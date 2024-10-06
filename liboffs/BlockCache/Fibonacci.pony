@@ -1,10 +1,20 @@
 use "json"
+use "collections"
+
 primitive Fibonacci
   fun apply(num: U64) : U64 =>
     if ((num == 1) or (num == 0)) then
       num
     else
-      apply(num - 1) + apply(num - 2)
+      var current: U64 = 0
+      var parent: U64 = 1
+      var grandparent: U64 = 0
+      for i in Range[U64](2, num + 1) do
+        current = parent + grandparent
+        grandparent = parent
+        parent = current
+      end
+      current
     end
 
 class FibonacciHitCounter
