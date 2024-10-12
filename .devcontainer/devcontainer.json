@@ -1,0 +1,39 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/ubuntu
+{
+	"name": "Ubuntu Pony Liboffs Dev Container",
+	"build": {
+		"dockerfile": "Dockerfile",
+		"args": {
+			"CHANGELOG_TOOL_VER": "0.5.0",
+			"CORRAL_VER": "0.7.0",
+			"PONYC_VER": "0.55.0",
+			"PONYUP_VER": "0.7.0"
+		}
+	},
+
+	// Features to add to the dev container. More info: https://containers.dev/features.
+	// "features": {},
+
+	// Use 'forwardPorts' to make a list of ports inside the container available locally.
+	// "forwardPorts": [],
+
+	// Use 'postCreateCommand' to run commands after the container is created.
+	// "postCreateCommand": "uname -a",
+	"postCreateCommand": "make bootstrap-blake3",
+
+	// Configure tool-specific properties.
+	"customizations": {
+		// Configure properties specific to VS Code.
+		"vscode": {
+			// Add the IDs of extensions you want installed when the container is created.
+			"extensions": [
+				"npruehs.pony",
+				"ms-vscode.makefile-tools",
+				"ms-vscode.cpptools-extension-pack"
+			]
+		}
+	},
+
+	"remoteUser": "root"
+}
