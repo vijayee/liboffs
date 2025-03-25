@@ -1,0 +1,6 @@
+[submodule "deps/googletest"]
+	path = deps/googletest
+	url = https://github.com/google/googletest.git
+[submodule "deps/BLAKE3"]
+	path = deps/BLAKE3
+	url = https://github.com/BLAKE3-team/BLAKE3.git
