@@ -16,4 +16,13 @@ TEST(TestRefCounter, TestRefCounterFunctions) {
   EXPECT_EQ(refc1, refc2);
 
   EXPECT_EQ(refcounter_count(refc1), 2);
+  refcounter_yield((refcounter_t*) refc2);
+  refc2 = NULL;
+  refcounter_t* refc3 = (refcounter_t*) refcounter_reference(refc1);
+  EXPECT_EQ(refcounter_count(refc3), 2);
+  EXPECT_EQ(refc1, refc3);
+  refcounter_dereference(refc3);
+  refc3 = NULL;
+  EXPECT_EQ(refcounter_count(refc1), 1);
+
 }

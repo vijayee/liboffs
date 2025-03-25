@@ -4,6 +4,7 @@
 #include "refcounter.h"
 #include "../Util/util.h"
 #include <stdint.h>
+#include <limits.h>
 #include "refcounter.p.h"
 
 void refcounter_init(refcounter_t* refcounter) {
@@ -23,7 +24,7 @@ void* refcounter_reference(refcounter_t* refcounter) {
   platform_lock(&refcounter->lock);
   if (refcounter->yield > 0) {
     refcounter->yield--;
-  } else {
+  } else if (refcounter->count < USHRT_MAX) {
     refcounter->count++;
   }
   platform_unlock(&refcounter->lock);
@@ -32,7 +33,9 @@ void* refcounter_reference(refcounter_t* refcounter) {
 
 void refcounter_dereference(refcounter_t* refcounter) {
   platform_lock(&refcounter->lock);
-  refcounter->count--;
+  if (refcounter->count > 0) {
+    refcounter->count--;
+  }
   platform_unlock(&refcounter->lock);
 }
 
