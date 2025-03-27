@@ -8,6 +8,8 @@
 #include "../RefCounter/refcounter.h"
 #include "../RefCounter/refcounter.p.h"
 
+#define STANDARD_BLOCK_SIZE 128000
+
 typedef struct {
   refcounter_t refcounter;
   const buffer_t* data;

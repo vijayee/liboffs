@@ -10,12 +10,6 @@
 #include <string.h>
 
 
-struct buffer_t {
-  refcounter_t refcounter;
-  uint8_t* data;
-  size_t size;
-};
-
 buffer_t* buffer_create(size_t size) {
   buffer_t* buf = calloc(1, sizeof(buffer_t));
   buf->data = calloc(size, sizeof(uint8_t));
@@ -24,20 +18,25 @@ buffer_t* buffer_create(size_t size) {
   return refcounter_reference((refcounter_t*) buf);
 }
 
-buffer_t* buffer_create_from_pointer(uint8_t* data, size_t size) {
-  buffer_t* buf = malloc(sizeof(buffer_t));
-  buf->data = data;
+buffer_t* buffer_create_from_pointer_copy(uint8_t* data, size_t size) {
+  buffer_t* buf = calloc(1, sizeof(buffer_t));
   buf->size = size;
+  buf->data = malloc(size);
+  buffer_copy_from_pointer(buf, data, size);
   refcounter_init((refcounter_t*) buf);
-  return refcounter_reference((refcounter_t*) buf);
+  return buf;
 }
 
 buffer_t* buffer_create_from_existing_memory(uint8_t* data, size_t size) {
   buffer_t* buf = calloc(1, sizeof(buffer_t));
-  buf->data = calloc(size, sizeof(uint8_t));
+  buf->data = data;
   buf->size = size;
   refcounter_init((refcounter_t*) buf);
-  return refcounter_reference((refcounter_t*) buf);
+  return buf;
+}
+
+buffer_t* buffer_copy(buffer_t* buf) {
+  return buffer_create_from_pointer_copy(buf->data, buf->size);
 }
 
 void buffer_copy_from_pointer(buffer_t* buf, uint8_t* data, size_t size) {
@@ -51,18 +50,33 @@ void buffer_copy_from_pointer(buffer_t* buf, uint8_t* data, size_t size) {
 void buffer_destroy(buffer_t* buf) {
   refcounter_dereference((refcounter_t*)buf);
   if (refcounter_count((refcounter_t*)buf) == 0) {
-    refcounter_destroy_lock(&buf->refcounter);
     free(buf->data);
+    refcounter_destroy_lock(&buf->refcounter);
     free(buf);
   }
 }
 
-uint8_t buffer_index(buffer_t* buf, size_t index) {
+uint8_t buffer_get_index(buffer_t* buf, size_t index) {
   return buf->data[index];
 }
 
 uint8_t buffer_set_index(buffer_t* buf, size_t index, uint8_t value) {
   return buf->data[index] = value;
+}
+buffer_t* buffer_slice(buffer_t* buf, size_t start, size_t end) {
+  if (start > end) {
+    return NULL;
+  }
+  if (buf->size < end) {
+    return NULL;
+  }
+  if (buf->size < start) {
+    return NULL;
+  }
+
+  uint8_t* startPtr = buf->data + start;
+  size_t sliceSize = end - start;
+  return buffer_create_from_pointer_copy(startPtr, sliceSize);
 }
 
 buffer_t* buffer_xor(buffer_t* buf1, buffer_t* buf2) {
@@ -129,4 +143,40 @@ buffer_t* buffer_and(buffer_t* buf1, buffer_t* buf2) {
     result->data[i] = largest->data[i] & 0;
   }
   return result;
+}
+
+buffer_t* buffer_not(buffer_t* buf) {
+  buffer_t* result = buffer_create(buf->size);
+  for (size_t i = 0; i < buf->size; i++) {
+    result->data[i] = !buf->data[i];
+  }
+  return result;
+}
+
+int8_t buffer_compare(buffer_t* buf1, buffer_t* buf2) {
+  size_t length;
+  if(buf2->size > buf1->size) {
+    length = buf1->size;
+  } else {
+    length = buf2->size;
+  }
+  size_t a = buf1->size;
+  size_t b = buf2->size;
+
+  for(size_t i = 0; i < length; i++) {
+    uint8_t val1 = buffer_get_index(buf1, i);
+    uint8_t val2 = buffer_get_index(buf2, i);
+    if (val1 != val2) {
+      a = val1;
+      b = val2;
+    }
+  }
+
+  if (a > b) {
+    return 1;
+  } else if (b > a) {
+    return -1;
+  } else {
+    return 0;
+  }
 }

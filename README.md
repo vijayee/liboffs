@@ -1,2 +1,2 @@
 # liboffs
-A library for extending the owner free  file systeminto any language
+A library for extending the owner free  file system into any language
