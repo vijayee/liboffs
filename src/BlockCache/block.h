@@ -8,7 +8,12 @@
 #include "../RefCounter/refcounter.h"
 #include "../RefCounter/refcounter.p.h"
 
-#define STANDARD_BLOCK_SIZE 128000
+typedef enum block_size_e {
+  mega = 1000000,
+  standard = 128000,
+  mini = 64000,
+  nano = 136
+} block_size_e;
 
 typedef struct {
   refcounter_t refcounter;
@@ -16,7 +21,12 @@ typedef struct {
   const buffer_t* hash;
 } block_t;
 
-block_t* create_block(buffer_t* data);
-block_t* create_block_existing_data(buffer_t* data);
-block_t* create_block_existing_data_hash(buffer_t* data, buffer_t* hash);
+block_t* block_create(buffer_t* data);
+block_t* block_create_by_type(buffer_t* data, block_size_e type);
+block_t* block_create_existing_data(buffer_t* data);
+block_t* block_create_existing_data_by_type(buffer_t* data, block_size_e type);
+block_t* block_create_existing_data_hash(buffer_t* data, buffer_t* hash);
+block_t* block_create_existing_data_hash_by_type(buffer_t* data, buffer_t* hash, block_size_e type);
+block_t* block_xor(block_t* block1, block_t* block2);
+void block_destroy(buffer_t* block);
 #endif //LIBOFFS_BLOCK_H

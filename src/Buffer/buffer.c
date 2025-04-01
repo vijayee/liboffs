@@ -7,28 +7,29 @@
 #include "buffer.h"
 #include "../RefCounter/refcounter.h"
 #include "../RefCounter/refcounter.p.h"
+#include "../Util/allocator.h"
 #include <string.h>
 
 
 buffer_t* buffer_create(size_t size) {
-  buffer_t* buf = calloc(1, sizeof(buffer_t));
-  buf->data = calloc(size, sizeof(uint8_t));
+  buffer_t* buf = get_clear_memory(sizeof(buffer_t));
+  buf->data = get_clear_memory(sizeof(uint8_t));
   buf->size = size;
   refcounter_init((refcounter_t*) buf);
-  return refcounter_reference((refcounter_t*) buf);
+  return buf;
 }
 
 buffer_t* buffer_create_from_pointer_copy(uint8_t* data, size_t size) {
-  buffer_t* buf = calloc(1, sizeof(buffer_t));
+  buffer_t* buf = get_clear_memory(sizeof(buffer_t));
   buf->size = size;
-  buf->data = malloc(size);
+  buf->data = get_memory(size);
   buffer_copy_from_pointer(buf, data, size);
   refcounter_init((refcounter_t*) buf);
   return buf;
 }
 
 buffer_t* buffer_create_from_existing_memory(uint8_t* data, size_t size) {
-  buffer_t* buf = calloc(1, sizeof(buffer_t));
+  buffer_t* buf = get_clear_memory(sizeof(buffer_t));
   buf->data = data;
   buf->size = size;
   refcounter_init((refcounter_t*) buf);
@@ -37,6 +38,13 @@ buffer_t* buffer_create_from_existing_memory(uint8_t* data, size_t size) {
 
 buffer_t* buffer_copy(buffer_t* buf) {
   return buffer_create_from_pointer_copy(buf->data, buf->size);
+}
+
+buffer_t* buffer_concat(buffer_t* buf1, buffer_t* buf2) {
+  buffer_t* buf = buffer_create(buf1->size + buf2->size);
+  memcpy(buf->data, buf1->data, buf1->size);
+  memcpy(buf->data + buf1->size, buf2->data, buf1->size + buf2->size);
+  return buf;
 }
 
 void buffer_copy_from_pointer(buffer_t* buf, uint8_t* data, size_t size) {
@@ -63,6 +71,7 @@ uint8_t buffer_get_index(buffer_t* buf, size_t index) {
 uint8_t buffer_set_index(buffer_t* buf, size_t index, uint8_t value) {
   return buf->data[index] = value;
 }
+
 buffer_t* buffer_slice(buffer_t* buf, size_t start, size_t end) {
   if (start > end) {
     return NULL;

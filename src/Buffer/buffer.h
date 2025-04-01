@@ -21,6 +21,7 @@ buffer_t* buffer_create_from_existing_memory(uint8_t* data, size_t size);
 void buffer_copy_from_pointer(buffer_t* buf, uint8_t* data, size_t size);
 buffer_t* buffer_copy(buffer_t* buf);
 buffer_t* buffer_slice(buffer_t* buf, size_t start, size_t end);
+buffer_t* buffer_concat(buffer_t* buf1, buffer_t* buf2);
 void buffer_destroy(buffer_t* buf);
 uint8_t buffer_get_index(buffer_t* buf, size_t index);
 uint8_t buffer_set_index(buffer_t* buf, size_t index, uint8_t value);

@@ -33,7 +33,7 @@ void* refcounter_reference(refcounter_t* refcounter) {
 
 void refcounter_dereference(refcounter_t* refcounter) {
   platform_lock(&refcounter->lock);
-  if (refcounter->count > 0) {
+  if ((refcounter->yield == 0) && (refcounter->count > 0)) {
     refcounter->count--;
   }
   platform_unlock(&refcounter->lock);

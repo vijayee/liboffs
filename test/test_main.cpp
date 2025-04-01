@@ -80,6 +80,15 @@ TEST(TestBuffer, TestBufferBitwise) {
   EXPECT_EQ(sliceResult->size, 2);
   EXPECT_EQ(buffer_get_index(sliceResult, 0), 0);
   EXPECT_EQ(buffer_get_index(sliceResult, 1), 1);
+
+  buffer_t* concatResult = buffer_concat(buf1, buf2);
+  for (size_t i = 0; i < buf1->size; i++) {
+    EXPECT_EQ(buffer_get_index(concatResult, i), buffer_get_index(buf1,i));
+  }
+
+  for (size_t i = buf1->size; i < buf1->size + buf2->size; i++) {
+    EXPECT_EQ(buffer_get_index(concatResult, i), buffer_get_index(buf2,i - buf1->size));
+  }
   buffer_destroy(buf1);
   buffer_destroy(buf2);
   buffer_destroy(buf3);
