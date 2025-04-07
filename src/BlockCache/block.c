@@ -7,20 +7,29 @@
 #include "../../deps/BLAKE3/c/blake3.h"
 #include <blake3.h>
 
+buffer_t* hash_data(buffer_t* data) {
+  blake3_hasher hasher;
+  blake3_hasher_init(&hasher);
+  blake3_hasher_update(&hasher, data->data, data->size);
+  uint8_t* digest = get_clear_memory(BLAKE3_OUT_LEN);
+  blake3_hasher_finalize(&hasher, digest, BLAKE3_OUT_LEN);
+  return buffer_create_from_existing_memory(digest, BLAKE3_OUT_LEN);
+}
+
 block_t* block_create(buffer_t* data) {
   return block_create_by_type(data, standard);
 }
 
-block_t* block_created_by_type(buffer_t* data, block_size_e type) {
+block_t* block_create_by_type(buffer_t* data, block_size_e type) {
   size_t size = type;
   if (data->size > size) {
     return NULL;
   }
-  buffer_t* final;
+  buffer_t* final = NULL;
   if (data->size < size) {
     size_t diff = size - data->size;
     buffer_t* randBuf = buffer_create_from_existing_memory( frand(diff), diff);
-    buffer_t* final = buffer_concat(data, randBuf);
+    final = buffer_concat(data, randBuf);
     buffer_destroy(randBuf);
   } else {
     final = data;
@@ -28,12 +37,22 @@ block_t* block_created_by_type(buffer_t* data, block_size_e type) {
 
   block_t* block = get_clear_memory(sizeof(block_t));
   block->data= final;
-  blake3_hasher hasher;
-  blake3_hasher_init(&hasher);
-  blake3_hasher_update(&hasher, final, final->size);
-  uint8_t* digest = get_memory(BLAKE3_OUT_LEN);
-  blake3_hasher_finalize(&hasher, &digest, BLAKE3_OUT_LEN);
-  block->hash = buffer_create_from_existing_memory(digest, BLAKE3_OUT_LEN);
+  block->hash = hash_data(final);
+  refcounter_init((refcounter_t*) block);
+  return block;
+}
+
+block_t* block_create_random_block() {
+  return block_create_random_block_by_type(standard);
+}
+
+block_t* block_create_random_block_by_type(block_size_e type) {
+  size_t size = type;
+  buffer_t* randBuf = buffer_create_from_existing_memory( frand(size), size);
+
+  block_t* block = get_clear_memory(sizeof(block_t));
+  block->data= randBuf;
+  block->hash = hash_data(randBuf);
 
   refcounter_init((refcounter_t*) block);
   return block;
@@ -48,13 +67,8 @@ block_t* block_create_existing_data_by_type(buffer_t* data, block_size_e type) {
     return NULL;
   }
   block_t* block = get_clear_memory(sizeof(block_t));
-  block->data = refcounter_reference(data);
-  blake3_hasher hasher;
-  blake3_hasher_init(&hasher);
-  blake3_hasher_update(&hasher, data, data->size);
-  uint8_t* digest = get_memory(BLAKE3_OUT_LEN);
-  blake3_hasher_finalize(&hasher, &digest, BLAKE3_OUT_LEN);
-  block->hash = buffer_create_from_existing_memory(digest, BLAKE3_OUT_LEN);
+  block->data = (buffer_t*) refcounter_reference((refcounter_t*)data);
+  block->hash = hash_data(block->data);
   refcounter_init((refcounter_t*) block);
   return block;
 }
@@ -72,17 +86,17 @@ block_t* block_create_existing_data_hash_by_type(buffer_t* data, buffer_t* hash,
   }
 
   block_t* block = get_clear_memory(sizeof(block_t));
-  block->hash = refcounter_reference(hash);
-  block->data = refcounter_reference(data);
+  block->hash = refcounter_reference((refcounter_t*)hash);
+  block->data = refcounter_reference((refcounter_t*)data);
   refcounter_init((refcounter_t*) block);
   return block;
 }
 
-void block_destroy(buffer_t* block) {
+void block_destroy(block_t* block) {
   buffer_destroy(block->hash);
   buffer_destroy(block->data);
   refcounter_dereference((refcounter_t*) block);
-  if (refcounter_count(block) == 0) {
+  if (refcounter_count((refcounter_t*) block) == 0) {
     free(block);
   }
 }

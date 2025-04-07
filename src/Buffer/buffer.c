@@ -13,7 +13,7 @@
 
 buffer_t* buffer_create(size_t size) {
   buffer_t* buf = get_clear_memory(sizeof(buffer_t));
-  buf->data = get_clear_memory(sizeof(uint8_t));
+  buf->data = get_clear_memory(size);
   buf->size = size;
   refcounter_init((refcounter_t*) buf);
   return buf;
@@ -43,7 +43,7 @@ buffer_t* buffer_copy(buffer_t* buf) {
 buffer_t* buffer_concat(buffer_t* buf1, buffer_t* buf2) {
   buffer_t* buf = buffer_create(buf1->size + buf2->size);
   memcpy(buf->data, buf1->data, buf1->size);
-  memcpy(buf->data + buf1->size, buf2->data, buf1->size + buf2->size);
+  memcpy(buf->data + buf1->size, buf2->data, buf2->size);
   return buf;
 }
 

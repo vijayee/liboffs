@@ -9,19 +9,28 @@ set(C_SRC ""
         src/BlockCache/block.h
         src/BlockCache/block.h
         src/BlockCache/block.h)
+set(blake3_SOURCE_DIR deps/BLAKE3)
 set(C_INC "")
 file(GLOB_RECURSE C_SRC "src/*/*.c" )
 file(GLOB_RECURSE C_INC "/src/*/*.h")
 
-file(GLOB_RECURSE BLAKE3_INC "/deps/BLAKE3/c/*.h")
-file(GLOB_RECURSE BLAKE3_SRC "/deps/BLAKE3/c/*.c")
+include(CTest)
+add_subdirectory(deps)
+add_subdirectory(test)
 
-add_library(offs STATIC
-        ${C_SRC})
+#file(GLOB_RECURSE BLAKE3_INC "/deps/BLAKE3/c/*.h")
+#file(GLOB_RECURSE BLAKE3_SRC "/deps/BLAKE3/c/*.c")
+#message(STATUS "${BLAKE3_INC}")
 
-target_include_directories(offs PUBLIC ${BLAKE3_INC})
-target_link_libraries(offs ${BLAKE3_SRC})
+add_library(offs STATIC ${C_SRC})
+#target_link_libraries(offs ${blake3_SOURCE_DIR}/libbla)
+target_include_directories(offs PUBLIC ${blake3_SOURCE_DIR}/c)
 target_include_directories(offs PUBLIC ${C_INC})
+
+#target_include_directories(offs PUBLIC ${BLAKE3_INC})
+#target_link_libraries(offs ${BLAKE3_SRC})
+
+
 find_package(OpenSSL REQUIRED)
 if(OPENSSL_FOUND)
     include_directories(${OPENSSL_INCLUDE_DIR})
@@ -30,9 +39,7 @@ if(OPENSSL_FOUND)
 else()
     message(FATAL_ERROR "OpenSSL not found.")
 endif()
-include(CTest)
-add_subdirectory(deps)
-add_subdirectory(test)
 
-include_directories()
+
+
 

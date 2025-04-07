@@ -3,10 +3,14 @@
 //
 
 #include <gtest/gtest.h>
+#include <string.h>
 extern "C" {
 #include "../src/RefCounter/refcounter.h"
 #include "../src/RefCounter/refcounter.p.h"
 #include "../src/Buffer/buffer.h"
+#include "../src/BlockCache/frand.h"
+#include "../src/BlockCache/block.h"
+#include "../src/Util/allocator.h"
 }
 
 TEST(TestRefCounter, TestRefCounterFunctions) {
@@ -25,6 +29,8 @@ TEST(TestRefCounter, TestRefCounterFunctions) {
   refcounter_dereference(refc3);
   refc3 = NULL;
   EXPECT_EQ(refcounter_count(refc1), 1);
+  refcounter_destroy_lock(refc1);
+  free(refc1);
 }
 
 TEST(TestBuffer, TestBufferCreation) {
@@ -89,6 +95,7 @@ TEST(TestBuffer, TestBufferBitwise) {
   for (size_t i = buf1->size; i < buf1->size + buf2->size; i++) {
     EXPECT_EQ(buffer_get_index(concatResult, i), buffer_get_index(buf2,i - buf1->size));
   }
+  buffer_destroy(concatResult);
   buffer_destroy(buf1);
   buffer_destroy(buf2);
   buffer_destroy(buf3);
@@ -98,4 +105,45 @@ TEST(TestBuffer, TestBufferBitwise) {
   buffer_destroy(andResult);
   buffer_destroy(orResult);
   buffer_destroy(sliceResult);
+}
+
+TEST(TestFRand, TestFRandFunction) {
+  uint8_t* rand = frand(20);
+
+  buffer_t* buf1 = buffer_create_from_existing_memory((uint8_t *) get_clear_memory(20), 20);
+  buffer_t* buf2 = buffer_create_from_existing_memory(rand, 20);
+  buffer_t* buf3 = buffer_concat(buf1, buf2);
+
+  buffer_destroy(buf1);
+  buffer_destroy(buf2);
+  buffer_destroy(buf3);
+}
+
+TEST(TestBlock, TestBlockOperations) {
+  uint8_t data[20] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20};
+  buffer_t* buf = buffer_create_from_pointer_copy((uint8_t*) &data, 20);
+  block_t* block1 = block_create(buf);
+  block_t* block2 = block_create_random_block();
+  block_t* block3 = block_xor(block1, block2);
+  block_t* block4 = block_xor(block3, block2);
+  EXPECT_EQ(buffer_compare(block1->data, block4->data), 0);
+
+  buffer_t* hash1 = hash_data(block1->data);
+  buffer_t* hash2 = hash_data(block1->data);
+  buffer_t* hash3 = hash_data(block4->data);
+  EXPECT_EQ(buffer_compare(hash1, hash2), 0);
+  EXPECT_EQ(buffer_compare(hash3, hash2), 0);
+  buffer_destroy(hash1);
+  buffer_destroy(hash2);
+  buffer_destroy(hash3);
+  for (size_t i = 0; i < block1->data->size; i++) {
+    EXPECT_EQ(buffer_get_index(block1->data, i), buffer_get_index(block4->data, i));
+  }
+  EXPECT_EQ(buffer_compare(block1->data, block4->data), 0);
+  EXPECT_EQ(buffer_compare(block1->hash, block4->hash), 0);
+  block_destroy(block4);
+  block_destroy(block3);
+  block_destroy(block2);
+  block_destroy(block1);
+  buffer_destroy(buf);
 }

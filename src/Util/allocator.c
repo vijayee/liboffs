@@ -15,7 +15,7 @@ void* get_memory(size_t size) {
   return mem;
 }
 void* get_clear_memory(size_t size) {
-   void* mem=  calloc(1, size);
+   void* mem =  calloc(1, size);
    if (mem == NULL) {
      log_error("Out of memory");
      abort();

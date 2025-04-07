@@ -5,6 +5,7 @@ if (BUILD_TESTING)
     message(STATUS "${C_INC}")
     add_executable(testliboffs test_main.cpp)
     target_link_libraries(testliboffs PRIVATE offs)
+    target_link_libraries(testliboffs PRIVATE blake3)
     target_link_libraries(testliboffs PRIVATE GTest::gtest_main)
     target_include_directories(testliboffs PUBLIC ${C_INC})
 
