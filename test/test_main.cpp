@@ -11,6 +11,7 @@ extern "C" {
 #include "../src/BlockCache/frand.h"
 #include "../src/BlockCache/block.h"
 #include "../src/Util/allocator.h"
+#include "../src/Workers/error.h"
 }
 
 TEST(TestRefCounter, TestRefCounterFunctions) {
@@ -146,4 +147,20 @@ TEST(TestBlock, TestBlockOperations) {
   block_destroy(block2);
   block_destroy(block1);
   buffer_destroy(buf);
+}
+TEST(TestError, TestErrorCreateDestroy) {
+  std::string message = "This is an error";
+  char* cmessage = (char*)message.c_str();
+  char* file = __FILE__;
+  char* func = (char*)__func__;
+  int line = __LINE__;
+  async_error_t* error = error_create(cmessage, file, func, line);
+  EXPECT_EQ(strcmp(error->message, cmessage), 0);
+  EXPECT_NE(error->message, cmessage);
+  EXPECT_EQ(strcmp(error->file, file), 0);
+  EXPECT_NE(error->file, file);
+  EXPECT_EQ(strcmp(error->function, func), 0);
+  EXPECT_NE(error->function, func);
+  EXPECT_EQ(error->line, line);
+  error_destroy(error);
 }
