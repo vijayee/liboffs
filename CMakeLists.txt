@@ -9,7 +9,9 @@ set(C_SRC ""
         src/BlockCache/block.h
         src/BlockCache/block.h
         src/BlockCache/block.h
-        src/Workers/promise.h)
+        src/Workers/promise.h
+        src/Workers/priority.h
+        src/Workers/priority.c)
 set(blake3_SOURCE_DIR deps/BLAKE3)
 set(C_INC "")
 file(GLOB_RECURSE C_SRC "src/*/*.c" )

@@ -3,6 +3,8 @@
 //
 
 #include <gtest/gtest.h>
+#include <functional>
+#include <gmock/gmock.h>
 #include <string.h>
 extern "C" {
 #include "../src/RefCounter/refcounter.h"
@@ -12,7 +14,11 @@ extern "C" {
 #include "../src/BlockCache/block.h"
 #include "../src/Util/allocator.h"
 #include "../src/Workers/error.h"
+#include "../src/Workers/promise.h"
 }
+
+using ::testing::_;
+using ::testing::MockFunction;
 
 TEST(TestRefCounter, TestRefCounterFunctions) {
   refcounter_t* refc1 = (refcounter_t*) calloc(sizeof(refcounter_t), 1);
@@ -148,10 +154,11 @@ TEST(TestBlock, TestBlockOperations) {
   block_destroy(block1);
   buffer_destroy(buf);
 }
+
 TEST(TestError, TestErrorCreateDestroy) {
   std::string message = "This is an error";
   char* cmessage = (char*)message.c_str();
-  char* file = __FILE__;
+  char* file = (char*)__FILE__;
   char* func = (char*)__func__;
   int line = __LINE__;
   async_error_t* error = error_create(cmessage, file, func, line);
@@ -163,4 +170,41 @@ TEST(TestError, TestErrorCreateDestroy) {
   EXPECT_NE(error->function, func);
   EXPECT_EQ(error->line, line);
   error_destroy(error);
+}
+
+MockFunction<void((void*, void*))> mockCallback;
+MockFunction<void((void*, async_error_t*))> mockErrCallback;
+
+
+
+void callbackWrapper(void* ctx, void* payload) {
+  mockCallback.Call(ctx, payload);
+}
+void callbackErrWrapper(void* ctx, async_error_t* err) {
+  mockErrCallback.Call(ctx, err);
+}
+
+TEST(TestPromise, TestPromiseExecution) {
+  std::string message = "This is an error";
+  char* cmessage = (char*)message.c_str();
+  char* file = (char*)__FILE__;
+  char* func = (char*)__func__;
+  int line = __LINE__;
+  async_error_t* error = error_create(cmessage, file, func, line);
+  promise_t promise1 = { .resolve = callbackWrapper, .reject = callbackErrWrapper, .hasFired= 0};
+  promise_t promise2 = { .resolve = callbackWrapper, .reject = callbackErrWrapper, .hasFired= 0};
+  EXPECT_CALL(mockCallback, Call(_,_)).Times(1);
+  EXPECT_CALL(mockErrCallback, Call(_,_)).Times(1);
+  promise_resolve(&promise1, &message);
+  promise_reject(&promise1, error);
+  promise_reject(&promise2, error);
+  promise_resolve(&promise2, &message);
+  error_destroy(error);
+  ASSERT_TRUE(testing::Mock::VerifyAndClearExpectations(
+          &mockCallback));
+  ASSERT_TRUE(testing::Mock::VerifyAndClearExpectations(
+      &mockErrCallback));
+  ::testing::Mock::AllowLeak(&mockCallback);
+  ::testing::Mock::AllowLeak(&mockErrCallback);
+
 }

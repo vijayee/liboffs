@@ -7,6 +7,7 @@ if (BUILD_TESTING)
     target_link_libraries(testliboffs PRIVATE offs)
     target_link_libraries(testliboffs PRIVATE blake3)
     target_link_libraries(testliboffs PRIVATE GTest::gtest_main)
+    target_link_libraries(testliboffs PRIVATE GTest::gmock)
     target_include_directories(testliboffs PUBLIC ${C_INC})
 
     include(GoogleTest)

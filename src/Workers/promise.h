@@ -14,6 +14,6 @@ typedef struct {
   uint8_t hasFired;
 } promise_t;
 
-void promise_resolve(promise_t*, void* payload);
-void promise_reject(promise_t*, async_error_t* error);
+void promise_resolve(promise_t* promise, void* payload);
+void promise_reject(promise_t* promise, async_error_t* error);
 #endif //OFFS_PROMISE_H
