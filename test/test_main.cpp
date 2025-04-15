@@ -16,6 +16,7 @@ extern "C" {
 #include "../src/Workers/error.h"
 #include "../src/Workers/promise.h"
 #include "../src/Workers/priority.h"
+#include "../src/Workers/work.h"
 }
 
 using ::testing::_;
@@ -198,14 +199,16 @@ TEST_F(PromiseTest, TestPromiseExecution) {
   char* func = (char*)__func__;
   int line = __LINE__;
   async_error_t* error = error_create(cmessage, file, func, line);
-  promise_t promise1 = { .resolve = callbackWrapper, .reject = callbackErrWrapper, .ctx= this, .hasFired= 0};
-  promise_t promise2 = { .resolve = callbackWrapper, .reject = callbackErrWrapper, .ctx= this, .hasFired= 0};
+  promise_t* promise1 = promise_create(callbackWrapper, callbackErrWrapper, this);
+  promise_t* promise2 = promise_create(callbackWrapper, callbackErrWrapper, this);
   EXPECT_CALL(mockCallback, Call(_,_)).Times(1);
   EXPECT_CALL(mockErrCallback, Call(_,_)).Times(1);
-  promise_resolve(&promise1, &message);
-  promise_reject(&promise1, error);
-  promise_reject(&promise2, error);
-  promise_resolve(&promise2, &message);
+  promise_resolve(promise1, &message);
+  promise_reject(promise1, error);
+  promise_reject(promise2, error);
+  promise_resolve(promise2, &message);
+  promise_destroy(promise1);
+  promise_destroy(promise2);
   error_destroy(error);
 }
 
@@ -220,4 +223,29 @@ TEST(TestPriority, TestPriorityFunctions) {
   EXPECT_EQ(priority_compare(&priority2, &priority3), -1);
   EXPECT_EQ(priority_compare(&priority4, &priority1), 1);
   EXPECT_EQ(priority_compare(&priority5, &priority1), 0);
+}
+
+
+class WorkTest : public testing::Test {
+public:
+
+  MockFunction<void((void*, void*))> mockCallback;
+  MockFunction<void((void*, async_error_t*))> mockErrCallback;
+};
+
+void promiseWrapper(void* ctx) {
+  promise_t* promise = static_cast<promise_t *>(ctx);
+  promise_resolve(promise, NULL);
+  promise_destroy(promise);
+}
+
+TEST_F(WorkTest, TestWorkExecution) {
+  promise_t* promise = promise_create(callbackWrapper, callbackErrWrapper, this);
+  EXPECT_CALL(mockCallback, Call(_,_)).Times(1);
+  work_t work = {0};
+  work.ctx = refcounter_reference((refcounter_t*)promise);
+  work.run = promiseWrapper;
+  work.priority = priority_get_next();
+  work.run(work.ctx);
+  promise_destroy(promise);
 }
