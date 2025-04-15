@@ -172,27 +172,34 @@ TEST(TestError, TestErrorCreateDestroy) {
   error_destroy(error);
 }
 
-MockFunction<void((void*, void*))> mockCallback;
-MockFunction<void((void*, async_error_t*))> mockErrCallback;
 
+
+class PromiseTest : public testing::Test {
+public:
+
+  MockFunction<void((void*, void*))> mockCallback;
+  MockFunction<void((void*, async_error_t*))> mockErrCallback;
+};
 
 
 void callbackWrapper(void* ctx, void* payload) {
-  mockCallback.Call(ctx, payload);
+  auto test = static_cast<PromiseTest*>(ctx);
+  test->mockCallback.Call(ctx, payload);
 }
 void callbackErrWrapper(void* ctx, async_error_t* err) {
-  mockErrCallback.Call(ctx, err);
+  auto test = static_cast<PromiseTest*>(ctx);
+  test->mockErrCallback.Call(ctx, err);
 }
 
-TEST(TestPromise, TestPromiseExecution) {
+TEST_F(PromiseTest, TestPromiseExecution) {
   std::string message = "This is an error";
   char* cmessage = (char*)message.c_str();
   char* file = (char*)__FILE__;
   char* func = (char*)__func__;
   int line = __LINE__;
   async_error_t* error = error_create(cmessage, file, func, line);
-  promise_t promise1 = { .resolve = callbackWrapper, .reject = callbackErrWrapper, .hasFired= 0};
-  promise_t promise2 = { .resolve = callbackWrapper, .reject = callbackErrWrapper, .hasFired= 0};
+  promise_t promise1 = { .resolve = callbackWrapper, .reject = callbackErrWrapper, .hasFired= 0, .ctx= this};
+  promise_t promise2 = { .resolve = callbackWrapper, .reject = callbackErrWrapper, .hasFired= 0, .ctx= this};
   EXPECT_CALL(mockCallback, Call(_,_)).Times(1);
   EXPECT_CALL(mockErrCallback, Call(_,_)).Times(1);
   promise_resolve(&promise1, &message);
@@ -200,11 +207,4 @@ TEST(TestPromise, TestPromiseExecution) {
   promise_reject(&promise2, error);
   promise_resolve(&promise2, &message);
   error_destroy(error);
-  ASSERT_TRUE(testing::Mock::VerifyAndClearExpectations(
-          &mockCallback));
-  ASSERT_TRUE(testing::Mock::VerifyAndClearExpectations(
-      &mockErrCallback));
-  ::testing::Mock::AllowLeak(&mockCallback);
-  ::testing::Mock::AllowLeak(&mockErrCallback);
-
 }
