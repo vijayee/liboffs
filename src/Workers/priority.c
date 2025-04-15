@@ -4,12 +4,28 @@
 #include "priority.h"
 #include <time.h>
 #include <stdint.h>
+#include "../Util/util.h"
+#if _WIN32
+#include <windows.h>
+CRITICAL_SECTION current_priority_lock;
+#else
+#include <pthread.h>
+pthread_mutex_t current_priority_lock;
+#endif
 priority_t current = {0};
 
-priority_t get_next_priority() {
+
+void priority_init() {
+  platform_lock_init(&current_priority_lock);
+}
+
+priority_t priority_get_next() {
+  platform_lock(&current_priority_lock);
   if ((current.time == 0) && (current.count == 0)) {
     current.time = (uint64_t) time(NULL);
-    return current;
+    priority_t next = current;
+    platform_unlock(&current_priority_lock);
+    return next;
   }
 
   priority_t next = {0};
@@ -17,6 +33,7 @@ priority_t get_next_priority() {
   int cmp = priority_compare(&next, &current);
   if (cmp == 1) {
     current = next;
+    platform_unlock(&current_priority_lock);
     return next;
   } else {
     next.count = current.count;
@@ -25,6 +42,7 @@ priority_t get_next_priority() {
       cmp = priority_compare(&next, &current);
     }
     current = next;
+    platform_unlock(&current_priority_lock);
     return next;
   }
 }

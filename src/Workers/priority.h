@@ -9,6 +9,7 @@ typedef struct {
   uint64_t time;
   uint64_t count;
 } priority_t;
-priority_t get_next_priority();
+void priority_init();
+priority_t priority_get_next();
 int priority_compare(priority_t* priority1, priority_t* priority2);
 #endif //OFFS_PRIORITY_H

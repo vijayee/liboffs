@@ -15,6 +15,7 @@ extern "C" {
 #include "../src/Util/allocator.h"
 #include "../src/Workers/error.h"
 #include "../src/Workers/promise.h"
+#include "../src/Workers/priority.h"
 }
 
 using ::testing::_;
@@ -181,7 +182,6 @@ public:
   MockFunction<void((void*, async_error_t*))> mockErrCallback;
 };
 
-
 void callbackWrapper(void* ctx, void* payload) {
   auto test = static_cast<PromiseTest*>(ctx);
   test->mockCallback.Call(ctx, payload);
@@ -198,8 +198,8 @@ TEST_F(PromiseTest, TestPromiseExecution) {
   char* func = (char*)__func__;
   int line = __LINE__;
   async_error_t* error = error_create(cmessage, file, func, line);
-  promise_t promise1 = { .resolve = callbackWrapper, .reject = callbackErrWrapper, .hasFired= 0, .ctx= this};
-  promise_t promise2 = { .resolve = callbackWrapper, .reject = callbackErrWrapper, .hasFired= 0, .ctx= this};
+  promise_t promise1 = { .resolve = callbackWrapper, .reject = callbackErrWrapper, .ctx= this, .hasFired= 0};
+  promise_t promise2 = { .resolve = callbackWrapper, .reject = callbackErrWrapper, .ctx= this, .hasFired= 0};
   EXPECT_CALL(mockCallback, Call(_,_)).Times(1);
   EXPECT_CALL(mockErrCallback, Call(_,_)).Times(1);
   promise_resolve(&promise1, &message);
@@ -207,4 +207,17 @@ TEST_F(PromiseTest, TestPromiseExecution) {
   promise_reject(&promise2, error);
   promise_resolve(&promise2, &message);
   error_destroy(error);
+}
+
+TEST(TestPriority, TestPriorityFunctions) {
+  priority_init();
+  priority_t priority1 = priority_get_next();
+  priority_t priority2 = priority_get_next();
+  priority_t priority3 = priority_get_next();
+  priority_t priority4 = priority_get_next();
+  priority_t priority5 = priority1;
+  EXPECT_EQ(priority_compare(&priority1, &priority2), -1);
+  EXPECT_EQ(priority_compare(&priority2, &priority3), -1);
+  EXPECT_EQ(priority_compare(&priority4, &priority1), 1);
+  EXPECT_EQ(priority_compare(&priority5, &priority1), 0);
 }
