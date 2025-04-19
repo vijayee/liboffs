@@ -17,6 +17,7 @@ extern "C" {
 #include "../src/Workers/promise.h"
 #include "../src/Workers/priority.h"
 #include "../src/Workers/work.h"
+#include "../src/Workers/queue.h"
 }
 
 using ::testing::_;
@@ -176,7 +177,7 @@ TEST(TestError, TestErrorCreateDestroy) {
 
 
 
-class PromiseTest : public testing::Test {
+class TestPromise : public testing::Test {
 public:
 
   MockFunction<void((void*, void*))> mockCallback;
@@ -184,15 +185,15 @@ public:
 };
 
 void callbackWrapper(void* ctx, void* payload) {
-  auto test = static_cast<PromiseTest*>(ctx);
+  auto test = static_cast<TestPromise*>(ctx);
   test->mockCallback.Call(ctx, payload);
 }
 void callbackErrWrapper(void* ctx, async_error_t* err) {
-  auto test = static_cast<PromiseTest*>(ctx);
+  auto test = static_cast<TestPromise*>(ctx);
   test->mockErrCallback.Call(ctx, err);
 }
 
-TEST_F(PromiseTest, TestPromiseExecution) {
+TEST_F(TestPromise, TestPromiseExecution) {
   std::string message = "This is an error";
   char* cmessage = (char*)message.c_str();
   char* file = (char*)__FILE__;
@@ -226,9 +227,8 @@ TEST(TestPriority, TestPriorityFunctions) {
 }
 
 
-class WorkTest : public testing::Test {
+class TestWork : public testing::Test {
 public:
-
   MockFunction<void((void*, void*))> mockCallback;
   MockFunction<void((void*, async_error_t*))> mockErrCallback;
 };
@@ -239,13 +239,53 @@ void promiseWrapper(void* ctx) {
   promise_destroy(promise);
 }
 
-TEST_F(WorkTest, TestWorkExecution) {
+TEST_F(TestWork, TestWorkExecution) {
+  priority_init();
   promise_t* promise = promise_create(callbackWrapper, callbackErrWrapper, this);
   EXPECT_CALL(mockCallback, Call(_,_)).Times(1);
-  work_t work = {0};
-  work.ctx = refcounter_reference((refcounter_t*)promise);
-  work.run = promiseWrapper;
-  work.priority = priority_get_next();
-  work.run(work.ctx);
+  work_t* work = work_create(priority_get_next(), refcounter_reference((refcounter_t*)promise), promiseWrapper);
+  work_execute(work);
+  work_destroy(work);
   promise_destroy(promise);
+}
+void fakeWork(void* ctx) {
+
+}
+TEST(TestWorkQueue, TestWorkQueueFunctions) {
+  priority_init();
+  priority_t firstPriority = priority_get_next();
+  priority_t secondPriority = priority_get_next();
+  priority_t thirdPriority = priority_get_next();
+  priority_t fourthPriority = priority_get_next();
+  work_t* work1 = work_create(secondPriority, NULL, fakeWork);
+  work_t* work2 = work_create(fourthPriority, NULL, fakeWork);
+  work_t* work3 = work_create(fourthPriority, NULL, fakeWork);
+  work_t* work4 = work_create(secondPriority, NULL, fakeWork);
+  work_t* work5 = work_create(firstPriority, NULL, fakeWork);
+  work_queue_init();
+  work_enqueue(work1);
+  work_enqueue(work2);
+  work_enqueue(work3);
+  work_enqueue(work4);
+  work_enqueue(work5);
+  EXPECT_EQ(work_dequeue(), work5);
+  EXPECT_EQ(work_dequeue(), work1);
+  EXPECT_EQ(work_dequeue(), work4);
+  EXPECT_EQ(work_dequeue(), work2);
+  EXPECT_EQ(work_dequeue(), work3);
+  work_enqueue(work1);
+  work_enqueue(work2);
+  work_enqueue(work3);
+  work_enqueue(work4);
+  work_enqueue(work5);
+  EXPECT_EQ(work_dequeue(), work5);
+  EXPECT_EQ(work_dequeue(), work1);
+  EXPECT_EQ(work_dequeue(), work4);
+  EXPECT_EQ(work_dequeue(), work2);
+  EXPECT_EQ(work_dequeue(), work3);
+  work_destroy(work1);
+  work_destroy(work2);
+  work_destroy(work3);
+  work_destroy(work4);
+  work_destroy(work5);
 }
