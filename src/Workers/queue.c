@@ -2,30 +2,25 @@
 // Created by victor on 4/15/25.
 //
 #include "queue.h"
-#include "../Util/util.h"
 #include "../Util/allocator.h"
 
 
-work_queue_t workQueue;
-
-void work_queue_init() {
-  workQueue.first = NULL;
-  workQueue.last = NULL;
-  platform_lock_init(&workQueue.lock);
+work_queue_t* work_queue_init(work_queue_t* queue) {
+  queue->first = NULL;
+  queue->last = NULL;
 }
-void work_enqueue(work_t* work) {
-  platform_lock(&workQueue.lock);
-  if (workQueue.first == NULL && workQueue.last == NULL) {
+void work_enqueue(work_queue_t* queue, work_t* work) {
+  if (queue->first == NULL && queue->last == NULL) {
     work_queue_item_t* item = get_clear_memory(sizeof(work_queue_item_t));
     item->last = NULL;
     item->next = NULL;
     item->work = work;
-    workQueue.first = item;
-    workQueue.last = item;
+    queue->first = item;
+    queue->last = item;
   } else {
     work_queue_item_t* new_item = get_clear_memory(sizeof(work_queue_item_t));
     new_item->work= work;
-    work_queue_item_t* current = workQueue.first;
+    work_queue_item_t* current = queue->first;
 
     int cmp = priority_compare(&work->priority,&current->work->priority);
     while ((current->next != NULL ) && ((cmp == 1) || (cmp == 0))) {
@@ -39,17 +34,17 @@ void work_enqueue(work_t* work) {
         work_queue_item_t* temp = current->last;
         temp->next = new_item;
       } else {// current is the first in the list and new work should become the new first
-        workQueue.first= new_item;
+        queue->first= new_item;
       }
       current->last = new_item;
     } else if ((cmp != -1) && current->next == NULL) { //current is the last in the list and the new work should come after it
       current->next = new_item;
       new_item->last = current;
-      workQueue.last = new_item;
+      queue->last = new_item;
     } else if (current->last == NULL) { // work should be at the begining of a populated list
       new_item->next = current;
       current->last = new_item;
-      workQueue.first = new_item;
+      queue->first = new_item;
     } else { // we are somewhere in the middle of the list and work has greater priority than the current
       work_queue_item_t* temp = current->last;
       temp->next = new_item;
@@ -58,26 +53,39 @@ void work_enqueue(work_t* work) {
       current->last = new_item;
     }
   }
-  platform_unlock(&workQueue.lock);
 }
-work_t* work_dequeue() {
-  platform_lock(&workQueue.lock);
-  if (workQueue.first == NULL) {
-    platform_unlock(&workQueue.lock);
+work_t* work_dequeue(work_queue_t* queue) {
+  if (queue->first == NULL) {
     return NULL;
   } else {
-    work_queue_item_t* temp = workQueue.first;
+    work_queue_item_t* temp = queue->first;
     work_t* work= temp->work;
-    workQueue.first= temp->next;
-    if(workQueue.first != NULL) {
-      workQueue.first->last = NULL;
+    queue->first = temp->next;
+    if(queue->first != NULL) {
+      queue->first->last = NULL;
     }
-    if (workQueue.last == temp) {
-      workQueue.last = NULL;
+    if (queue->last == temp) {
+      queue->last = NULL;
     }
     free(temp);
-    platform_unlock(&workQueue.lock);
     return work;
   }
-
 }
+/*
+work_queue_t* work_queue_destroy(work_queue_t* queue) {
+  platform_lock(&queue->lock);
+  refcounter_dereference((refcounter_t*) queue);
+  platform_unlock(&queue->lock);
+  if (refcounter_count((refcounter_t*) queue) == 0) {
+    platform_lock_destroy(&queue->lock);
+    work_queue_item_t *current = queue->first;
+    while (current != NULL) {
+      work_queue_item_t *temp = current->next;
+      free(current);
+      current = temp;
+    }
+    free(queue);
+  }
+
+  }
+}*/

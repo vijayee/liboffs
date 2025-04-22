@@ -238,15 +238,27 @@ void promiseWrapper(void* ctx) {
   promise_resolve(promise, NULL);
   promise_destroy(promise);
 }
+void promiseErrWrapper(void* ctx) {
+  promise_t* promise = static_cast<promise_t *>(ctx);
+  std::string message = "WORK ABORTED";
+  promise_reject(promise, ERROR((char*)message.c_str()));
+  promise_destroy(promise);
+}
 
 TEST_F(TestWork, TestWorkExecution) {
   priority_init();
-  promise_t* promise = promise_create(callbackWrapper, callbackErrWrapper, this);
+  promise_t* promise1 = promise_create(callbackWrapper, callbackErrWrapper, this);
+  promise_t* promise2 = promise_create(callbackWrapper, callbackErrWrapper, this);
   EXPECT_CALL(mockCallback, Call(_,_)).Times(1);
-  work_t* work = work_create(priority_get_next(), refcounter_reference((refcounter_t*)promise), promiseWrapper);
-  work_execute(work);
-  work_destroy(work);
-  promise_destroy(promise);
+  EXPECT_CALL(mockErrCallback, Call(_,_)).Times(1);
+  work_t* work1 = work_create(priority_get_next(), refcounter_reference((refcounter_t*)promise1), promiseWrapper, promiseErrWrapper);
+  work_t* work2 = work_create(priority_get_next(), refcounter_reference((refcounter_t*)promise2), promiseWrapper, promiseErrWrapper);
+  work_execute(work1);
+  work_abort(work2);
+  work_destroy(work1);
+  work_destroy(work2);
+  promise_destroy(promise1);
+  promise_destroy(promise2);
 }
 void fakeWork(void* ctx) {
 
@@ -257,32 +269,33 @@ TEST(TestWorkQueue, TestWorkQueueFunctions) {
   priority_t secondPriority = priority_get_next();
   priority_t thirdPriority = priority_get_next();
   priority_t fourthPriority = priority_get_next();
-  work_t* work1 = work_create(secondPriority, NULL, fakeWork);
-  work_t* work2 = work_create(fourthPriority, NULL, fakeWork);
-  work_t* work3 = work_create(fourthPriority, NULL, fakeWork);
-  work_t* work4 = work_create(secondPriority, NULL, fakeWork);
-  work_t* work5 = work_create(firstPriority, NULL, fakeWork);
-  work_queue_init();
-  work_enqueue(work1);
-  work_enqueue(work2);
-  work_enqueue(work3);
-  work_enqueue(work4);
-  work_enqueue(work5);
-  EXPECT_EQ(work_dequeue(), work5);
-  EXPECT_EQ(work_dequeue(), work1);
-  EXPECT_EQ(work_dequeue(), work4);
-  EXPECT_EQ(work_dequeue(), work2);
-  EXPECT_EQ(work_dequeue(), work3);
-  work_enqueue(work1);
-  work_enqueue(work2);
-  work_enqueue(work3);
-  work_enqueue(work4);
-  work_enqueue(work5);
-  EXPECT_EQ(work_dequeue(), work5);
-  EXPECT_EQ(work_dequeue(), work1);
-  EXPECT_EQ(work_dequeue(), work4);
-  EXPECT_EQ(work_dequeue(), work2);
-  EXPECT_EQ(work_dequeue(), work3);
+  work_t* work1 = work_create(secondPriority, NULL, fakeWork, fakeWork);
+  work_t* work2 = work_create(fourthPriority, NULL, fakeWork, fakeWork);
+  work_t* work3 = work_create(fourthPriority, NULL, fakeWork, fakeWork);
+  work_t* work4 = work_create(secondPriority, NULL, fakeWork, fakeWork);
+  work_t* work5 = work_create(firstPriority, NULL, fakeWork, fakeWork);
+  work_queue_t queue = {0};
+  work_queue_init(&queue);
+  work_enqueue(&queue,work1);
+  work_enqueue(&queue,work2);
+  work_enqueue(&queue,work3);
+  work_enqueue(&queue,work4);
+  work_enqueue(&queue,work5);
+  EXPECT_EQ(work_dequeue(&queue), work5);
+  EXPECT_EQ(work_dequeue(&queue), work1);
+  EXPECT_EQ(work_dequeue(&queue), work4);
+  EXPECT_EQ(work_dequeue(&queue), work2);
+  EXPECT_EQ(work_dequeue(&queue), work3);
+  work_enqueue(&queue,work1);
+  work_enqueue(&queue,work2);
+  work_enqueue(&queue,work3);
+  work_enqueue(&queue,work4);
+  work_enqueue(&queue,work5);
+  EXPECT_EQ(work_dequeue(&queue), work5);
+  EXPECT_EQ(work_dequeue(&queue), work1);
+  EXPECT_EQ(work_dequeue(&queue), work4);
+  EXPECT_EQ(work_dequeue(&queue), work2);
+  EXPECT_EQ(work_dequeue(&queue), work3);
   work_destroy(work1);
   work_destroy(work2);
   work_destroy(work3);

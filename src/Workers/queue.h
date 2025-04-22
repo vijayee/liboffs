@@ -5,11 +5,8 @@
 #ifndef OFFS_QUEUE_H
 #define OFFS_QUEUE_H
 #include "work.h"
-#if _WIN32
-#include <windows.h>
-#else
-#include <pthread.h>
-#endif
+
+
 typedef struct work_queue_item_t work_queue_item_t;
 struct work_queue_item_t {
   work_t* work;
@@ -17,17 +14,12 @@ struct work_queue_item_t {
   work_queue_item_t* last;
 };
 typedef struct {
-#if _WIN32
-  CRITICAL_SECTION lock;
-#else
-  pthread_mutex_t lock;
-#endif
   work_queue_item_t* first;
   work_queue_item_t* last;
 } work_queue_t;
 
-void work_queue_init();
-void work_enqueue(work_t* work);
-work_t* work_dequeue();
+work_queue_t* work_queue_init(work_queue_t* queue);
+void work_enqueue(work_queue_t* queue, work_t* work);
+work_t* work_dequeue(work_queue_t* queue);
 
 #endif //OFFS_QUEUE_H

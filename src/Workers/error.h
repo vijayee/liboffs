@@ -16,4 +16,5 @@ typedef struct {
 
 async_error_t* error_create(char* message, char* file, char* function, int line);
 void error_destroy(async_error_t* error);
+#define ERROR(MESSAGE) error_create(MESSAGE, (char*)__FILE__, (char*)__func__, __LINE__)
 #endif //OFFS_ERROR_H

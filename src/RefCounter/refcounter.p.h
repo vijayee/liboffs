@@ -11,11 +11,7 @@
 //#ifndef __STDC_NO_ATOMICS__
 
 //#else
-#if _WIN32
-#include <windows.h>
-#else
-#include <pthread.h>
-#endif
+#include "../Util/util.h"
 //#endif
 //#endif
 
@@ -26,11 +22,7 @@ struct refcounter_t {
 #else
   uint16_t count;
   uint8_t yield;
-#if WIN32//TODO: Make this a macro
-  CRITICAL_SECTION lock;
-#else
-  pthread_mutex_t lock;
-#endif
+  PlATFORMLOCKTYPE(lock);
 #endif
 };
 

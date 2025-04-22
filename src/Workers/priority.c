@@ -5,13 +5,8 @@
 #include <time.h>
 #include <stdint.h>
 #include "../Util/util.h"
-#if _WIN32
-#include <windows.h>
-CRITICAL_SECTION current_priority_lock;
-#else
-#include <pthread.h>
-pthread_mutex_t current_priority_lock;
-#endif
+
+PlATFORMLOCKTYPE(current_priority_lock);
 priority_t current = {0};
 
 
