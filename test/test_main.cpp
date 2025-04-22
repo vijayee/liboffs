@@ -240,8 +240,7 @@ void promiseWrapper(void* ctx) {
 }
 void promiseErrWrapper(void* ctx) {
   promise_t* promise = static_cast<promise_t *>(ctx);
-  std::string message = "WORK ABORTED";
-  promise_reject(promise, ERROR((char*)message.c_str()));
+  promise_reject(promise, NULL);
   promise_destroy(promise);
 }
 
