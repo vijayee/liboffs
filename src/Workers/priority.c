@@ -4,7 +4,7 @@
 #include "priority.h"
 #include <time.h>
 #include <stdint.h>
-#include "../Util/util.h"
+#include "../Util/threadding.h"
 
 PlATFORMLOCKTYPE(current_priority_lock);
 priority_t current = {0};

@@ -6,7 +6,6 @@
 #define OFFS_WORK_H
 #include "priority.h"
 #include "../RefCounter/refcounter.h"
-#include "../RefCounter/refcounter.p.h"
 typedef struct {
   refcounter_t refcounter;
   priority_t priority;

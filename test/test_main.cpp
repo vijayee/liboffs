@@ -8,7 +8,6 @@
 #include <string.h>
 extern "C" {
 #include "../src/RefCounter/refcounter.h"
-#include "../src/RefCounter/refcounter.p.h"
 #include "../src/Buffer/buffer.h"
 #include "../src/BlockCache/frand.h"
 #include "../src/BlockCache/block.h"

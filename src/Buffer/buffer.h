@@ -6,7 +6,6 @@
 #define LIBOFFS_BUFFER_H
 
 #include "../RefCounter/refcounter.h"
-#include "../RefCounter/refcounter.p.h"
 
 typedef struct buffer_t {
   refcounter_t refcounter;

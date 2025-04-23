@@ -5,8 +5,6 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include "buffer.h"
-#include "../RefCounter/refcounter.h"
-#include "../RefCounter/refcounter.p.h"
 #include "../Util/allocator.h"
 #include <string.h>
 

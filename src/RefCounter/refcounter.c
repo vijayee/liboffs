@@ -2,11 +2,8 @@
 // Created by victor on 3/18/25.
 //
 #include "refcounter.h"
-#include "../Util/util.h"
 #include <stdint.h>
 #include <limits.h>
-#include "refcounter.p.h"
-#include <stdio.h>
 
 void refcounter_init(refcounter_t* refcounter) {
 #ifndef OFFS_ATOMIC

@@ -97,6 +97,7 @@ void block_destroy(block_t* block) {
   buffer_destroy(block->data);
   refcounter_dereference((refcounter_t*) block);
   if (refcounter_count((refcounter_t*) block) == 0) {
+    refcounter_destroy_lock((refcounter_t*) block);
     free(block);
   }
 }

@@ -1,7 +1,7 @@
 //
 // Created by victor on 3/18/25.
 //
-#include "util.h"
+#include "threadding.h"
 #if _WIN32
 #include <windows.h>
 #else
@@ -20,6 +20,12 @@ void platform_lock_init(CRITICAL_SECTION* lock) {
 void platform_lock_destroy(CRITICAL_SECTION* lock) {
   DeleteCriticalSection(lock, NULL);
 }
+void platform_condition_init(pthread_cond_t* condition) {
+  InitializeConditionVariable(condition);
+}
+void platform_condition_wait(pthread_mutex_t* lock, pthread_cond_t* condition) {
+  SleepConditionVariableCS(condition, lock, INFINITE);
+}
 #else
 void platform_lock(pthread_mutex_t* lock) {
   pthread_mutex_lock(lock);
@@ -32,5 +38,11 @@ void platform_lock_init(pthread_mutex_t* lock) {
 }
 void platform_lock_destroy(pthread_mutex_t* lock) {
   int result = pthread_mutex_destroy(lock);
+}
+void platform_condition_init(pthread_cond_t* condition) {
+  pthread_cond_init(condition, NULL);
+}
+void platform_condition_wait(pthread_mutex_t* lock, pthread_cond_t* condition) {
+  pthread_cond_wait(condition, lock);
 }
 #endif

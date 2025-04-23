@@ -6,7 +6,6 @@
 #define LIBOFFS_BLOCK_H
 #include "../Buffer/buffer.h"
 #include "../RefCounter/refcounter.h"
-#include "../RefCounter/refcounter.p.h"
 
 typedef enum block_size_e {
   mega = 1000000,

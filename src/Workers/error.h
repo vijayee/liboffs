@@ -5,7 +5,6 @@
 #ifndef OFFS_ERROR_H
 #define OFFS_ERROR_H
 #include "../RefCounter/refcounter.h"
-#include "../RefCounter/refcounter.p.h"
 typedef struct {
   refcounter_t refcounter;
   char* message;

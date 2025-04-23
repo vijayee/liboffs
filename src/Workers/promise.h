@@ -7,7 +7,6 @@
 #include <stdint.h>
 #include "error.h"
 #include "../RefCounter/refcounter.h"
-#include "../RefCounter/refcounter.p.h"
 
 typedef struct {
   refcounter_t refcounter;
