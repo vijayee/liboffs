@@ -8,6 +8,7 @@
 #include <windows.h>
 #else
 #include <pthread.h>
+#include <unistd.h>
 #endif
 #if _WIN32
 void platform_lock(CRITICAL_SECTION* lock) {
@@ -34,6 +35,11 @@ void platform_condition_destroy(CONDITION_VARIABLE* condition) {
 void platform_signal_condition(CONDITION_VARIABLE* condition) {
    WakeConditionVariable(condition);
 }
+
+void platform_broadcast_condition(CONDITION_VARIABLE* condition) {
+  WakeAllConditionVariable(condition);
+}
+
 void platform_barrier_init(SYNCHRONIZATION_BARRIER* barrier, long count) {
   BOOL result = InitializeSynchronizationBarrier(barrier, count, -1);
   if (!result) {
@@ -49,6 +55,15 @@ void platform_barrier_destroy(SYNCHRONIZATION_BARRIER* barrier) {
 }
 int platform_join(HANDLE thread) {
   return WaitForSingleObject(thread, INFINITE);
+}
+
+int platform_core_count() {
+  SYSTEM_INFO sysinfo;
+  GetSystemInfo(&sysinfo);
+  return sysinfo.dwNumberOfProcessors;
+}
+int platform_self() {
+  return GetCurrentThreadId();
 }
 #else
 void platform_lock(pthread_mutex_t* lock) {
@@ -109,6 +124,14 @@ void platform_signal_condition(pthread_cond_t* condition) {
   }
 }
 
+void platform_broadcast_condition(pthread_cond_t* condition) {
+  int result = pthread_cond_broadcast(condition);
+  if (result) {
+    log_trace("Failed to broadcast condition");
+    abort();
+  }
+}
+
 void platform_barrier_init(pthread_barrier_t* barrier, unsigned int count) {
   int result = pthread_barrier_init(barrier, NULL, count);
   if (result) {
@@ -128,5 +151,11 @@ void platform_barrier_destroy(pthread_barrier_t* barrier) {
 }
 int platform_join(pthread_t thread) {
   return pthread_join(thread, NULL);
+}
+int platform_core_count() {
+  return sysconf(_SC_NPROCESSORS_ONLN);
+}
+uint64_t platform_self() {
+  return pthread_self();
 }
 #endif

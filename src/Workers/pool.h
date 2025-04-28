@@ -14,7 +14,8 @@ typedef struct {
   PLATFORMCONDITIONTYPE(condition);
   PLATFORMBARRIERTYPE(barrier);
   PLATFORMCONDITIONTYPE(shutdown);
-  PlATFORMLOCKTYPE(shutdown_lock);
+  PLATFORMCONDITIONTYPE(idle);
+  size_t idleCount;
   work_queue_t queue;
   PLATFORMTHREADTYPE* workers;
 #if _WIN32
@@ -30,5 +31,6 @@ int work_pool_enqueue(work_pool_t* pool, work_t* work);
 void work_pool_launch(work_pool_t* pool);
 void work_pool_shutdown(work_pool_t* pool);
 void work_pool_wait_for_shutdown_signal(work_pool_t* pool);
+void work_pool_wait_for_idle_signal(work_pool_t* pool);
 void work_pool_join_all(work_pool_t* pool);
 #endif //OFFS_POOL_H

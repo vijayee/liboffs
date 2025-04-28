@@ -4,6 +4,7 @@
 
 #ifndef LIBOFFS_THREADDING_H
 #define LIBOFFS_THREADDING_H
+#include <stdint.h>
 #if _WIN32
 #include <windows>
 #define PlATFORMLOCKTYPE(N) CRITICAL_SECTION N
@@ -18,10 +19,13 @@ void platform_condition_init(CONDITION_VARIABLE* condition);
 void platform_condition_wait(CRITICAL_SECTION* lock, CONDITION_VARIABLE* condition);
 void platform_condition_destroy(CONDITION_VARIABLE* condition);
 void platform_signal_condition(CONDITION_VARIABLE* condition);
+void platform_broadcast_condition(CONDITION_VARIABLE* condition);
 void platform_barrier_init(SYNCHRONIZATION_BARRIER* barrier, long count);
 int platform_barrier_wait(SYNCHRONIZATION_BARRIER* barrier);
 void platform_barrier_destroy(SYNCHRONIZATION_BARRIER* barrier);
 int platform_join(HANDLE thread);
+int platform_core_count();
+uint64_t platform_self();
 #else
 #include <pthread.h>
 #define PlATFORMLOCKTYPE(N) pthread_mutex_t N
@@ -36,9 +40,12 @@ void platform_condition_init(pthread_cond_t* condition);
 void platform_condition_wait(pthread_mutex_t* lock, pthread_cond_t* condition);
 void platform_condition_destroy(pthread_cond_t* condition);
 void platform_signal_condition(pthread_cond_t* condition);
+void platform_broadcast_condition(pthread_cond_t* condition);
 void platform_barrier_init(pthread_barrier_t* barrier, unsigned int count);
 int platform_barrier_wait(pthread_barrier_t* barrier);
 void platform_barrier_destroy(pthread_barrier_t* barrier);
 int platform_join(pthread_t thread);
+int platform_core_count();
+uint64_t platform_self();
 #endif
 #endif //LIBOFFS_THREADDONG_H

@@ -17,6 +17,8 @@ extern "C" {
 #include "../src/Workers/priority.h"
 #include "../src/Workers/work.h"
 #include "../src/Workers/queue.h"
+#include "../src/Workers/pool.h"
+#include "../src/Util/threadding.h"
 }
 
 using ::testing::_;
@@ -299,4 +301,51 @@ TEST(TestWorkQueue, TestWorkQueueFunctions) {
   work_destroy(work3);
   work_destroy(work4);
   work_destroy(work5);
+}
+
+TEST(TestCoreCount, GetCoreCount) {
+  int corecnt = platform_core_count();
+  printf("Machine has %d cores\n", corecnt);
+  EXPECT_GT(corecnt, 0);
+}
+
+void onExecute(void* ctx) {
+  unsigned int work = *((unsigned long*) ctx);
+  printf("Work %d executed on thread %lu\n", work, platform_self());
+}
+void onAbort(void* ctx) {
+  unsigned int work = *((unsigned long*) ctx);
+  printf("Work %d aborted on thread %lu\n", work, platform_self());
+}
+
+void Shutdown(void* ctx) {
+  work_pool_t* pool = (work_pool_t*) ctx;
+  platform_signal_condition(&pool->shutdown);
+}
+void ShutdownAborted(void* ctx) {
+  printf("Shutdown Aborted \n");
+}
+
+TEST(TestWorkerPool, TestPoolLaunchShutdown) {
+  size_t size = 256;
+  int workId[size];
+  int corecnt = platform_core_count();
+  work_pool_t* pool = work_pool_create(corecnt);
+
+  priority_t priority = priority_get_next();
+  work_pool_launch(pool);
+  for (int i = 0; i < size; i++) {
+    workId[i] = i;
+    work_t* work = work_create(priority, &workId[i], onExecute, onAbort);
+    refcounter_yield((refcounter_t*) work);
+    work_pool_enqueue(pool, work);
+  }
+  work_pool_wait_for_idle_signal(pool);
+  work_t* work = work_create(priority, pool, Shutdown, ShutdownAborted);
+  refcounter_yield((refcounter_t*) work);
+  work_pool_enqueue(pool, work);
+  work_pool_wait_for_shutdown_signal(pool);
+  work_pool_shutdown(pool);
+  work_pool_join_all(pool);
+  work_pool_destroy(pool);
 }

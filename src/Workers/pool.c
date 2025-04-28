@@ -21,19 +21,20 @@ work_pool_t* work_pool_create(size_t size) {
  refcounter_init((refcounter_t*) pool);
  work_queue_init(&pool->queue);
  platform_lock_init(&pool->lock);
- platform_lock_init(&pool->shutdown_lock);
  platform_condition_init(&pool->condition);
  platform_condition_init(&pool->shutdown);
+ platform_condition_init(&pool->idle);
  platform_barrier_init(&pool->barrier, size + 1);
+ return pool;
 }
 void work_pool_destroy(work_pool_t* pool) {
   refcounter_dereference((refcounter_t*) pool);
   if (refcounter_count((refcounter_t*) pool) == 0) {
     platform_lock_destroy(&pool->lock);
-    platform_lock_destroy(&pool->shutdown_lock);
     platform_barrier_destroy(&pool->barrier);
     platform_condition_destroy(&pool->shutdown);
     platform_condition_destroy(&pool->condition);
+    platform_condition_destroy(&pool->idle);
     free(pool->workers);
 #if _WIN32
     free(pool->workerIds);
@@ -50,6 +51,7 @@ int work_pool_enqueue(work_pool_t* pool, work_t* work) {
   } else {
     work_enqueue(&pool->queue, work);
     platform_unlock(&pool->lock);
+    platform_signal_condition(&pool->condition);
     return 0;
   }
 }
@@ -74,13 +76,22 @@ void work_pool_launch(work_pool_t* pool) {
 void work_pool_shutdown(work_pool_t* pool){
   platform_lock(&pool->lock);
   pool->stop = 1;
+  platform_broadcast_condition(&pool->condition);
   platform_unlock(&pool->lock);
 }
 
 void work_pool_wait_for_shutdown_signal(work_pool_t* pool) {
-  platform_lock(&pool->shutdown_lock);
+  platform_lock(&pool->lock);
   platform_condition_wait(&pool->lock,&pool->shutdown);
-  platform_unlock(&pool->shutdown_lock);
+  platform_unlock(&pool->lock);
+}
+
+void work_pool_wait_for_idle_signal (work_pool_t* pool) {
+  platform_lock(&pool->lock);
+  if (pool->idleCount != pool->size) {
+    platform_condition_wait(&pool->lock, &pool->idle);
+  }
+  platform_unlock(&pool->lock);
 }
 
 void work_pool_join_all(work_pool_t* pool) {
@@ -100,7 +111,12 @@ void* workerFunction(void* args) {
     platform_lock(&pool->lock);
     work_t* work = work_dequeue(&pool->queue);
     if ((work == NULL) && (pool->stop == 0)) { // If there is nothing on the queue and we are not supposed to stop
+      pool->idleCount++;
+      if (pool->idleCount == pool->size) {
+        platform_signal_condition(&pool->idle);
+      }
       platform_condition_wait(&pool->lock, &pool->condition);
+      pool->idleCount--;
       work = work_dequeue(&pool->queue);
     }
     platform_unlock(&pool->lock);
