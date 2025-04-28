@@ -23,6 +23,7 @@ extern "C" {
 
 using ::testing::_;
 using ::testing::MockFunction;
+using ::testing::AtLeast;
 
 TEST(TestRefCounter, TestRefCounterFunctions) {
   refcounter_t* refc1 = (refcounter_t*) calloc(sizeof(refcounter_t), 1);
@@ -309,43 +310,92 @@ TEST(TestCoreCount, GetCoreCount) {
   EXPECT_GT(corecnt, 0);
 }
 
+class TestWorkerPool : public testing::Test {
+public:
+  work_pool_t* pool;
+  MockFunction<void((void*))> mockExecuteCallback;
+  MockFunction<void((void*))> mockAbortCallback;
+  MockFunction<void((void*))> mockShutdownCallback;
+  MockFunction<void((void*))> mockShutdownAbortCallback;
+};
+
 void onExecute(void* ctx) {
-  unsigned int work = *((unsigned long*) ctx);
-  printf("Work %d executed on thread %lu\n", work, platform_self());
+  auto test = static_cast<TestWorkerPool*>(ctx);
+  test->mockExecuteCallback.Call(ctx);
 }
 void onAbort(void* ctx) {
-  unsigned int work = *((unsigned long*) ctx);
-  printf("Work %d aborted on thread %lu\n", work, platform_self());
+  auto test = static_cast<TestWorkerPool*>(ctx);
+  test->mockAbortCallback.Call(ctx);
 }
 
 void Shutdown(void* ctx) {
-  work_pool_t* pool = (work_pool_t*) ctx;
-  platform_signal_condition(&pool->shutdown);
+  auto test = static_cast<TestWorkerPool*>(ctx);
+  platform_signal_condition(&test->pool->shutdown);
+  test->mockShutdownCallback.Call(ctx);
 }
 void ShutdownAborted(void* ctx) {
-  printf("Shutdown Aborted \n");
+  auto test = static_cast<TestWorkerPool*>(ctx);
+  test->mockShutdownAbortCallback.Call(ctx);
 }
 
-TEST(TestWorkerPool, TestPoolLaunchShutdown) {
+TEST_F(TestWorkerPool, TestPoolLaunch) {
   size_t size = 256;
   int workId[size];
   int corecnt = platform_core_count();
-  work_pool_t* pool = work_pool_create(corecnt);
+  pool = work_pool_create(corecnt);
 
   priority_t priority = priority_get_next();
   work_pool_launch(pool);
+  EXPECT_CALL(mockExecuteCallback, Call(_)).Times(size);
+  EXPECT_CALL(mockAbortCallback, Call(_)).Times(0);
+  EXPECT_CALL(mockShutdownCallback, Call(_)).Times(1);
+  EXPECT_CALL(mockShutdownAbortCallback, Call(_)).Times(0);
+
   for (int i = 0; i < size; i++) {
     workId[i] = i;
-    work_t* work = work_create(priority, &workId[i], onExecute, onAbort);
+    work_t* work = work_create(priority, this, onExecute, onAbort);
     refcounter_yield((refcounter_t*) work);
     work_pool_enqueue(pool, work);
   }
   work_pool_wait_for_idle_signal(pool);
-  work_t* work = work_create(priority, pool, Shutdown, ShutdownAborted);
+  work_t* work = work_create(priority, this, Shutdown, ShutdownAborted);
   refcounter_yield((refcounter_t*) work);
   work_pool_enqueue(pool, work);
   work_pool_wait_for_shutdown_signal(pool);
   work_pool_shutdown(pool);
   work_pool_join_all(pool);
   work_pool_destroy(pool);
+  pool= NULL;
+}
+
+TEST_F(TestWorkerPool, TestPoolShutdown) {
+  size_t size = 256;
+  int workId[size];
+  int corecnt = platform_core_count();
+  pool = work_pool_create(corecnt);
+
+  priority_t priority = priority_get_next();
+  EXPECT_CALL(mockExecuteCallback, Call(_)).Times(AtLeast(1));
+  EXPECT_CALL(mockAbortCallback, Call(_)).Times(AtLeast(1));
+  EXPECT_CALL(mockShutdownCallback, Call(_)).Times(1);
+  EXPECT_CALL(mockShutdownAbortCallback, Call(_)).Times(0);
+
+  for (int i = 0; i < size; i++) {
+    if(i == 100) {
+      work_t* work = work_create(priority, this, Shutdown, ShutdownAborted);
+      refcounter_yield((refcounter_t*) work);
+      work_pool_enqueue(pool, work);
+    }
+    workId[i] = i;
+    work_t *work = work_create(priority, this, onExecute, onAbort);
+    refcounter_yield((refcounter_t *) work);
+    work_pool_enqueue(pool, work);
+  }
+
+  work_pool_launch(pool);
+  work_pool_wait_for_shutdown_signal(pool);
+  work_pool_shutdown(pool);
+  work_pool_join_all(pool);
+  work_pool_destroy(pool);
+  pool= NULL;
 }
