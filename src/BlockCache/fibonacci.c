@@ -10,7 +10,7 @@ uint32_t fibonacci(uint32_t num) {
     uint32_t current = 0;
     uint32_t parent = 1;
     uint32_t grandparent = 0;
-    for (int32_t i = 0; i < (num + 1); i++) {
+    for (int32_t i = 2; i < (num + 1); i++) {
       current = parent + grandparent;
       grandparent = parent;
       parent = current;

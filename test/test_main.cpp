@@ -402,16 +402,27 @@ TEST_F(TestWorkerPool, TestPoolShutdown) {
 }
 
 TEST(TestFibonacciHitCounter, HitCounterFunctions) {
+  EXPECT_EQ(fibonacci(0), 0);
+  EXPECT_EQ(fibonacci(1), 1);
+  EXPECT_EQ(fibonacci(2), 1);
   fibonacci_hit_counter_t  counter1 = fibonacci_hit_counter_create();
-  fibonacci_hit_counter_t  counter2 = fibonacci_hit_counter_from(6,12);
-  EXPECT_EQ(counter2.threshold, 21);
+  fibonacci_hit_counter_t  counter2 = fibonacci_hit_counter_from(6,5);
+  fibonacci_hit_counter_t  counter3 = fibonacci_hit_counter_from(6,5);
+  EXPECT_EQ(counter2.threshold, 8);
   EXPECT_EQ(fibonacci_hit_counter_compare(&counter1, &counter2), -1);
-  for (int i = 0; i < 10; i++) {
-    fibonacci_hit_counter_increment(&counter2);
+  EXPECT_EQ(fibonacci_hit_counter_compare(&counter2, &counter1), 1);
+  EXPECT_EQ(fibonacci_hit_counter_compare(&counter2, &counter3), 0);
+  for (int i = 0; i < 4; i++) {
+    if (i == 3) {
+      EXPECT_EQ(fibonacci_hit_counter_increment(&counter2), 1);
+    } else {
+      EXPECT_EQ(fibonacci_hit_counter_increment(&counter2), 0);
+    }
   }
-  EXPECT_EQ(counter2.threshold, 34);
+  EXPECT_EQ(counter2.threshold, 13);
   EXPECT_EQ(counter2.count, 0);
-  fibonacci_hit_counter_decrement(&counter2);
-  EXPECT_EQ(counter2.threshold, 21);
-  EXPECT_EQ(counter2.count, 21);
+  EXPECT_EQ(fibonacci_hit_counter_decrement(&counter2), 1);
+  EXPECT_EQ(counter2.threshold, 8);
+  EXPECT_EQ(counter2.count, 8);
+  EXPECT_EQ(fibonacci_hit_counter_decrement(&counter2), 0);
 }
