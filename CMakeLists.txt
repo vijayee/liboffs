@@ -17,7 +17,9 @@ set(C_SRC ""
         src/Workers/queue.h
         src/Workers/queue.c
         src/Workers/pool.h
-        src/Workers/pool.c)
+        src/Workers/pool.c
+        src/BlockCache/fibonacci.h
+        src/BlockCache/fibonacci.c)
 set(blake3_SOURCE_DIR deps/BLAKE3)
 set(C_INC "")
 file(GLOB_RECURSE C_SRC "src/*/*.c" )

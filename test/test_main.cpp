@@ -19,6 +19,7 @@ extern "C" {
 #include "../src/Workers/queue.h"
 #include "../src/Workers/pool.h"
 #include "../src/Util/threadding.h"
+#include "../src/BlockCache/fibonacci.h"
 }
 
 using ::testing::_;
@@ -398,4 +399,19 @@ TEST_F(TestWorkerPool, TestPoolShutdown) {
   work_pool_join_all(pool);
   work_pool_destroy(pool);
   pool= NULL;
+}
+
+TEST(TestFibonacciHitCounter, HitCounterFunctions) {
+  fibonacci_hit_counter_t  counter1 = fibonacci_hit_counter_create();
+  fibonacci_hit_counter_t  counter2 = fibonacci_hit_counter_from(6,12);
+  EXPECT_EQ(counter2.threshold, 21);
+  EXPECT_EQ(fibonacci_hit_counter_compare(&counter1, &counter2), -1);
+  for (int i = 0; i < 10; i++) {
+    fibonacci_hit_counter_increment(&counter2);
+  }
+  EXPECT_EQ(counter2.threshold, 34);
+  EXPECT_EQ(counter2.count, 0);
+  fibonacci_hit_counter_decrement(&counter2);
+  EXPECT_EQ(counter2.threshold, 21);
+  EXPECT_EQ(counter2.count, 21);
 }
