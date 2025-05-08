@@ -20,8 +20,15 @@ set(C_SRC ""
         src/Workers/pool.c
         src/BlockCache/fibonacci.h
         src/BlockCache/fibonacci.c
-        src/BlockCache/index.h)
+        src/BlockCache/index.h
+        src/BlockCache/index.c
+        src/Util/hash.h
+        src/Util/hash.c
+        src/Util/vec.h
+        src/Util/vec.c)
 set(blake3_SOURCE_DIR deps/BLAKE3)
+set(xxHash_SOURCE_DIR deps/xxHash)
+set(hashmap_SOURCE_DIR deps/hashmap)
 set(C_INC "")
 file(GLOB_RECURSE C_SRC "src/*/*.c" )
 file(GLOB_RECURSE C_INC "/src/*/*.h")
@@ -36,8 +43,11 @@ add_subdirectory(test)
 
 add_library(offs STATIC ${C_SRC})
 #target_link_libraries(offs ${blake3_SOURCE_DIR}/libbla)
-target_include_directories(offs PUBLIC ${blake3_SOURCE_DIR}/c)
-target_include_directories(offs PUBLIC ${C_INC})
+target_include_directories(offs PRIVATE ${blake3_SOURCE_DIR}/c)
+target_include_directories(offs PRIVATE ${C_INC})
+target_include_directories(offs PRIVATE ${xxHash_SOURCE_DIR})
+target_include_directories(offs PRIVATE ${hashmap_SOURCE_DIR}/include)
+#target_link_libraries(offs PUBLIC ${hashmap_SOURCE_DIR}/libhashmap)
 
 #target_include_directories(offs PUBLIC ${BLAKE3_INC})
 #target_link_libraries(offs ${BLAKE3_SRC})

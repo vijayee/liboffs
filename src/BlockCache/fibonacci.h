@@ -13,6 +13,7 @@ typedef struct {
   uint32_t threshold;
 } fibonacci_hit_counter_t;
 
+uint32_t fibonacci(uint32_t num);
 fibonacci_hit_counter_t fibonacci_hit_counter_create();
 fibonacci_hit_counter_t fibonacci_hit_counter_from(uint64_t fib, uint64_t count);
 uint8_t fibonacci_hit_counter_increment(fibonacci_hit_counter_t* counter);
