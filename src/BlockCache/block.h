@@ -6,6 +6,7 @@
 #define LIBOFFS_BLOCK_H
 #include "../Buffer/buffer.h"
 #include "../RefCounter/refcounter.h"
+#include <cbor.h>
 
 typedef enum block_size_e {
   mega = 1000000,
@@ -30,5 +31,8 @@ block_t* block_create_existing_data_by_type(buffer_t* data, block_size_e type);
 block_t* block_create_existing_data_hash(buffer_t* data, buffer_t* hash);
 block_t* block_create_existing_data_hash_by_type(buffer_t* data, buffer_t* hash, block_size_e type);
 block_t* block_xor(block_t* block1, block_t* block2);
+cbor_item_t* block_to_cbor(block_t* block);
+block_t* cbor_to_block(cbor_item_t* cbor);
 void block_destroy(block_t* block);
+
 #endif //LIBOFFS_BLOCK_H

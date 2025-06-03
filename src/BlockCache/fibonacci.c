@@ -2,6 +2,7 @@
 // Created by victor on 4/28/25.
 //
 #include "fibonacci.h"
+#include "../Util/log.h"
 
 uint32_t fibonacci(uint32_t num) {
   if((num == 1) || (num == 0)) {
@@ -74,4 +75,25 @@ int fibonacci_hit_counter_compare(fibonacci_hit_counter_t* counter1, fibonacci_h
   } else {
     return 0;
   }
+}
+
+cbor_item_t* fibonacci_hit_counter_to_cbor(fibonacci_hit_counter_t* counter) {
+  cbor_item_t* array = cbor_new_definite_array(3);
+  bool success = cbor_array_push(array, cbor_move(cbor_build_uint32(counter->fib)));
+  success &= cbor_array_push(array, cbor_move(cbor_build_uint32(counter->count)));
+  success &= cbor_array_push(array, cbor_move(cbor_build_uint32(counter->threshold)));
+  if (!success) {
+    cbor_decref(&array);
+    return NULL;
+  } else {
+    return array;
+  }
+}
+
+fibonacci_hit_counter_t cbor_to_fibonacci_hit_counter(cbor_item_t* cbor) {
+  fibonacci_hit_counter_t counter = {0};
+  counter.fib = cbor_get_uint32(cbor_move(cbor_array_get(cbor, 0)));
+  counter.count = cbor_get_uint32(cbor_move(cbor_array_get(cbor, 1)));
+  counter.threshold = cbor_get_uint32(cbor_move(cbor_array_get(cbor, 2)));
+  return counter;
 }

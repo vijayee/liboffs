@@ -6,6 +6,7 @@
 #define LIBOFFS_BUFFER_H
 
 #include "../RefCounter/refcounter.h"
+#include <cbor.h>
 
 typedef struct buffer_t {
   refcounter_t refcounter;
@@ -29,7 +30,8 @@ buffer_t* buffer_or(buffer_t* buf1, buffer_t* buf2);
 buffer_t* buffer_and(buffer_t* buf1, buffer_t* buf2);
 buffer_t* buffer_not(buffer_t* buf);
 int8_t buffer_compare(buffer_t* buf1, buffer_t* buf2);
-
+cbor_item_t* buffer_to_cbor(buffer_t* buf);
+buffer_t* cbor_to_buffer(cbor_item_t* cbor);
 
 
 #endif //LIBOFFS_BUFFER_H

@@ -9,6 +9,7 @@
 #include <string.h>
 
 
+
 buffer_t* buffer_create(size_t size) {
   buffer_t* buf = get_clear_memory(sizeof(buffer_t));
   buf->data = get_clear_memory(size);
@@ -186,4 +187,14 @@ int8_t buffer_compare(buffer_t* buf1, buffer_t* buf2) {
   } else {
     return 0;
   }
+}
+
+cbor_item_t* buffer_to_cbor(buffer_t* buf) {
+  return cbor_build_bytestring(buf->data, buf->size);
+}
+
+buffer_t* cbor_to_buffer(cbor_item_t* cbor) {
+  uint8_t* data = (uint8_t*) cbor_bytestring_handle(cbor);
+  size_t size =  cbor_bytestring_length(cbor);
+  return buffer_create_from_pointer_copy(data, size);
 }
