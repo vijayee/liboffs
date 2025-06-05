@@ -160,6 +160,41 @@ TEST(TestIndex, TestIndexFunctions) {
   EXPECT_TRUE(_entry7 == NULL);
   EXPECT_TRUE(_entry8 == NULL);
 
+
+  cbor_item_t* cbor = index_to_cbor(index);
+  uint8_t* cbor_data;
+  size_t cbor_size;
+  cbor_serialize_alloc(cbor, &cbor_data, &cbor_size);
+  struct cbor_load_result result;
+  cbor_item_t* cbor2 = cbor_load(cbor_data, cbor_size, &result);
+  EXPECT_EQ(result.error.code == CBOR_ERR_NONE, true);
+  EXPECT_EQ(cbor_isa_array(cbor2), true);
+  index_t* from_cbor = cbor_to_index(cbor2);
+  EXPECT_FALSE(from_cbor == NULL);
+
+
+  _entry1 = index_get(from_cbor, block1->hash);
+  _entry2 = index_get(from_cbor, block2->hash);
+  _entry3 = index_get(from_cbor, block3->hash);
+  _entry4 = index_get(from_cbor, block4->hash);
+  _entry5 = index_get(from_cbor, block5->hash);
+  _entry6 = index_get(from_cbor, block6->hash);
+  _entry7 = index_get(from_cbor, block7->hash);
+  _entry8 = index_get(from_cbor, block8->hash);
+
+  EXPECT_TRUE(_entry1 == NULL);
+  EXPECT_TRUE(_entry2 == NULL);
+  EXPECT_TRUE(_entry3 == NULL);
+  EXPECT_TRUE(_entry4 == NULL);
+  EXPECT_TRUE(_entry5 == NULL);
+  EXPECT_TRUE(_entry6 == NULL);
+  EXPECT_TRUE(_entry7 == NULL);
+  EXPECT_TRUE(_entry8 == NULL);
+
+  cbor_decref(&cbor);
+  cbor_decref(&cbor2);
+  free(cbor_data);
+
   index_entry_destroy(entry1);
   index_entry_destroy(entry2);
   index_entry_destroy(entry3);
@@ -180,5 +215,6 @@ TEST(TestIndex, TestIndexFunctions) {
   block_destroy(block8);
 
   index_destroy(index);
+  index_destroy(from_cbor);
 }
 

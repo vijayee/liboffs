@@ -103,6 +103,7 @@ index_node_t* index_node_create_from_leaves(index_node_t* left, index_node_t* ri
   node->bucket = NULL;
   node->left = (index_node_t*) refcounter_reference((refcounter_t*) left);
   node->right = (index_node_t*) refcounter_reference((refcounter_t*) right);
+  return node;
 }
 
 void index_node_destroy(index_node_t* node) {
@@ -151,6 +152,7 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root) {
     index_entry_destroy(entry);
   }
   vec_deinit(entries);
+  free(entries);
   return index;
 }
 
@@ -195,11 +197,13 @@ cbor_item_t* index_node_to_cbor(index_node_t* node) {
     }
   } else {
     cbor_item_t* array = cbor_new_definite_array(1);
+    cbor_item_t* bucket_array = cbor_new_definite_array(node->bucket->length);
     bool success = true;
-    for (size_t i =0; i < node->bucket->length; i++) {
+    for (size_t i = 0; i < node->bucket->length; i++) {
       index_entry_t* cur_entry = node->bucket->data[i];
-      success &= cbor_array_push(array, cbor_move(index_entry_to_cbor(cur_entry)));
+      success &= cbor_array_push(bucket_array, cbor_move(index_entry_to_cbor(cur_entry)));
     }
+    success &= cbor_array_push(array, cbor_move(bucket_array));
     if (!success) {
       cbor_decref(&array);
       return NULL;
@@ -226,12 +230,12 @@ index_node_t* cbor_to_index_node(cbor_item_t* cbor, size_t bucket_size) {
     refcounter_yield((refcounter_t*) right);
     index_node_t* node = index_node_create_from_leaves(left, right);
     return node;
-  } if (size == 1) {
+  } else if (size == 1) {
     cbor_item_t* cbor_bucket = cbor_move(cbor_array_get(cbor, 0));
     index_node_t* node = index_node_create(bucket_size);
-    size_t size = cbor_array_size(cbor_bucket);
+    size_t length = cbor_array_size(cbor_bucket);
 
-    for (size_t i; i < size; i++) {
+    for (size_t i = 0; i < length; i++) {
       cbor_item_t* cbor_entry = cbor_move(cbor_array_get(cbor_bucket, i));
       index_entry_t* entry = cbor_to_index_entry(cbor_entry);
       if (entry == NULL) {
