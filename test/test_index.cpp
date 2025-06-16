@@ -7,8 +7,16 @@ extern "C" {
 #include "../src/BlockCache/block.h"
 #include "../src/BlockCache/fibonacci.h"
 #include "../src/BlockCache/index.h"
+#include "../src/Util/path_join.h"
 #include <time.h>
 #include <cbor.h>
+}
+
+
+TEST(TestPath, TestPathJoin) {
+  char* location = path_join(".","wal");
+  EXPECT_EQ(strcmp(location, "./wal"), 0);
+  free(location);
 }
 
 int littleEndian() {
@@ -102,8 +110,8 @@ TEST(TestIndex, TestIndexFunctions) {
   index_entry_t* entry6 = index_entry_create(block6->hash);
   index_entry_t* entry7 = index_entry_create(block7->hash);
   index_entry_t* entry8 = index_entry_create(block8->hash);
-
-  index_t* index = index_create(3);
+  char* location = path_join(".","wal");
+  index_t* index = index_create(3, location);
 
   index_add(index, entry1);
   index_add(index, entry2);
@@ -122,6 +130,24 @@ TEST(TestIndex, TestIndexFunctions) {
   index_entry_t* _entry6 = index_get(index, block6->hash);
   index_entry_t* _entry7 = index_get(index, block7->hash);
   index_entry_t* _entry8 = index_get(index, block8->hash);
+
+  EXPECT_EQ(buffer_compare(_entry1->hash, entry1->hash), 0);
+  EXPECT_EQ(buffer_compare(_entry2->hash, entry2->hash), 0);
+  EXPECT_EQ(buffer_compare(_entry3->hash, entry3->hash), 0);
+  EXPECT_EQ(buffer_compare(_entry4->hash, entry4->hash), 0);
+  EXPECT_EQ(buffer_compare(_entry5->hash, entry5->hash), 0);
+  EXPECT_EQ(buffer_compare(_entry6->hash, entry6->hash), 0);
+  EXPECT_EQ(buffer_compare(_entry7->hash, entry7->hash), 0);
+  EXPECT_EQ(buffer_compare(_entry8->hash, entry8->hash), 0);
+
+  _entry1 = index_find(index, block1->hash);
+  _entry2 = index_find(index, block2->hash);
+  _entry3 = index_find(index, block3->hash);
+  _entry4 = index_find(index, block4->hash);
+  _entry5 = index_find(index, block5->hash);
+  _entry6 = index_find(index, block6->hash);
+  _entry7 = index_find(index, block7->hash);
+  _entry8 = index_find(index, block8->hash);
 
   EXPECT_EQ(buffer_compare(_entry1->hash, entry1->hash), 0);
   EXPECT_EQ(buffer_compare(_entry2->hash, entry2->hash), 0);
@@ -169,7 +195,7 @@ TEST(TestIndex, TestIndexFunctions) {
   cbor_item_t* cbor2 = cbor_load(cbor_data, cbor_size, &result);
   EXPECT_EQ(result.error.code == CBOR_ERR_NONE, true);
   EXPECT_EQ(cbor_isa_array(cbor2), true);
-  index_t* from_cbor = cbor_to_index(cbor2);
+  index_t* from_cbor = cbor_to_index(cbor2, location);
   EXPECT_FALSE(from_cbor == NULL);
 
 
@@ -214,6 +240,7 @@ TEST(TestIndex, TestIndexFunctions) {
   block_destroy(block7);
   block_destroy(block8);
 
+  free(location);
   index_destroy(index);
   index_destroy(from_cbor);
 }

@@ -32,7 +32,10 @@ set(C_SRC ""
         src/BlockCache/wal.c
         src/BlockCache/wal.c
         src/Util/path_join.h
-        src/Util/path_join.c)
+        src/Util/path_join.c
+        src/Util/get_dir.h
+        src/Util/get_dir.c
+        src/Util/get_dir.c)
 set(blake3_SOURCE_DIR deps/BLAKE3)
 set(xxHash_SOURCE_DIR deps/xxHash)
 set(hashmap_SOURCE_DIR deps/hashmap)

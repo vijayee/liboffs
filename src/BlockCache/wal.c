@@ -3,8 +3,14 @@
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
 #include <stdio.h>
-#include <xxhash.h>
+#include <xxh3.h>
 #include <arpa/inet.h>
+#include "../Util/get_dir.h"
+#include "../Util/vec.h"
+#include <stdlib.h>
+#include <stdio.h>
+
+
 
 wal_t* wal_create(char* location) {
   wal_t* wal = get_clear_memory(sizeof(wal_t));
@@ -12,8 +18,16 @@ wal_t* wal_create(char* location) {
   wal->location = path_join(location, "wal");
 
   mkdir_p(wal->location);
-  if (0) {
-    //todo: parse directory for max number
+  vec_str_t* files = get_dir(wal->location);
+
+  if (files->length > 0) {
+    char id[20];
+    char* last = vec_last(files);
+    uint64_t last_id = atol(last);
+    last_id++;
+    sprintf(id,"%lu", last_id);
+    wal->current_file = path_join(wal->location, id);
+    wal->last_file = path_join(wal->location, last);
   } else {
     char id[20];
     sprintf(id,"%lu", (uint64_t)1);
@@ -22,6 +36,7 @@ wal_t* wal_create(char* location) {
   }
 
   wal->log = fopen(wal->current_file, "wb+");
+  destroy_files(files);
   return wal;
 }
 
@@ -42,5 +57,6 @@ void wal_destroy(wal_t* wal) {
       free(wal->last_file);
     }
     free(wal->location);
+    free(wal);
   }
 }

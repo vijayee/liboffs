@@ -22,7 +22,7 @@ typedef struct {
   char* last_file;
 } wal_t;
 
-wal_t* wal_create();
+wal_t* wal_create(char* location);
 void wal_write(wal_t* wal, wal_type_e type, buffer_t* data);
 void wal_destroy(wal_t* wal);
 

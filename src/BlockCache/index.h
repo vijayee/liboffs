@@ -13,6 +13,7 @@
 #include "../Util/vec.h"
 #include "fibonacci.h"
 #include <cbor.h>
+#include "wal.h"
 uint8_t get_bit(buffer_t* buffer, size_t index);
 
 typedef struct {
@@ -56,16 +57,19 @@ typedef struct {
   index_node_t* root;
   size_t bucket_size;
   rank_map_t ranks;
+  wal_t* wal;
 } index_t;
 
-index_t* index_create(size_t bucket_size);
-index_t* index_create_from(size_t bucket_size, index_node_t* root);
+index_t* index_create(size_t bucket_size, char* location);
+index_t* index_create_from(size_t bucket_size, index_node_t* root, char* location);
 size_t index_count(index_t* index);
 void index_add(index_t* index, index_entry_t* entry);
 index_entry_t* index_get(index_t* index, buffer_t* hash);
+index_entry_t* index_find(index_t* index, buffer_t* hash);
+void index_increment(index_t* index, index_entry_t* entry);
 void index_remove(index_t* index, buffer_t* hash);
 void index_destroy(index_t* index);
 index_entry_vec_t* index_to_array(index_t* index);
 cbor_item_t* index_to_cbor(index_t* index);
-index_t* cbor_to_index(cbor_item_t* cbor);
+index_t* cbor_to_index(cbor_item_t* cbor, char* location);
 #endif //OFFS_INDEX_H

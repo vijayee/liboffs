@@ -4,11 +4,13 @@
 #include "index.h"
 #include "../Util/allocator.h"
 #include "../Util/hash.h"
+#include "../Util/log.h"
 
 void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node, size_t current);
 void index_split_node(index_t* index, index_node_t* node, size_t current);
-void index_increment(index_t* index, index_entry_t* entry);
+
 index_entry_t* index_get_from_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current);
+index_entry_t* index_find_in_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current);
 void index_remove_from_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current);
 void index_destroy_node(index_t* index, index_node_t* node);
 
@@ -84,7 +86,7 @@ index_entry_t* cbor_to_index_entry(cbor_item_t* cbor) {
  size_t sectionId = (size_t) cbor_get_uint64(cbor_move(cbor_array_get(cbor, 2)));
  size_t section_index = (size_t) cbor_get_uint64(cbor_move(cbor_array_get(cbor, 3)));
  uint64_t ejection_date = (size_t) cbor_get_uint64(cbor_move(cbor_array_get(cbor,4)));
-  refcounter_yield((refcounter_t*) hash);
+ refcounter_yield((refcounter_t*) hash);
  return index_entry_from(hash, sectionId, section_index, ejection_date, counter);
 }
 
@@ -118,19 +120,21 @@ void index_node_destroy(index_node_t* node) {
   }
 }
 
-index_t* index_create(size_t bucket_size) {
+index_t* index_create(size_t bucket_size, char* location) {
   index_t* index = get_clear_memory(sizeof(index_t));
   index->bucket_size = bucket_size;
   index->root = index_node_create(bucket_size);
+  index->wal = wal_create(location);
   hashmap_init(&index->ranks, (void*)hash_uint32, (void*)compare_uint32);
   hashmap_set_key_alloc_funcs(&index->ranks, duplicate_uint32, (void*)free);
   refcounter_init((refcounter_t*) index);
   return index;
 }
-index_t* index_create_from(size_t bucket_size, index_node_t* root) {
+index_t* index_create_from(size_t bucket_size, index_node_t* root, char* location) {
   index_t* index = get_clear_memory(sizeof(index_t));
   index->bucket_size = bucket_size;
   index->root = (index_node_t*) refcounter_reference((refcounter_t*) root);
+  index->wal = wal_create(location);
   hashmap_init(&index->ranks, (void*)hash_uint32, (void*)compare_uint32);
   hashmap_set_key_alloc_funcs(&index->ranks, duplicate_uint32, (void*)free);
   refcounter_init((refcounter_t*) index);
@@ -270,6 +274,14 @@ void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node,
        }
      }
      if (node->bucket->length < index->bucket_size) {
+       cbor_item_t* cbor_entry = index_entry_to_cbor(entry);
+       uint8_t* cbor_data;
+       size_t cbor_size;
+       cbor_serialize_alloc(cbor_entry, &cbor_data, &cbor_size);
+       buffer_t* cbor_buf = buffer_create_from_existing_memory(cbor_data, cbor_size);
+       wal_write(index->wal, addition, cbor_buf);
+       buffer_destroy(cbor_buf);
+       cbor_decref(&cbor_entry);
        vec_push(node->bucket, (index_entry_t*) refcounter_reference((refcounter_t*) entry));
      } else {
        index_split_node(index, node, current);
@@ -279,6 +291,14 @@ void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node,
 }
 
 void index_increment(index_t* index, index_entry_t* entry) {
+  cbor_item_t* cbor_hash = cbor_build_bytestring(entry->hash->data, entry->hash->size);
+  uint8_t* cbor_data;
+  size_t cbor_size;
+  cbor_serialize_alloc(cbor_hash, &cbor_data, &cbor_size);
+  buffer_t* cbor_buf = buffer_create_from_existing_memory(cbor_data, cbor_size);
+  wal_write(index->wal, increment, cbor_buf);
+  buffer_destroy(cbor_buf);
+  cbor_decref(&cbor_hash);
   if (index_entry_increment(entry)) {
     uint32_t key = entry->counter.fib - 1;
     index_entry_vec_t* rank = hashmap_get(&index->ranks, &key);
@@ -306,6 +326,7 @@ void index_increment(index_t* index, index_entry_t* entry) {
 }
 
 
+
 void index_split_node(index_t* index, index_node_t* node, size_t current) {
   node->left = index_node_create(index->bucket_size);
   node->right = index_node_create(index->bucket_size);
@@ -325,6 +346,10 @@ index_entry_t* index_get(index_t* index, buffer_t* hash) {
   return index_get_from_node(index, hash, index->root, 0);
 }
 
+index_entry_t* index_find(index_t* index, buffer_t* hash) {
+  return index_find_in_node(index, hash, index->root, 0);
+}
+
 index_entry_t* index_get_from_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current) {
   if (node->bucket == NULL) {
     if (get_bit(hash, current + 1)) {
@@ -337,6 +362,24 @@ index_entry_t* index_get_from_node(index_t* index, buffer_t* hash, index_node_t*
       index_entry_t* cur_entry = node->bucket->data[i];
       if (buffer_compare(cur_entry->hash, hash) == 0) {
         index_increment(index, cur_entry);
+        return cur_entry;
+      }
+    }
+    return NULL;
+  }
+}
+
+index_entry_t* index_find_in_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current) {
+  if (node->bucket == NULL) {
+    if (get_bit(hash, current + 1)) {
+      return index_find_in_node(index, hash, node->right, current + 1);
+    } else {
+      return index_find_in_node(index, hash, node->left, current + 1);
+    }
+  } else {
+    for (size_t i = 0; i < node->bucket->length; i++) {
+      index_entry_t* cur_entry = node->bucket->data[i];
+      if (buffer_compare(cur_entry->hash, hash) == 0) {
         return cur_entry;
       }
     }
@@ -390,6 +433,7 @@ void index_destroy(index_t* index) {
       free(rank);
     }
     hashmap_cleanup(&index->ranks);
+    wal_destroy(index->wal);
     free(index);
   }
 }
@@ -432,13 +476,13 @@ cbor_item_t* index_to_cbor(index_t* index) {
 }
 
 
-index_t* cbor_to_index(cbor_item_t* cbor) {
+index_t* cbor_to_index(cbor_item_t* cbor, char* location) {
   cbor_item_t* cbor_root = cbor_move(cbor_array_get(cbor,0));
   size_t bucket_size = cbor_get_uint64(cbor_move(cbor_array_get(cbor, 1)));
   index_node_t* root = cbor_to_index_node(cbor_root, bucket_size);
   if (root == NULL) {
     return NULL;
   }
-  index_t* index= index_create_from(bucket_size, root);
+  index_t* index= index_create_from(bucket_size, root, location);
   return index;
 }
