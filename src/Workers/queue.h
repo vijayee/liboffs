@@ -11,7 +11,7 @@ typedef struct work_queue_item_t work_queue_item_t;
 struct work_queue_item_t {
   work_t* work;
   work_queue_item_t* next;
-  work_queue_item_t* last;
+  work_queue_item_t* previous;
 };
 typedef struct {
   work_queue_item_t* first;

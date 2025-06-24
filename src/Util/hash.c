@@ -24,6 +24,14 @@ size_t hash_uint32(const void* data) {
   }
 }
 
+size_t hash_uint64(const void* data) {
+  if(sizeof(size_t) == 8) {
+    return XXH3_64bits(data,8);
+  } else {
+    return XXH32(data, 8, 0);
+  }
+}
+
 int compare_uint32(const void* data1, const void* data2) {
   const uint32_t* _data1 = data1;
   const uint32_t* _data2 = data2;
@@ -36,9 +44,27 @@ int compare_uint32(const void* data1, const void* data2) {
   }
 }
 
+int compare_uint64(const void* data1, const void* data2) {
+  const uint64_t* _data1 = data1;
+  const uint64_t* _data2 = data2;
+  if (*_data1 == *_data2){
+    return 0;
+  } else if (*_data1 > *_data2) {
+    return 1;
+  } else {
+    return -1;
+  }
+}
+
 uint32_t* duplicate_uint32(const uint32_t* key) {
   uint32_t* copy = get_clear_memory(4);
   memcpy(copy, key,4);
+  return copy;
+}
+
+uint64_t* duplicate_uint64(const uint64_t* key) {
+  uint64_t* copy = get_clear_memory(8);
+  memcpy(copy, key,8);
   return copy;
 }
 

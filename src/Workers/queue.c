@@ -12,7 +12,7 @@ work_queue_t* work_queue_init(work_queue_t* queue) {
 void work_enqueue(work_queue_t* queue, work_t* work) {
   if (queue->first == NULL && queue->last == NULL) {
     work_queue_item_t* item = get_clear_memory(sizeof(work_queue_item_t));
-    item->last = NULL;
+    item->previous = NULL;
     item->next = NULL;
     item->work = work;
     queue->first = item;
@@ -28,29 +28,29 @@ void work_enqueue(work_queue_t* queue, work_t* work) {
       cmp = priority_compare(&work->priority,&current->work->priority);
     }
     if ((cmp == -1) && (current->next == NULL)) {// current is the last in the list and the new work has greater priority
-      new_item->last = current->last;
+      new_item->previous = current->previous;
       new_item->next = current;
-      if (current->last != NULL) { // current is not the first item in the list
-        work_queue_item_t* temp = current->last;
+      if (current->previous != NULL) { // current is not the first item in the list
+        work_queue_item_t* temp = current->previous;
         temp->next = new_item;
       } else {// current is the first in the list and new work should become the new first
         queue->first= new_item;
       }
-      current->last = new_item;
+      current->previous = new_item;
     } else if ((cmp != -1) && current->next == NULL) { //current is the last in the list and the new work should come after it
       current->next = new_item;
-      new_item->last = current;
+      new_item->previous = current;
       queue->last = new_item;
-    } else if (current->last == NULL) { // work should be at the begining of a populated list
+    } else if (current->previous == NULL) { // work should be at the begining of a populated list
       new_item->next = current;
-      current->last = new_item;
+      current->previous = new_item;
       queue->first = new_item;
     } else { // we are somewhere in the middle of the list and work has greater priority than the current
-      work_queue_item_t* temp = current->last;
+      work_queue_item_t* temp = current->previous;
       temp->next = new_item;
-      new_item->last= temp;
+      new_item->previous= temp;
       new_item->next = current;
-      current->last = new_item;
+      current->previous = new_item;
     }
   }
 }
@@ -62,7 +62,7 @@ work_t* work_dequeue(work_queue_t* queue) {
     work_t* work= temp->work;
     queue->first = temp->next;
     if(queue->first != NULL) {
-      queue->first->last = NULL;
+      queue->first->previous = NULL;
     }
     if (queue->last == temp) {
       queue->last = NULL;

@@ -7,7 +7,8 @@ if (BUILD_TESTING)
             test_buffer.cpp
             test_refcounter.cpp
             test_block.cpp
-            test_index.cpp)
+            test_index.cpp
+            test_time.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
