@@ -15,9 +15,10 @@ timer_st* timer_list_remove_by_id(timer_list_t* list, size_t timerId);
 timer_st* timer_list_remove(timer_list_t* list, timer_list_node_t* node);
 timer_list_t* timing_wheel_maintenance(timing_wheel_t* wheel);
 void timing_wheel_fire_expired(timing_wheel_t* wheel, timer_list_t* expired);
+void timer_duration_rectify(timer_duration_t* duration);
 
 timer_list_t*  timer_list_create() {
-  timer_list_t* list = get_clear_memory(sizeof(timer_list_t*));
+  timer_list_t* list = get_clear_memory(sizeof(timer_list_t));
   list->first = NULL;
   list->last = NULL;
   return list;
@@ -30,12 +31,12 @@ void timer_list_destroy(timer_list_t* list) {
     next = current->next;
     free(current->timer);
     free(current);
-    current = next;
+      current = next;
   }
 }
 
 void timer_list_enqueue(timer_list_t* list, timer_st* timer) {
-  timer_list_node_t* node = get_clear_memory(sizeof(timer_list_t ));
+  timer_list_node_t* node = get_clear_memory(sizeof(timer_list_node_t));
   node->timer = timer;
   node->previous = NULL;
   node->next = NULL;
@@ -117,7 +118,7 @@ timer_st* timer_list_remove(timer_list_t* list, timer_list_node_t* node) {
   return timer;
 }
 
-timing_wheel_t* timing_wheel_create(uint64_t interval, size_t slot_count, work_pool_t* pool) {
+timing_wheel_t* timing_wheel_create(uint64_t interval, size_t slot_count, work_pool_t* pool, timer_map_t* timers) {
   timing_wheel_t* wheel = get_clear_memory(sizeof(timing_wheel_t));
   refcounter_init((refcounter_t*) wheel);
   platform_lock_init(&wheel->lock);
@@ -125,36 +126,46 @@ timing_wheel_t* timing_wheel_create(uint64_t interval, size_t slot_count, work_p
   wheel->interval = interval;
   wheel->position = slot_count - 1;
   wheel->slots = get_clear_memory(sizeof(slots_t));
+  wheel->timers = timers;
   vec_init(wheel->slots);
   vec_reserve(wheel->slots, slot_count);
   for (size_t i = 0; i < slot_count; i++) {
     vec_push(wheel->slots, timer_list_create());
   }
-  hashmap_init(&wheel->timers, (void*)hash_uint64, (void*)compare_uint64);
-  hashmap_set_key_alloc_funcs(&wheel->timers, duplicate_uint64, (void*)free);
   return wheel;
 }
 
 void timing_wheel_destroy(timing_wheel_t* wheel) {
   refcounter_dereference((refcounter_t*) wheel);
   if (refcounter_count((refcounter_t*) wheel)) {
-    hashmap_cleanup(&wheel->timers);
     for (size_t i = 0; i < wheel->slots->length; i++) {
       timer_list_t* list = wheel->slots->data[i];
       timer_list_destroy(list);
     }
     vec_deinit(wheel->slots);
-    //free(&wheel->slots);
     platform_lock_destroy(&wheel->lock);
     free(wheel);
   }
 }
 
 void timing_wheel_run(timing_wheel_t* wheel) {
-  wheel->stopped = 0;
-  priority_t priority = {0};
-  work_t* work = work_create(priority, (void*) wheel, timing_wheel_worker_execute, timing_wheel_worker_abort);
-  work_pool_enqueue(wheel->pool, work);
+  if (wheel->ticker != NULL) {
+    wheel->stopped = 0;
+    priority_t priority = {0};
+    work_t *work = work_create(priority, (void *) wheel, timing_wheel_worker_execute, timing_wheel_worker_abort);
+    work_pool_enqueue(wheel->pool, work);
+  } else {
+    timer_st* timer = get_clear_memory(sizeof(timer_st));
+    timer->cb = timing_wheel_on_tick;
+    timer->abort = timing_wheel_worker_abort;
+    timer->ctx = wheel;
+    timer->plan.size = 1;
+    timer->plan.current = 0;
+    timer->plan.steps = get_clear_memory(sizeof(timer_wheel_plan_step_t));
+    timer->plan.steps[0].delay = wheel->interval;
+    timer->plan.steps[0].wheel = wheel->wheel;
+    timing_wheel_set_timer(wheel->wheel, timer);
+  }
 }
 
 void timing_wheel_on_tick(void* ctx) {
@@ -176,11 +187,27 @@ void timing_wheel_on_tick(void* ctx) {
 void timing_wheel_fire_expired(timing_wheel_t* wheel, timer_list_t* expired) {
   timer_st* current = timer_list_dequeue(expired);
   while (current != NULL) {
+    if (current->plan.current < (current->plan.size - 1)) {
+      current->plan.current++;
+      //Move to first non-zero wheel
+      while((current->plan.current < current->plan.size) && (current->plan.steps[current->plan.current].delay == 0)) {
+        current->plan.current++;
+      }
+      if (current->plan.current < current->plan.size) {
+        timing_wheel_set_timer(current->plan.steps[current->plan.current].wheel, current);
+        current = timer_list_dequeue(expired);
+        continue;
+      }
+    }
     priority_t priority = {0};
     work_t* work = work_create(priority, current->ctx, current->cb, current->abort);
     work_pool_enqueue(wheel->pool, work);
+
+    free(current->plan.steps);
     free(current);
-    current= timer_list_dequeue(expired);
+
+    current = timer_list_dequeue(expired);
+
   }
   timer_list_destroy(expired);
 }
@@ -195,29 +222,24 @@ timer_list_t* timing_wheel_maintenance(timing_wheel_t* wheel) {
     if (timer->removed) {
       next = current->next;
       timer_list_remove(list, current);
+      free(timer->plan.steps);
+      free(timer);
       current = next;
       continue;
     } else if (timer->circle > 0) {
       timer->circle--;
-      current = current->next;
-      continue;
-    } /*else if (timer->diff > 0) {
-      next = current->next;
-      timer = current->timer;
-      timer_list_remove(list, current);
-      size_t position = (wheel->position + timer->diff) % wheel->slots->length;
-      timer_list_enqueue(wheel->slots->data[position], timer);
-      timer->diff = 0;
-      current= next;
-      continue;
-    }*/
+      if (timer->circle > 0) {
+        current = current->next;
+        continue;
+      }
+    }
     if (expired == NULL) {
       expired = timer_list_create();
     }
     timer_list_enqueue(expired, timer);
-    next = current-> next;
+    next = current->next;
+    hashmap_remove(wheel->timers, &timer->timerId);
     timer_list_remove(list, current);
-    hashmap_remove(&wheel->timers, &timer->timerId);
     current = next;
   }
   return expired;
@@ -228,7 +250,7 @@ void timing_wheel_worker_execute(void* ctx) {
   ticker_t ticker = {0};
   ticker.ctx = ctx;
   ticker.cb = timing_wheel_on_tick;
-  ticker_start(ticker, wheel->simulated == 1 ? 0 : wheel->interval);
+  ticker_start(ticker, wheel->simulated == 1 ? 0 : Time_Milliseconds);
 }
 
 void timing_wheel_worker_abort(void* ctx) {
@@ -240,37 +262,109 @@ void timing_wheel_worker_abort(void* ctx) {
     timer_st* current = timer_list_dequeue(list);
     while (current != NULL) {
       current->abort(current->ctx);
-      hashmap_remove(&wheel->timers, &current->timerId);
       free(current);
     }
   }
   platform_unlock(&wheel->lock);
 }
 
-uint64_t timing_wheel_set_timer(timing_wheel_t* wheel, void* ctx, void (* cb)(void*), void (* abort)(void*), uint64_t delay) {
-  timer_st* timer = get_clear_memory(sizeof(timer_st));
-  timer->delay = delay;
-  timer->cb = cb;
-  timer->abort = abort;
-  timer->ctx = ctx;
-  size_t timerId;
+void timing_wheel_set_timer(timing_wheel_t* wheel, timer_st* timer) {
   platform_lock(&wheel->lock);
-  timerId = wheel->next_id++;
-  timer->timerId = timerId;
-  if (delay < wheel->interval) {
-    timer->delay = wheel->interval;
-  }
-  size_t steps = delay / wheel->interval;
+  size_t steps = timer->plan.steps[timer->plan.current].delay;
   size_t position = (wheel->position + steps) % wheel->slots->length;
   timer->circle = (steps - 1) / wheel->slots->length;
   timer_list_t* list = wheel->slots->data[position];
   timer_list_enqueue(list, timer);
-  hashmap_put(&wheel->timers, &timer->timerId, timer);
   platform_unlock(&wheel->lock);
-  return timerId;
 }
 
-void timing_wheel_cancel_timer(timing_wheel_t* wheel, uint64_t timerId) {
+void timing_wheel_stop(timing_wheel_t* wheel) {
+  platform_lock(&wheel->lock);
+  wheel->stopped = 1;
+  platform_unlock(&wheel->lock);
+}
+
+void hierachical_timing_wheel_stop(hierarchical_timing_wheel_t* wheel) {
+  platform_lock(&wheel->lock);
+  wheel->stopped = 1;
+  timing_wheel_stop(wheel->milliseconds);
+  timing_wheel_stop(wheel->seconds);
+  timing_wheel_stop(wheel->minutes);
+  timing_wheel_stop(wheel->hours);
+  timing_wheel_stop(wheel->days);
+  platform_unlock(&wheel->lock);
+}
+
+uint64_t hierarchical_timing_wheel_set_timer(hierarchical_timing_wheel_t* wheel, void* ctx, void (* cb)(void*), void (* abort)(void*), timer_duration_t delay) {
+  timer_duration_rectify(&delay);
+  timer_st* timer = get_clear_memory(sizeof(timer_st));
+  timer->cb = cb;
+  timer->abort = abort;
+  timer->ctx = ctx;
+  platform_lock(&wheel->lock);
+  hashmap_put(&wheel->timers, &timer->timerId, timer);
+  platform_unlock(&wheel->lock);
+  timer->timerId = wheel->next_id++;
+  if (delay.days > 0) {
+    timer->plan.size = 5;
+    timer->plan.steps = get_clear_memory(sizeof(timer_wheel_plan_step_t) * timer->plan.size);
+    timer->plan.steps[0].delay = delay.days;
+    timer->plan.steps[0].wheel = wheel->days;
+    timer->plan.steps[1].delay = delay.hours;
+    timer->plan.steps[1].wheel = wheel->hours;
+    timer->plan.steps[2].delay = delay.minutes;
+    timer->plan.steps[2].wheel = wheel->minutes;
+    timer->plan.steps[3].delay = delay.seconds;
+    timer->plan.steps[3].wheel = wheel->seconds;
+    timer->plan.steps[4].delay = delay.milliseconds;
+    timer->plan.steps[4].wheel = wheel->milliseconds;
+    timer->plan.current = 0;
+    timing_wheel_set_timer(wheel->days, timer);
+  } else if (delay.hours > 0) {
+    timer->plan.size = 4;
+    timer->plan.steps = get_clear_memory(sizeof(timer_wheel_plan_step_t) * timer->plan.size);
+    timer->plan.steps[0].delay = delay.hours;
+    timer->plan.steps[0].wheel = wheel->hours;
+    timer->plan.steps[1].delay = delay.minutes;
+    timer->plan.steps[1].wheel = wheel->minutes;
+    timer->plan.steps[2].delay = delay.seconds;
+    timer->plan.steps[2].wheel = wheel->seconds;
+    timer->plan.steps[3].delay = delay.milliseconds;
+    timer->plan.steps[3].wheel = wheel->milliseconds;
+    timer->plan.current = 0;
+    timing_wheel_set_timer(wheel->hours, timer);
+  } else if (delay.minutes > 0) {
+    timer->plan.size = 3;
+    timer->plan.steps = get_clear_memory(sizeof(timer_wheel_plan_step_t) * timer->plan.size);
+    timer->plan.steps[0].delay = delay.minutes;
+    timer->plan.steps[0].wheel = wheel->minutes;
+    timer->plan.steps[1].delay = delay.seconds;
+    timer->plan.steps[1].wheel = wheel->seconds;
+    timer->plan.steps[2].delay = delay.milliseconds;
+    timer->plan.steps[2].wheel = wheel->milliseconds;
+    timer->plan.current = 0;
+    timing_wheel_set_timer(wheel->minutes, timer);
+  } else if (delay.seconds > 0) {
+    timer->plan.size = 2;
+    timer->plan.steps = get_clear_memory(sizeof(timer_wheel_plan_step_t) * timer->plan.size);
+    timer->plan.steps[0].delay = delay.seconds;
+    timer->plan.steps[0].wheel = wheel->seconds;
+    timer->plan.steps[1].delay = delay.milliseconds;
+    timer->plan.steps[1].wheel = wheel->milliseconds;
+    timer->plan.current = 0;
+    timing_wheel_set_timer(wheel->seconds, timer);
+  } else {
+    timer->plan.size = 1;
+    timer->plan.steps = get_clear_memory(sizeof(timer_wheel_plan_step_t) * timer->plan.size);
+    timer->plan.steps[0].delay = delay.milliseconds;
+    timer->plan.steps[0].wheel = wheel->milliseconds;
+    timer->plan.current = 0;
+    timing_wheel_set_timer(wheel->milliseconds, timer);
+  }
+  return timer->timerId;
+}
+
+void hierarchical_timing_wheel_cancel_timer(hierarchical_timing_wheel_t* wheel, uint64_t timerId) {
   platform_lock(&wheel->lock);
   timer_st* timer = hashmap_get(&wheel->timers, &timerId);
   if (timer != NULL) {
@@ -278,4 +372,74 @@ void timing_wheel_cancel_timer(timing_wheel_t* wheel, uint64_t timerId) {
     hashmap_remove(&wheel->timers, &timerId);
   }
   platform_unlock(&wheel->lock);
+}
+
+hierarchical_timing_wheel_t* hierarchical_timing_wheel_create(size_t slot_count, work_pool_t* pool) {
+  hierarchical_timing_wheel_t* wheel = get_clear_memory(sizeof(hierarchical_timing_wheel_t));
+  refcounter_init((refcounter_t*) wheel);
+  platform_lock_init(&wheel->lock);
+  wheel->next_id = 1;
+  hashmap_init(&wheel->timers, (void*)hash_uint64, (void*)compare_uint64);
+  hashmap_set_key_alloc_funcs(&wheel->timers, duplicate_uint64, (void*)free);
+  wheel->milliseconds = timing_wheel_create(1, slot_count, pool, &wheel->timers);
+  wheel->seconds = timing_wheel_create(Time_Seconds, slot_count, pool, &wheel->timers);
+  wheel->minutes = timing_wheel_create(Time_Minutes, slot_count, pool, &wheel->timers);
+  wheel->hours = timing_wheel_create(Time_Hours, slot_count, pool, &wheel->timers);
+  wheel->days = timing_wheel_create(Time_Days, slot_count, pool, &wheel->timers);
+
+  wheel->milliseconds->ticker = get_clear_memory(sizeof(ticker_t));
+  wheel->seconds->wheel = wheel->milliseconds;
+  wheel->minutes->wheel = wheel->seconds;
+  wheel->hours->wheel = wheel->minutes;
+  wheel->days->wheel = wheel->hours;
+  return wheel;
+}
+
+void hierarchical_timing_wheel_destroy(hierarchical_timing_wheel_t* wheel) {
+  refcounter_dereference((refcounter_t*) wheel);
+  if (refcounter_count((refcounter_t*) wheel) == 0) {
+    free(wheel->milliseconds->ticker);
+    timing_wheel_destroy(wheel->days);
+    timing_wheel_destroy(wheel->hours);
+    timing_wheel_destroy(wheel->minutes);
+    timing_wheel_destroy(wheel->seconds);
+    timing_wheel_destroy(wheel->milliseconds);
+    hashmap_cleanup(&wheel->timers);
+    free(wheel);
+  }
+}
+
+void hierarchical_timing_wheel_simulate(hierarchical_timing_wheel_t* wheel) {
+  wheel->days->simulated = 1;
+  wheel->hours->simulated = 1;
+  wheel->minutes->simulated = 1;
+  wheel->seconds->simulated = 1;
+  wheel->seconds->simulated = 1;
+}
+
+void timer_duration_rectify(timer_duration_t* duration) {
+  if (duration->milliseconds > Time_Seconds) {
+    duration->seconds += duration->milliseconds/ Time_Seconds;
+    duration->milliseconds = duration->milliseconds % Time_Seconds;
+  }
+  if (duration->seconds > Time_Minutes) {
+    duration->minutes += duration->seconds / Time_Minutes;
+    duration->seconds = duration->seconds % Time_Minutes;
+  }
+  if (duration->minutes > Time_Hours) {
+    duration->hours += duration->minutes / Time_Hours;
+    duration->minutes = duration->minutes % Time_Hours;
+  }
+  if (duration->hours > Time_Days) {
+    duration->hours += duration->hours / Time_Days;
+    duration->minutes = duration->hours / Time_Days;
+  }
+}
+
+void hierarchical_timing_wheel_run(hierarchical_timing_wheel_t* wheel) {
+  timing_wheel_run(wheel->milliseconds);
+  timing_wheel_run(wheel->seconds);
+  timing_wheel_run(wheel->minutes);
+  timing_wheel_run(wheel->hours);
+  timing_wheel_run(wheel->days);
 }

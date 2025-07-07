@@ -41,7 +41,6 @@ namespace timeTest {
   };
 
   void onExecute(void *ctx) {
-    printf("timer fired\n");
     auto test = static_cast<TestTimingWheel *>(ctx);
     test->mockExecuteCallback.Call(ctx);
   }
@@ -68,15 +67,15 @@ namespace timeTest {
     EXPECT_CALL(mockShutdownAbortCallback, Call(_)).Times(0);
     pool = work_pool_create(4);
     work_pool_launch(pool);
-    timing_wheel_t* wheel = timing_wheel_create(Time_Milliseconds, 16, pool);
-    wheel->simulated = 0;
-    timing_wheel_run(wheel);
-    uint64_t timer1 = timing_wheel_set_timer(wheel, this,onExecute, onAbort, 20 * Time_Milliseconds);
-    uint64_t timer2 = timing_wheel_set_timer(wheel, this,onExecute, onAbort, 200 * Time_Milliseconds);
-    uint64_t timer3 = timing_wheel_set_timer(wheel, this,onExecute, onAbort, 500 * Time_Milliseconds);
-    uint64_t timer4 = timing_wheel_set_timer(wheel, this,onExecute, onAbort, 500 * Time_Milliseconds);
-    uint64_t timer5 = timing_wheel_set_timer(wheel, this,onExecute, onAbort, 2000 * Time_Milliseconds);
-    uint64_t timer8 = timing_wheel_set_timer(wheel, this, Shutdown, ShutdownAborted, 2 * Time_Seconds);
+    hierarchical_timing_wheel_t* wheel = hierarchical_timing_wheel_create(8, pool);
+    hierarchical_timing_wheel_simulate(wheel);
+    hierarchical_timing_wheel_run(wheel);
+    uint64_t timer1 = hierarchical_timing_wheel_set_timer(wheel, this, onExecute, onAbort, {.milliseconds = 20});
+    uint64_t timer2 = hierarchical_timing_wheel_set_timer(wheel, this, onExecute, onAbort, {.milliseconds = 200});
+    uint64_t timer3 = hierarchical_timing_wheel_set_timer(wheel, this, onExecute, onAbort, {.milliseconds = 500});
+    uint64_t timer4 = hierarchical_timing_wheel_set_timer(wheel, this, onExecute, onAbort, {.milliseconds= 500});
+    uint64_t timer5 = hierarchical_timing_wheel_set_timer(wheel, this, onExecute, onAbort, {.milliseconds = 2300});
+    uint64_t timer8 = hierarchical_timing_wheel_set_timer(wheel, this, Shutdown, ShutdownAborted, {.seconds = 3});
     work_pool_wait_for_shutdown_signal(pool);
     work_pool_shutdown(pool);
     work_pool_join_all(pool);
