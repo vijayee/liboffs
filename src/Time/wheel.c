@@ -5,6 +5,7 @@
 #include "../Workers/work.h"
 #include "../Util/allocator.h"
 #include "../Util/hash.h"
+#include <stdio.h>
 
 
 void timing_wheel_on_tick();
@@ -149,10 +150,10 @@ void timing_wheel_destroy(timing_wheel_t* wheel) {
 }
 
 void timing_wheel_run(timing_wheel_t* wheel) {
-  if (wheel->ticker != NULL) {
+  if (wheel->wheel == NULL) {
     wheel->stopped = 0;
     priority_t priority = {0};
-    work_t *work = work_create(priority, (void *) wheel, timing_wheel_worker_execute, timing_wheel_worker_abort);
+    work_t* work = work_create(priority, (void *) wheel, timing_wheel_worker_execute, timing_wheel_worker_abort);
     work_pool_enqueue(wheel->pool, work);
   } else {
     timer_st* timer = get_clear_memory(sizeof(timer_st));
@@ -387,7 +388,6 @@ hierarchical_timing_wheel_t* hierarchical_timing_wheel_create(size_t slot_count,
   wheel->hours = timing_wheel_create(Time_Hours, slot_count, pool, &wheel->timers);
   wheel->days = timing_wheel_create(Time_Days, slot_count, pool, &wheel->timers);
 
-  wheel->milliseconds->ticker = get_clear_memory(sizeof(ticker_t));
   wheel->seconds->wheel = wheel->milliseconds;
   wheel->minutes->wheel = wheel->seconds;
   wheel->hours->wheel = wheel->minutes;
@@ -398,7 +398,6 @@ hierarchical_timing_wheel_t* hierarchical_timing_wheel_create(size_t slot_count,
 void hierarchical_timing_wheel_destroy(hierarchical_timing_wheel_t* wheel) {
   refcounter_dereference((refcounter_t*) wheel);
   if (refcounter_count((refcounter_t*) wheel) == 0) {
-    free(wheel->milliseconds->ticker);
     timing_wheel_destroy(wheel->days);
     timing_wheel_destroy(wheel->hours);
     timing_wheel_destroy(wheel->minutes);
@@ -414,7 +413,7 @@ void hierarchical_timing_wheel_simulate(hierarchical_timing_wheel_t* wheel) {
   wheel->hours->simulated = 1;
   wheel->minutes->simulated = 1;
   wheel->seconds->simulated = 1;
-  wheel->seconds->simulated = 1;
+  wheel->milliseconds->simulated = 1;
 }
 
 void timer_duration_rectify(timer_duration_t* duration) {

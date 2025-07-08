@@ -76,7 +76,6 @@ struct timing_wheel_t {
   PlATFORMLOCKTYPE(lock);
   size_t position;
   timer_map_t* timers;
-  ticker_t* ticker;
   timing_wheel_t* wheel;
   slots_t* slots;
   uint64_t interval;

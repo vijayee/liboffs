@@ -61,8 +61,7 @@ namespace timeTest {
   }
 
   TEST_F(TestTimingWheel, TestTimingWheelFunctions) {
-    //int corecnt = platform_core_count();
-    EXPECT_CALL(mockExecuteCallback, Call(_)).Times(5);
+    EXPECT_CALL(mockExecuteCallback, Call(_)).Times(6);
     EXPECT_CALL(mockShutdownCallback, Call(_)).Times(1);
     EXPECT_CALL(mockShutdownAbortCallback, Call(_)).Times(0);
     pool = work_pool_create(4);
@@ -75,12 +74,15 @@ namespace timeTest {
     uint64_t timer3 = hierarchical_timing_wheel_set_timer(wheel, this, onExecute, onAbort, {.milliseconds = 500});
     uint64_t timer4 = hierarchical_timing_wheel_set_timer(wheel, this, onExecute, onAbort, {.milliseconds= 500});
     uint64_t timer5 = hierarchical_timing_wheel_set_timer(wheel, this, onExecute, onAbort, {.milliseconds = 2300});
-    uint64_t timer8 = hierarchical_timing_wheel_set_timer(wheel, this, Shutdown, ShutdownAborted, {.seconds = 3});
+    uint64_t timer6 = hierarchical_timing_wheel_set_timer(wheel, this, onExecute, onAbort, {.minutes = 1});
+    uint64_t timer7 = hierarchical_timing_wheel_set_timer(wheel, this, onExecute, onAbort, {.minutes = 3});
+    hierarchical_timing_wheel_cancel_timer(wheel, timer7);
+    uint64_t timer8 = hierarchical_timing_wheel_set_timer(wheel, this, Shutdown, ShutdownAborted, {.minutes= 1, .seconds = 3});
     work_pool_wait_for_shutdown_signal(pool);
     work_pool_shutdown(pool);
     work_pool_join_all(pool);
     work_pool_destroy(pool);
+    hierarchical_timing_wheel_destroy(wheel);
     pool= NULL;
-
   }
 }
