@@ -303,9 +303,9 @@ uint64_t hierarchical_timing_wheel_set_timer(hierarchical_timing_wheel_t* wheel,
   timer->abort = abort;
   timer->ctx = ctx;
   platform_lock(&wheel->lock);
+  timer->timerId = wheel->next_id++;
   hashmap_put(&wheel->timers, &timer->timerId, timer);
   platform_unlock(&wheel->lock);
-  timer->timerId = wheel->next_id++;
   if (delay.days > 0) {
     timer->plan.size = 5;
     timer->plan.steps = get_clear_memory(sizeof(timer_wheel_plan_step_t) * timer->plan.size);

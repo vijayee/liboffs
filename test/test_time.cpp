@@ -8,6 +8,7 @@
 extern "C" {
 #include "../src/Time/ticker.h"
 #include "../src/Time/wheel.h"
+#include "../src/Time/debouncer.h"
 }
 using ::testing::_;
 using ::testing::MockFunction;
@@ -33,7 +34,7 @@ namespace timeTest {
 
   class TestTimingWheel : public testing::Test {
   public:
-    work_pool_t *pool;
+    work_pool_t* pool;
     MockFunction<void((void * ))> mockExecuteCallback;
     MockFunction<void((void * ))> mockAbortCallback;
     MockFunction<void((void*))> mockShutdownCallback;
@@ -84,5 +85,73 @@ namespace timeTest {
     work_pool_destroy(pool);
     hierarchical_timing_wheel_destroy(wheel);
     pool= NULL;
+  }
+
+  class TestDebouncer : public testing::Test {
+  public:
+    work_pool_t* pool;
+    MockFunction<void((void*))> mockExecuteCallback;
+    MockFunction<void((void*))> mockAbortCallback;
+    MockFunction<void((void*))> mockShutdownCallback;
+    MockFunction<void((void*))> mockShutdownAbortCallback;
+  };
+
+  void onDebouncerExecute(void* ctx) {
+    auto test = static_cast<TestDebouncer *>(ctx);
+    test->mockExecuteCallback.Call(ctx);
+  }
+
+  void onDebouncerAbort(void* ctx) {
+    auto test = static_cast<TestDebouncer *>(ctx);
+    test->mockAbortCallback.Call(ctx);
+    platform_signal_condition(&test->pool->shutdown);
+  }
+  void ShutdownDebouncer(void* ctx) {
+    auto test = static_cast<TestDebouncer*>(ctx);
+    platform_signal_condition(&test->pool->shutdown);
+    test->mockShutdownCallback.Call(ctx);
+  }
+  void ShutdownDebouncerAborted(void* ctx) {
+    auto test = static_cast<TestTimingWheel*>(ctx);
+    test->mockShutdownAbortCallback.Call(ctx);
+  }
+
+  TEST_F(TestDebouncer, TestTimingWheelFunctions) {
+    EXPECT_CALL(mockExecuteCallback, Call(_)).Times(1);
+    EXPECT_CALL(mockShutdownCallback, Call(_)).Times(1);
+    pool = work_pool_create(4);
+    work_pool_launch(pool);
+    hierarchical_timing_wheel_t* wheel = hierarchical_timing_wheel_create(8, pool);
+    hierarchical_timing_wheel_run(wheel);
+    uint64_t wait = 200;
+    uint64_t max_wait = 5000;
+    debouncer_t* debouncer1 = debouncer_create(wheel, this, onDebouncerExecute, onDebouncerAbort, wait, max_wait);
+    uint64_t timer = hierarchical_timing_wheel_set_timer(wheel, this, ShutdownDebouncer, ShutdownDebouncerAborted, { .seconds = 6});
+    timeval_t start;
+    timeval_t end;
+    get_time(&start);
+    get_time(&end);
+    uint64_t elapsed = elapsed_time(start, end);
+    while (elapsed < max_wait) {
+      usleep(1000);
+      debouncer_debounce(debouncer1);
+      get_time(&end);
+      elapsed = elapsed_time(start, end);
+    }
+    work_pool_wait_for_shutdown_signal(pool);
+    work_pool_shutdown(pool);
+    work_pool_join_all(pool);
+    work_pool_destroy(pool);
+    hierarchical_timing_wheel_destroy(wheel);
+    pool= NULL;
+  }
+  TEST(TestElapsedTime, TestTimeElapsed) {
+    timeval_t start, end;
+    get_time(&start);
+    sleep(3);
+    get_time(&end);
+
+    uint64_t elapsed = elapsed_time(start, end);
+    EXPECT_EQ(elapsed, 3000);
   }
 }

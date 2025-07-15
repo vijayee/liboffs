@@ -39,7 +39,9 @@ set(C_SRC ""
         src/Time/ticker.h
         src/Time/ticker.c
         src/Time/wheel.h
-        src/Time/wheel.c)
+        src/Time/wheel.c
+        src/Time/debouncer.h
+        src/Time/debouncer.c)
 set(blake3_SOURCE_DIR deps/BLAKE3)
 set(xxHash_SOURCE_DIR deps/xxHash)
 set(hashmap_SOURCE_DIR deps/hashmap)
