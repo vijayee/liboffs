@@ -12,7 +12,7 @@
 #include "../Util//threadding.h"
 #include <stdint.h>
 
-#define Time_Milliseconds 1000000
+#define Time_Milliseconds 1000
 #define Time_Seconds 1000
 #define Time_Minutes 60
 #define Time_Hours 60
@@ -74,6 +74,7 @@ typedef vec_t(timer_list_t*) slots_t;
 struct timing_wheel_t {
   refcounter_t refcounter;
   PlATFORMLOCKTYPE(lock);
+  PLATFORMCONDITIONTYPEPTR(idle);
   size_t position;
   timer_map_t* timers;
   timing_wheel_t* wheel;
@@ -87,6 +88,7 @@ struct timing_wheel_t {
 typedef struct {
   refcounter_t refcounter;
   PlATFORMLOCKTYPE(lock);
+  PLATFORMCONDITIONTYPE(idle);
   timer_map_t timers;
   size_t next_id;
   uint8_t stopped;
@@ -105,11 +107,11 @@ void hierarchical_timing_wheel_stop(hierarchical_timing_wheel_t* wheel);
 void hierarchical_timing_wheel_run(hierarchical_timing_wheel_t* wheel);
 void hierarchical_timing_wheel_simulate(hierarchical_timing_wheel_t* wheel);
 
-timing_wheel_t* timing_wheel_create(uint64_t interval, size_t slot_count, work_pool_t* pool, timer_map_t* timers);
+timing_wheel_t* timing_wheel_create(uint64_t interval, size_t slot_count, work_pool_t* pool, timer_map_t* timers, PLATFORMCONDITIONTYPEPTR(idle));
 void timing_wheel_destroy(timing_wheel_t* wheel);
 void timing_wheel_set_timer(timing_wheel_t* wheel, timer_st* timer);
-//void timing_wheel_cancel_timer(timing_wheel_t* wheel, uint64_t timerId);
 void timing_wheel_stop(timing_wheel_t* wheel);
 void timing_wheel_run(timing_wheel_t* wheel);
+void hierarchical_timing_wheel_wait_for_idle_signal(hierarchical_timing_wheel_t* wheel);
 
 #endif //OFFS_WHEEL_H

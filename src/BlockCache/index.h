@@ -14,6 +14,7 @@
 #include "fibonacci.h"
 #include <cbor.h>
 #include "wal.h"
+#include "../Time/debouncer.h"
 uint8_t get_bit(buffer_t* buffer, size_t index);
 
 typedef struct {
@@ -54,14 +55,21 @@ index_node_t* cbor_to_index_node(cbor_item_t* cbor, size_t bucket_size);
 typedef HASHMAP(uint32_t, index_entry_vec_t) rank_map_t;
 typedef struct {
   refcounter_t refcounter;
+  PlATFORMLOCKTYPE(lock);
   index_node_t* root;
   size_t bucket_size;
   rank_map_t ranks;
+  char* location;
+  char* current_file;
+  char* last_file;
+  char* parent_location;
+  size_t next_id;
   wal_t* wal;
+  debouncer_t* debouncer;
 } index_t;
 
-index_t* index_create(size_t bucket_size, char* location);
-index_t* index_create_from(size_t bucket_size, index_node_t* root, char* location);
+index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait);
+index_t* index_create_from(size_t bucket_size, index_node_t* root, char* location, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait);
 size_t index_count(index_t* index);
 void index_add(index_t* index, index_entry_t* entry);
 index_entry_t* index_get(index_t* index, buffer_t* hash);
@@ -71,5 +79,5 @@ void index_remove(index_t* index, buffer_t* hash);
 void index_destroy(index_t* index);
 index_entry_vec_t* index_to_array(index_t* index);
 cbor_item_t* index_to_cbor(index_t* index);
-index_t* cbor_to_index(cbor_item_t* cbor, char* location);
+index_t* cbor_to_index(cbor_item_t* cbor, char* location, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait);
 #endif //OFFS_INDEX_H

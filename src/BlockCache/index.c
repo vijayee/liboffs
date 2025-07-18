@@ -5,6 +5,10 @@
 #include "../Util/allocator.h"
 #include "../Util/hash.h"
 #include "../Util/log.h"
+#include "../Util/mkdir_p.h"
+#include "../Util/path_join.h"
+#include  "../Util/get_dir.h"
+#include <stdio.h>
 
 void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node, size_t current);
 void index_split_node(index_t* index, index_node_t* node, size_t current);
@@ -13,6 +17,10 @@ index_entry_t* index_get_from_node(index_t* index, buffer_t* hash, index_node_t*
 index_entry_t* index_find_in_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current);
 void index_remove_from_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current);
 void index_destroy_node(index_t* index, index_node_t* node);
+void index_debounce(void* ctx);
+size_t index_count_p(index_t* index);
+void index_increment_p(index_t* index, index_entry_t* entry);
+cbor_item_t* index_to_cbor_p(index_t* index);
 
 uint8_t get_bit(buffer_t* buffer, size_t index) {
   size_t byte = index / 8;
@@ -120,21 +128,66 @@ void index_node_destroy(index_node_t* node) {
   }
 }
 
-index_t* index_create(size_t bucket_size, char* location) {
+index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait) {
   index_t* index = get_clear_memory(sizeof(index_t));
+  platform_lock_init(&index->lock);
   index->bucket_size = bucket_size;
   index->root = index_node_create(bucket_size);
-  index->wal = wal_create(location);
+  index->location = path_join(location,"index");
+  index->parent_location = strdup(location);
+  mkdir_p(index->location);
+
+  vec_str_t* files = get_dir(index->location);
+
+  if (files->length > 0) {
+    char id[20];
+    char* last = vec_last(files);
+    uint64_t last_id = atol(last);
+    index->next_id = last_id + 2;
+    sprintf(id,"%lu", last_id + 1);
+    index->current_file = path_join(index->location, id);
+    index->last_file = path_join(index->location, last);
+  } else {
+    char id[20];
+    sprintf(id,"%lu", (uint64_t)1);
+    index->next_id = 2;
+    index->current_file = path_join(index->location, id);
+    index->last_file = NULL;
+  }
+
+  index->wal = wal_create(index->parent_location);
+  index->debouncer = debouncer_create(wheel, index, index_debounce, index_debounce, wait, max_wait);
   hashmap_init(&index->ranks, (void*)hash_uint32, (void*)compare_uint32);
   hashmap_set_key_alloc_funcs(&index->ranks, duplicate_uint32, (void*)free);
   refcounter_init((refcounter_t*) index);
   return index;
 }
-index_t* index_create_from(size_t bucket_size, index_node_t* root, char* location) {
+index_t* index_create_from(size_t bucket_size, index_node_t* root, char* location, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait) {
   index_t* index = get_clear_memory(sizeof(index_t));
   index->bucket_size = bucket_size;
+  index->location = path_join(location,"index");
+  index->parent_location = strdup(location);
+  vec_str_t* files = get_dir(index->location);
+
+  if (files->length > 0) {
+    char id[20];
+    char* last = vec_last(files);
+    uint64_t last_id = atol(last);
+    index->next_id = last_id + 2;
+    sprintf(id,"%lu", last_id + 1);
+    index->current_file = path_join(index->location, id);
+    index->last_file = path_join(index->location, last);
+  } else {
+    char id[20];
+    sprintf(id,"%lu", (uint64_t)1);
+    index->next_id = 2;
+    index->current_file = path_join(index->location, id);
+    index->last_file = NULL;
+  }
+
   index->root = (index_node_t*) refcounter_reference((refcounter_t*) root);
-  index->wal = wal_create(location);
+  index->wal = wal_create(index->parent_location);
+  index->debouncer = debouncer_create(wheel, index, index_debounce, index_debounce, wait, max_wait);
   hashmap_init(&index->ranks, (void*)hash_uint32, (void*)compare_uint32);
   hashmap_set_key_alloc_funcs(&index->ranks, duplicate_uint32, (void*)free);
   refcounter_init((refcounter_t*) index);
@@ -255,7 +308,9 @@ index_node_t* cbor_to_index_node(cbor_item_t* cbor, size_t bucket_size) {
 }
 
 void index_add(index_t* index, index_entry_t* entry) {
+  platform_lock(&index->lock);
   index_add_to_node(index, entry, index->root, 0);
+  platform_unlock(&index->lock);
 }
 
 void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node, size_t current) {
@@ -269,7 +324,7 @@ void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node,
      for (size_t i = 0; i < node->bucket->length; i++) {
        index_entry_t* cur_entry = node->bucket->data[i];
        if (buffer_compare(cur_entry->hash, entry->hash) == 0) {
-         index_increment(index, cur_entry);
+         index_increment_p(index, cur_entry);
          return;
        }
      }
@@ -283,14 +338,20 @@ void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node,
        buffer_destroy(cbor_buf);
        cbor_decref(&cbor_entry);
        vec_push(node->bucket, (index_entry_t*) refcounter_reference((refcounter_t*) entry));
+       debouncer_debounce(index->debouncer);
      } else {
        index_split_node(index, node, current);
        index_add_to_node(index, entry, node, current);
      }
    }
 }
-
 void index_increment(index_t* index, index_entry_t* entry) {
+  platform_lock(&index->lock);
+  index_increment_p(index, entry);
+  platform_unlock(&index->lock);
+}
+
+void index_increment_p(index_t* index, index_entry_t* entry) {
   cbor_item_t* cbor_hash = cbor_build_bytestring(entry->hash->data, entry->hash->size);
   uint8_t* cbor_data;
   size_t cbor_size;
@@ -322,6 +383,7 @@ void index_increment(index_t* index, index_entry_t* entry) {
      } else {
        vec_push(rank, (index_entry_t*) refcounter_reference((refcounter_t*) entry));
      }
+     debouncer_debounce(index->debouncer);
   }
 }
 
@@ -343,11 +405,19 @@ void index_split_node(index_t* index, index_node_t* node, size_t current) {
 }
 
 index_entry_t* index_get(index_t* index, buffer_t* hash) {
-  return index_get_from_node(index, hash, index->root, 0);
+  index_entry_t* entry;
+  platform_lock(&index->lock);
+  entry = index_get_from_node(index, hash, index->root, 0);
+  platform_unlock(&index->lock);
+  return entry;
 }
 
 index_entry_t* index_find(index_t* index, buffer_t* hash) {
-  return index_find_in_node(index, hash, index->root, 0);
+  index_entry_t* entry;
+  platform_lock(&index->lock);
+  entry = index_find_in_node(index, hash, index->root, 0);
+  platform_unlock(&index->lock);
+  return entry;
 }
 
 index_entry_t* index_get_from_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current) {
@@ -361,7 +431,7 @@ index_entry_t* index_get_from_node(index_t* index, buffer_t* hash, index_node_t*
     for (size_t i = 0; i < node->bucket->length; i++) {
       index_entry_t* cur_entry = node->bucket->data[i];
       if (buffer_compare(cur_entry->hash, hash) == 0) {
-        index_increment(index, cur_entry);
+        index_increment_p(index, cur_entry);
         return cur_entry;
       }
     }
@@ -388,7 +458,9 @@ index_entry_t* index_find_in_node(index_t* index, buffer_t* hash, index_node_t* 
 }
 
 void index_remove(index_t* index, buffer_t* hash) {
+  platform_lock(&index->lock);
   index_remove_from_node(index, hash, index->root, 0);
+  platform_unlock(&index->lock);
 }
 void index_remove_from_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current) {
   if (node->bucket == NULL) {
@@ -401,6 +473,14 @@ void index_remove_from_node(index_t* index, buffer_t* hash, index_node_t* node, 
     for (size_t i = 0; i < node->bucket->length; i++) {
       index_entry_t* cur_entry = node->bucket->data[i];
       if (buffer_compare(cur_entry->hash, hash) == 0) {
+        cbor_item_t* cbor_hash = cbor_build_bytestring(cur_entry->hash->data, cur_entry->hash->size);
+        uint8_t* cbor_data;
+        size_t cbor_size;
+        cbor_serialize_alloc(cbor_hash, &cbor_data, &cbor_size);
+        buffer_t* cbor_buf = buffer_create_from_existing_memory(cbor_data, cbor_size);
+        wal_write(index->wal, removal, cbor_buf);
+        buffer_destroy(cbor_buf);
+        cbor_decref(&cbor_hash);
         vec_splice(node->bucket, i, 1);
       }
       index_entry_destroy(cur_entry);
@@ -423,6 +503,8 @@ void index_remove_from_node(index_t* index, buffer_t* hash, index_node_t* node, 
 void index_destroy(index_t* index) {
   refcounter_dereference((refcounter_t*) index);
   if (refcounter_count((refcounter_t*) index) == 0) {
+    refcounter_destroy_lock((refcounter_t*) index);
+    platform_lock_destroy(&index->lock);
     index_destroy_node(index, index->root);
     index_entry_vec_t *rank;
     hashmap_foreach_data(rank, &index->ranks) {
@@ -434,6 +516,12 @@ void index_destroy(index_t* index) {
     }
     hashmap_cleanup(&index->ranks);
     wal_destroy(index->wal);
+    free(index->location);
+    free(index->current_file);
+    if (index->last_file != NULL) {
+      free(index->last_file);
+    }
+    debouncer_destroy(index->debouncer);
     free(index);
   }
 }
@@ -453,18 +541,33 @@ void index_destroy_node(index_t* index, index_node_t* node) {
 }
 
 size_t index_count(index_t* index) {
+  platform_lock(&index->lock);
+  size_t count = index_count_p(index);
+  platform_unlock(&index->lock);
+  return count;
+}
+
+size_t index_count_p(index_t* index) {
   return index_node_count(index->root);
 }
 
 index_entry_vec_t* index_to_array(index_t* index) {
  index_entry_vec_t* entries = get_clear_memory(sizeof(index_entry_vec_t));
  vec_init(entries);
- vec_reserve(entries, index_count(index));
+ platform_lock(&index->lock);
+ vec_reserve(entries, index_count_p(index));
  index_node_to_array(index->root, entries);
+ platform_unlock(&index->lock);
  return entries;
 }
 
 cbor_item_t* index_to_cbor(index_t* index) {
+  platform_lock(&index->lock);
+  cbor_item_t* array = index_to_cbor_p(index);
+  platform_unlock(&index->lock);
+  return array;
+}
+cbor_item_t* index_to_cbor_p(index_t* index) {
   cbor_item_t* array = cbor_new_definite_array(3);
   bool success = cbor_array_push(array, cbor_move(index_node_to_cbor(index->root)));
   success &= cbor_array_push(array, cbor_move(cbor_build_uint64(index->bucket_size)));
@@ -476,13 +579,41 @@ cbor_item_t* index_to_cbor(index_t* index) {
 }
 
 
-index_t* cbor_to_index(cbor_item_t* cbor, char* location) {
+index_t* cbor_to_index(cbor_item_t* cbor, char* location, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait) {
   cbor_item_t* cbor_root = cbor_move(cbor_array_get(cbor,0));
   size_t bucket_size = cbor_get_uint64(cbor_move(cbor_array_get(cbor, 1)));
   index_node_t* root = cbor_to_index_node(cbor_root, bucket_size);
   if (root == NULL) {
     return NULL;
   }
-  index_t* index= index_create_from(bucket_size, root, location);
+  index_t* index= index_create_from(bucket_size, root, location, wheel, wait, max_wait);
   return index;
+}
+
+void index_debounce(void* ctx) {
+  index_t *index = (index_t *) ctx;
+  platform_lock(&index->lock);
+  cbor_item_t *cbor = index_to_cbor_p(index);
+  char *file = index->current_file;
+  if (index->last_file != NULL) {
+    free(index->last_file);
+  }
+  index->last_file = index->current_file;
+  char id[20];
+  sprintf(id, "%lu", index->next_id);
+  index->current_file = path_join(index->location, id);
+  index->next_id++;
+  wal_t* wal = index->wal;
+  index->wal = wal_create_next(index->parent_location, wal->next_id, wal->last_file);
+  platform_unlock(&index->lock);
+
+  uint8_t *cbor_data;
+  size_t cbor_size;
+  cbor_serialize_alloc(cbor, &cbor_data, &cbor_size);
+  FILE *index_file = fopen(file, "wb+");
+  fwrite(cbor_data, 1, cbor_size, index_file);
+  fflush(index_file);
+  fclose(index_file);
+  wal_destroy(wal);
+
 }

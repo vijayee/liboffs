@@ -63,7 +63,7 @@ namespace timeTest {
 
   TEST_F(TestTimingWheel, TestTimingWheelFunctions) {
     EXPECT_CALL(mockExecuteCallback, Call(_)).Times(6);
-    EXPECT_CALL(mockShutdownCallback, Call(_)).Times(1);
+    EXPECT_CALL(mockShutdownCallback, Call(_)).Times(0);
     EXPECT_CALL(mockShutdownAbortCallback, Call(_)).Times(0);
     pool = work_pool_create(4);
     work_pool_launch(pool);
@@ -78,8 +78,10 @@ namespace timeTest {
     uint64_t timer6 = hierarchical_timing_wheel_set_timer(wheel, this, onExecute, onAbort, {.minutes = 1});
     uint64_t timer7 = hierarchical_timing_wheel_set_timer(wheel, this, onExecute, onAbort, {.minutes = 3});
     hierarchical_timing_wheel_cancel_timer(wheel, timer7);
-    uint64_t timer8 = hierarchical_timing_wheel_set_timer(wheel, this, Shutdown, ShutdownAborted, {.minutes= 1, .seconds = 3});
-    work_pool_wait_for_shutdown_signal(pool);
+    //uint64_t timer8 = hierarchical_timing_wheel_set_timer(wheel, this, Shutdown, ShutdownAborted, {.minutes= 1, .seconds = 3});
+    //work_pool_wait_for_shutdown_signal(pool);
+    hierarchical_timing_wheel_wait_for_idle_signal(wheel);
+    hierarchical_timing_wheel_stop(wheel);
     work_pool_shutdown(pool);
     work_pool_join_all(pool);
     work_pool_destroy(pool);
@@ -90,6 +92,7 @@ namespace timeTest {
   class TestDebouncer : public testing::Test {
   public:
     work_pool_t* pool;
+    hierarchical_timing_wheel_t* wheel;
     MockFunction<void((void*))> mockExecuteCallback;
     MockFunction<void((void*))> mockAbortCallback;
     MockFunction<void((void*))> mockShutdownCallback;
@@ -108,6 +111,7 @@ namespace timeTest {
   }
   void ShutdownDebouncer(void* ctx) {
     auto test = static_cast<TestDebouncer*>(ctx);
+    hierarchical_timing_wheel_stop(test->wheel);
     platform_signal_condition(&test->pool->shutdown);
     test->mockShutdownCallback.Call(ctx);
   }
@@ -116,17 +120,18 @@ namespace timeTest {
     test->mockShutdownAbortCallback.Call(ctx);
   }
 
-  TEST_F(TestDebouncer, TestTimingWheelFunctions) {
-    EXPECT_CALL(mockExecuteCallback, Call(_)).Times(1);
-    EXPECT_CALL(mockShutdownCallback, Call(_)).Times(1);
+  TEST_F(TestDebouncer, TestDebounceFunctions) {
+    EXPECT_CALL(mockExecuteCallback, Call(_)).Times(2);
+    EXPECT_CALL(mockShutdownCallback, Call(_)).Times(0);
     pool = work_pool_create(4);
     work_pool_launch(pool);
-    hierarchical_timing_wheel_t* wheel = hierarchical_timing_wheel_create(8, pool);
+    wheel = hierarchical_timing_wheel_create(8, pool);
     hierarchical_timing_wheel_run(wheel);
     uint64_t wait = 200;
     uint64_t max_wait = 5000;
     debouncer_t* debouncer1 = debouncer_create(wheel, this, onDebouncerExecute, onDebouncerAbort, wait, max_wait);
-    uint64_t timer = hierarchical_timing_wheel_set_timer(wheel, this, ShutdownDebouncer, ShutdownDebouncerAborted, { .seconds = 6});
+    debouncer_t* debouncer2 = debouncer_create(wheel, this, onDebouncerExecute, onDebouncerAbort, wait, 0);
+    //uint64_t timer = hierarchical_timing_wheel_set_timer(wheel, this, ShutdownDebouncer, ShutdownDebouncerAborted, { .seconds = 6});
     timeval_t start;
     timeval_t end;
     get_time(&start);
@@ -135,14 +140,23 @@ namespace timeTest {
     while (elapsed < max_wait) {
       usleep(1000);
       debouncer_debounce(debouncer1);
+      debouncer_debounce(debouncer2);
       get_time(&end);
       elapsed = elapsed_time(start, end);
     }
-    work_pool_wait_for_shutdown_signal(pool);
+    while (elapsed < 5800) {
+      debouncer_debounce(debouncer2);
+      get_time(&end);
+      elapsed = elapsed_time(start, end);
+    }
+    hierarchical_timing_wheel_wait_for_idle_signal(wheel);
+    hierarchical_timing_wheel_stop(wheel);
     work_pool_shutdown(pool);
     work_pool_join_all(pool);
     work_pool_destroy(pool);
     hierarchical_timing_wheel_destroy(wheel);
+    debouncer_destroy(debouncer1);
+    debouncer_destroy(debouncer2);
     pool= NULL;
   }
   TEST(TestElapsedTime, TestTimeElapsed) {

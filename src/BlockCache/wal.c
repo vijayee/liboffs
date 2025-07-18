@@ -14,7 +14,6 @@
 
 wal_t* wal_create(char* location) {
   wal_t* wal = get_clear_memory(sizeof(wal_t));
-  refcounter_init((refcounter_t*) wal);
   wal->location = path_join(location, "wal");
 
   mkdir_p(wal->location);
@@ -28,15 +27,34 @@ wal_t* wal_create(char* location) {
     sprintf(id,"%lu", last_id);
     wal->current_file = path_join(wal->location, id);
     wal->last_file = path_join(wal->location, last);
+    wal->next_id = last_id + 1;
   } else {
     char id[20];
     sprintf(id,"%lu", (uint64_t)1);
+    wal->next_id = 2;
     wal->current_file = path_join(wal->location, id);
     wal->last_file = NULL;
   }
 
   wal->log = fopen(wal->current_file, "wb+");
   destroy_files(files);
+  return wal;
+}
+
+wal_t* wal_create_next(char* location, uint64_t next_id, char* last_file) {
+  wal_t* wal = get_clear_memory(sizeof(wal_t));
+  wal->location = path_join(location, "wal");
+  char id[20];
+
+  sprintf(id,"%lu", next_id);
+  wal->next_id = next_id + 1;
+  wal->current_file = path_join(wal->location, id);
+  if (last_file != NULL) {
+    wal->last_file = strdup(last_file);
+  } else {
+    wal->last_file = NULL;
+  }
+  wal->log = fopen(wal->current_file, "wb+");
   return wal;
 }
 
@@ -49,14 +67,11 @@ void wal_write(wal_t* wal,wal_type_e type, buffer_t* data) {
 }
 
 void wal_destroy(wal_t* wal) {
-  refcounter_dereference((refcounter_t*) wal);
-  if (refcounter_count((refcounter_t*) wal) == 0) {
-    fclose(wal->log);
-    free(wal->current_file);
-    if (wal->last_file != NULL) {
-      free(wal->last_file);
-    }
-    free(wal->location);
-    free(wal);
+  fclose(wal->log);
+  free(wal->current_file);
+  if (wal->last_file != NULL) {
+    free(wal->last_file);
   }
+  free(wal->location);
+  free(wal);
 }

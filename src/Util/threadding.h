@@ -9,6 +9,7 @@
 #include <windows>
 #define PlATFORMLOCKTYPE(N) CRITICAL_SECTION N
 #define PLATFORMCONDITIONTYPE(N) CONDITION_VARIABLE N
+#define PLATFORMCONDITIONTYPEPTR(N) CONDITION_VARIABLE* N
 #define PLATFORMBARRIERTYPE(N) SYNCHRONIZATION_BARRIER N
 #define PLATFORMTHREADTYPE HANDLE
 void platform_lock(CRITICAL_SECTION* lock);
@@ -30,6 +31,7 @@ uint64_t platform_self();
 #include <pthread.h>
 #define PlATFORMLOCKTYPE(N) pthread_mutex_t N
 #define PLATFORMCONDITIONTYPE(N) pthread_cond_t N
+#define PLATFORMCONDITIONTYPEPTR(N) pthread_cond_t* N
 #define PLATFORMBARRIERTYPE(N) pthread_barrier_t N
 #define PLATFORMTHREADTYPE pthread_t
 void platform_lock(pthread_mutex_t* lock);
