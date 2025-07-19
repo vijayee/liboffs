@@ -11,8 +11,11 @@
 #include "../Workers/pool.h"
 #include "../Util//threadding.h"
 #include <stdint.h>
-
+#ifdef _WIN32
+#define Time_Milliseconds 1
+#else
 #define Time_Milliseconds 1000
+#endif
 #define Time_Seconds 1000
 #define Time_Minutes 60
 #define Time_Hours 60

@@ -29,7 +29,11 @@ namespace timeTest {
     ticker.cb = callbackWrapper;
     ticker.ctx = this;
     EXPECT_CALL(mockCallback, Call(_)).Times(1);
-    ticker_start(ticker, 2000000000);
+#if _WIN32
+    ticker_start(ticker, 2000);
+#else
+    ticker_start(ticker, 2000000);
+#endif
   }
 
   class TestTimingWheel : public testing::Test {
@@ -153,8 +157,8 @@ namespace timeTest {
     hierarchical_timing_wheel_stop(wheel);
     work_pool_shutdown(pool);
     work_pool_join_all(pool);
-    work_pool_destroy(pool);
     hierarchical_timing_wheel_destroy(wheel);
+    work_pool_destroy(pool);
     debouncer_destroy(debouncer1);
     debouncer_destroy(debouncer2);
     pool= NULL;

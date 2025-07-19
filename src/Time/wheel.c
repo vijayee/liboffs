@@ -30,10 +30,12 @@ void timer_list_destroy(timer_list_t* list) {
   timer_list_node_t* next = NULL;
   while (current != NULL ) {
     next = current->next;
+    free(current->timer->plan.steps);
     free(current->timer);
     free(current);
       current = next;
   }
+  free(list);
 }
 
 void timer_list_enqueue(timer_list_t* list, timer_st* timer) {
@@ -139,12 +141,13 @@ timing_wheel_t* timing_wheel_create(uint64_t interval, size_t slot_count, work_p
 
 void timing_wheel_destroy(timing_wheel_t* wheel) {
   refcounter_dereference((refcounter_t*) wheel);
-  if (refcounter_count((refcounter_t*) wheel)) {
+  if (refcounter_count((refcounter_t*) wheel) == 0) {
     for (size_t i = 0; i < wheel->slots->length; i++) {
       timer_list_t* list = wheel->slots->data[i];
       timer_list_destroy(list);
     }
     vec_deinit(wheel->slots);
+    free(wheel->slots);
     platform_lock_destroy(&wheel->lock);
     free(wheel);
   }
@@ -155,6 +158,7 @@ void timing_wheel_run(timing_wheel_t* wheel) {
     wheel->stopped = 0;
     priority_t priority = {0};
     work_t* work = work_create(priority, (void *) wheel, timing_wheel_worker_execute, timing_wheel_worker_abort);
+    refcounter_yield((refcounter_t*) work);
     work_pool_enqueue(wheel->pool, work);
   } else {
     timer_st* timer = get_clear_memory(sizeof(timer_st));
@@ -203,6 +207,7 @@ void timing_wheel_fire_expired(timing_wheel_t* wheel, timer_list_t* expired) {
     }
     priority_t priority = {0};
     work_t* work = work_create(priority, current->ctx, current->cb, current->abort);
+    refcounter_yield((refcounter_t*) work);
     work_pool_enqueue(wheel->pool, work);
 
     free(current->plan.steps);

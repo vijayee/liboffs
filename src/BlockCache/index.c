@@ -154,6 +154,7 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
     index->current_file = path_join(index->location, id);
     index->last_file = NULL;
   }
+  destroy_files(files);
 
   index->wal = wal_create(index->parent_location);
   index->debouncer = debouncer_create(wheel, index, index_debounce, index_debounce, wait, max_wait);
@@ -184,6 +185,7 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root, char* locatio
     index->current_file = path_join(index->location, id);
     index->last_file = NULL;
   }
+  destroy_files(files);
 
   index->root = (index_node_t*) refcounter_reference((refcounter_t*) root);
   index->wal = wal_create(index->parent_location);
@@ -518,6 +520,7 @@ void index_destroy(index_t* index) {
     wal_destroy(index->wal);
     free(index->location);
     free(index->current_file);
+    free(index->parent_location);
     if (index->last_file != NULL) {
       free(index->last_file);
     }
@@ -614,6 +617,8 @@ void index_debounce(void* ctx) {
   fwrite(cbor_data, 1, cbor_size, index_file);
   fflush(index_file);
   fclose(index_file);
+  free(cbor_data);
   wal_destroy(wal);
+  cbor_intermediate_decref(cbor);
 
 }

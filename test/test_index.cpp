@@ -210,7 +210,7 @@ namespace indexTest {
     cbor_item_t *cbor2 = cbor_load(cbor_data, cbor_size, &result);
     EXPECT_EQ(result.error.code == CBOR_ERR_NONE, true);
     EXPECT_EQ(cbor_isa_array(cbor2), true);
-    index_t *from_cbor = cbor_to_index(cbor2, location, wheel, wait, max_wait);
+    index_t* from_cbor = cbor_to_index(cbor2, location, wheel, wait, max_wait);
     EXPECT_FALSE(from_cbor == NULL);
 
 
@@ -243,6 +243,7 @@ namespace indexTest {
     work_pool_shutdown(pool);
     work_pool_join_all(pool);
     work_pool_destroy(pool);
+    hierarchical_timing_wheel_destroy(wheel);
 
     index_entry_destroy(entry1);
     index_entry_destroy(entry2);
