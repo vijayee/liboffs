@@ -41,7 +41,12 @@ set(C_SRC ""
         src/Time/wheel.h
         src/Time/wheel.c
         src/Time/debouncer.h
-        src/Time/debouncer.c)
+        src/Time/debouncer.c
+        src/BlockCache/section.h
+        src/BlockCache/section.c
+        src/BlockCache/section.h
+        src/Util/rm_rf.h
+        src/Util/rm_rf.c)
 set(blake3_SOURCE_DIR deps/BLAKE3)
 set(xxHash_SOURCE_DIR deps/xxHash)
 set(hashmap_SOURCE_DIR deps/hashmap)

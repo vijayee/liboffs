@@ -14,21 +14,51 @@
 void platform_lock(CRITICAL_SECTION* lock) {
   EnterCriticalSection(lock);
 }
+
+void platform_rw_lock_r(PSRW* lock) {
+  AcquireSRWLockShared(lock);
+}
+
+void platform_rw_lock_w(PSRW* lock) {
+  AcquireSRWLockExclusive(lock);
+}
+
 void platform_unlock(CRITICAL_SECTION* lock) {
   LeaveCriticalSection(lock);
 }
+
+void platform_rw_unlock_r(pthread_rwlock_t* lock) {
+  ReleaseSRWLockShared(lock);
+}
+
+void platform_rw_unlock_w(pthread_rwlock_t* lock) {
+  ReleaseSRWLockExclusive((lock);
+}
+
 void platform_lock_init(CRITICAL_SECTION* lock) {
   InitializeCriticalSection(lock);
 }
+
+void platform_rw_lock_init(pthread_rwlock_t* lock) {
+  InitializeSRWLock(lock);
+}
+
 void platform_lock_destroy(CRITICAL_SECTION* lock) {
   DeleteCriticalSection(lock, NULL);
 }
+
+void platform_rw_lock_destroy(PSRWLOCK* lock) {
+
+}
+
 void platform_condition_init(CONDITION_VARIABLE* condition) {
   InitializeConditionVariable(condition);
 }
+
 void platform_condition_wait(CRITICAL_SECTION* lock, CONDITION_VARIABLE* condition) {
   SleepConditionVariableCS(condition, lock, INFINITE);
 }
+
 void platform_condition_destroy(CONDITION_VARIABLE* condition) {
 
 }
@@ -73,6 +103,23 @@ void platform_lock(pthread_mutex_t* lock) {
     abort();
   }
 }
+
+void platform_rw_lock_r(pthread_rwlock_t* lock) {
+  int result = pthread_rwlock_rdlock(lock);
+  if (result) {
+    log_trace("Failed to acquire rw lock");
+    abort();
+  }
+}
+
+void platform_rw_lock_w(pthread_rwlock_t* lock) {
+  int result = pthread_rwlock_wrlock(lock);
+  if (result) {
+    log_trace("Failed to acquire rw lock");
+    abort();
+  }
+}
+
 void platform_unlock(pthread_mutex_t* lock) {
   int result = pthread_mutex_unlock(lock);
   if (result) {
@@ -80,6 +127,23 @@ void platform_unlock(pthread_mutex_t* lock) {
     abort();
   }
 }
+
+void platform_rw_unlock_r(pthread_rwlock_t* lock) {
+  int result = pthread_rwlock_unlock(lock);
+  if (result) {
+    log_trace("Failed to release rw lock");
+    abort();
+  }
+}
+
+void platform_rw_unlock_w(pthread_rwlock_t* lock) {
+  int result = pthread_rwlock_unlock(lock);
+  if (result) {
+    log_trace("Failed to release rw lock");
+    abort();
+  }
+}
+
 void platform_lock_init(pthread_mutex_t* lock) {
   int result = pthread_mutex_init(lock, NULL);
   if (result) {
@@ -87,6 +151,15 @@ void platform_lock_init(pthread_mutex_t* lock) {
     abort();
   }
 }
+
+void platform_rw_lock_init(pthread_rwlock_t* lock) {
+  int result = pthread_rwlock_init(lock, NULL);
+  if (result) {
+    log_trace("Failed to initialize RW lock");
+    abort();
+  }
+}
+
 void platform_lock_destroy(pthread_mutex_t* lock) {
   int result = pthread_mutex_destroy(lock);
   if (result) {
@@ -94,6 +167,15 @@ void platform_lock_destroy(pthread_mutex_t* lock) {
     abort();
   }
 }
+
+void platform_rw_lock_destroy(pthread_rwlock_t* lock) {
+  int result = pthread_rwlock_destroy(lock);
+  if (result) {
+    log_trace("Failed to destroy rw lock");
+    abort();
+  }
+}
+
 void platform_condition_init(pthread_cond_t* condition) {
   int result = pthread_cond_init(condition, NULL);
   if (result) {

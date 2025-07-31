@@ -70,7 +70,7 @@ namespace indexTest {
     EXPECT_EQ(entry->ejection_date, now);
 
     cbor_item_t *cbor = index_entry_to_cbor(entry);
-    uint8_t *cbor_data;
+    uint8_t* cbor_data;
     size_t cbor_size;
     cbor_serialize_alloc(cbor, &cbor_data, &cbor_size);
     struct cbor_load_result result;
