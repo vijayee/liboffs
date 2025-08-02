@@ -137,12 +137,12 @@ cbor_item_t* fragment_list_to_cbor(fragment_list_t* list) {
   fragment_list_node_t* current = list->first;
   bool success = true;
   while (current != NULL ) {
-    success &= cbor_array_push(array, cbor_move(fragment_to_cbor(current->fragment)));
+    success = cbor_array_push(array, cbor_move(fragment_to_cbor(current->fragment)));
+    if (!success) {
+      cbor_decref(&array);
+      return NULL;
+    }
     current = current->next;
-  }
-  if (!success) {
-    cbor_decref(&array);
-    return NULL;
   }
   return array;
 }
@@ -201,7 +201,7 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id, h
       abort();
     }
     section->fragments = fragments;
-
+    cbor_decref(&cbor);
   } else {
     //New File
     section->fragments = fragment_list_create();
@@ -213,7 +213,9 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id, h
 
 void section_destroy(section_t* section) {
   platform_rw_lock_destroy(&section->lock);
-  fclose(section->file);
+  if (section->file != NULL) {
+    fclose(section->file);
+  }
   fragment_list_destroy(section->fragments);
   debouncer_destroy(section->debouncer);
   free(section->path);
@@ -266,18 +268,21 @@ int section_write(section_t* section, block_t* block, size_t* index) {
     if (section->file == NULL) {
       section->file = fopen(section->path, "wb+");
       if (section->file == NULL) {
+        section_deallocate(section, *index);
         platform_rw_unlock_w(&section->lock);
         return 3;
       }
     }
     size_t byte = block->data->size * (*index);
     if (fseek(section->file, byte, SEEK_SET)) {
+      section_deallocate(section, *index);
       platform_rw_unlock_w(&section->lock);
       return 4;
     }
     size_t result = fwrite(block->data->data, sizeof(block->data->data[0]), block->data->size, section->file);
     fflush(section->file);
     if (result < section->block_size) {
+      section_deallocate(section, *index);
       platform_rw_unlock_w(&section->lock);
       return 5;
     }
@@ -330,14 +335,10 @@ int section_deallocate(section_t* section, size_t index) {
       if (index == current->fragment->end) { //Someone tried to deallocate free space
         platform_rw_unlock_w(&section->lock);
         return 1;
-      } else if (index < current->fragment->end) {
-        if (index >= current->fragment->start) { //Someone tried to deallocate free space
-          platform_rw_unlock_w(&section->lock);
-          return 1;
-        } else {
-          current = next;
-          continue;
-        }
+      } else if ((index < current->fragment->end) && (index >= current->fragment->start)) {
+         //Someone tried to deallocate free space
+        platform_rw_unlock_w(&section->lock);
+        return 1;
       }  else {
         last = current;
         current = next;
@@ -358,14 +359,28 @@ int section_deallocate(section_t* section, size_t index) {
         return 0;
       }
     } else {
-      fragment_list_enqueue(section->fragments, fragment_create(index, index + 1));
-      next = last->next;
       fragment_t* fragment = fragment_create(index,index);
-      fragment_list_node_t* node = fragment_list_node_create(fragment, next, last);
-      last->next = node;
-      if (next != NULL) {
-        next->previous = node;
+      if (index < last->fragment->start) {
+        fragment_list_node_t* node = fragment_list_node_create(fragment, last, last->previous);
+        last->previous = node;
+        if (section->fragments->first == last) {
+          section->fragments->first= node;
+        }
+        section->fragments->count++;
+      } else {
+        next = last->next;
+        fragment_list_node_t* node = fragment_list_node_create(fragment, next, last);
+        last->next = node;
+        if (next != NULL) {
+          next->previous = node;
+        }
+        if (section->fragments->last == last) {
+          section->fragments->last= node;
+        }
+        section->fragments->count++;
       }
+
+
       debouncer_debounce(section->debouncer);
       platform_rw_unlock_w(&section->lock);
       return 0;
@@ -390,5 +405,7 @@ void section_save_fragments(void* ctx) {
   fwrite(cbor_data,cbor_size,1,meta_file);
   fflush(meta_file);
   fclose(meta_file);
+  free(cbor_data);
+  cbor_decref(&cbor);
 }
 

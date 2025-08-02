@@ -9,6 +9,7 @@ extern "C" {
 #include "../src/BlockCache/index.h"
 #include "../src/Util/path_join.h"
 #include "../src/Util/mkdir_p.h"
+#include "../src/Util/rm_rf.h"
 #include "../src/Util/threadding.h"
 #include <time.h>
 #include <cbor.h>
@@ -16,7 +17,20 @@ extern "C" {
 #include "../src/BlockCache/section.h"
 }
 
-TEST(TestSection, TestSectionFunction) {
+class TestSection : public testing::Test {
+public:
+  char* section_location;
+  char* meta_location;
+  void SetUp() override {
+    section_location = path_join(".", "sections");
+    meta_location = path_join(".", "meta");
+    rm_rf(section_location);
+    rm_rf(meta_location);
+  }
+};
+
+
+TEST_F(TestSection, TestSectionFunction) {
   size_t block_count = 20;
   block_t* blocks[block_count];
   index_entry_t* entries[block_count];
@@ -24,16 +38,12 @@ TEST(TestSection, TestSectionFunction) {
     blocks[i] = block_create_random_block_by_type(mini);
   }
 
-  char *location = path_join(".", "block_index");
   work_pool_t* pool= work_pool_create(platform_core_count());
   work_pool_launch(pool);
   hierarchical_timing_wheel_t* wheel = hierarchical_timing_wheel_create(8, pool);
   hierarchical_timing_wheel_run(wheel);
-  uint64_t wait = 200;
+  uint64_t wait = 5;
   uint64_t max_wait = 5000;
-  index_t* index = index_create(25, location, wheel, wait, max_wait);
-  char* section_location = path_join(".", "sections");
-  char* meta_location = path_join(".", "meta");
   mkdir_p(section_location);
   mkdir_p(meta_location);
   section_t* section = section_create(section_location, meta_location, 20, 4000, wheel, wait, max_wait, mini);
@@ -46,7 +56,21 @@ TEST(TestSection, TestSectionFunction) {
       entry->section_id = 4000;
       entry->section_index = section_index;
       entries[i] = entry;
-      index_add(index, entry);
+    } else {
+      hierarchical_timing_wheel_wait_for_idle_signal(wheel);
+      hierarchical_timing_wheel_stop(wheel);
+      work_pool_shutdown(pool);
+      work_pool_join_all(pool);
+
+      section_destroy(section);
+      free(meta_location);
+      free(section_location);
+      work_pool_destroy(pool);
+      hierarchical_timing_wheel_destroy(wheel);
+      for (size_t i = 0; i < block_count; i++) {
+        block_destroy(blocks[i]);
+      }
+      GTEST_SKIP();
     }
   }
 
@@ -55,6 +79,7 @@ TEST(TestSection, TestSectionFunction) {
     buffer_t* buf = section_read(section, entry->section_index);
     EXPECT_NE(buf, (buffer_t*) NULL);
     EXPECT_EQ(buffer_compare(buf, blocks[i]->data), 0);
+    refcounter_yield((refcounter_t*) buf);
     block_t* block = block_create_existing_data(buf);
     EXPECT_EQ(buffer_compare(block->hash, blocks[i]->hash), 0);
     EXPECT_EQ(buffer_compare(block->hash, entry->hash), 0);
@@ -72,10 +97,56 @@ TEST(TestSection, TestSectionFunction) {
     int result = section_write(section, blocks[i], &section_index);
     EXPECT_EQ(result, 0);
   }
+  int result = section_deallocate(section, entries[10]->section_index);
+  EXPECT_EQ(result, 0);
+  result = section_deallocate(section, entries[11]->section_index);
+  EXPECT_EQ(result, 0);
+  result = section_deallocate(section, entries[12]->section_index);
+  EXPECT_EQ(result, 0);
+
+  result = section_deallocate(section, entries[2]->section_index);
+  EXPECT_EQ(result, 0);
+
+  platform_rw_lock_r(&section->lock);
+  EXPECT_EQ(section->fragments->count, 2);
+  platform_rw_unlock_r(&section->lock);
+
+  result = section_deallocate(section, entries[18]->section_index);
+  EXPECT_EQ(result, 0);
+
+  platform_rw_lock_r(&section->lock);
+  EXPECT_EQ(section->fragments->count, 3);
+  platform_rw_unlock_r(&section->lock);
+
+  result = section_deallocate(section, entries[19]->section_index);
+  EXPECT_EQ(result, 0);
+
+  platform_rw_lock_r(&section->lock);
+  EXPECT_EQ(section->fragments->count, 3);
+  platform_rw_unlock_r(&section->lock);
+
+  result = section_write(section, blocks[12], &entries[12]->section_index);
+  EXPECT_EQ(result, 0);
+
+
+  platform_rw_lock_r(&section->lock);
+  EXPECT_EQ(section->fragments->count, 2);
+  platform_rw_unlock_r(&section->lock);
+
+  EXPECT_EQ(entries[12]->section_index, entries[2]->section_index);
+
+  result = section_write(section, blocks[18], &entries[18]->section_index);
+  EXPECT_EQ(result, 0);
+
+  EXPECT_EQ(entries[18]->section_index, entries[10]->section_index);
+
   hierarchical_timing_wheel_wait_for_idle_signal(wheel);
   hierarchical_timing_wheel_stop(wheel);
   work_pool_shutdown(pool);
   work_pool_join_all(pool);
+  section_destroy(section);
+  free(meta_location);
+  free(section_location);
   work_pool_destroy(pool);
   hierarchical_timing_wheel_destroy(wheel);
 
@@ -83,7 +154,4 @@ TEST(TestSection, TestSectionFunction) {
     index_entry_destroy(entries[i]);
     block_destroy(blocks[i]);
   }
-  free(location);
-  free(section_location);
-
 }
