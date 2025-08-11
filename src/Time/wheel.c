@@ -8,8 +8,7 @@
 #include <stdio.h>
 
 
-void timing_wheel_on_tick();
-void timing_wheel_on_abort_tick();
+void timing_wheel_on_tick(void* ctx);
 void timing_wheel_worker_execute(void* ctx);
 void timing_wheel_worker_abort(void* ctx);
 timer_st* timer_list_remove_by_id(timer_list_t* list, size_t timerId);
@@ -125,7 +124,7 @@ timing_wheel_t* timing_wheel_create(uint64_t interval, size_t slot_count, work_p
   timing_wheel_t* wheel = get_clear_memory(sizeof(timing_wheel_t));
   refcounter_init((refcounter_t*) wheel);
   platform_lock_init(&wheel->lock);
-  wheel->pool = pool;
+  wheel->pool = (work_pool_t*) refcounter_reference((refcounter_t*) pool);
   wheel->interval = interval;
   wheel->position = slot_count - 1;
   wheel->slots = get_clear_memory(sizeof(slots_t));
@@ -146,6 +145,7 @@ void timing_wheel_destroy(timing_wheel_t* wheel) {
       timer_list_t* list = wheel->slots->data[i];
       timer_list_destroy(list);
     }
+    work_pool_destroy(wheel->pool);
     vec_deinit(wheel->slots);
     free(wheel->slots);
     platform_lock_destroy(&wheel->lock);
