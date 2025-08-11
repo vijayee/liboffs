@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include "../Time/debouncer.h"
+#include "../RefCounter/refcounter.h"
 #include "cbor.h"
 #include "block.h"
 
@@ -16,7 +17,7 @@ typedef struct {
 } fragment_t;
 
 fragment_t* fragment_create(size_t start, size_t end);
-fragment_t* fragment_destroy(fragment_t* fragment);
+void fragment_destroy(fragment_t* fragment);
 cbor_item_t* fragment_to_cbor(fragment_t* fragment);
 fragment_t* cbor_to_fragment(cbor_item_t* cbor);
 
@@ -46,6 +47,7 @@ fragment_list_t* cbor_to_fragment_list(cbor_item_t* cbor);
 
 
 typedef struct {
+  refcounter_t refcounter;
   PLATFORMRWLOCKTYPE(lock);
   FILE* file;
   size_t id;

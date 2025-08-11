@@ -24,7 +24,7 @@ fragment_t* fragment_create(size_t start, size_t end) {
   return fragment;
 }
 
-fragment_t* fragment_destroy(fragment_t* fragment) {
+void fragment_destroy(fragment_t* fragment) {
   free(fragment);
 }
 
@@ -159,6 +159,7 @@ fragment_list_t* cbor_to_fragment_list(cbor_item_t* cbor){
 
 section_t* section_create(char* path, char* meta_path, size_t size, size_t id, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait, block_size_e type) {
   section_t* section = get_clear_memory(sizeof(section_t));
+  refcounter_init((refcounter_t*) section);
   platform_rw_lock_init(&section->lock);
   char section_id[20];
   sprintf(section_id, "%lu", id);
@@ -212,15 +213,19 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id, h
 }
 
 void section_destroy(section_t* section) {
-  platform_rw_lock_destroy(&section->lock);
-  if (section->file != NULL) {
-    fclose(section->file);
+  refcounter_dereference((refcounter_t*) section);
+  if (refcounter_count((refcounter_t*) section) == 0) {
+    refcounter_destroy_lock((refcounter_t*) section);
+    platform_rw_lock_destroy(&section->lock);
+    if (section->file != NULL) {
+      fclose(section->file);
+    }
+    fragment_list_destroy(section->fragments);
+    debouncer_destroy(section->debouncer);
+    free(section->path);
+    free(section->meta_path);
+    free(section);
   }
-  fragment_list_destroy(section->fragments);
-  debouncer_destroy(section->debouncer);
-  free(section->path);
-  free(section->meta_path);
-  free(section);
 }
 
 int section_next_index(section_t* section, size_t* index) {
