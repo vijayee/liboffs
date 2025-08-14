@@ -5,7 +5,7 @@
 #include "../Util/allocator.h"
 
 
-work_queue_t* work_queue_init(work_queue_t* queue) {
+void work_queue_init(work_queue_t* queue) {
   queue->first = NULL;
   queue->last = NULL;
 }

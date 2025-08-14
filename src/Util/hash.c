@@ -24,6 +24,14 @@ size_t hash_uint32(const void* data) {
   }
 }
 
+size_t hash_size_t(const void* data) {
+  if(sizeof(size_t) == 8) {
+    return XXH3_64bits(data,4);
+  } else {
+    return XXH32(data, 4, 0);
+  }
+}
+
 size_t hash_uint64(const void* data) {
   if(sizeof(size_t) == 8) {
     return XXH3_64bits(data,8);
@@ -47,6 +55,18 @@ int compare_uint32(const void* data1, const void* data2) {
 int compare_uint64(const void* data1, const void* data2) {
   const uint64_t* _data1 = data1;
   const uint64_t* _data2 = data2;
+  if (*_data1 == *_data2){
+    return 0;
+  } else if (*_data1 > *_data2) {
+    return 1;
+  } else {
+    return -1;
+  }
+}
+
+int compare_size_t(const void* data1, const void* data2) {
+  const size_t* _data1 = data1;
+  const size_t* _data2 = data2;
   if (*_data1 == *_data2){
     return 0;
   } else if (*_data1 > *_data2) {

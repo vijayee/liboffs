@@ -15,6 +15,8 @@ extern "C" {
 #include <cbor.h>
 #include "../src/Time/wheel.h"
 #include "../src/BlockCache/section.h"
+#include "../src/BlockCache/sections.h"
+#include "../src/Util/allocator.h"
 }
 
 class TestSection : public testing::Test {
@@ -154,4 +156,122 @@ TEST_F(TestSection, TestSectionFunction) {
     index_entry_destroy(entries[i]);
     block_destroy(blocks[i]);
   }
+}
+
+class TestSectionsLRU : public testing::Test {
+public:
+  size_t size = 5;
+  size_t overage = 3;
+  section_t* sections[8];
+  size_t id = 0;
+  uint64_t wait = 5;
+  uint64_t max_wait = 5000;
+  char* section_location;
+  char* meta_location;
+  work_pool_t* pool;
+  hierarchical_timing_wheel_t* wheel;
+  void SetUp() override {
+    section_location = path_join(".", "sections");
+    meta_location = path_join(".", "meta");
+    rm_rf(section_location);
+    rm_rf(meta_location);
+    pool = work_pool_create(platform_core_count());
+    work_pool_launch(pool);
+    wheel = hierarchical_timing_wheel_create(8, pool);
+    hierarchical_timing_wheel_run(wheel);
+    mkdir_p(section_location);
+    mkdir_p(meta_location);
+
+    for (size_t i = 0; i < 8; i++) {
+      sections[i] = section_create(section_location, meta_location, 20, ++id, wheel, wait, max_wait, mini);
+    }
+  }
+  void TearDown() override {
+    hierarchical_timing_wheel_wait_for_idle_signal(wheel);
+    hierarchical_timing_wheel_stop(wheel);
+    work_pool_shutdown(pool);
+    work_pool_join_all(pool);
+    free(meta_location);
+    free(section_location);
+    work_pool_destroy(pool);
+    hierarchical_timing_wheel_destroy(wheel);
+
+    for (size_t i = 0; i < 8; i++) {
+      section_destroy(sections[i]);
+    }
+  }
+};
+
+TEST_F(TestSectionsLRU, TestSectionLRUInsertionDeletion) {
+  sections_lru_cache_t* lru = sections_lru_cache_create(size);
+  for (size_t i = 0; i < (size + overage); i++) {
+    sections_lru_cache_put(lru, sections[i]);
+  }
+  for (size_t i = 0; i <  overage; i++) {
+    EXPECT_EQ(sections_lru_cache_get(lru, sections[i]->id) == NULL, true);
+  }
+  for (size_t i = overage; i < (size + overage); i++) {
+    EXPECT_NE(sections_lru_cache_get(lru, sections[i]->id) == NULL, true);
+  }
+  for (size_t i = overage; i < (size + overage); i++) {
+    EXPECT_EQ(sections_lru_cache_contains(lru, sections[i]->id), true);
+  }
+  for (size_t i = overage; i < (size + overage); i++) {
+    sections_lru_cache_delete(lru, sections[i]->id);
+  }
+  for (size_t i = overage; i < (size + overage); i++) {
+    EXPECT_EQ(sections_lru_cache_contains(lru, sections[i]->id), false);
+  }
+
+  sections_lru_cache_destroy(lru);
+}
+
+TEST_F(TestSectionsLRU, TestSectionLRUSize1) {
+  size = 1;
+  sections_lru_cache_t* lru = sections_lru_cache_create(size);
+  for (size_t i = 0; i < (size + overage); i++) {
+    sections_lru_cache_put(lru, sections[i]);
+  }
+  for (size_t i = 0; i < overage; i++) {
+    EXPECT_EQ(sections_lru_cache_get(lru, sections[i]->id) == NULL, true);
+  }
+  for (size_t i = overage; i < (size + overage); i++) {
+    EXPECT_NE(sections_lru_cache_get(lru, sections[i]->id) == NULL, true);
+  }
+  for (size_t i = overage; i < (size + overage); i++) {
+    EXPECT_EQ(sections_lru_cache_contains(lru, sections[i]->id), true);
+  }
+  for (size_t i = overage; i < (size + overage); i++) {
+    sections_lru_cache_delete(lru, sections[i]->id);
+  }
+  for (size_t i = overage; i < (size + overage); i++) {
+    EXPECT_EQ(sections_lru_cache_contains(lru, sections[i]->id), false);
+  }
+
+  sections_lru_cache_destroy(lru);
+}
+
+TEST_F(TestSectionsLRU, TestSectionLRUSize0) {
+  size = 0;
+  sections_lru_cache_t* lru = sections_lru_cache_create(size);
+  for (size_t i = 0; i < (size + overage); i++) {
+    sections_lru_cache_put(lru, sections[i]);
+  }
+  for (size_t i = 0; i < overage; i++) {
+    EXPECT_EQ(sections_lru_cache_get(lru, sections[i]->id) == NULL, true);
+  }
+  for (size_t i = overage; i < (size + overage); i++) {
+    EXPECT_NE(sections_lru_cache_get(lru, sections[i]->id) == NULL, true);
+  }
+  for (size_t i = overage; i < (size + overage); i++) {
+    EXPECT_EQ(sections_lru_cache_contains(lru, sections[i]->id), true);
+  }
+  for (size_t i = overage; i < (size + overage); i++) {
+    sections_lru_cache_delete(lru, sections[i]->id);
+  }
+  for (size_t i = overage; i < (size + overage); i++) {
+    EXPECT_EQ(sections_lru_cache_contains(lru, sections[i]->id), false);
+  }
+
+  sections_lru_cache_destroy(lru);
 }

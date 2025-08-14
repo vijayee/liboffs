@@ -106,6 +106,7 @@ index_node_t* index_node_create(size_t bucket_size) {
   vec_reserve(node->bucket, bucket_size);
   node->left = NULL;
   node->right = NULL;
+  return node;
 }
 index_node_t* index_node_create_from_leaves(index_node_t* left, index_node_t* right) {
   index_node_t* node = get_clear_memory(sizeof(index_node_t));

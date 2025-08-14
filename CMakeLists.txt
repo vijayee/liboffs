@@ -1,6 +1,5 @@
 cmake_minimum_required(VERSION 3.29)
 project(offs C CXX)
-
 set(CMAKE_C_STANDARD 11)
 set(C_SRC ""
         src/BlockCache/frand.c
@@ -46,7 +45,11 @@ set(C_SRC ""
         src/BlockCache/section.c
         src/BlockCache/section.h
         src/Util/rm_rf.h
-        src/Util/rm_rf.c)
+        src/Util/rm_rf.c
+        src/Util/lru.h
+        src/BlockCache/sections.h
+        src/BlockCache/sections.h
+        src/BlockCache/sections.c)
 set(blake3_SOURCE_DIR deps/BLAKE3)
 set(xxHash_SOURCE_DIR deps/xxHash)
 set(hashmap_SOURCE_DIR deps/hashmap)
