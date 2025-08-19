@@ -183,7 +183,8 @@ public:
     mkdir_p(meta_location);
 
     for (size_t i = 0; i < 8; i++) {
-      sections[i] = section_create(section_location, meta_location, 20, ++id, wheel, wait, max_wait, mini);
+      sections[i] = section_create(section_location, meta_location, 20, id, wheel, wait, max_wait, mini);
+      id++;
     }
   }
   void TearDown() override {

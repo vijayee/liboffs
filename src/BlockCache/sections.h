@@ -11,16 +11,16 @@
 typedef struct sections_lru_node_t sections_lru_node_t;
 struct sections_lru_node_t {
   section_t* value;
-  size_t* next;
-  size_t* previous;
+  sections_lru_node_t* next;
+  sections_lru_node_t* previous;
 };
 
 typedef HASHMAP(size_t, sections_lru_node_t) section_cache_t;
 
 typedef struct {
   section_cache_t cache;
-  size_t* first;
-  size_t* last;
+  sections_lru_node_t* first;
+  sections_lru_node_t* last;
   size_t size;
 } sections_lru_cache_t;
 

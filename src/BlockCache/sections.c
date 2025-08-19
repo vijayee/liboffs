@@ -5,7 +5,7 @@
 #include "../Util/allocator.h"
 #include "../Util/hash.h"
 
-void sections_lru_cache_move(sections_lru_cache_t* lru, size_t section_id);
+void sections_lru_cache_move(sections_lru_cache_t* lru, sections_lru_node_t* node);
 
 sections_lru_cache_t* sections_lru_cache_create(size_t size) {
   sections_lru_cache_t* lru = get_clear_memory(sizeof(sections_lru_cache_t));
@@ -21,21 +21,9 @@ void sections_lru_cache_destroy(sections_lru_cache_t* lru) {
   sections_lru_node_t* node;
   hashmap_foreach_data(node, &lru->cache) {
     section_destroy(node->value);
-    if (node->previous != NULL) {
-      free(node->previous);
-    }
-    if (node->next) {
-     free(node->next);
-    }
     free(node);
   }
   hashmap_cleanup(&lru->cache);
-  if(lru->first != NULL) {
-    free(lru->first);
-  }
-  if(lru->last != NULL) {
-    free(lru->last);
-  }
   free(lru);
 }
 
@@ -44,7 +32,7 @@ section_t* sections_lru_cache_get(sections_lru_cache_t* lru, size_t section_id) 
   if (node == NULL) {
     return NULL;
   } else {
-    sections_lru_cache_move(lru, section_id);
+    sections_lru_cache_move(lru, node);
     return node->value;
   }
 }
@@ -54,42 +42,30 @@ void sections_lru_cache_delete(sections_lru_cache_t* lru, size_t section_id) {
   if (node != NULL) {
     if (node->previous == NULL) { // Node is the _start of the list
       if (node->next == NULL) {// List has only one node
-        hashmap_remove(&lru->cache, &section_id);
         if (lru->first != NULL) {
-          free(lru->first);
           lru->first = NULL;
         }
         if (lru->last != NULL) {
-          free(lru->last);
           lru->last = NULL;
         }
       } else {
-        sections_lru_node_t* next_node = hashmap_get(&lru->cache, node->next);
+        sections_lru_node_t* next_node = node->next;
         if (next_node->previous != NULL) {
-          free(next_node->previous);
           next_node->previous = NULL;
         }
-        *lru->first = *node->next;
-        hashmap_remove(&lru->cache, &section_id);
-        free(node->next);
+        lru->first = node->next;
       }
     } else {//Node is not at the start
-      sections_lru_node_t* previous_node = hashmap_get(&lru->cache, node->previous);
+      sections_lru_node_t* previous_node = node->previous;
       if (node->next == NULL) { // Node is the end of the list
-        free(previous_node->next);
         previous_node->next = NULL;
-        hashmap_remove(&lru->cache, &section_id);
       } else { // Node is in the middle of the list
-        sections_lru_node_t* next_node = hashmap_get(&lru->cache, node->next);
-        if (next_node->previous == NULL) {
-          node->previous = get_clear_memory(sizeof(size_t));
-        }
-        *next_node->previous = *node->previous;
-        *previous_node->next = *node->next;
-        hashmap_remove(&lru->cache, &section_id);
+        sections_lru_node_t* next_node = node->next;
+        next_node->previous = node->previous;
+        previous_node->next = node->next;
       }
-      free(node->previous);
     }
+    hashmap_remove(&lru->cache, &section_id);
     section_destroy(node->value);
     free(node);
   }
@@ -107,37 +83,26 @@ void sections_lru_cache_put(sections_lru_cache_t* lru, section_t* section) {
   // Cache Ejection
   if (hashmap_size(&lru->cache) == lru->size) {
     if (lru->last != NULL) {
-      sections_lru_node_t* last_node = hashmap_get(&lru->cache, lru->last);
+      sections_lru_node_t* last_node = lru->last;
       if(last_node->previous == NULL) { // We are at the end and its equal to the start
-        hashmap_remove(&lru->cache, lru->last);
-        free(lru->last);
         lru->last = NULL;
         if (lru->first != NULL) {
-          free(lru->first);
           lru->first = NULL;
         }
       } else {
-        sections_lru_node_t* new_last_node = hashmap_get(&lru->cache, last_node->previous);
+        sections_lru_node_t* new_last_node = last_node->previous;
         if (new_last_node->next != NULL) {
-          free(new_last_node->next);
           new_last_node->next = NULL;
         }
-        hashmap_remove(&lru->cache, lru->last);
-        *lru->last = *last_node->previous;
+        lru->last = last_node->previous;
       }
-
+      hashmap_remove(&lru->cache, &last_node->value->id);
       section_destroy(last_node->value);
-      if (last_node->previous != NULL) {
-        free(last_node->previous);
-      }
-      if (last_node->next != NULL) {
-        free(last_node->next);
-      }
       free(last_node);
     }
   }
   hashmap_put(&lru->cache, &section->id, node);
-  sections_lru_cache_move(lru, section->id);
+  sections_lru_cache_move(lru, node);
 }
 
 uint8_t sections_lru_cache_contains(sections_lru_cache_t* lru, size_t section_id) {
@@ -145,78 +110,48 @@ uint8_t sections_lru_cache_contains(sections_lru_cache_t* lru, size_t section_id
   return node != NULL;
 }
 
-void sections_lru_cache_move(sections_lru_cache_t* lru, size_t section_id) {
+void sections_lru_cache_move(sections_lru_cache_t* lru, sections_lru_node_t* node) {
    if (lru->first == NULL) {
-    lru->first = get_clear_memory(sizeof(size_t));
-    *lru->first = section_id;
-    if (lru->last == NULL) {
-      lru->last= get_clear_memory(sizeof(size_t));
-    }
-    *lru->last = section_id;
+    lru->first = node;
+    lru->last = node;
    } else {
-     if (*lru->first == section_id) { //id is already most recently used
+     if (lru->first == node) { //id is already most recently used
        return;
      }
-     if (*lru->first == *lru->last) { //cache has one node
-       sections_lru_node_t* node  = hashmap_get(&lru->cache, &section_id);
-       if (node->next == NULL) {
-         node->next = get_clear_memory(sizeof(size_t));
-       }
-       *node->next = *lru->first;
-       sections_lru_node_t* first_node  = hashmap_get(&lru->cache, lru->first);
-       if (first_node->previous == NULL) {
-         first_node->previous = get_clear_memory(sizeof(size_t));
-       }
-       *first_node->previous = section_id;
-       *lru->last = *lru->first;
-       *lru->first = section_id;
-     } else if (*lru->last == section_id) { // section is the lru
-       sections_lru_node_t* node  = hashmap_get(&lru->cache, &section_id);
-       *lru->last = *node->previous;
-       sections_lru_node_t* last_node  = hashmap_get(&lru->cache, lru->last);
-       if (last_node->next != NULL) {
-         free(last_node->next);
-       }
+     if (lru->first == lru->last) { //cache has one node
+       node->next = lru->first;
+       sections_lru_node_t* first_node = lru->first;
+       first_node->previous = node;
+       lru->last = first_node;
+       lru->first = node;
+     } else if (lru->last == node) { // section is the lru
+       lru->last = node->previous;
+       sections_lru_node_t* last_node = lru->last;
        last_node->next = NULL;
-       if (node->next == NULL) {
-         node->next = get_clear_memory(sizeof(size_t));
-       }
-       *node->next = *lru->first;
-       if (node->previous != NULL) {
-         free(node->previous);
-       }
+       node->next = lru->first;
        node->previous = NULL;
-       sections_lru_node_t* first_node  = hashmap_get(&lru->cache, lru->first);
-       if (first_node->previous == NULL) {
-         first_node->previous = get_clear_memory(sizeof(size_t));
-       }
-       *first_node->previous = section_id;
-       *lru->first = section_id;
+       sections_lru_node_t* first_node  = lru->first;
+       first_node->previous = node;
+       lru->first = node;
      } else { // section is somewhere in the middle;
-       sections_lru_node_t* node  = hashmap_get(&lru->cache, &section_id);
-       sections_lru_node_t* next_node =  hashmap_get(&lru->cache, node->next);
-       if (node->previous != NULL) {
-         sections_lru_node_t* previous_node = hashmap_get(&lru->cache, node->previous);
-         *previous_node->next = *node->next;
-       }
-       if (node->next == NULL) { //node is new in the list
-         node->next = get_clear_memory(sizeof(size_t));
-         *node->next = *lru->first;
-         sections_lru_node_t* first_node =  hashmap_get(&lru->cache, lru->first);
-         if (first_node->previous == NULL) {
-           first_node->previous = get_clear_memory(sizeof(size_t));
-         }
-         *first_node->previous = section_id;
-         *lru->first = section_id;
+       if ((node->next == NULL) && (node->previous == NULL)) {
+         sections_lru_node_t* first_node = lru->first;
+         first_node->previous = node;
+         node->next = first_node;
+         lru->first = node;
        } else {
-         next_node->previous = node->previous;
-
-         *node->next = *lru->first;
-         if (next_node->previous != NULL) {
-           free(next_node->previous);
+         sections_lru_node_t* next_node = node->next;
+         if (node->previous != NULL) {
+           sections_lru_node_t* previous_node = node->previous;
+           previous_node->next = next_node;
          }
-         next_node->previous = NULL;
-         *lru->first = section_id;
+         if (node->next != NULL) {
+           next_node->previous = node->previous;
+         }
+         sections_lru_node_t* first_node = lru->first;
+         first_node->previous = node;
+         node->next = first_node;
+         lru->first = node;
        }
      }
    }
