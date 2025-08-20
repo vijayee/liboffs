@@ -276,3 +276,49 @@ TEST_F(TestSectionsLRU, TestSectionLRUSize0) {
 
   sections_lru_cache_destroy(lru);
 }
+
+class TestRoundRobin : public testing::Test {
+public:
+  char* robin_location;
+  work_pool_t* pool;
+  hierarchical_timing_wheel_t* wheel;
+  round_robin_t* robin;
+  void SetUp() override {
+    robin_location = path_join(".", "robin");
+    rm_rf(robin_location);
+    pool = work_pool_create(platform_core_count());
+    work_pool_launch(pool);
+    wheel = hierarchical_timing_wheel_create(8, pool);
+    hierarchical_timing_wheel_run(wheel);
+    mkdir_p(robin_location);
+  }
+  void TearDown() override {
+    hierarchical_timing_wheel_wait_for_idle_signal(wheel);
+    hierarchical_timing_wheel_stop(wheel);
+    work_pool_shutdown(pool);
+    work_pool_join_all(pool);
+    free(robin_location);
+    work_pool_destroy(pool);
+    hierarchical_timing_wheel_destroy(wheel);
+    round_robin_destroy(robin);
+  }
+};
+
+TEST_F(TestRoundRobin, TestRoundRobinFunctions) {
+  robin = round_robin_create(robin_location, wheel);
+  size_t size = 6;
+  for (size_t i = 0; i < size; i++) {
+    round_robin_add(robin, i);
+  }
+  EXPECT_EQ(robin->size, size);
+  for (size_t i= 0; i < (size * 10); i++) {
+    EXPECT_EQ(round_robin_next(robin), i % size);
+  }
+  for (size_t i = 0; i < size; i++) {
+    round_robin_remove(robin, i);
+  }
+  EXPECT_EQ(robin->size, 0);
+  for (size_t i= 0; i < (size * 10); i++) {
+    EXPECT_EQ(round_robin_next(robin), 0);
+  }
+}
