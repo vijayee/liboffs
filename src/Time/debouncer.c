@@ -43,6 +43,13 @@ void debouncer_debounce(debouncer_t* bouncer) {
     bouncer->timerId = hierarchical_timing_wheel_set_timer(bouncer->wheel, bouncer->ctx, bouncer->cb, bouncer->abort, (timer_duration_t){.milliseconds = bouncer->wait});
   }
 }
+
+void debouncer_flush(debouncer_t* bouncer) {
+  hierarchical_timing_wheel_cancel_timer(bouncer->wheel, bouncer->timerId);
+  bouncer->timerId = 0;
+  bouncer->cb(bouncer->ctx);
+}
+
 uint64_t elapsed_time(timeval_t start, timeval_t end) {
   double elapsedTime;
 #if _WIN32

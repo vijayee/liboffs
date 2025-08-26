@@ -36,6 +36,7 @@ TEST_F(TestSection, TestSectionFunction) {
   size_t block_count = 20;
   block_t* blocks[block_count];
   index_entry_t* entries[block_count];
+  uint8_t full;
   for (size_t i = 0; i < block_count; i++) {
     blocks[i] = block_create_random_block_by_type(mini);
   }
@@ -51,7 +52,7 @@ TEST_F(TestSection, TestSectionFunction) {
   section_t* section = section_create(section_location, meta_location, 20, 4000, wheel, wait, max_wait, mini);
   for (size_t i = 0; i < block_count; i++) {
     size_t section_index = 0;
-    int result = section_write(section, blocks[i], &section_index);
+    int result = section_write(section, blocks[i]->data, &section_index, &full);
     EXPECT_EQ(result, 0);
     if (result == 0) {
       index_entry_t* entry = index_entry_create(blocks[i]->hash);
@@ -96,7 +97,7 @@ TEST_F(TestSection, TestSectionFunction) {
 
   for (size_t i = 0; i < block_count; i++) {
     size_t section_index;
-    int result = section_write(section, blocks[i], &section_index);
+    int result = section_write(section, blocks[i]->data, &section_index, &full);
     EXPECT_EQ(result, 0);
   }
   int result = section_deallocate(section, entries[10]->section_index);
@@ -127,7 +128,7 @@ TEST_F(TestSection, TestSectionFunction) {
   EXPECT_EQ(section->fragments->count, 3);
   platform_rw_unlock_r(&section->lock);
 
-  result = section_write(section, blocks[12], &entries[12]->section_index);
+  result = section_write(section, blocks[12]->data, &entries[12]->section_index, &full);
   EXPECT_EQ(result, 0);
 
 
@@ -137,7 +138,7 @@ TEST_F(TestSection, TestSectionFunction) {
 
   EXPECT_EQ(entries[12]->section_index, entries[2]->section_index);
 
-  result = section_write(section, blocks[18], &entries[18]->section_index);
+  result = section_write(section, blocks[18]->data, &entries[18]->section_index, &full);
   EXPECT_EQ(result, 0);
 
   EXPECT_EQ(entries[18]->section_index, entries[10]->section_index);

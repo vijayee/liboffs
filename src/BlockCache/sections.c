@@ -6,9 +6,24 @@
 #include "../Util/hash.h"
 #include "../Util/path_join.h"
 #include "../Util/log.h"
+#include "../Util/mkdir_p.h"
+#include "../Util/get_dir.h"
+#include "block.h"
+#ifdef _WIN32
+#include <io.h>
+#define F_OK 0
+#define access _access
+#else
+#include <unistd.h>
+#endif
+
 
 void sections_lru_cache_move(sections_lru_cache_t* lru, sections_lru_node_t* node);
 void round_robin_save(void* ctx);
+void sections_full(sections_t* sections, size_t section_id);
+size_t sections_get_next_id(sections_t* sections);
+section_t* sections_get_section(sections_t* sections, size_t section_id);
+void sections_free(sections_t* sections, size_t section_id);
 
 sections_lru_cache_t* sections_lru_cache_create(size_t size) {
   sections_lru_cache_t* lru = get_clear_memory(sizeof(sections_lru_cache_t));
@@ -75,6 +90,9 @@ void sections_lru_cache_delete(sections_lru_cache_t* lru, size_t section_id) {
 }
 
 void sections_lru_cache_put(sections_lru_cache_t* lru, section_t* section) {
+  if (lru->size == 0) {
+    return;
+  }
   sections_lru_node_t* node = hashmap_get(&lru->cache, &section->id);
   // Add a new node if none exists already
   if (node == NULL) {
@@ -261,6 +279,25 @@ void round_robin_remove(round_robin_t* robin, size_t id){
   platform_unlock(&robin->lock);
 }
 
+uint8_t round_robin_contains(round_robin_t* robin, size_t id) {
+  platform_lock(&robin->lock);
+  if ((robin->last == NULL) && (robin->first == NULL)) {
+    platform_unlock(&robin->lock);
+    return 0;
+  }
+  round_robin_node_t* current = robin->first;
+  while (current != NULL) {
+    if (current->id == id) {
+      platform_unlock(&robin->lock);
+      return 1;
+    } else {
+      current = current->next;
+    }
+  }
+  platform_unlock(&robin->lock);
+  return 0;
+}
+
 cbor_item_t* round_robin_to_cbor(round_robin_t* robin) {
   cbor_item_t* array= cbor_new_definite_array(robin->size);
   round_robin_node_t* current = robin->first;
@@ -313,3 +350,148 @@ void round_robin_save(void* ctx) {
   free(cbor_data);
   cbor_decref(&cbor);
 }
+
+sections_t* sections_create(char* path, size_t size, size_t max_tuple_size, block_size_e type, hierarchical_timing_wheel_t* wheel, size_t wait, size_t max_wait) {
+  char* robin_folder = path_join(path, "robin");
+  mkdir_p(robin_folder);
+  char* robin_path = path_join(robin_folder, ".robin");
+  free(robin_folder);
+  sections_t* sections = get_clear_memory(sizeof(sections_t));
+  sections->wheel = (hierarchical_timing_wheel_t*) refcounter_reference((refcounter_t*) wheel);
+  sections->wait = wait;
+  sections->max_wait = max_wait;
+  sections->type = type;
+  if (access(robin_path,F_OK) == 0) {
+    //Existing File
+    FILE* robin_file = fopen(robin_path, "rb");
+    if(fseek(robin_file, 0,SEEK_END)) {
+      log_error("Failed to Read Round Robin File Size");
+      abort();
+    }
+    int32_t size = ftell(robin_file);
+    rewind(robin_file);
+    uint8_t buffer[size];
+    int32_t read_size = fread(buffer, sizeof(uint8_t), size, robin_file);
+    fclose(robin_file);
+    if (size != read_size) {
+      log_error("Failed to Read Round Robin File");
+      abort();
+    }
+    struct cbor_load_result result;
+    cbor_item_t* cbor = cbor_load(buffer, size, &result);
+    if (result.error.code != CBOR_ERR_NONE) {
+      log_error("Failed to Parse Round Robin File");
+      abort();
+    }
+    if(!cbor_isa_array(cbor)) {
+      log_error("Failed to Parse Round Robin File: Malformed Data");
+      abort();
+    }
+    sections->robin = cbor_to_round_robin(cbor, robin_path, wheel);
+  } else {
+    sections->robin = round_robin_create(robin_path, wheel);
+  }
+  sections->lru = sections_lru_cache_create(size);
+  sections->data_path = path_join(path, "data");
+  mkdir_p(sections->data_path);
+  sections->meta_path = path_join(path, "meta");
+  mkdir_p(sections->meta_path);
+
+  vec_str_t* files = get_dir(sections->meta_path);
+  if (files->length) {
+    char* last = vec_last(files);
+    uint64_t last_id = atol(last);
+    sections->next_id = last_id + 1;
+  } else {
+    sections->next_id = 0;
+  }
+  vec_deinit(files);
+  while (sections->robin->size < sections->max_tuple_size) {
+    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections_get_next_id(sections), sections->wheel, sections->wait, sections->max_wait, sections->type);
+    sections_lru_cache_put(sections->lru, section);
+    round_robin_add(sections->robin, section->id);
+  }
+  return sections;
+}
+
+void sections_destroy(sections_t* sections) {
+  sections_lru_cache_destroy(sections->lru);
+  round_robin_destroy(sections->robin);
+  hierarchical_timing_wheel_destroy(sections->wheel);
+  free(sections->meta_path);
+  free(sections->data_path);
+  free(sections->robin_path);
+  free(sections);
+}
+
+int sections_write(sections_t* sections, buffer_t* data, size_t* index) {
+  size_t section_id;
+  section_t* section;
+  uint8_t full;
+  int result;
+  do {
+    section_id = round_robin_next(sections->robin);
+    section = sections_lru_cache_get(sections->lru, section_id);
+    if (section == NULL) {
+      section = section_create(sections->data_path, sections->meta_path, sections->size, section_id, sections->wheel, sections->wait, sections->max_wait, sections->type);
+      sections_lru_cache_put(sections->lru, section);
+    }
+    result = section_write(section, data, index, &full);
+
+    if ((result == 2) || full) {
+      sections_full(sections, section_id);
+    }
+  } while(result == 2);
+  return result;
+}
+
+buffer_t* sections_read(sections_t* sections, size_t section_id, size_t section_index) {
+  section_t* section = sections_lru_cache_get(sections->lru, section_id);
+  if (section == NULL) {
+    section_t* section = sections_get_section(sections, section_id);
+  }
+  return section_read(section, section_index);
+}
+
+int sections_deallocate(sections_t* sections, size_t section_id, size_t section_index) {
+  section_t* section = sections_lru_cache_get(sections->lru, section_id);
+  if (section == NULL) {
+    section_t* section = sections_get_section(sections, section_id);
+  }
+  int result = section_deallocate(section, section_index);
+  if(result == 0) {
+    sections_free(sections, section_id);
+  }
+  return result;
+}
+
+section_t* sections_get_section(sections_t* sections, size_t section_id) {
+  section_t* section = section_create(sections->data_path, sections->meta_path, sections->size,section_id, sections->wheel, sections->wait, sections->max_wait, sections->type);
+  round_robin_add(sections->robin, section_id);
+  sections_lru_cache_put(sections->lru, section);
+  return section;
+}
+
+size_t sections_get_next_id(sections_t* sections) {
+  size_t id;
+  platform_lock(&sections->lock);
+  id = sections->next_id++;
+  platform_unlock(&sections->lock);
+  return id;
+}
+
+void sections_full(sections_t* sections, size_t section_id) {
+  round_robin_remove(sections->robin, section_id);
+  while (sections->robin->size < sections->max_tuple_size) {
+    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections_get_next_id(sections), sections->wheel, sections->wait, sections->max_wait, sections->type);
+    sections_lru_cache_put(sections->lru, section);
+    round_robin_add(sections->robin, section->id);
+  }
+}
+
+void sections_free(sections_t* sections, size_t section_id) {
+  if(round_robin_contains(sections->robin, section_id) == 0) {
+    round_robin_add(sections->robin, section_id);
+  }
+}
+

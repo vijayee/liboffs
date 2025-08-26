@@ -32,6 +32,7 @@ typedef struct {
 debouncer_t* debouncer_create(hierarchical_timing_wheel_t* wheel, void* ctx, void (* cb)(void*), void (* abort)(void*), uint64_t wait, uint64_t max_wait);
 void debouncer_destroy(debouncer_t* bouncer);
 void debouncer_debounce(debouncer_t* bouncer);
+void debouncer_flush(debouncer_t* bouncer);
 uint64_t elapsed_time(timeval_t start, timeval_t end);
 void get_time(timeval_t* tv);
 #endif //OFFS_DEBOUNCER_H

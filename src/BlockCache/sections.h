@@ -55,7 +55,29 @@ void round_robin_destroy(round_robin_t* robin);
 void round_robin_add(round_robin_t* robin, size_t id);
 size_t round_robin_next(round_robin_t* robin);
 void round_robin_remove(round_robin_t* robin, size_t id);
+uint8_t round_robin_contains(round_robin_t* robin, size_t id);
 cbor_item_t* round_robin_to_cbor(round_robin_t* robin);
 round_robin_t* cbor_to_round_robin(cbor_item_t* cbor, char* robin_path, hierarchical_timing_wheel_t* wheel);
 
+typedef struct {
+  PlATFORMLOCKTYPE(lock);
+  sections_lru_cache_t* lru;
+  round_robin_t* robin;
+  size_t max_tuple_size;
+  size_t next_id;
+  size_t size;
+  block_size_e type;
+  size_t wait;
+  size_t max_wait;
+  hierarchical_timing_wheel_t* wheel;
+  char* data_path;
+  char* meta_path;
+  char* robin_path;
+} sections_t;
+
+sections_t* sections_create(char* path, size_t size, size_t max_tuple_size, block_size_e type, hierarchical_timing_wheel_t* wheel, size_t wait, size_t max_wait);
+void sections_destroy(sections_t* sections);
+int sections_write(sections_t* sections, buffer_t* data, size_t* index);
+buffer_t* sections_read(sections_t* sections, size_t section_id, size_t section_index);
+int sections_deallocate(sections_t* sections, size_t section_id, size_t section_index);
 #endif //OFFS_SECTIONS_H

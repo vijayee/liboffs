@@ -61,7 +61,7 @@ typedef struct {
 
 section_t* section_create(char* path, char* meta_path, size_t size, size_t id, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait, block_size_e type);
 void section_destroy(section_t* section);
-int section_write(section_t* section, block_t* block, size_t* index);
+int section_write(section_t* section, buffer_t* data, size_t* index, uint8_t* full);
 buffer_t* section_read(section_t* section, size_t index);
 int section_deallocate(section_t* section, size_t index);
 #endif //OFFS_SECTION_H

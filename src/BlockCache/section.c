@@ -260,9 +260,9 @@ uint8_t section_full(section_t* section) {
   return result;
 }
 
-int section_write(section_t* section, block_t* block, size_t* index) {
+int section_write(section_t* section, buffer_t* data, size_t* index, uint8_t* full) {
   platform_rw_lock_w(&section->lock);
-  if (block->data->size != section->block_size) {
+  if (data->size != section->block_size) {
     platform_rw_unlock_w(&section->lock);
     return 1;
   }
@@ -278,13 +278,13 @@ int section_write(section_t* section, block_t* block, size_t* index) {
         return 3;
       }
     }
-    size_t byte = block->data->size * (*index);
+    size_t byte = data->size * (*index);
     if (fseek(section->file, byte, SEEK_SET)) {
       section_deallocate(section, *index);
       platform_rw_unlock_w(&section->lock);
       return 4;
     }
-    size_t result = fwrite(block->data->data, sizeof(block->data->data[0]), block->data->size, section->file);
+    size_t result = fwrite(data->data, sizeof(data->data[0]), data->size, section->file);
     fflush(section->file);
     if (result < section->block_size) {
       section_deallocate(section, *index);
@@ -292,6 +292,7 @@ int section_write(section_t* section, block_t* block, size_t* index) {
       return 5;
     }
     debouncer_debounce(section->debouncer);
+    *full = section->fragments->count == 0;
     platform_rw_unlock_w(&section->lock);
     return 0;
   }
