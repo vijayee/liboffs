@@ -6,7 +6,6 @@
 #define OFFS_SECTION_H
 #include <stddef.h>
 #include <stdio.h>
-#include "../Time/debouncer.h"
 #include "../RefCounter/refcounter.h"
 #include "cbor.h"
 #include "block.h"
@@ -49,19 +48,19 @@ fragment_list_t* cbor_to_fragment_list(cbor_item_t* cbor);
 typedef struct {
   refcounter_t refcounter;
   PLATFORMRWLOCKTYPE(lock);
-  FILE* file;
+  int fd;
   size_t id;
   char* meta_path;
   char* path;
   fragment_list_t* fragments;
   size_t size;
   block_size_e block_size;
-  debouncer_t* debouncer;
 } section_t;
 
-section_t* section_create(char* path, char* meta_path, size_t size, size_t id, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait, block_size_e type);
+section_t* section_create(char* path, char* meta_path, size_t size, size_t id, block_size_e type);
 void section_destroy(section_t* section);
 int section_write(section_t* section, buffer_t* data, size_t* index, uint8_t* full);
 buffer_t* section_read(section_t* section, size_t index);
 int section_deallocate(section_t* section, size_t index);
+uint8_t section_full(section_t* section);
 #endif //OFFS_SECTION_H

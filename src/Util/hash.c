@@ -88,6 +88,12 @@ uint64_t* duplicate_uint64(const uint64_t* key) {
   return copy;
 }
 
+size_t* duplicate_size_t(const size_t* key) {
+  uint64_t* copy = get_clear_memory(sizeof(size_t));
+  memcpy(copy, key,sizeof(size_t));
+  return copy;
+}
+
 size_t hash_buffer(const buffer_t* data) {
   if(sizeof(size_t) == 8) {
     return XXH3_64bits(data->data,data->size);

@@ -22,8 +22,9 @@ void sections_lru_cache_move(sections_lru_cache_t* lru, sections_lru_node_t* nod
 void round_robin_save(void* ctx);
 void sections_full(sections_t* sections, size_t section_id);
 size_t sections_get_next_id(sections_t* sections);
-section_t* sections_get_section(sections_t* sections, size_t section_id);
 void sections_free(sections_t* sections, size_t section_id);
+section_t* sections_checkout(sections_t* sections, size_t section_id);
+void sections_checkin(sections_t* sections, section_t* section);
 
 sections_lru_cache_t* sections_lru_cache_create(size_t size) {
   sections_lru_cache_t* lru = get_clear_memory(sizeof(sections_lru_cache_t));
@@ -31,7 +32,7 @@ sections_lru_cache_t* sections_lru_cache_create(size_t size) {
   lru->first = NULL;
   lru->last = NULL;
   hashmap_init(&lru->cache, (void*) hash_size_t, (void*) compare_size_t);
-  hashmap_set_key_alloc_funcs(&lru->cache, duplicate_uint64, (void*)free);
+  hashmap_set_key_alloc_funcs(&lru->cache, duplicate_size_t, (void*)free);
   return lru;
 }
 
@@ -183,7 +184,7 @@ round_robin_t* round_robin_create(char* robin_path, hierarchical_timing_wheel_t*
   round_robin_t* robin = get_clear_memory(sizeof(round_robin_t));
   platform_lock_init(&robin->lock);
   robin->debouncer = debouncer_create(wheel, (void*) robin, round_robin_save, round_robin_save,5, 5000);
-  robin->path = path_join(robin_path, ".robin");
+  robin->path = robin_path;
   return robin;
 }
 
@@ -351,7 +352,7 @@ void round_robin_save(void* ctx) {
   cbor_decref(&cbor);
 }
 
-sections_t* sections_create(char* path, size_t size, size_t max_tuple_size, block_size_e type, hierarchical_timing_wheel_t* wheel, size_t wait, size_t max_wait) {
+sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t max_tuple_size, block_size_e type, hierarchical_timing_wheel_t* wheel, size_t wait, size_t max_wait) {
   char* robin_folder = path_join(path, "robin");
   mkdir_p(robin_folder);
   char* robin_path = path_join(robin_folder, ".robin");
@@ -361,6 +362,12 @@ sections_t* sections_create(char* path, size_t size, size_t max_tuple_size, bloc
   sections->wait = wait;
   sections->max_wait = max_wait;
   sections->type = type;
+  sections->max_tuple_size = max_tuple_size;
+  sections->size = size;
+  platform_lock_init(&sections->lock);
+  platform_lock_init(&sections->checkout.lock);
+  hashmap_init(&sections->checkout.sections, (void*) hash_size_t, (void*) compare_size_t);
+  hashmap_set_key_alloc_funcs(&sections->checkout.sections, duplicate_size_t, (void*)free);
   if (access(robin_path,F_OK) == 0) {
     //Existing File
     FILE* robin_file = fopen(robin_path, "rb");
@@ -391,7 +398,7 @@ sections_t* sections_create(char* path, size_t size, size_t max_tuple_size, bloc
   } else {
     sections->robin = round_robin_create(robin_path, wheel);
   }
-  sections->lru = sections_lru_cache_create(size);
+  sections->lru = sections_lru_cache_create(cache_size);
   sections->data_path = path_join(path, "data");
   mkdir_p(sections->data_path);
   sections->meta_path = path_join(path, "meta");
@@ -407,7 +414,8 @@ sections_t* sections_create(char* path, size_t size, size_t max_tuple_size, bloc
   }
   vec_deinit(files);
   while (sections->robin->size < sections->max_tuple_size) {
-    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections_get_next_id(sections), sections->wheel, sections->wait, sections->max_wait, sections->type);
+    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections_get_next_id(sections), sections->type);
+    refcounter_yield((refcounter_t*) section);
     sections_lru_cache_put(sections->lru, section);
     round_robin_add(sections->robin, section->id);
   }
@@ -424,52 +432,80 @@ void sections_destroy(sections_t* sections) {
   free(sections);
 }
 
-int sections_write(sections_t* sections, buffer_t* data, size_t* index) {
-  size_t section_id;
+int sections_write(sections_t* sections, buffer_t* data, size_t* section_id, size_t* section_index) {
   section_t* section;
   uint8_t full;
+  uint8_t tries = 0;
   int result;
   do {
-    section_id = round_robin_next(sections->robin);
-    section = sections_lru_cache_get(sections->lru, section_id);
+    *section_id = round_robin_next(sections->robin);
+    section = sections_checkout(sections, *section_id);
     if (section == NULL) {
-      section = section_create(sections->data_path, sections->meta_path, sections->size, section_id, sections->wheel, sections->wait, sections->max_wait, sections->type);
-      sections_lru_cache_put(sections->lru, section);
+      section = section_create(sections->data_path, sections->meta_path, sections->size,*section_id, sections->type);
     }
-    result = section_write(section, data, index, &full);
+    result = section_write(section, data, section_index, &full);
 
     if ((result == 2) || full) {
-      sections_full(sections, section_id);
+      sections_full(sections, *section_id);
     }
-  } while(result == 2);
+    tries++;
+    sections_checkin(sections, section);
+  } while((result == 2) && (tries < sections->max_tuple_size));
   return result;
 }
 
 buffer_t* sections_read(sections_t* sections, size_t section_id, size_t section_index) {
-  section_t* section = sections_lru_cache_get(sections->lru, section_id);
-  if (section == NULL) {
-    section_t* section = sections_get_section(sections, section_id);
-  }
-  return section_read(section, section_index);
+  section_t* section = sections_checkout(sections, section_id);
+  buffer_t* data = section_read(section, section_index);
+  sections_checkin(sections, section);
+  return data;
 }
 
 int sections_deallocate(sections_t* sections, size_t section_id, size_t section_index) {
-  section_t* section = sections_lru_cache_get(sections->lru, section_id);
-  if (section == NULL) {
-    section_t* section = sections_get_section(sections, section_id);
-  }
+  section_t* section = sections_checkout(sections, section_id);
   int result = section_deallocate(section, section_index);
   if(result == 0) {
     sections_free(sections, section_id);
   }
+  sections_checkin(sections, section);
   return result;
 }
 
-section_t* sections_get_section(sections_t* sections, size_t section_id) {
-  section_t* section = section_create(sections->data_path, sections->meta_path, sections->size,section_id, sections->wheel, sections->wait, sections->max_wait, sections->type);
-  round_robin_add(sections->robin, section_id);
-  sections_lru_cache_put(sections->lru, section);
-  return section;
+section_t* sections_checkout(sections_t* sections, size_t section_id) {
+  section_t* section = sections_lru_cache_get(sections->lru, section_id);
+  if (section == NULL) {
+    section = section_create(sections->data_path, sections->meta_path, sections->size,section_id, sections->type);
+    if (section_full(section) == 0) {
+      round_robin_add(sections->robin, section_id);
+    }
+  }
+  platform_lock(&sections->checkout.lock);
+  checkout_t* checkout = hashmap_get(&sections->checkout.sections, &section_id);
+  if (checkout == NULL) {
+    checkout = get_clear_memory(sizeof(checkout_t));
+    checkout->section = (section_t*) refcounter_reference((refcounter_t*) section);
+    checkout->count = 1;
+    hashmap_put(&sections->checkout.sections, &section_id, checkout);
+  } else {
+    checkout->count++;
+  }
+  platform_unlock(&sections->checkout.lock);
+  return (section_t*) refcounter_reference((refcounter_t*)section);
+}
+
+void sections_checkin(sections_t* sections, section_t* section) {
+  platform_lock(&sections->checkout.lock);
+  checkout_t* checkout = hashmap_get(&sections->checkout.sections, &section->id);
+  if (checkout != NULL) {
+    checkout->count--;
+    if (checkout->count == 0) {
+      hashmap_remove(&sections->checkout.sections, &section->id);
+      free(checkout);
+      section_destroy(section);
+    }
+  }
+  platform_unlock(&sections->checkout.lock);
+  section_destroy(section);
 }
 
 size_t sections_get_next_id(sections_t* sections) {
@@ -483,7 +519,8 @@ size_t sections_get_next_id(sections_t* sections) {
 void sections_full(sections_t* sections, size_t section_id) {
   round_robin_remove(sections->robin, section_id);
   while (sections->robin->size < sections->max_tuple_size) {
-    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections_get_next_id(sections), sections->wheel, sections->wait, sections->max_wait, sections->type);
+    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections_get_next_id(sections), sections->type);
+    refcounter_yield((refcounter_t*) section);
     sections_lru_cache_put(sections->lru, section);
     round_robin_add(sections->robin, section->id);
   }
