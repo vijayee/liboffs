@@ -323,6 +323,7 @@ public:
   char* path;
   work_pool_t* pool;
   hierarchical_timing_wheel_t* wheel;
+  sections_t* sections = NULL;
   void SetUp() override {
     path = path_join(".", "sections");
     rm_rf(path);
@@ -335,6 +336,7 @@ public:
       blocks[i] = block_create_random_block_by_type(block_type);
       entries[i] = index_entry_create(blocks[i]->hash);
     }
+    sections = sections_create(path, size, cache_size, max_tuple_size, block_type, wheel, wait, max_wait);
   }
   void TearDown() override {
     for (size_t i = 0; i < 25; i++) {
@@ -346,13 +348,13 @@ public:
     work_pool_shutdown(pool);
     work_pool_join_all(pool);
     free(path);
+    sections_destroy(sections);
     work_pool_destroy(pool);
     hierarchical_timing_wheel_destroy(wheel);
   }
 };
 
 TEST_F(TestSections, SectionsFunctions) {
-  sections_t* sections = sections_create(path, size, cache_size, max_tuple_size, block_type, wheel, wait, max_wait);
   size_t section_index;
   size_t section_id;
 
@@ -371,6 +373,7 @@ TEST_F(TestSections, SectionsFunctions) {
     EXPECT_EQ(data == NULL, false);
     if (data != NULL) {
       EXPECT_EQ(buffer_compare(data, blocks[i]->data) == 0, true);
+      buffer_destroy(data);
     }
   }
   for (size_t i = 0; i < 25; i++) {
@@ -381,5 +384,4 @@ TEST_F(TestSections, SectionsFunctions) {
     int result = sections_deallocate(sections, entries[i]->section_id, entries[i]->section_index);
     EXPECT_NE(result, 0);
   }
-  //sections_destroy(sections);
 }

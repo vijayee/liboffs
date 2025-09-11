@@ -45,8 +45,8 @@ cbor_item_t* fragment_to_cbor(fragment_t* fragment) {
 
 fragment_t* cbor_to_fragment(cbor_item_t* cbor) {
   fragment_t* fragment = get_clear_memory(sizeof(fragment_t));
-  fragment->start = cbor_get_uint64(cbor_array_get(cbor, 0));
-  fragment->end = cbor_get_uint64(cbor_array_get(cbor, 1));
+  fragment->start = cbor_get_uint64(cbor_move(cbor_array_get(cbor, 0)));
+  fragment->end = cbor_get_uint64(cbor_move(cbor_array_get(cbor, 1)));
   return fragment;
 }
 
@@ -155,7 +155,7 @@ fragment_list_t* cbor_to_fragment_list(cbor_item_t* cbor){
   fragment_list_t* list= fragment_list_create();
   size_t size =  cbor_array_size(cbor);
   for (size_t i= 0; i < size; i++) {
-    fragment_list_enqueue(list,cbor_to_fragment(cbor_array_get(cbor,i)));
+    fragment_list_enqueue(list,cbor_to_fragment(cbor_move(cbor_array_get(cbor,i))));
   }
   list->count = size;
   return list;
@@ -200,7 +200,9 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id, b
       abort();
     }
     struct cbor_load_result result;
+
     cbor_item_t* cbor = cbor_load(buffer, size, &result);
+
     if (result.error.code != CBOR_ERR_NONE) {
       log_error("Failed to Parse Section Meta File");
       abort();

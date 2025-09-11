@@ -194,7 +194,7 @@ void round_robin_destroy(round_robin_t* robin) {
   platform_lock_destroy(&robin->lock);
   round_robin_node_t* current = robin->first;
   while (current != NULL) {
-    round_robin_node_t* next = current;
+    round_robin_node_t* next = current->next;
     free(current);
     current = next;
   }
@@ -413,6 +413,7 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
     sections->next_id = 0;
   }
   vec_deinit(files);
+  free(files);
   while (sections->robin->size < sections->max_tuple_size) {
     section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections_get_next_id(sections), sections->type);
     refcounter_yield((refcounter_t*) section);
@@ -423,6 +424,8 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
 }
 
 void sections_destroy(sections_t* sections) {
+  platform_lock_destroy(&sections->checkout.lock);
+  hashmap_cleanup(&sections->checkout.sections);
   sections_lru_cache_destroy(sections->lru);
   round_robin_destroy(sections->robin);
   hierarchical_timing_wheel_destroy(sections->wheel);
@@ -475,6 +478,7 @@ section_t* sections_checkout(sections_t* sections, size_t section_id) {
   section_t* section = sections_lru_cache_get(sections->lru, section_id);
   if (section == NULL) {
     section = section_create(sections->data_path, sections->meta_path, sections->size,section_id, sections->type);
+    refcounter_yield((refcounter_t*) section);
     if (section_full(section) == 0) {
       round_robin_add(sections->robin, section_id);
     }
