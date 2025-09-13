@@ -20,4 +20,5 @@ size_t hash_buffer(const buffer_t* data);
 size_t hash_block(const block_t* data);
 size_t hash_size_t(const void* data);
 int compare_size_t(const void* data1, const void* data2);
+int compare_buffer(const void* data1, const void* data2);
 #endif //OFFS_HASH_H

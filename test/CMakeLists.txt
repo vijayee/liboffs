@@ -9,7 +9,8 @@ if (BUILD_TESTING)
             test_block.cpp
             test_index.cpp
             test_time.cpp
-            test_section.cpp)
+            test_section.cpp
+            test_block_cache.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)

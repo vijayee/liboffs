@@ -93,11 +93,11 @@ block_t* block_create_existing_data_hash_by_type(buffer_t* data, buffer_t* hash,
 }
 
 void block_destroy(block_t* block) {
-  buffer_destroy(block->hash);
-  buffer_destroy(block->data);
   refcounter_dereference((refcounter_t*) block);
   if (refcounter_count((refcounter_t*) block) == 0) {
     refcounter_destroy_lock((refcounter_t*) block);
+    buffer_destroy(block->hash);
+    buffer_destroy(block->data);
     free(block);
   }
 }
