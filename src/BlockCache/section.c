@@ -164,7 +164,7 @@ fragment_list_t* cbor_to_fragment_list(cbor_item_t* cbor){
 section_t* section_create(char* path, char* meta_path, size_t size, size_t id, block_size_e type) {
   section_t* section = get_clear_memory(sizeof(section_t));
   refcounter_init((refcounter_t*) section);
-  platform_rw_lock_init(&section->lock);
+  platform_lock_init(&section->lock);
   char section_id[20];
   sprintf(section_id, "%lu", id);
   section->fd = -1;
@@ -231,7 +231,7 @@ void section_destroy(section_t* section) {
   refcounter_dereference((refcounter_t*) section);
   if (refcounter_count((refcounter_t*) section) == 0) {
     refcounter_destroy_lock((refcounter_t*) section);
-    platform_rw_lock_destroy(&section->lock);
+    platform_lock_destroy(&section->lock);
     if (section->fd != -1) {
       close(section->fd);
       section->fd = -1;
@@ -270,22 +270,22 @@ int section_next_index(section_t* section, size_t* index) {
 
 uint8_t section_full(section_t* section) {
   uint8_t result;
-  platform_rw_lock_r(&section->lock);
+  platform_lock(&section->lock);
   result = section->fragments->count == 0;
-  platform_rw_unlock_r(&section->lock);
+  platform_unlock(&section->lock);
   return result;
 }
 
 int section_write(section_t* section, buffer_t* data, size_t* index, uint8_t* full) {
-  platform_rw_lock_w(&section->lock);
+  platform_lock(&section->lock);
   if (data->size != section->block_size) {
     *full = section->fragments->count == 0;
-    platform_rw_unlock_w(&section->lock);
+    platform_unlock(&section->lock);
     return 1;
   }
   if (section_next_index(section, index)) {
     *full = section->fragments->count == 0;
-    platform_rw_unlock_w(&section->lock);
+    platform_unlock(&section->lock);
     return 2;
   } else {
     if (section->fd == -1) {
@@ -297,7 +297,7 @@ int section_write(section_t* section, buffer_t* data, size_t* index, uint8_t* fu
       if (section->fd < 0) {
         _section_deallocate(section, *index);
         *full = section->fragments->count == 0;
-        platform_rw_unlock_w(&section->lock);
+        platform_unlock(&section->lock);
         return 3;
       }
     }
@@ -305,7 +305,7 @@ int section_write(section_t* section, buffer_t* data, size_t* index, uint8_t* fu
     if (lseek(section->fd, byte, SEEK_SET) != byte) {
       _section_deallocate(section, *index);
       *full = section->fragments->count == 0;
-      platform_rw_unlock_w(&section->lock);
+      platform_unlock(&section->lock);
       return 4;
     }
     size_t result = write(section->fd, data->data, data->size);
@@ -313,18 +313,18 @@ int section_write(section_t* section, buffer_t* data, size_t* index, uint8_t* fu
     if (result < section->block_size) {
       _section_deallocate(section, *index);
       *full = section->fragments->count == 0;
-      platform_rw_unlock_w(&section->lock);
+      platform_unlock(&section->lock);
       return 5;
     }
     section_save_fragments(section);
     *full = section->fragments->count == 0;
-    platform_rw_unlock_w(&section->lock);
+    platform_unlock(&section->lock);
     return 0;
   }
 }
 
 buffer_t* section_read(section_t* section, size_t index) {
-  platform_rw_lock_r(&section->lock);
+  platform_lock(&section->lock);
   if (section->fd == -1) {
 #ifdef _WIN32
     section->fd = _open(section->path, _O_RDWR | _O_BINARY | _O_CREAT, 0644);
@@ -333,22 +333,22 @@ buffer_t* section_read(section_t* section, size_t index) {
 #endif
   }
   if (section->fd < 0) {
-    platform_rw_unlock_w(&section->lock);
+    platform_unlock(&section->lock);
     return NULL;
   }
   size_t byte = index * section->block_size;
   if (lseek(section->fd, byte, SEEK_SET) != byte) {
-    platform_rw_unlock_w(&section->lock);
+    platform_unlock(&section->lock);
     return NULL;
   }
   uint8_t* data = get_memory(section->block_size);
   int32_t read_size = read(section->fd, data, section->block_size);
   if (read_size < section->block_size) {
     free(data);
-    platform_rw_unlock_r(&section->lock);
+    platform_unlock(&section->lock);
     return NULL;
   }
-  platform_rw_unlock_r(&section->lock);
+  platform_unlock(&section->lock);
 
   buffer_t* buf = buffer_create_from_existing_memory(data, section->block_size);
   return buf;
@@ -413,9 +413,9 @@ int _section_deallocate(section_t* section, size_t index) {
   }
 }
 int section_deallocate(section_t* section, size_t index) {
-  platform_rw_lock_w(&section->lock);
+  platform_lock(&section->lock);
    int result = _section_deallocate(section, index);
-  platform_rw_unlock_w(&section->lock);
+  platform_unlock(&section->lock);
    return result;
 
 

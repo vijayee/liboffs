@@ -76,7 +76,7 @@ typedef vec_t(timer_list_t*) slots_t;
 
 struct timing_wheel_t {
   refcounter_t refcounter;
-  PlATFORMLOCKTYPE(lock);
+  PLATFORMLOCKTYPE(lock);
   PLATFORMCONDITIONTYPEPTR(idle);
   size_t position;
   timer_map_t* timers;
@@ -90,7 +90,7 @@ struct timing_wheel_t {
 
 typedef struct {
   refcounter_t refcounter;
-  PlATFORMLOCKTYPE(lock);
+  PLATFORMLOCKTYPE(lock);
   PLATFORMCONDITIONTYPE(idle);
   timer_map_t timers;
   size_t next_id;

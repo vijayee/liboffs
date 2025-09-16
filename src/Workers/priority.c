@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include "../Util/threadding.h"
 
-PlATFORMLOCKTYPE(current_priority_lock);
+PLATFORMLOCKTYPE(current_priority_lock);
 priority_t current = {0};
 
 

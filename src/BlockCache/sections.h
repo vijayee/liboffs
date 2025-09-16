@@ -42,7 +42,7 @@ struct round_robin_node_t {
 };
 
 typedef struct {
-  PlATFORMLOCKTYPE(lock);
+  PLATFORMLOCKTYPE(lock);
   debouncer_t* debouncer;
   char* path;
   size_t size;
@@ -65,11 +65,11 @@ typedef struct {
 } checkout_t;
 typedef HASHMAP(size_t, checkout_t) section_checkout_t;
 typedef struct {
-  PlATFORMLOCKTYPE(lock);
+  PLATFORMLOCKTYPE(lock);
   sections_lru_cache_t* lru;
   round_robin_t* robin;
   struct {
-    PlATFORMLOCKTYPE(lock);
+    PLATFORMLOCKTYPE(lock);
     section_checkout_t sections;
   } checkout;
   size_t max_tuple_size;

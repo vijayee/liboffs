@@ -19,7 +19,7 @@ uint8_t get_bit(buffer_t* buffer, size_t index);
 
 typedef struct {
   refcounter_t refcounter;
-  PlATFORMLOCKTYPE(lock);
+  PLATFORMLOCKTYPE(lock);
   fibonacci_hit_counter_t counter;
   buffer_t* hash;
   size_t section_id;
@@ -55,7 +55,7 @@ index_node_t* cbor_to_index_node(cbor_item_t* cbor, size_t bucket_size);
 typedef HASHMAP(uint32_t, index_entry_vec_t) rank_map_t;
 typedef struct {
   refcounter_t refcounter;
-  PlATFORMLOCKTYPE(lock);
+  PLATFORMLOCKTYPE(lock);
   index_node_t* root;
   size_t bucket_size;
   rank_map_t ranks;

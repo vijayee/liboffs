@@ -113,31 +113,31 @@ TEST_F(TestSection, TestSectionFunction) {
   result = section_deallocate(section, entries[2]->section_index);
   EXPECT_EQ(result, 0);
 
-  platform_rw_lock_r(&section->lock);
+  platform_lock(&section->lock);
   EXPECT_EQ(section->fragments->count, 2);
-  platform_rw_unlock_r(&section->lock);
+  platform_unlock(&section->lock);
 
   result = section_deallocate(section, entries[18]->section_index);
   EXPECT_EQ(result, 0);
 
-  platform_rw_lock_r(&section->lock);
+  platform_lock(&section->lock);
   EXPECT_EQ(section->fragments->count, 3);
-  platform_rw_unlock_r(&section->lock);
+  platform_unlock(&section->lock);
 
   result = section_deallocate(section, entries[19]->section_index);
   EXPECT_EQ(result, 0);
 
-  platform_rw_lock_r(&section->lock);
+  platform_lock(&section->lock);
   EXPECT_EQ(section->fragments->count, 3);
-  platform_rw_unlock_r(&section->lock);
+  platform_unlock(&section->lock);
 
   result = section_write(section, blocks[12]->data, &entries[12]->section_index, &full);
   EXPECT_EQ(result, 0);
 
 
-  platform_rw_lock_r(&section->lock);
+  platform_lock(&section->lock);
   EXPECT_EQ(section->fragments->count, 2);
-  platform_rw_unlock_r(&section->lock);
+  platform_unlock(&section->lock);
 
   EXPECT_EQ(entries[12]->section_index, entries[2]->section_index);
 

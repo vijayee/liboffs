@@ -14,7 +14,7 @@ typedef struct refcounter_t {
 #else
   uint16_t count;
   uint8_t yield;
-  PlATFORMLOCKTYPE(lock);
+  PLATFORMLOCKTYPE(lock);
 #endif
 } refcounter_t;
 void refcounter_init(refcounter_t* refcounter);

@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include "../RefCounter/refcounter.h"
+#include "../Util/threadding.h"
 #include "cbor.h"
 #include "block.h"
 
@@ -47,7 +48,7 @@ fragment_list_t* cbor_to_fragment_list(cbor_item_t* cbor);
 
 typedef struct {
   refcounter_t refcounter;
-  PLATFORMRWLOCKTYPE(lock);
+  PLATFORMLOCKTYPE(lock);
   int fd;
   size_t id;
   char* meta_path;

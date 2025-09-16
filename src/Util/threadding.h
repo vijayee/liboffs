@@ -36,7 +36,7 @@ int platform_core_count();
 uint64_t platform_self();
 #else
 #include <pthread.h>
-#define PlATFORMLOCKTYPE(N) pthread_mutex_t N
+#define PLATFORMLOCKTYPE(N) pthread_mutex_t N
 #define PLATFORMCONDITIONTYPE(N) pthread_cond_t N
 #define PLATFORMCONDITIONTYPEPTR(N) pthread_cond_t* N
 #define PLATFORMBARRIERTYPE(N) pthread_barrier_t N

@@ -10,7 +10,7 @@
 
 typedef struct {
   refcounter_t refcounter;
-  PlATFORMLOCKTYPE(lock);
+  PLATFORMLOCKTYPE(lock);
   PLATFORMCONDITIONTYPE(condition);
   PLATFORMBARRIERTYPE(barrier);
   PLATFORMCONDITIONTYPE(shutdown);

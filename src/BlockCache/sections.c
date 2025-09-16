@@ -189,6 +189,7 @@ round_robin_t* round_robin_create(char* robin_path, hierarchical_timing_wheel_t*
 }
 
 void round_robin_destroy(round_robin_t* robin) {
+  debouncer_flush(robin->debouncer);
   debouncer_destroy(robin->debouncer);
   free(robin->path);
   platform_lock_destroy(&robin->lock);
