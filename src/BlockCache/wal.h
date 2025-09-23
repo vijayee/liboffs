@@ -16,7 +16,7 @@ typedef enum wal_type_e {
 } wal_type_e;
 
 typedef struct {
-  FILE* log;
+  int log;
   char* location;
   char* current_file;
   char* last_file;

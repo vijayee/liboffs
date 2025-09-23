@@ -27,6 +27,9 @@ void refcounter_yield(refcounter_t* refcounter) {
 }
 
 void* refcounter_reference(refcounter_t* refcounter) {
+  if (refcounter == NULL) {
+    return NULL;
+  }
 #ifndef OFFS_ATOMIC
   platform_lock(&refcounter->lock);
   if (refcounter->yield > 0) {

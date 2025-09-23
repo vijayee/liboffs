@@ -32,7 +32,7 @@ block_t* block_create_by_type(buffer_t* data, block_size_e type) {
     final = buffer_concat(data, randBuf);
     buffer_destroy(randBuf);
   } else {
-    final = data;
+    final = (buffer_t*) refcounter_reference((refcounter_t*)data);
   }
 
   block_t* block = get_clear_memory(sizeof(block_t));

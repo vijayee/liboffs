@@ -11,6 +11,7 @@ extern "C" {
 #include <time.h>
 #include <cbor.h>
 #include "../src/Time/wheel.h"
+#include "../src/BlockCache/frand.h"
 }
 
 namespace indexTest {
@@ -102,14 +103,58 @@ namespace indexTest {
 
 
   TEST(TestIndex, TestIndexFunctions) {
-    block_t* block1 = block_create_random_block_by_type(nano);
-    block_t* block2 = block_create_random_block_by_type(nano);
-    block_t* block3 = block_create_random_block_by_type(nano);
-    block_t* block4 = block_create_random_block_by_type(nano);
-    block_t* block5 = block_create_random_block_by_type(nano);
-    block_t* block6 = block_create_random_block_by_type(nano);
-    block_t* block7 = block_create_random_block_by_type(nano);
-    block_t* block8 = block_create_random_block_by_type(nano);
+    uint8_t* data1 = frand(nano);
+    data1[0] = 1;
+    uint8_t* data2 = frand(nano);
+    data2[0] = 2;
+    uint8_t* data3 = frand(nano);
+    data3[0] = 3;
+    uint8_t* data4 = frand(nano);
+    data4[0] = 4;
+    uint8_t* data5 = frand(nano);
+    data5[0] = 5;
+    uint8_t* data6 = frand(nano);
+    data6[0] = 6;
+    uint8_t* data7 = frand(nano);
+    data7[0] = 7;
+    uint8_t* data8 = frand(nano);
+    data8[0] = 8;
+
+    buffer_t* buf1 = buffer_create_from_pointer_copy(data1, nano);
+    buffer_t* buf2 = buffer_create_from_pointer_copy(data2, nano);
+    buffer_t* buf3 = buffer_create_from_pointer_copy(data3, nano);
+    buffer_t* buf4 = buffer_create_from_pointer_copy(data4, nano);
+    buffer_t* buf5 = buffer_create_from_pointer_copy(data5, nano);
+    buffer_t* buf6 = buffer_create_from_pointer_copy(data6, nano);
+    buffer_t* buf7 = buffer_create_from_pointer_copy(data7, nano);
+    buffer_t* buf8 = buffer_create_from_pointer_copy(data8, nano);
+
+    refcounter_yield((refcounter_t*) buf1);
+    refcounter_yield((refcounter_t*) buf2);
+    refcounter_yield((refcounter_t*) buf3);
+    refcounter_yield((refcounter_t*) buf4);
+    refcounter_yield((refcounter_t*) buf5);
+    refcounter_yield((refcounter_t*) buf6);
+    refcounter_yield((refcounter_t*) buf7);
+    refcounter_yield((refcounter_t*) buf8);
+
+    free(data1);
+    free(data2);
+    free(data3);
+    free(data4);
+    free(data5);
+    free(data6);
+    free(data7);
+    free(data8);
+
+    block_t* block1 = block_create_by_type(buf1, nano);
+    block_t* block2 = block_create_by_type(buf2, nano);
+    block_t* block3 = block_create_by_type(buf3, nano);
+    block_t* block4 = block_create_by_type(buf4, nano);
+    block_t* block5 = block_create_by_type(buf5, nano);
+    block_t* block6 = block_create_by_type(buf6, nano);
+    block_t* block7 = block_create_by_type(buf7, nano);
+    block_t* block8 = block_create_by_type(buf8, nano);
 
     index_entry_t* entry1 = index_entry_create(block1->hash);
     index_entry_t* entry2 = index_entry_create(block2->hash);
@@ -119,14 +164,14 @@ namespace indexTest {
     index_entry_t* entry6 = index_entry_create(block6->hash);
     index_entry_t* entry7 = index_entry_create(block7->hash);
     index_entry_t* entry8 = index_entry_create(block8->hash);
-    char *location = path_join(".", "block_index");
+    char* location = path_join(".", "block_index");
     work_pool_t* pool= work_pool_create(4);
     work_pool_launch(pool);
     hierarchical_timing_wheel_t* wheel = hierarchical_timing_wheel_create(8, pool);
     hierarchical_timing_wheel_run(wheel);
     uint64_t wait = 200;
     uint64_t max_wait = 5000;
-    index_t *index = index_create(3, location, wheel, wait, max_wait);
+    index_t *index = index_create(25, location, wheel, wait, max_wait);
 
     index_add(index, entry1);
     index_add(index, entry2);
@@ -137,14 +182,14 @@ namespace indexTest {
     index_add(index, entry7);
     index_add(index, entry8);
 
-    index_entry_t* _entry1 = index_get(index, block1->hash);
-    index_entry_t* _entry2 = index_get(index, block2->hash);
-    index_entry_t* _entry3 = index_get(index, block3->hash);
-    index_entry_t* _entry4 = index_get(index, block4->hash);
-    index_entry_t* _entry5 = index_get(index, block5->hash);
-    index_entry_t* _entry6 = index_get(index, block6->hash);
-    index_entry_t* _entry7 = index_get(index, block7->hash);
-    index_entry_t* _entry8 = index_get(index, block8->hash);
+    index_entry_t* _entry1 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block1->hash));
+    index_entry_t* _entry2 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block2->hash));
+    index_entry_t* _entry3 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block3->hash));
+    index_entry_t* _entry4 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block4->hash));
+    index_entry_t* _entry5 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block5->hash));
+    index_entry_t* _entry6 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block6->hash));
+    index_entry_t* _entry7 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block7->hash));
+    index_entry_t* _entry8 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block8->hash));
 
     EXPECT_EQ(buffer_compare(_entry1->hash, entry1->hash), 0);
     EXPECT_EQ(buffer_compare(_entry2->hash, entry2->hash), 0);
@@ -155,14 +200,23 @@ namespace indexTest {
     EXPECT_EQ(buffer_compare(_entry7->hash, entry7->hash), 0);
     EXPECT_EQ(buffer_compare(_entry8->hash, entry8->hash), 0);
 
-    _entry1 = index_find(index, block1->hash);
-    _entry2 = index_find(index, block2->hash);
-    _entry3 = index_find(index, block3->hash);
-    _entry4 = index_find(index, block4->hash);
-    _entry5 = index_find(index, block5->hash);
-    _entry6 = index_find(index, block6->hash);
-    _entry7 = index_find(index, block7->hash);
-    _entry8 = index_find(index, block8->hash);
+    index_entry_destroy(_entry1);
+    index_entry_destroy(_entry2);
+    index_entry_destroy(_entry3);
+    index_entry_destroy(_entry4);
+    index_entry_destroy(_entry5);
+    index_entry_destroy(_entry6);
+    index_entry_destroy(_entry7);
+    index_entry_destroy(_entry8);
+
+    _entry1 = (index_entry_t*) refcounter_reference((refcounter_t*)index_find(index, block1->hash));
+    _entry2 = (index_entry_t*) refcounter_reference((refcounter_t*)index_find(index, block2->hash));
+    _entry3 = (index_entry_t*) refcounter_reference((refcounter_t*)index_find(index, block3->hash));
+    _entry4 = (index_entry_t*) refcounter_reference((refcounter_t*)index_find(index, block4->hash));
+    _entry5 = (index_entry_t*) refcounter_reference((refcounter_t*)index_find(index, block5->hash));
+    _entry6 = (index_entry_t*) refcounter_reference((refcounter_t*)index_find(index, block6->hash));
+    _entry7 = (index_entry_t*) refcounter_reference((refcounter_t*)index_find(index, block7->hash));
+    _entry8 = (index_entry_t*) refcounter_reference((refcounter_t*)index_find(index, block8->hash));
 
     EXPECT_EQ(buffer_compare(_entry1->hash, entry1->hash), 0);
     EXPECT_EQ(buffer_compare(_entry2->hash, entry2->hash), 0);
@@ -172,6 +226,15 @@ namespace indexTest {
     EXPECT_EQ(buffer_compare(_entry6->hash, entry6->hash), 0);
     EXPECT_EQ(buffer_compare(_entry7->hash, entry7->hash), 0);
     EXPECT_EQ(buffer_compare(_entry8->hash, entry8->hash), 0);
+
+    index_entry_destroy(_entry1);
+    index_entry_destroy(_entry2);
+    index_entry_destroy(_entry3);
+    index_entry_destroy(_entry4);
+    index_entry_destroy(_entry5);
+    index_entry_destroy(_entry6);
+    index_entry_destroy(_entry7);
+    index_entry_destroy(_entry8);
 
     index_remove(index, block1->hash);
     index_remove(index, block2->hash);
@@ -183,14 +246,15 @@ namespace indexTest {
     index_remove(index, block8->hash);
 
 
-    _entry1 = index_get(index, block1->hash);
-    _entry2 = index_get(index, block2->hash);
-    _entry3 = index_get(index, block3->hash);
-    _entry4 = index_get(index, block4->hash);
-    _entry5 = index_get(index, block5->hash);
-    _entry6 = index_get(index, block6->hash);
-    _entry7 = index_get(index, block7->hash);
-    _entry8 = index_get(index, block8->hash);
+    _entry1 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block1->hash));
+    _entry2 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block2->hash));
+    _entry3 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block3->hash));
+    _entry4 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block4->hash));
+    _entry5 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block5->hash));
+    _entry6 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block6->hash));
+    _entry7 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block7->hash));
+    _entry8 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block8->hash));
+
 
     EXPECT_TRUE(_entry1 == NULL);
     EXPECT_TRUE(_entry2 == NULL);
@@ -214,14 +278,14 @@ namespace indexTest {
     EXPECT_FALSE(from_cbor == NULL);
 
 
-    _entry1 = index_get(from_cbor, block1->hash);
-    _entry2 = index_get(from_cbor, block2->hash);
-    _entry3 = index_get(from_cbor, block3->hash);
-    _entry4 = index_get(from_cbor, block4->hash);
-    _entry5 = index_get(from_cbor, block5->hash);
-    _entry6 = index_get(from_cbor, block6->hash);
-    _entry7 = index_get(from_cbor, block7->hash);
-    _entry8 = index_get(from_cbor, block8->hash);
+    _entry1 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(from_cbor, block1->hash));
+    _entry2 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(from_cbor, block2->hash));
+    _entry3 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(from_cbor, block3->hash));
+    _entry4 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(from_cbor, block4->hash));
+    _entry5 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(from_cbor, block5->hash));
+    _entry6 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(from_cbor, block6->hash));
+    _entry7 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(from_cbor, block7->hash));
+    _entry8 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(from_cbor, block8->hash));
 
     EXPECT_TRUE(_entry1 == NULL);
     EXPECT_TRUE(_entry2 == NULL);
@@ -235,9 +299,8 @@ namespace indexTest {
     cbor_decref(&cbor);
     cbor_decref(&cbor2);
     free(cbor_data);
-
-    //hierarchical_timing_wheel_stop(wheel);
-    //work_pool_wait_for_idle_signal(pool);
+    index_destroy(index);
+    index_destroy(from_cbor);
     hierarchical_timing_wheel_wait_for_idle_signal(wheel);
     hierarchical_timing_wheel_stop(wheel);
     work_pool_shutdown(pool);
@@ -265,7 +328,6 @@ namespace indexTest {
     block_destroy(block8);
 
     free(location);
-    index_destroy(index);
-    index_destroy(from_cbor);
+
   }
 }

@@ -79,7 +79,7 @@ int compare_size_t(const void* data1, const void* data2) {
 int compare_buffer(const void* data1, const void* data2) {
   const buffer_t* _data1 = data1;
   const buffer_t* _data2 = data2;
-  return buffer_compare(_data1, _data2);
+  return buffer_compare((buffer_t*)_data1, (buffer_t*)_data2);
 }
 
 uint32_t* duplicate_uint32(const uint32_t* key) {

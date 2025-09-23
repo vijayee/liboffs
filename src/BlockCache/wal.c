@@ -8,7 +8,8 @@
 #include "../Util/get_dir.h"
 #include "../Util/vec.h"
 #include <stdlib.h>
-#include <stdio.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 
 
@@ -36,7 +37,11 @@ wal_t* wal_create(char* location) {
     wal->last_file = NULL;
   }
 
-  wal->log = fopen(wal->current_file, "wb+");
+#ifdef _WIN32
+  wal->log = open(wal->current_file, _O_RDWR | _O_BINARY | _O_CREAT, 0644);
+#else
+  wal->log = open(wal->current_file, O_RDWR | O_CREAT, 0644);
+#endif
   destroy_files(files);
   return wal;
 }
@@ -54,20 +59,23 @@ wal_t* wal_create_next(char* location, uint64_t next_id, char* last_file) {
   } else {
     wal->last_file = NULL;
   }
-  wal->log = fopen(wal->current_file, "wb+");
+#ifdef _WIN32
+  wal->log = open(wal->current_file, _O_RDWR | _O_BINARY | _O_CREAT, 0644);
+#else
+  wal->log = open(wal->current_file, O_RDWR | O_CREAT, 0644);
+#endif
   return wal;
 }
 
 void wal_write(wal_t* wal,wal_type_e type, buffer_t* data) {
   uint32_t crc =  htonl(XXH32(data->data,data->size, 0));
-  fwrite(&type, 1, 1,wal->log);
-  fwrite(&crc, 4, 1, wal->log);
-  fwrite(data->data, 1, data->size, wal->log);
-  fflush(wal->log);
+  write(wal->log, &type, 1);
+  write(wal->log, &crc, 4);
+  write(wal->log, data->data, data->size);
 }
 
 void wal_destroy(wal_t* wal) {
-  fclose(wal->log);
+  close(wal->log);
   free(wal->current_file);
   if (wal->last_file != NULL) {
     free(wal->last_file);
