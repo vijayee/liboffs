@@ -53,9 +53,6 @@ index_entry_t* index_entry_from(buffer_t* hash, size_t section_id, size_t sectio
 
 void index_entry_destroy(index_entry_t* entry) {
   refcounter_dereference((refcounter_t*) entry);
-  if (refcounter_count((refcounter_t*) entry) == UINT16_MAX) {
-    printf("We fucked up\n");
-  }
   if (refcounter_count((refcounter_t*) entry) == 0) {
     refcounter_destroy_lock((refcounter_t *) entry);
     platform_lock_destroy(&entry->lock);

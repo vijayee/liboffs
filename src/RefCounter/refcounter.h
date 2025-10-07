@@ -6,7 +6,10 @@
 #define LIBOFFS_REFCOUNTER_H
 #include <stdint.h>
 #include "../Util/threadding.h"
-
+#define REFERENCE(N,T) (T*) refcounter_reference((refcounter_t*) N)
+#define YIELD(N) refcounter_yield((refcounter_t*) N)
+#define DEREFERENCE(N) refcounter_dereference((refcounter_t*) N); N = NULL
+#define DESTROY(N,T)  T##_destroy(N); N = NULL
 typedef struct refcounter_t {
 #ifdef OFFS_ATOMIC
   _Atomic uint16_t count;

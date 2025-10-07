@@ -33,7 +33,7 @@ void _block_cache_get(block_cache_get_ctx* ctx);
 void _block_cache_get_abort(block_cache_get_ctx* ctx);
 void _block_cache_put(block_cache_put_ctx* ctx);
 void _block_cache_put_abort(block_cache_put_ctx* ctx);
-void block_cache_remove(block_cache_t* block_cache, priority_t priority, buffer_t* hash, promise_t* promise);
+void _block_cache_remove(block_cache_remove_ctx* ctx);
 void _block_cache_remove_abort(block_cache_remove_ctx* ctx);
 
 block_lru_cache_t* block_lru_cache_create(size_t size) {
@@ -247,9 +247,11 @@ void block_cache_destroy(block_cache_t* block_cache) {
 void block_cache_put(block_cache_t* block_cache, priority_t priority, block_t* block, promise_t* promise) {
   block_cache_put_ctx* ctx = get_memory(sizeof(block_cache_put_ctx));
   ctx->block_cache = block_cache;
-  ctx->block = (block_t*) refcounter_reference((refcounter_t*)block);
-  refcounter_yield((refcounter_t*) ctx-> block);
+  ctx->block = REFERENCE(block, block_t);
+  ctx->promise = promise;
+  YIELD(ctx->block);
   work_t* work = work_create(priority, ctx,(void*)_block_cache_put,(void*)_block_cache_put_abort);
+  YIELD(work);
   work_pool_enqueue(block_cache->pool, work);
 }
 
@@ -258,7 +260,7 @@ void _block_cache_put(block_cache_put_ctx* ctx) {
   block_t* block = (block_t*) refcounter_reference((refcounter_t*)ctx->block);
   promise_t* promise = ctx->promise;
   free(ctx);
-  index_entry_t* entry = index_get(block_cache->index, block->hash);
+  index_entry_t* entry = REFERENCE(index_get(block_cache->index, block->hash), index_entry_t);
   if (entry == NULL) {
     entry = index_entry_create(block->hash);
     int result = sections_write(block_cache->sections, block->data, &entry->section_id, &entry->section_index);
@@ -272,6 +274,7 @@ void _block_cache_put(block_cache_put_ctx* ctx) {
     }
     block_lru_cache_put(block_cache->lru, block);
   } else {
+    DESTROY(entry, index_entry);
     promise_resolve(promise, NULL);
   }
   block_destroy(block);
@@ -290,18 +293,19 @@ void block_cache_get(block_cache_t* block_cache, priority_t priority, buffer_t* 
   block_cache_get_ctx* ctx = get_memory(sizeof(block_cache_get_ctx));
   ctx->promise = promise;
   ctx->block_cache = block_cache;
-  ctx->hash = (buffer_t*) refcounter_reference((refcounter_t*)hash);
-  refcounter_yield((refcounter_t*) ctx->hash);
+  ctx->hash = REFERENCE(hash, buffer_t);
+  YIELD(ctx->hash);
   work_t* work = work_create(priority, ctx,(void*)_block_cache_get,(void*)_block_cache_get_abort);
+  YIELD(work);
   work_pool_enqueue(block_cache->pool, work);
 }
 
 void _block_cache_get(block_cache_get_ctx* ctx) {
   block_cache_t* block_cache = ctx->block_cache;
-  buffer_t* hash = refcounter_reference((refcounter_t*) ctx->hash);
+  buffer_t* hash = REFERENCE(ctx->hash, buffer_t);
   promise_t* promise = ctx->promise;
   free(ctx);
-  index_entry_t* entry = index_get(block_cache->index, hash);
+  index_entry_t* entry = REFERENCE(index_get(block_cache->index, hash), index_entry_t);
   if (entry == NULL) {
     promise_resolve(promise, NULL);
   } else {
@@ -325,8 +329,9 @@ void _block_cache_get(block_cache_get_ctx* ctx) {
       refcounter_yield((refcounter_t *) block);
       promise_resolve(promise, (void *) block);
     }
+    DESTROY(entry, index_entry);
   }
-  buffer_destroy(hash);
+  DESTROY(hash, buffer);
 }
 
 void _block_cache_get_abort(block_cache_get_ctx* ctx) {
@@ -342,18 +347,19 @@ void block_cache_remove(block_cache_t* block_cache, priority_t priority, buffer_
   block_cache_remove_ctx* ctx = get_memory(sizeof(block_cache_remove_ctx));
   ctx->promise = promise;
   ctx->block_cache = block_cache;
-  ctx->hash = (buffer_t*) refcounter_reference((refcounter_t*)hash);
+  ctx->hash = REFERENCE(hash, buffer_t);
   refcounter_yield((refcounter_t*) ctx->hash);
-  work_t* work = work_create(priority, ctx,(void*)_block_cache_get,(void*)_block_cache_get_abort);
+  work_t* work = work_create(priority, ctx,(void*)_block_cache_remove,(void*)_block_cache_remove_abort);
+  YIELD(work);
   work_pool_enqueue(block_cache->pool, work);
 }
 
 void _block_cache_remove(block_cache_remove_ctx* ctx) {
   block_cache_t* block_cache = ctx->block_cache;
-  buffer_t* hash = (buffer_t*) refcounter_reference((refcounter_t*)ctx->hash);
+  buffer_t* hash = REFERENCE(ctx->hash, buffer_t);
   promise_t* promise = ctx->promise;
   free(ctx);
-  index_entry_t* entry = index_get(block_cache->index, hash);
+  index_entry_t* entry = REFERENCE(index_get(block_cache->index, hash), index_entry_t);
   if (entry == NULL) {
     promise_resolve(promise, NULL);
   } else {
@@ -361,7 +367,9 @@ void _block_cache_remove(block_cache_remove_ctx* ctx) {
     index_remove(block_cache->index, hash);
     block_lru_cache_delete(block_cache->lru, hash);
     promise_resolve(promise,NULL);
+    index_entry_destroy(entry);
   }
+  DESTROY(hash, buffer);
 }
 
 void _block_cache_remove_abort(block_cache_remove_ctx* ctx) {

@@ -3,7 +3,7 @@
 //
 
 #include "config.h"
-config_t default_config() {
+config_t config_default() {
   config_t config;
   config.index_bucket_size = 25;
   config.index_wait = 5;

@@ -51,7 +51,9 @@ set(C_SRC ""
         src/BlockCache/sections.h
         src/BlockCache/sections.c
         src/BlockCache/block_cache.h
-        src/BlockCache/block_cache.c)
+        src/BlockCache/block_cache.c
+        src/Configuration/config.h
+        src/Configuration/config.c)
 set(blake3_SOURCE_DIR deps/BLAKE3)
 set(xxHash_SOURCE_DIR deps/xxHash)
 set(hashmap_SOURCE_DIR deps/hashmap)

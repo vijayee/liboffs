@@ -308,7 +308,7 @@ namespace indexTest {
     work_pool_destroy(pool);
     hierarchical_timing_wheel_destroy(wheel);
 
-    index_entry_destroy(entry1);
+    DESTROY(entry1, index_entry);
     index_entry_destroy(entry2);
     index_entry_destroy(entry3);
     index_entry_destroy(entry4);
@@ -318,7 +318,7 @@ namespace indexTest {
     index_entry_destroy(entry8);
 
 
-    block_destroy(block1);
+    DESTROY(block1, block);
     block_destroy(block2);
     block_destroy(block3);
     block_destroy(block4);

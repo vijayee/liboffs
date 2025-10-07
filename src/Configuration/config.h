@@ -19,5 +19,5 @@ typedef struct {
   size_t lru_size;
   size_t descriptor_pad;
 } config_t;
-config_t default_config();
+config_t config_default();
 #endif //OFFS_CONFIG_H
