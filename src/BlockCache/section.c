@@ -361,56 +361,78 @@ int _section_deallocate(section_t* section, size_t index) {
   } else {
     fragment_list_node_t* current = section->fragments->first;
     fragment_list_node_t* next = NULL;
-    fragment_list_node_t* last = section->fragments->last;
-    while (current != NULL) {
+    fragment_list_node_t* greater_than = NULL;
+    int64_t greater_than_difference = 0;
+    fragment_list_node_t* less_than = NULL;
+    int64_t less_than_difference = 0;
+    while (current != NULL) { //Make sure this index has not been deallocated
       next = current->next;
       if (index == current->fragment->end) { //Someone tried to deallocate free space
         return 1;
       } else if ((index < current->fragment->end) && (index >= current->fragment->start)) {
         //Someone tried to deallocate free space
         return 1;
-      }  else {
-        last = current;
+      } else {
+        if (index > current->fragment->end) {
+          greater_than = current;
+          greater_than_difference = index - greater_than->fragment->end;
+        }
+        if (index < current->fragment->start) {
+          less_than = current;
+          less_than_difference = less_than->fragment->start - index;
+        }
         current = next;
       }
     }
 
-    if (index == (last->fragment->end + 1)) {
-      if ((last->next != NULL) && (last->next->fragment->start == (last->fragment->end + 1))) {
-        last->fragment->end = last->next->fragment->end;
-        fragment_list_remove(section->fragments, last->next);
-        section_save_fragments(section);
-        return 0;
-      } else {
-        last->fragment->end = index;
-        section_save_fragments(section);
-        return 0;
-      }
+    if ((greater_than == NULL) && (less_than == NULL)) {
+      return 2;
+    }
+    if (greater_than == less_than) {
+      return 3;
     } else {
-      fragment_t* fragment = fragment_create(index,index);
-      if (index < last->fragment->start) {
-        fragment_list_node_t* node = fragment_list_node_create(fragment, last, last->previous);
-        last->previous = node;
-        if (section->fragments->first == last) {
-          section->fragments->first= node;
+      if ((greater_than == NULL) && (less_than != NULL)) {
+        if (less_than_difference > 1) {
+          fragment_t* fragment = fragment_create(index, index);
+          fragment_list_node_t* node = fragment_list_node_create(fragment, less_than, NULL);
+          less_than->previous = node;
+          section->fragments->first = node;
+          section->fragments->count++;
+        } else {
+          less_than->fragment->start--;
         }
-        section->fragments->count++;
+      } else if ((greater_than != NULL) && (less_than == NULL)) {
+        if (greater_than_difference > 1) {
+          fragment_t *fragment = fragment_create(index, index);
+          fragment_list_node_t* node = fragment_list_node_create(fragment, NULL, greater_than);
+          greater_than->next = node;
+          section->fragments->last = node;
+          section->fragments->count++;
+        } else {
+          greater_than->fragment->end++;
+        }
       } else {
-        next = last->next;
-        fragment_list_node_t* node = fragment_list_node_create(fragment, next, last);
-        last->next = node;
-        if (next != NULL) {
-          next->previous = node;
+        if ((greater_than_difference > 1) && (less_than_difference > 1)) {
+          fragment_t *fragment = fragment_create(index, index);
+          fragment_list_node_t *node = fragment_list_node_create(fragment, less_than, greater_than);
+          greater_than->next = node;
+          less_than->previous = node;
+          section->fragments->count++;
+        } else if ((greater_than_difference == 1) && (less_than_difference == 1)) {
+          greater_than->fragment->end = less_than->fragment->end;
+          fragment_list_remove(section->fragments, less_than);
+        } else {
+          if (less_than_difference > 1) {
+            greater_than->fragment->end++;
+          } else {
+            less_than->fragment->start--;
+          }
         }
-        if (section->fragments->last == last) {
-          section->fragments->last= node;
-        }
-        section->fragments->count++;
       }
-      section_save_fragments(section);
-      return 0;
     }
   }
+  section_save_fragments(section);
+  return 0;
 }
 int section_deallocate(section_t* section, size_t index) {
   platform_lock(&section->lock);

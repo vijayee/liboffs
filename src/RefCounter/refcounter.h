@@ -10,6 +10,7 @@
 #define YIELD(N) refcounter_yield((refcounter_t*) N)
 #define DEREFERENCE(N) refcounter_dereference((refcounter_t*) N); N = NULL
 #define DESTROY(N,T)  T##_destroy(N); N = NULL
+#define CONSUME(N, T) (T*) refcounter_consume((refcounter_t**) &N)
 typedef struct refcounter_t {
 #ifdef OFFS_ATOMIC
   _Atomic uint16_t count;
@@ -24,6 +25,7 @@ void refcounter_init(refcounter_t* refcounter);
 void refcounter_yield(refcounter_t* refcounter);
 void* refcounter_reference(refcounter_t* refcounter);
 void refcounter_dereference(refcounter_t* refcounter);
+refcounter_t* refcounter_consume(refcounter_t** refcounter);
 uint16_t refcounter_count(refcounter_t* refcounter);
 void refcounter_destroy_lock(refcounter_t* refcounter);
 #endif //LIBOFFS_REFCOUNTER_H

@@ -51,7 +51,7 @@ void block_lru_cache_destroy(block_lru_cache_t* lru) {
   block_lru_node_t* node;
   platform_lock_destroy(&lru->lock);
   hashmap_foreach_data(node, &lru->cache) {
-    block_destroy(node->value);
+    DESTROY(node->value, block);
     free(node);
   }
   hashmap_cleanup(&lru->cache);
@@ -66,10 +66,9 @@ block_t* block_lru_cache_get(block_lru_cache_t* lru, buffer_t* hash) {
     return NULL;
   } else {
     block_lru_cache_move(lru, node);
-    block_t* value = (block_t*) refcounter_reference( (refcounter_t*) node->value);
+    block_t* value = REFERENCE(node->value, block_t);
     platform_unlock(&lru->lock);
-    refcounter_yield((refcounter_t*) value);
-    return value;
+    return CONSUME(value, block_t);
   }
 }
 
@@ -103,7 +102,7 @@ void block_lru_cache_delete(block_lru_cache_t* lru, buffer_t* hash) {
       }
     }
     hashmap_remove(&lru->cache, hash);
-    block_destroy(node->value);
+    DESTROY(node->value, block);
     free(node);
   }
   platform_unlock(&lru->lock);
@@ -121,7 +120,7 @@ void block_lru_cache_put(block_lru_cache_t* lru, block_t* block) {
     node = get_clear_memory(sizeof(block_lru_node_t));
     node->previous = NULL;
     node->next = NULL;
-    node->value = refcounter_reference((refcounter_t*) block);
+    node->value = REFERENCE(block, block_t);
   }
   // Cache Ejection
   if (hashmap_size(&lru->cache) == lru->size) {
@@ -140,7 +139,7 @@ void block_lru_cache_put(block_lru_cache_t* lru, block_t* block) {
         lru->last = last_node->previous;
       }
       hashmap_remove(&lru->cache, last_node->value->hash);
-      block_destroy(last_node->value);
+      DESTROY(last_node->value, block);
       free(last_node);
     }
   }
@@ -207,7 +206,7 @@ void block_lru_cache_move(block_lru_cache_t* lru, block_lru_node_t* node) {
 block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, work_pool_t* pool, hierarchical_timing_wheel_t* wheel) {
   block_cache_t* block_cache = get_clear_memory(sizeof(block_cache_t));
   refcounter_init((refcounter_t*) block_cache);
-  block_cache->pool = (work_pool_t*) refcounter_reference((void*) pool);
+  block_cache->pool = REFERENCE(pool, work_pool_t);
   block_cache->type = type;
   char* folder;
   switch (type) {
@@ -251,13 +250,12 @@ void block_cache_put(block_cache_t* block_cache, priority_t priority, block_t* b
   ctx->promise = promise;
   YIELD(ctx->block);
   work_t* work = work_create(priority, ctx,(void*)_block_cache_put,(void*)_block_cache_put_abort);
-  YIELD(work);
-  work_pool_enqueue(block_cache->pool, work);
+  work_pool_enqueue(block_cache->pool, CONSUME(work, work_t));
 }
 
 void _block_cache_put(block_cache_put_ctx* ctx) {
   block_cache_t* block_cache = ctx->block_cache;
-  block_t* block = (block_t*) refcounter_reference((refcounter_t*)ctx->block);
+  block_t* block = REFERENCE(ctx->block, block_t);
   promise_t* promise = ctx->promise;
   free(ctx);
   index_entry_t* entry = REFERENCE(index_get(block_cache->index, block->hash), index_entry_t);
@@ -268,8 +266,7 @@ void _block_cache_put(block_cache_put_ctx* ctx) {
       index_entry_destroy(entry);
       promise_reject(promise, ERROR("Section Write Error"));
     } else {
-      refcounter_yield((refcounter_t*) entry);
-      index_add(block_cache->index, entry);
+      index_add(block_cache->index, CONSUME(entry, index_entry_t));
       promise_resolve(promise, NULL);
     }
     block_lru_cache_put(block_cache->lru, block);
@@ -277,13 +274,13 @@ void _block_cache_put(block_cache_put_ctx* ctx) {
     DESTROY(entry, index_entry);
     promise_resolve(promise, NULL);
   }
-  block_destroy(block);
+  DESTROY(block, block);
 }
 
 void _block_cache_put_abort(block_cache_put_ctx* ctx) {
   promise_t* promise = ctx->promise;
-  block_t* block = (block_t*) refcounter_reference((refcounter_t*)ctx->block);
-  block_destroy(block);
+  block_t* block = REFERENCE(ctx->block, block_t);
+  DESTROY(block, block);
   free(ctx);
   promise_reject(promise, ERROR("Cache Put Aborted"));
 }
@@ -296,8 +293,7 @@ void block_cache_get(block_cache_t* block_cache, priority_t priority, buffer_t* 
   ctx->hash = REFERENCE(hash, buffer_t);
   YIELD(ctx->hash);
   work_t* work = work_create(priority, ctx,(void*)_block_cache_get,(void*)_block_cache_get_abort);
-  YIELD(work);
-  work_pool_enqueue(block_cache->pool, work);
+  work_pool_enqueue(block_cache->pool, CONSUME(work, work_t));
 }
 
 void _block_cache_get(block_cache_get_ctx* ctx) {
@@ -309,7 +305,7 @@ void _block_cache_get(block_cache_get_ctx* ctx) {
   if (entry == NULL) {
     promise_resolve(promise, NULL);
   } else {
-    block_t* block = block_lru_cache_get(block_cache->lru, hash);
+    block_t* block = REFERENCE(block_lru_cache_get(block_cache->lru, hash), block_t);
     if (block == NULL) {
       buffer_t* data = sections_read(block_cache->sections, entry->section_id, entry->section_index);
       if (data == NULL) {
@@ -318,16 +314,14 @@ void _block_cache_get(block_cache_get_ctx* ctx) {
         block = block_create_existing_data_hash(data, entry->hash);
         if (block != NULL) {
           block_lru_cache_put(block_cache->lru, block);
-          refcounter_yield((refcounter_t *) block);
+          YIELD(block);
           promise_resolve(promise, (void *) block);
         } else {
           promise_reject(promise, ERROR("Failed to form block"));
         }
       }
     } else {
-      block = (block_t*) refcounter_reference((refcounter_t*) block);
-      refcounter_yield((refcounter_t *) block);
-      promise_resolve(promise, (void *) block);
+      promise_resolve(promise, CONSUME(block, block_t));
     }
     DESTROY(entry, index_entry);
   }
@@ -336,8 +330,8 @@ void _block_cache_get(block_cache_get_ctx* ctx) {
 
 void _block_cache_get_abort(block_cache_get_ctx* ctx) {
   promise_t* promise = ctx->promise;
-  buffer_t* hash = (buffer_t*) refcounter_reference((refcounter_t*)ctx->hash);
-  buffer_destroy(hash);
+  buffer_t* hash = REFERENCE(ctx->hash, buffer_t);
+  DESTROY(hash, buffer);
   free(ctx);
   promise_reject(promise, ERROR("Cache Get Aborted"));
 }
@@ -348,10 +342,9 @@ void block_cache_remove(block_cache_t* block_cache, priority_t priority, buffer_
   ctx->promise = promise;
   ctx->block_cache = block_cache;
   ctx->hash = REFERENCE(hash, buffer_t);
-  refcounter_yield((refcounter_t*) ctx->hash);
+  YIELD(ctx->hash);
   work_t* work = work_create(priority, ctx,(void*)_block_cache_remove,(void*)_block_cache_remove_abort);
-  YIELD(work);
-  work_pool_enqueue(block_cache->pool, work);
+  work_pool_enqueue(block_cache->pool, CONSUME(work, work_t));
 }
 
 void _block_cache_remove(block_cache_remove_ctx* ctx) {
@@ -374,8 +367,12 @@ void _block_cache_remove(block_cache_remove_ctx* ctx) {
 
 void _block_cache_remove_abort(block_cache_remove_ctx* ctx) {
   promise_t* promise = ctx->promise;
-  buffer_t* hash = (buffer_t*) refcounter_reference((refcounter_t*)ctx->hash);
-  buffer_destroy(hash);
+  buffer_t* hash = REFERENCE(ctx->hash, buffer_t);
+  DESTROY(hash, buffer);
   free(ctx);
   promise_reject(promise, ERROR("Cache Get Aborted"));
+}
+
+size_t block_cache_count(block_cache_t* block_cache) {
+  return index_count(block_cache->index);
 }

@@ -74,6 +74,13 @@ uint16_t refcounter_count(refcounter_t* refcounter) {
   return count;
 }
 
+refcounter_t* refcounter_consume(refcounter_t** refcounter) {
+  refcounter_t* holder = *refcounter;
+  refcounter_yield(holder);
+  *refcounter = NULL;
+  return holder;
+}
+
 void refcounter_destroy_lock(refcounter_t* refcounter) {
 #ifndef OFFS_ATOMIC
   platform_lock_destroy(&refcounter->lock);

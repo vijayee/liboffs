@@ -18,7 +18,11 @@ uint8_t * frand(size_t size) {
   srand((unsigned int) *seed);
 
   for (size_t i = 0; i < size; i++) {
-    buffer[i] = rand() % 256;
+    if (i < 4) {
+      buffer[i] = seed[i];
+    } else {
+      buffer[i] = rand() % 256;
+    }
   }
   free(seed);
   return buffer;

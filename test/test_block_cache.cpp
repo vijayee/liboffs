@@ -48,10 +48,18 @@ TEST_F(TestBlockLRU, TestBlockLRUOperations) {
     block_lru_cache_put(lru, blocks[i]);
   }
   for (size_t i = 0; i < overage; i++) {
-    EXPECT_EQ(block_lru_cache_get(lru, blocks[i]->hash) == NULL, true);
+    block_t* block = REFERENCE(block_lru_cache_get(lru, blocks[i]->hash), block_t);
+    EXPECT_EQ(block == NULL, true);
+    if (block != NULL) {
+      DESTROY(block, block);
+    }
   }
   for (size_t i = overage; i < (size + overage); i++) {
-    EXPECT_NE(block_lru_cache_get(lru, blocks[i]->hash) == NULL, true);
+    block_t* block = REFERENCE(block_lru_cache_get(lru, blocks[i]->hash), block_t);
+    EXPECT_NE(block == NULL, true);
+    if (block != NULL) {
+      DESTROY(block, block);
+    }
   }
   for (size_t i = overage; i < (size + overage); i++) {
     EXPECT_EQ(block_lru_cache_contains(lru, blocks[i]->hash), true);
@@ -66,21 +74,25 @@ TEST_F(TestBlockLRU, TestBlockLRUOperations) {
   block_lru_cache_destroy(lru);
 }
 
-#define BLOCK_COUNT 1
+#define BLOCK_COUNT 25
 class TestBlockCache : public testing::Test {
 public:
+  block_size_e type = standard;
   char* location;
   work_pool_t* pool;
   hierarchical_timing_wheel_t* wheel;
   block_cache_t* block_cache;
   block_t* blocks[BLOCK_COUNT];
   std::promise<void> put_promise[BLOCK_COUNT];
+  std::promise<void> re_put_promise[BLOCK_COUNT];
   std::promise<block_t*> get_promise[BLOCK_COUNT];
   std::promise<void> remove_promise[BLOCK_COUNT];
   std::promise<block_t*> re_get_promise[BLOCK_COUNT];
   config_t config;
   MockFunction<void((void*, void*))> mock_put_callback;
   MockFunction<void((void*, async_error_t*))> mock_put_err_callback;
+  MockFunction<void((void*, void*))> mock_re_put_callback;
+  MockFunction<void((void*, async_error_t*))> mock_re_put_err_callback;
   MockFunction<void((void*, block_t*))> mock_get_callback;
   MockFunction<void((void*, async_error_t*))> mock_get_err_callback;
   MockFunction<void((void*, void*))> mock_remove_callback;
@@ -98,7 +110,7 @@ public:
     mkdir_p(location);
     config = config_default();
     for (size_t i = 0; i < BLOCK_COUNT; i++) {
-      blocks[i] = block_create_random_block_by_type(mini);
+      blocks[i] = block_create_random_block_by_type(type);
     }
   }
   void TearDown() override {
@@ -134,6 +146,25 @@ void put_callback_err_wrapper(void* ctx, async_error_t* payload) {
     throw std::runtime_error((const char*)payload->message);
   } catch(...) {
     tbc->test->put_promise[tbc->i].set_exception(std::current_exception());
+  }
+  error_destroy(payload);
+  free(ctx);
+}
+
+void re_put_callback_wrapper(void* ctx, void* payload) {
+  auto tbc = static_cast<tbc_ctx*>(ctx);
+  tbc->test->mock_re_put_callback.Call(ctx, payload);
+  tbc->test->re_put_promise[tbc->i].set_value();
+  free(ctx);
+}
+
+void re_put_callback_err_wrapper(void* ctx, async_error_t* payload) {
+  auto tbc = static_cast<tbc_ctx*>(ctx);
+  tbc->test->mock_re_put_err_callback.Call(ctx, payload);
+  try {
+    throw std::runtime_error((const char*)payload->message);
+  } catch(...) {
+    tbc->test->re_put_promise[tbc->i].set_exception(std::current_exception());
   }
   error_destroy(payload);
   free(ctx);
@@ -201,7 +232,7 @@ void re_get_callback_err_wrapper(void* ctx, async_error_t* payload) {
 
 
 TEST_F(TestBlockCache, TestBlockCache) {
-  block_cache = block_cache_create(config, location, mini, pool, wheel);
+  block_cache = block_cache_create(config, location, type, pool, wheel);
   priority_t priority = priority_get_next();
 
   EXPECT_CALL(mock_put_callback, Call(_,_)).Times(BLOCK_COUNT);
@@ -220,14 +251,47 @@ TEST_F(TestBlockCache, TestBlockCache) {
     try {
       put_future.get();
     } catch (...) {
+      GTEST_FATAL_FAILURE_("Failed to store block " + i);
+    }
+  }
+
+  EXPECT_EQ(block_cache_count(block_cache), BLOCK_COUNT);
+
+  for (size_t i = 0; i < BLOCK_COUNT; i++) {
+    promise_destroy(put_promises_c[i]);
+  }
+
+  if (HasFailure()) {
+    GTEST_SKIP();
+  }
+
+  EXPECT_CALL(mock_re_put_callback, Call(_,_)).Times(BLOCK_COUNT);
+  EXPECT_CALL(mock_re_put_err_callback, Call(_,_)).Times(0);
+  promise_t* re_put_promises_c[BLOCK_COUNT];
+  for (size_t i = 0; i < BLOCK_COUNT; i++) {
+    tbc_ctx* ctx = (tbc_ctx*)get_memory(sizeof(tbc_ctx));
+    ctx->i = i;
+    ctx->test = this;
+    promise_t* promise = promise_create(re_put_callback_wrapper,re_put_callback_err_wrapper,ctx);
+    re_put_promises_c[i] = promise;
+    block_cache_put(block_cache, priority, blocks[i], promise);
+  }
+  for (size_t i = 0; i < BLOCK_COUNT; i++) {
+    std::future<void> re_put_future = re_put_promise[i].get_future();
+    try {
+      re_put_future.get();
+    } catch (...) {
       GTEST_FATAL_FAILURE_("Failed to stores block " + i);
     }
   }
 
+  EXPECT_EQ(block_cache_count(block_cache), BLOCK_COUNT);
+
+  for (size_t i = 0; i < BLOCK_COUNT; i++) {
+    promise_destroy(re_put_promises_c[i]);
+  }
+
   if (HasFailure()) {
-    for (size_t i = 0; i < BLOCK_COUNT; i++) {
-      promise_destroy(put_promises_c[i]);
-    }
     GTEST_SKIP();
   }
 
@@ -259,12 +323,14 @@ TEST_F(TestBlockCache, TestBlockCache) {
     }
   }
 
+  for (size_t i = 0; i < BLOCK_COUNT; i++) {
+    promise_destroy(get_promises_c[i]);
+  }
+
   if (HasFailure()) {
-    for (size_t i = 0; i < BLOCK_COUNT; i++) {
-      promise_destroy(get_promises_c[i]);
-    }
     GTEST_SKIP();
   }
+
 
   EXPECT_CALL(mock_remove_callback, Call(_,_)).Times(BLOCK_COUNT);
   EXPECT_CALL(mock_remove_err_callback, Call(_,_)).Times(0);
@@ -288,10 +354,11 @@ TEST_F(TestBlockCache, TestBlockCache) {
     }
   }
 
+  for (size_t i = 0; i < BLOCK_COUNT; i++) {
+    promise_destroy(remove_promises_c[i]);
+  }
+
   if (HasFailure()) {
-    for (size_t i = 0; i < BLOCK_COUNT; i++) {
-      promise_destroy(remove_promises_c[i]);
-    }
     GTEST_SKIP();
   }
 
@@ -321,9 +388,6 @@ TEST_F(TestBlockCache, TestBlockCache) {
   }
 
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    promise_destroy(put_promises_c[i]);
-    promise_destroy(get_promises_c[i]);
-    promise_destroy(remove_promises_c[i]);
     promise_destroy(re_get_promises_c[i]);
   }
 }
