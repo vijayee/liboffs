@@ -278,6 +278,7 @@ public:
     mkdir_p(robin_location);
   }
   void TearDown() override {
+    round_robin_destroy(robin);
     hierarchical_timing_wheel_wait_for_idle_signal(wheel);
     hierarchical_timing_wheel_stop(wheel);
     work_pool_shutdown(pool);
@@ -285,7 +286,6 @@ public:
     free(robin_location);
     work_pool_destroy(pool);
     hierarchical_timing_wheel_destroy(wheel);
-    round_robin_destroy(robin);
   }
 };
 
