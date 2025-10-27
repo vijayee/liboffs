@@ -19,6 +19,7 @@
 typedef struct block_lru_node_t block_lru_node_t;
 struct block_lru_node_t {
   block_t* value;
+  index_entry_t* entry;
   block_lru_node_t* next;
   block_lru_node_t* previous;
 };
@@ -37,7 +38,7 @@ block_lru_cache_t* block_lru_cache_create(size_t size);
 void block_lru_cache_destroy(block_lru_cache_t* lru);
 block_t* block_lru_cache_get(block_lru_cache_t* lru, buffer_t* hash);
 void  block_lru_cache_delete(block_lru_cache_t* lru, buffer_t* hash);
-void block_lru_cache_put(block_lru_cache_t* lru, block_t* block);
+index_entry_t* block_lru_cache_put(block_lru_cache_t* lru, block_t* block, index_entry_t* entry);
 uint8_t block_lru_cache_contains(block_lru_cache_t* lru, buffer_t* hash);
 
 typedef struct {

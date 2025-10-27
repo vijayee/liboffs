@@ -8,7 +8,7 @@
 #include "../RefCounter/refcounter.h"
 #include <cbor.h>
 
-typedef enum block_size_e {
+typedef enum {
   mega = 1000000,
   standard = 128000,
   mini = 64000,

@@ -620,10 +620,25 @@ index_t* cbor_to_index(cbor_item_t* cbor, char* location, hierarchical_timing_wh
   index_t* index= index_create_from(bucket_size, root, location, wheel, wait, max_wait);
   return index;
 }
+void index_set_entry_ejection(index_t* index, index_entry_t* entry, uint64_t date) {
+  cbor_item_t* array = cbor_new_definite_array(2);
+  bool success = cbor_array_push(array, cbor_move(cbor_build_bytestring(entry->hash->data, entry->hash->size)));
+  success &= cbor_array_push(array, cbor_move(cbor_build_uint64(date)));
+  if (success) {
+    uint8_t *cbor_data;
+    size_t cbor_size;
+    cbor_serialize_alloc(array, &cbor_data, &cbor_size);
+    buffer_t *cbor_buf = buffer_create_from_existing_memory(cbor_data, cbor_size);
+    wal_write(index->wal, ejection, cbor_buf);
+    buffer_destroy(cbor_buf);
+    cbor_decref(&array);
+  } else {
+    log_error("Failed to commit ejection date to log");
+  }
+  index_entry_set_ejection_date(entry, date);
+}
 
 void index_debounce(void* ctx) {
-  /*
-  printf("this happened\n");
   index_t *index = (index_t *) ctx;
   platform_lock(&index->lock);
   cbor_item_t *cbor = _index_to_cbor(index);
@@ -653,5 +668,5 @@ void index_debounce(void* ctx) {
   close(index_file);
   free(cbor_data);
   wal_destroy(wal);
-  cbor_intermediate_decref(cbor);*/
+  cbor_intermediate_decref(cbor);
 }

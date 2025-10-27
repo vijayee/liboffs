@@ -8,6 +8,7 @@
 #include "../Util/path_join.h"
 #include "../Workers/error.h"
 #include "../Workers/work.h"
+#include <time.h>
 
 
 typedef struct {
@@ -52,6 +53,7 @@ void block_lru_cache_destroy(block_lru_cache_t* lru) {
   platform_lock_destroy(&lru->lock);
   hashmap_foreach_data(node, &lru->cache) {
     DESTROY(node->value, block);
+    DESTROY(node->entry, index_entry);
     free(node);
   }
   hashmap_cleanup(&lru->cache);
@@ -102,17 +104,18 @@ void block_lru_cache_delete(block_lru_cache_t* lru, buffer_t* hash) {
       }
     }
     hashmap_remove(&lru->cache, hash);
+    DESTROY(node->entry, index_entry);
     DESTROY(node->value, block);
     free(node);
   }
   platform_unlock(&lru->lock);
 }
 
-void block_lru_cache_put(block_lru_cache_t* lru, block_t* block) {
+index_entry_t* block_lru_cache_put(block_lru_cache_t* lru, block_t* block, index_entry_t* entry) {
   platform_lock(&lru->lock);
   if (lru->size == 0) {
     platform_unlock(&lru->lock);
-    return;
+    return NULL;
   }
   block_lru_node_t* node = hashmap_get(&lru->cache, block->hash);
   // Add a new node if none exists already
@@ -121,7 +124,9 @@ void block_lru_cache_put(block_lru_cache_t* lru, block_t* block) {
     node->previous = NULL;
     node->next = NULL;
     node->value = REFERENCE(block, block_t);
+    node->entry = REFERENCE(entry, index_entry_t);
   }
+  index_entry_t* ejected = NULL;
   // Cache Ejection
   if (hashmap_size(&lru->cache) == lru->size) {
     if (lru->last != NULL) {
@@ -140,12 +145,15 @@ void block_lru_cache_put(block_lru_cache_t* lru, block_t* block) {
       }
       hashmap_remove(&lru->cache, last_node->value->hash);
       DESTROY(last_node->value, block);
+      YIELD(last_node->entry);
+      ejected = last_node->entry;
       free(last_node);
     }
   }
   hashmap_put(&lru->cache, block->hash, node);
   block_lru_cache_move(lru, node);
   platform_unlock(&lru->lock);
+  return ejected;
 }
 
 uint8_t block_lru_cache_contains(block_lru_cache_t* lru, buffer_t* hash) {
@@ -266,10 +274,14 @@ void _block_cache_put(block_cache_put_ctx* ctx) {
       index_entry_destroy(entry);
       promise_reject(promise, ERROR("Section Write Error"));
     } else {
+      index_entry_t* ejection = REFERENCE(block_lru_cache_put(block_cache->lru, block, entry), index_entry_t);
+      if (ejection) {
+        index_set_entry_ejection(block_cache->index, ejection, time(NULL));
+      }
+      DESTROY(ejection, index_entry);
       index_add(block_cache->index, CONSUME(entry, index_entry_t));
       promise_resolve(promise, NULL);
     }
-    block_lru_cache_put(block_cache->lru, block);
   } else {
     DESTROY(entry, index_entry);
     promise_resolve(promise, NULL);
@@ -313,7 +325,11 @@ void _block_cache_get(block_cache_get_ctx* ctx) {
       } else {
         block = block_create_existing_data_hash(data, entry->hash);
         if (block != NULL) {
-          block_lru_cache_put(block_cache->lru, block);
+          index_entry_t* ejection = REFERENCE(block_lru_cache_put(block_cache->lru, block, entry), index_entry_t);
+          if (ejection) {
+            index_set_entry_ejection(block_cache->index, ejection, time(NULL));
+          }
+          DESTROY(ejection, index_entry);
           YIELD(block);
           promise_resolve(promise, (void *) block);
         } else {

@@ -80,4 +80,5 @@ void index_destroy(index_t* index);
 index_entry_vec_t* index_to_array(index_t* index);
 cbor_item_t* index_to_cbor(index_t* index);
 index_t* cbor_to_index(cbor_item_t* cbor, char* location, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait);
+void index_set_entry_ejection(index_t* index, index_entry_t* entry, uint64_t date);
 #endif //OFFS_INDEX_H

@@ -12,7 +12,8 @@
 typedef enum wal_type_e {
   addition = 'a',
   removal = 'r',
-  increment = 'i'
+  increment = 'i',
+  ejection = 'e'
 } wal_type_e;
 
 typedef struct {

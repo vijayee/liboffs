@@ -28,14 +28,17 @@ public:
   size_t size = 5;
   size_t overage = 3;
   block_t* blocks[25];
+  index_entry_t* entries[25];
   block_size_e block_type = mini;
   void SetUp() override {
     for (size_t i = 0; i < 25; i++) {
       blocks[i] = block_create_random_block_by_type(block_type);
+      entries[i] = index_entry_create(blocks[i]->hash);
     }
   }
   void TearDown() override {
     for (size_t i = 0; i < 25; i++) {
+      index_entry_destroy(entries[i]);
       block_destroy(blocks[i]);
     }
   }
@@ -45,7 +48,13 @@ public:
 TEST_F(TestBlockLRU, TestBlockLRUOperations) {
   block_lru_cache_t* lru = block_lru_cache_create(size);
   for (size_t i = 0; i < (size + overage); i++) {
-    block_lru_cache_put(lru, blocks[i]);
+   index_entry_t* ejected = REFERENCE(block_lru_cache_put(lru, blocks[i], entries[i]), index_entry_t);
+   if (i >= size) {
+     EXPECT_NE(ejected == NULL, true);
+   }
+   if (ejected) {
+     DESTROY(ejected, index_entry);
+   }
   }
   for (size_t i = 0; i < overage; i++) {
     block_t* block = REFERENCE(block_lru_cache_get(lru, blocks[i]->hash), block_t);
