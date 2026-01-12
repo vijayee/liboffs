@@ -65,10 +65,11 @@ typedef struct {
   char* parent_location;
   size_t next_id;
   wal_t* wal;
+  uint8_t is_rebuilding;
   debouncer_t* debouncer;
 } index_t;
 
-index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait);
+index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait, int* error_code);
 index_t* index_create_from(size_t bucket_size, index_node_t* root, char* location, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait);
 size_t index_count(index_t* index);
 void index_add(index_t* index, index_entry_t* entry);

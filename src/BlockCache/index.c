@@ -7,13 +7,19 @@
 #include "../Util/log.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
-#include  "../Util/get_dir.h"
+#include "../Util/get_dir.h"
+#include "../Util/portable_endian.h"
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <xxh3.h>
+#include <string.h>
+
 
 void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node, size_t current);
 void index_split_node(index_t* index, index_node_t* node, size_t current);
+int _index_node_to_crc(index_node_t* node, XXH64_state_t* const state);
+int _index_to_crc(index_t* index, uint64_t* crc);
 
 index_entry_t* index_get_from_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current);
 index_entry_t* index_find_in_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current);
@@ -131,7 +137,7 @@ void index_node_destroy(index_node_t* node) {
   }
 }
 
-index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait) {
+index_t* _index_new_empty(size_t bucket_size, char* location, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait, uint64_t most_recent_id) {
   index_t* index = get_clear_memory(sizeof(index_t));
   platform_lock_init(&index->lock);
   index->bucket_size = bucket_size;
@@ -140,24 +146,11 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
   index->parent_location = strdup(location);
   mkdir_p(index->location);
 
-  vec_str_t* files = get_dir(index->location);
-
-  if (files->length > 0) {
-    char id[20];
-    char* last = vec_last(files);
-    uint64_t last_id = atol(last);
-    index->next_id = last_id + 2;
-    sprintf(id,"%lu", last_id + 1);
-    index->current_file = path_join(index->location, id);
-    index->last_file = path_join(index->location, last);
-  } else {
-    char id[20];
-    sprintf(id,"%lu", (uint64_t)1);
-    index->next_id = 2;
-    index->current_file = path_join(index->location, id);
-    index->last_file = NULL;
-  }
-  destroy_files(files);
+  char id[20];
+  sprintf(id,"%lu", (uint64_t) (most_recent_id + 1));
+  index->next_id = most_recent_id + 2;
+  index->current_file = path_join(index->location, id);
+  index->last_file = NULL;
 
   index->wal = wal_create(index->parent_location);
   index->debouncer = debouncer_create(wheel, index, index_debounce, index_debounce, wait, max_wait);
@@ -165,6 +158,191 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
   hashmap_set_key_alloc_funcs(&index->ranks, duplicate_uint32, (void*)free);
   refcounter_init((refcounter_t*) index);
   return index;
+}
+
+index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait, int* error_code) {
+  index_t* index;
+  char* index_location = path_join(location,"index");
+  char* parent_location = strdup(location);
+  vec_str_t* files = get_dir(index_location);
+  uint64_t most_recent_id = 0;
+  mkdir_p(index_location);
+  if (files->length > 0) {
+    char id[20];
+    for (size_t i = files->length - 1; i >= 0; i--) { //loop through index files to find first valid file
+      //Get index's crc
+      char* last = files->data[i];
+      char* index_file_location = path_join(index_location, last);
+      char delims[] = "-";
+      char* last_id_str = strtok(last,delims);
+      uint64_t last_id = atoll(last_id_str);
+      if (i == (files->length - 1)) {
+        most_recent_id = last_id;
+      }
+      char* last_crc_str = strtok(NULL, delims);
+      if (strcmp(last_crc_str, "crc_error") == 0) {
+        log_error("index file %lu invalid", i);
+         continue;
+      }
+      uint64_t last_crc = atoll(last_crc_str);
+
+#ifdef _WIN32
+      int32_t index_fd = open(index_file_location, O_RDWR | O_CREAT, 0644);
+#else
+      int32_t index_fd = open(index_file_location, O_RDWR | O_CREAT, 0644);
+#endif
+      int32_t size = lseek(index_fd, 0,SEEK_END);
+      if(size < 0) {
+        *error_code= -1;
+        return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+      }
+      if (lseek(index_fd, 0, SEEK_SET) < 0) {
+        *error_code= -2;
+        return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+      }
+      uint8_t buffer[size];
+      size_t bytes = read(index_fd, buffer, size);
+
+      if (size != bytes) {
+        *error_code= -3;
+        return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+      }
+      struct cbor_load_result result;
+
+      cbor_item_t* cbor = cbor_load(buffer, size, &result);
+
+      if (result.error.code != CBOR_ERR_NONE) {
+        *error_code= -4;
+        return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+      }
+      if(!cbor_isa_array(cbor)) {
+        cbor_decref(&cbor);
+        *error_code= -5;
+        return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+      }
+      index = cbor_to_index(cbor, location, wheel, wait, max_wait);
+      uint64_t crc;
+      _index_to_crc(index, &crc);
+      if (crc != last_crc) { //Index is invalid, continue to iterate backward until we have a valid index
+        DESTROY(index, index);
+        free(index_file_location);
+        free(last);
+        continue;
+      } else { // // Index is valid rebuild if it is not the most recent index
+        if (i != (files->length - 1)) { //incorporate every wal's changes until we get to the most recent index
+          index->is_rebuilding = 1;
+          for (size_t j = i + 1; j < (files->length - 1); j++) {
+            wal_t* wal = wal_load(parent_location, j);
+            wal_type_e* type;
+            buffer_t* data;
+            uint64_t cursor;
+            int32_t wal_size;
+            int read_result = wal_read(wal, type, data, &cursor, &wal_size);
+            while ((read_result == 0) && (cursor < wal_size)) {
+              struct cbor_load_result result;
+              cbor_item_t* cbor;
+              switch (*type) {
+                case 'a':
+                  cbor = cbor_load(data->data, data->size, &result);
+                  if (result.error.code == CBOR_ERR_NONE) {
+                    index_entry_t *entry = cbor_to_index_entry(cbor);
+                    index_add(index, entry);
+                    cbor_decref(&cbor);
+                  } else {
+                    cbor_decref(&cbor);
+                    DESTROY(index, index);
+                    *error_code= -6;
+                    return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+                  }
+                  break;
+                case 'i':
+                  cbor = cbor_load(data->data, data->size, &result);
+                  if (result.error.code == CBOR_ERR_NONE) {
+                    index_entry_t *entry = cbor_to_index_entry(cbor);
+                    index_increment(index, entry);
+                    cbor_decref(&cbor);
+                  } else {
+                    cbor_decref(&cbor);
+                    DESTROY(index, index);
+                    *error_code= -7;
+                    return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+                  }
+                  break;
+                case 'e':
+                  cbor = cbor_load(data->data, data->size, &result);
+                  if (result.error.code == CBOR_ERR_NONE) {
+                    if(cbor_isa_array(cbor)) {
+                      cbor_item_t* cbor_hash = cbor_move(cbor_array_get(cbor, 0));
+                      cbor_item_t* cbor_date = cbor_move(cbor_array_get(cbor,1));
+                      if (cbor_isa_bytestring(cbor_hash) && cbor_isa_uint(cbor_date)) {
+                        buffer_t* hash = cbor_to_buffer(cbor_move(cbor_hash));
+                        index_entry_t* entry = index_find(index, hash);
+                        index_entry_set_ejection_date(entry, cbor_get_uint64(cbor_date));
+                        cbor_decref(&cbor_hash);
+                        cbor_decref(&cbor_date);
+                        cbor_decref(&cbor);
+                      } else {
+                        cbor_decref(&cbor_hash);
+                        cbor_decref(&cbor_date);
+                        cbor_decref(&cbor);
+                        DESTROY(index, index);
+                        *error_code = read_result;
+                        return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+                      }
+                    }
+                  } else {
+                    cbor_decref(&cbor);
+                    DESTROY(index, index);
+                    *error_code = -8;
+                    return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+                  }
+                  break;
+                case 'r':
+                  cbor = cbor_load(data->data, data->size, &result);
+                  if (result.error.code == CBOR_ERR_NONE) {
+                    if (cbor_isa_bytestring(cbor)) {
+                      buffer_t* hash = cbor_to_buffer(cbor_move(cbor));
+                      index_remove(index, hash);
+                    } else {
+                      cbor_decref(&cbor);
+                      DESTROY(index, index);
+                      *error_code = -9;
+                      return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+                    }
+                    cbor_decref(&cbor);
+                  } else {
+                    cbor_decref(&cbor);
+                    DESTROY(index, index);
+                    *error_code = -10;
+                    return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+                  }
+                  break;
+              }
+              read_result = wal_read(wal, type, data, &cursor, &wal_size);
+            }
+            destroy_files(files);
+            if ((read_result != 0) || (cursor != wal_size)) { // some error other than end of file
+              DESTROY(index, index);
+              *error_code = read_result;
+              return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+            }
+            index->is_rebuilding = 0;
+            return index;
+          }
+        } else {
+          return index;
+        }
+      }
+
+      index->next_id = last_id + 2;
+      sprintf(id,"%lu", last_id + 1);
+
+      index->current_file = path_join(index_location, id);
+      index->last_file = path_join(index->location, last);
+    }
+  } else {
+    return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+  }
 }
 index_t* index_create_from(size_t bucket_size, index_node_t* root, char* location, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait) {
   index_t* index = get_clear_memory(sizeof(index_t));
@@ -176,8 +354,10 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root, char* locatio
   if (files->length > 0) {
     char id[20];
     char* last = vec_last(files);
-    uint64_t last_id = atol(last);
-    index->next_id = last_id + 2;
+    char delims[] = "-";
+    char* last_id_str = strtok(last,delims);
+    uint64_t last_id = atoll(last_id_str);
+    index->next_id = last_id + 2; // TODO Handle integer rollover
     sprintf(id,"%lu", last_id + 1);
     index->current_file = path_join(index->location, id);
     index->last_file = path_join(index->location, last);
@@ -217,7 +397,66 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root, char* locatio
   free(entries);
   return index;
 }
+/*
+int index_check_integrity(index_t* index, wal_t* wal) {
+ uint64_t cursor = 0;
+ buffer_t* log_entry;
+ wal_type_e type;
+ int result = 0;
+ int32_t wal_size;
+ int read_result = wal_read(wal, &type, log_entry, &cursor, &wal_size);
+ do {
+   cbor_item_t* cbor;
+   struct cbor_load_result cbor_result;
+   cbor = cbor_load(log_entry->data, log_entry->size, &cbor_result);
+   if (cbor_result.error.code != CBOR_ERR_NONE) {
+     return 1;
+   }
+   switch(type) {
+     case 'a':
+       index_entry_t* addition_entry = cbor_to_index_entry(cbor);
+       index_entry_t* found = index_find(index, addition_entry->hash);
+       if ((found == NULL) || (buffer_compare(addition_entry->hash, found->hash))) {
+         result = 2;
+       }
+       index_entry_destroy(addition_entry);
+       if (found != NULL) {
+         index_entry_destroy(found);
+       }
+       break;
+     case 'r':
+       buffer_t* hash = cbor_to_buffer(cbor);
+       index_entry_t* removed = index_find(index, hash);
+       if (removed != NULL) {
+         result = 3;
+         DESTROY(removed, index_entry);
+       }
+       DESTROY(hash, buffer);
+       break;
+     case 'i':
+       index_entry_t* inc_entry = cbor_to_index_entry(cbor);
+       index_entry_t* incremented = index_find(index, inc_entry->hash);
+       if (incremented == NULL) {
+         result = 4;
+       }
+       if (fibonacci_hit_counter_compare(&incremented->counter, &inc_entry->counter) == -1) {
+          result = 5;
+       }
+       index_entry_destroy(inc_entry);
+       if (incremented != NULL) {
+         index_entry_destroy(incremented);
+       }
+       break;
+     case 'e':
+       break;
+   }
+   cbor_decref(&cbor);
+   if (result != 0) {
+     return result;
+   }
+ } while()
 
+}*/
 size_t index_node_count(index_node_t* node) {
   if (node->bucket == NULL) {
     return index_node_count(node->left) + index_node_count(node->right);
@@ -312,6 +551,54 @@ index_node_t* cbor_to_index_node(cbor_item_t* cbor, size_t bucket_size) {
   }
 }
 
+int _index_node_to_crc(index_node_t* node, XXH64_state_t* const state) {
+  if (node->bucket == NULL) {
+    int result = _index_node_to_crc(node->left, state);
+    if (result != 0) {
+      return result;
+    } else {
+      return _index_node_to_crc(node->right, state);
+    }
+  } else {
+    for (size_t i =0; i < node->bucket->length; i++) {
+      index_entry_t* cur_entry = node->bucket->data[i];
+      if (XXH64_update(state, cur_entry->hash->data, cur_entry->hash->size) == XXH_ERROR) {
+        log_error("failed to update crc with hash");
+        return 3;
+      }
+      uint32_t fib = htobe32(cur_entry->counter.fib);
+      if (XXH64_update(state, &fib, sizeof(uint32_t)) == XXH_ERROR) {
+        log_error("failed to update crc with counter");
+        return 4;
+      }
+
+      uint32_t count = htobe32(cur_entry->counter.count);
+      if (XXH64_update(state, &count, sizeof(uint32_t)) == XXH_ERROR) {
+        log_error("failed to update crc with counter");
+        return 4;
+      }
+
+      uint64_t ejection_date  = htobe64(cur_entry->ejection_date);
+      if (XXH64_update(state, &ejection_date, sizeof(uint64_t)) == XXH_ERROR) {
+        log_error("failed to update crc with ejection date");
+        return 5;
+      }
+
+      uint64_t section_index = htobe64((uint64_t)cur_entry->section_index);
+      if (XXH64_update(state, &section_index, sizeof(uint64_t)) == XXH_ERROR) {
+        log_error("failed to update crc with section index");
+        return 6;
+      }
+
+      uint64_t section_id = htobe64((uint64_t)cur_entry->section_id);
+      if (XXH64_update(state, &section_id, sizeof(uint64_t)) == XXH_ERROR) {
+        log_error("failed to update crc with section id");
+        return 7;
+      }
+    }
+  }
+}
+
 void index_add(index_t* index, index_entry_t* entry) {
   platform_lock(&index->lock);
   index_add_to_node(index, entry, index->root, 0);
@@ -348,16 +635,20 @@ void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node,
      }
 
      if (node->bucket->length < index->bucket_size) {
-       cbor_item_t* cbor_entry = index_entry_to_cbor(entry);
-       uint8_t* cbor_data;
-       size_t cbor_size;
-       cbor_serialize_alloc(cbor_entry, &cbor_data, &cbor_size);
-       buffer_t* cbor_buf = buffer_create_from_existing_memory(cbor_data, cbor_size);
-       wal_write(index->wal, addition, cbor_buf);
-       buffer_destroy(cbor_buf);
-       cbor_decref(&cbor_entry);
+       if(!index->is_rebuilding) {
+         cbor_item_t* cbor_entry = index_entry_to_cbor(entry);
+         uint8_t* cbor_data;
+         size_t cbor_size;
+         cbor_serialize_alloc(cbor_entry, &cbor_data, &cbor_size);
+         buffer_t *cbor_buf = buffer_create_from_existing_memory(cbor_data, cbor_size);
+         wal_write(index->wal, addition, cbor_buf);
+         buffer_destroy(cbor_buf);
+         cbor_decref(&cbor_entry);
+       }
        vec_push(node->bucket, (index_entry_t*) refcounter_reference((refcounter_t*) entry));
-       debouncer_debounce(index->debouncer);
+       if(!index->is_rebuilding) {
+         debouncer_debounce(index->debouncer);
+       }
      } else {
        index_split_node(index, node, current);
        index_add_to_node(index, entry, node, current);
@@ -371,14 +662,16 @@ void index_increment(index_t* index, index_entry_t* entry) {
 }
 
 void _index_increment(index_t* index, index_entry_t* entry) {
-  cbor_item_t* cbor_hash = cbor_build_bytestring(entry->hash->data, entry->hash->size);
-  uint8_t* cbor_data;
-  size_t cbor_size;
-  cbor_serialize_alloc(cbor_hash, &cbor_data, &cbor_size);
-  buffer_t* cbor_buf = buffer_create_from_existing_memory(cbor_data, cbor_size);
-  wal_write(index->wal, increment, cbor_buf);
-  buffer_destroy(cbor_buf);
-  cbor_decref(&cbor_hash);
+  if(!index->is_rebuilding) {
+    cbor_item_t *cbor_hash = index_entry_to_cbor(entry);
+    uint8_t *cbor_data;
+    size_t cbor_size;
+    cbor_serialize_alloc(cbor_hash, &cbor_data, &cbor_size);
+    buffer_t *cbor_buf = buffer_create_from_existing_memory(cbor_data, cbor_size);
+    wal_write(index->wal, increment, cbor_buf);
+    buffer_destroy(cbor_buf);
+    cbor_decref(&cbor_hash);
+  }
 
   if (index_entry_increment(entry)) {
     uint32_t key = entry->counter.fib - 1;
@@ -403,7 +696,9 @@ void _index_increment(index_t* index, index_entry_t* entry) {
      } else {
        vec_push(rank, (index_entry_t*) refcounter_reference((refcounter_t*) entry));
      }
-     debouncer_debounce(index->debouncer);
+    if (!index->is_rebuilding) {
+       debouncer_debounce(index->debouncer);
+    }
   }
 }
 
@@ -501,14 +796,16 @@ void index_remove_from_node(index_t* index, buffer_t* hash, index_node_t* node, 
     for (size_t i = 0; i < node->bucket->length; i++) {
       index_entry_t* cur_entry = node->bucket->data[i];
       if (buffer_compare(cur_entry->hash, hash) == 0) {
-        cbor_item_t* cbor_hash = cbor_build_bytestring(cur_entry->hash->data, cur_entry->hash->size);
-        uint8_t* cbor_data;
-        size_t cbor_size;
-        cbor_serialize_alloc(cbor_hash, &cbor_data, &cbor_size);
-        buffer_t* cbor_buf = buffer_create_from_existing_memory(cbor_data, cbor_size);
-        wal_write(index->wal, removal, cbor_buf);
-        buffer_destroy(cbor_buf);
-        cbor_decref(&cbor_hash);
+        if (!index->is_rebuilding) {
+          cbor_item_t *cbor_hash = cbor_build_bytestring(cur_entry->hash->data, cur_entry->hash->size);
+          uint8_t *cbor_data;
+          size_t cbor_size;
+          cbor_serialize_alloc(cbor_hash, &cbor_data, &cbor_size);
+          buffer_t *cbor_buf = buffer_create_from_existing_memory(cbor_data, cbor_size);
+          wal_write(index->wal, removal, cbor_buf);
+          buffer_destroy(cbor_buf);
+          cbor_decref(&cbor_hash);
+        }
         vec_splice(node->bucket, i, 1);
 
         uint32_t key = cur_entry->counter.fib;
@@ -621,19 +918,21 @@ index_t* cbor_to_index(cbor_item_t* cbor, char* location, hierarchical_timing_wh
   return index;
 }
 void index_set_entry_ejection(index_t* index, index_entry_t* entry, uint64_t date) {
-  cbor_item_t* array = cbor_new_definite_array(2);
-  bool success = cbor_array_push(array, cbor_move(cbor_build_bytestring(entry->hash->data, entry->hash->size)));
-  success &= cbor_array_push(array, cbor_move(cbor_build_uint64(date)));
-  if (success) {
-    uint8_t *cbor_data;
-    size_t cbor_size;
-    cbor_serialize_alloc(array, &cbor_data, &cbor_size);
-    buffer_t *cbor_buf = buffer_create_from_existing_memory(cbor_data, cbor_size);
-    wal_write(index->wal, ejection, cbor_buf);
-    buffer_destroy(cbor_buf);
-    cbor_decref(&array);
-  } else {
-    log_error("Failed to commit ejection date to log");
+  if (!index->is_rebuilding) {
+    cbor_item_t *array = cbor_new_definite_array(2);
+    bool success = cbor_array_push(array, cbor_move(cbor_build_bytestring(entry->hash->data, entry->hash->size)));
+    success &= cbor_array_push(array, cbor_move(cbor_build_uint64(date)));
+    if (success) {
+      uint8_t *cbor_data;
+      size_t cbor_size;
+      cbor_serialize_alloc(array, &cbor_data, &cbor_size);
+      buffer_t *cbor_buf = buffer_create_from_existing_memory(cbor_data, cbor_size);
+      wal_write(index->wal, ejection, cbor_buf);
+      buffer_destroy(cbor_buf);
+      cbor_decref(&array);
+    } else {
+      log_error("Failed to commit ejection date to log");
+    }
   }
   index_entry_set_ejection_date(entry, date);
 }
@@ -642,13 +941,21 @@ void index_debounce(void* ctx) {
   index_t *index = (index_t *) ctx;
   platform_lock(&index->lock);
   cbor_item_t *cbor = _index_to_cbor(index);
+  uint64_t crc = 0;
+  int result = _index_to_crc(index, &crc);
+
   char *file = index->current_file;
   if (index->last_file != NULL) {
     free(index->last_file);
   }
   index->last_file = index->current_file;
   char id[20];
-  sprintf(id, "%lu", index->next_id);
+  if (result != 0) {
+    sprintf(id, "%lu-%lu", index->next_id, crc);
+  } else {
+    log_error("Could not store index with correct crc");
+    sprintf(id, "%lu-crc_error", index->next_id, crc);
+  }
   index->current_file = path_join(index->location, id);
   index->next_id++;
   wal_t* wal = index->wal;
@@ -669,4 +976,22 @@ void index_debounce(void* ctx) {
   free(cbor_data);
   wal_destroy(wal);
   cbor_intermediate_decref(cbor);
+}
+int _index_to_crc(index_t* index, uint64_t* crc) {
+  XXH64_state_t* const state = XXH64_createState();
+  if (state == NULL) {
+    log_error("failed to create crc");
+    return 1;
+  }
+  if (XXH64_reset(state, 0) == XXH_ERROR) {
+    log_error("failed to init crc");
+    return 2;
+  }
+  int result = _index_node_to_crc(index->root, state);
+  if (result != 0) {
+    return result;
+  }
+  *crc = XXH64_digest(state);
+  XXH64_freeState(state);
+  return 0;
 }

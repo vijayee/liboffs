@@ -171,7 +171,8 @@ namespace indexTest {
     hierarchical_timing_wheel_run(wheel);
     uint64_t wait = 200;
     uint64_t max_wait = 5000;
-    index_t *index = index_create(25, location, wheel, wait, max_wait);
+    int error_code;
+    index_t *index = index_create(25, location, wheel, wait, max_wait, &error_code);
 
     index_add(index, entry1);
     index_add(index, entry2);

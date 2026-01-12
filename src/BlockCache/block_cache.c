@@ -233,7 +233,8 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
   }
   block_cache->lru = block_lru_cache_create(config.lru_size);
   block_cache->sections = sections_create(folder, config.section_size, config.cache_size, config.max_tuple_size, type, wheel, config.section_wait, config.section_max_wait);
-  block_cache->index = index_create(config.index_bucket_size,folder, wheel, config.index_wait, config.index_max_wait);
+  int error_code;
+  block_cache->index = index_create(config.index_bucket_size,folder, wheel, config.index_wait, config.index_max_wait, &error_code);
   free(folder);
   return block_cache;
 }
@@ -277,8 +278,8 @@ void _block_cache_put(block_cache_put_ctx* ctx) {
       index_entry_t* ejection = REFERENCE(block_lru_cache_put(block_cache->lru, block, entry), index_entry_t);
       if (ejection) {
         index_set_entry_ejection(block_cache->index, ejection, time(NULL));
+        DESTROY(ejection, index_entry);
       }
-      DESTROY(ejection, index_entry);
       index_add(block_cache->index, CONSUME(entry, index_entry_t));
       promise_resolve(promise, NULL);
     }
@@ -328,8 +329,8 @@ void _block_cache_get(block_cache_get_ctx* ctx) {
           index_entry_t* ejection = REFERENCE(block_lru_cache_put(block_cache->lru, block, entry), index_entry_t);
           if (ejection) {
             index_set_entry_ejection(block_cache->index, ejection, time(NULL));
+            DESTROY(ejection, index_entry);
           }
-          DESTROY(ejection, index_entry);
           YIELD(block);
           promise_resolve(promise, (void *) block);
         } else {

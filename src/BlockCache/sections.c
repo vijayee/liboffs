@@ -408,7 +408,7 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
   vec_str_t* files = get_dir(sections->meta_path);
   if (files->length) {
     char* last = vec_last(files);
-    uint64_t last_id = atol(last);
+    uint64_t last_id = atoll(last);
     sections->next_id = last_id + 1;
   } else {
     sections->next_id = 0;
