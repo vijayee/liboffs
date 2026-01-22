@@ -164,9 +164,10 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
   index_t* index;
   char* index_location = path_join(location,"index");
   char* parent_location = strdup(location);
+  mkdir_p(index_location);
   vec_str_t* files = get_dir(index_location);
   uint64_t most_recent_id = 0;
-  mkdir_p(index_location);
+
   if (files->length > 0) {
     char id[20];
     for (size_t i = files->length - 1; i >= 0; i--) { //loop through index files to find first valid file
@@ -596,6 +597,7 @@ int _index_node_to_crc(index_node_t* node, XXH64_state_t* const state) {
         return 7;
       }
     }
+    return 0;
   }
 }
 
@@ -943,19 +945,21 @@ void index_debounce(void* ctx) {
   cbor_item_t *cbor = _index_to_cbor(index);
   uint64_t crc = 0;
   int result = _index_to_crc(index, &crc);
+  char file[41];
+  if (result == 0) {
+    sprintf(file, "%s-%lu", index->current_file, crc);
+  } else {
+    log_error("Could not store index with correct crc");
+    sprintf(file, "%s-crc_error", index->current_file);
+  }
 
-  char *file = index->current_file;
   if (index->last_file != NULL) {
     free(index->last_file);
   }
   index->last_file = index->current_file;
+
   char id[20];
-  if (result != 0) {
-    sprintf(id, "%lu-%lu", index->next_id, crc);
-  } else {
-    log_error("Could not store index with correct crc");
-    sprintf(id, "%lu-crc_error", index->next_id, crc);
-  }
+  sprintf(id, "%lu", index->next_id);
   index->current_file = path_join(index->location, id);
   index->next_id++;
   wal_t* wal = index->wal;
@@ -989,6 +993,7 @@ int _index_to_crc(index_t* index, uint64_t* crc) {
   }
   int result = _index_node_to_crc(index->root, state);
   if (result != 0) {
+    XXH64_freeState(state);
     return result;
   }
   *crc = XXH64_digest(state);

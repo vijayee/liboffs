@@ -8,6 +8,8 @@ extern "C" {
 #include "../src/BlockCache/fibonacci.h"
 #include "../src/BlockCache/index.h"
 #include "../src/Util/path_join.h"
+#include "../src/Util/mkdir_p.h"
+#include "../src/Util/rm_rf.h"
 #include <time.h>
 #include <cbor.h>
 #include "../src/Time/wheel.h"
@@ -30,7 +32,7 @@ namespace indexTest {
     }
   }
 
-  TEST(TestIndex, TestBitFunctions) {
+  TEST(TestBit, TestBitFunctions) {
     uint8_t data[1] = {1};
     buffer_t *buf = buffer_create_from_existing_memory(data, 1);
     if (littleEndian()) {
@@ -54,7 +56,7 @@ namespace indexTest {
     }
   }
 
-  TEST(TestIndex, TestIndexEntry) {
+  TEST(TestIndexEntry, TestIndexEntry) {
     block_t *block = block_create_random_block_by_type(nano);
     index_entry_t *entry = index_entry_create(block->hash);
     EXPECT_EQ(buffer_compare(entry->hash, block->hash), 0);
@@ -101,170 +103,63 @@ namespace indexTest {
   void ShutdownAborted(void* ctx) {
   }
 
-
-  TEST(TestIndex, TestIndexFunctions) {
-    uint8_t* data1 = frand(nano);
-    data1[0] = 1;
-    uint8_t* data2 = frand(nano);
-    data2[0] = 2;
-    uint8_t* data3 = frand(nano);
-    data3[0] = 3;
-    uint8_t* data4 = frand(nano);
-    data4[0] = 4;
-    uint8_t* data5 = frand(nano);
-    data5[0] = 5;
-    uint8_t* data6 = frand(nano);
-    data6[0] = 6;
-    uint8_t* data7 = frand(nano);
-    data7[0] = 7;
-    uint8_t* data8 = frand(nano);
-    data8[0] = 8;
-
-    buffer_t* buf1 = buffer_create_from_pointer_copy(data1, nano);
-    buffer_t* buf2 = buffer_create_from_pointer_copy(data2, nano);
-    buffer_t* buf3 = buffer_create_from_pointer_copy(data3, nano);
-    buffer_t* buf4 = buffer_create_from_pointer_copy(data4, nano);
-    buffer_t* buf5 = buffer_create_from_pointer_copy(data5, nano);
-    buffer_t* buf6 = buffer_create_from_pointer_copy(data6, nano);
-    buffer_t* buf7 = buffer_create_from_pointer_copy(data7, nano);
-    buffer_t* buf8 = buffer_create_from_pointer_copy(data8, nano);
-
-    refcounter_yield((refcounter_t*) buf1);
-    refcounter_yield((refcounter_t*) buf2);
-    refcounter_yield((refcounter_t*) buf3);
-    refcounter_yield((refcounter_t*) buf4);
-    refcounter_yield((refcounter_t*) buf5);
-    refcounter_yield((refcounter_t*) buf6);
-    refcounter_yield((refcounter_t*) buf7);
-    refcounter_yield((refcounter_t*) buf8);
-
-    free(data1);
-    free(data2);
-    free(data3);
-    free(data4);
-    free(data5);
-    free(data6);
-    free(data7);
-    free(data8);
-
-    block_t* block1 = block_create_by_type(buf1, nano);
-    block_t* block2 = block_create_by_type(buf2, nano);
-    block_t* block3 = block_create_by_type(buf3, nano);
-    block_t* block4 = block_create_by_type(buf4, nano);
-    block_t* block5 = block_create_by_type(buf5, nano);
-    block_t* block6 = block_create_by_type(buf6, nano);
-    block_t* block7 = block_create_by_type(buf7, nano);
-    block_t* block8 = block_create_by_type(buf8, nano);
-
-    index_entry_t* entry1 = index_entry_create(block1->hash);
-    index_entry_t* entry2 = index_entry_create(block2->hash);
-    index_entry_t* entry3 = index_entry_create(block3->hash);
-    index_entry_t* entry4 = index_entry_create(block4->hash);
-    index_entry_t* entry5 = index_entry_create(block5->hash);
-    index_entry_t* entry6 = index_entry_create(block6->hash);
-    index_entry_t* entry7 = index_entry_create(block7->hash);
-    index_entry_t* entry8 = index_entry_create(block8->hash);
-    char* location = path_join(".", "block_index");
-    work_pool_t* pool= work_pool_create(4);
-    work_pool_launch(pool);
-    hierarchical_timing_wheel_t* wheel = hierarchical_timing_wheel_create(8, pool);
-    hierarchical_timing_wheel_run(wheel);
+  class TestIndex : public testing::Test {
+  public:
+    block_t* blocks[8];
+    index_entry_t* entries[8];
+    char* location;
+    work_pool_t* pool;
+    hierarchical_timing_wheel_t* wheel;
     uint64_t wait = 200;
     uint64_t max_wait = 5000;
+    void SetUp() override {
+      for (size_t i = 0; i < 8; i++) {
+        buffer_t* buf = buffer_create_from_existing_memory(frand(nano), nano);
+        blocks[i] = block_create_by_type(CONSUME(buf, buffer_t), nano);
+        entries[i] = index_entry_create(blocks[i]->hash);
+      }
+      location = path_join(".", "block_index");
+      rm_rf(location);
+      mkdir_p(location);
+      pool = work_pool_create(4);
+      work_pool_launch(pool);
+      wheel = hierarchical_timing_wheel_create(8, pool);
+      hierarchical_timing_wheel_run(wheel);
+    }
+    void TearDown() override {
+      hierarchical_timing_wheel_wait_for_idle_signal(wheel);
+      hierarchical_timing_wheel_stop(wheel);
+      work_pool_shutdown(pool);
+      work_pool_join_all(pool);
+      work_pool_destroy(pool);
+      hierarchical_timing_wheel_destroy(wheel);
+      for (size_t i = 0; i < 8; i++) {
+        DESTROY(blocks[i], block);
+        DESTROY(entries[i], index_entry);
+      }
+      free(location);
+    }
+  };
+
+  TEST_F(TestIndex, TestIndexFunctions) {
     int error_code;
     index_t *index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    for (size_t i = 0; i < 8; i++) {
+      index_add(index, entries[i]);
+    }
+    index_entry_t* _entries[8];
 
-    index_add(index, entry1);
-    index_add(index, entry2);
-    index_add(index, entry3);
-    index_add(index, entry4);
-    index_add(index, entry5);
-    index_add(index, entry6);
-    index_add(index, entry7);
-    index_add(index, entry8);
+    for (size_t i = 0; i < 8; i++) {
+      _entries[i] = REFERENCE(index_get(index, blocks[i]->hash), index_entry_t);
+      EXPECT_EQ(buffer_compare(_entries[i]->hash, entries[i]->hash), 0);
+      DESTROY(_entries[i], index_entry);
+    }
 
-    index_entry_t* _entry1 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block1->hash));
-    index_entry_t* _entry2 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block2->hash));
-    index_entry_t* _entry3 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block3->hash));
-    index_entry_t* _entry4 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block4->hash));
-    index_entry_t* _entry5 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block5->hash));
-    index_entry_t* _entry6 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block6->hash));
-    index_entry_t* _entry7 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block7->hash));
-    index_entry_t* _entry8 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block8->hash));
-
-    EXPECT_EQ(buffer_compare(_entry1->hash, entry1->hash), 0);
-    EXPECT_EQ(buffer_compare(_entry2->hash, entry2->hash), 0);
-    EXPECT_EQ(buffer_compare(_entry3->hash, entry3->hash), 0);
-    EXPECT_EQ(buffer_compare(_entry4->hash, entry4->hash), 0);
-    EXPECT_EQ(buffer_compare(_entry5->hash, entry5->hash), 0);
-    EXPECT_EQ(buffer_compare(_entry6->hash, entry6->hash), 0);
-    EXPECT_EQ(buffer_compare(_entry7->hash, entry7->hash), 0);
-    EXPECT_EQ(buffer_compare(_entry8->hash, entry8->hash), 0);
-
-    index_entry_destroy(_entry1);
-    index_entry_destroy(_entry2);
-    index_entry_destroy(_entry3);
-    index_entry_destroy(_entry4);
-    index_entry_destroy(_entry5);
-    index_entry_destroy(_entry6);
-    index_entry_destroy(_entry7);
-    index_entry_destroy(_entry8);
-
-    _entry1 = (index_entry_t*) refcounter_reference((refcounter_t*)index_find(index, block1->hash));
-    _entry2 = (index_entry_t*) refcounter_reference((refcounter_t*)index_find(index, block2->hash));
-    _entry3 = (index_entry_t*) refcounter_reference((refcounter_t*)index_find(index, block3->hash));
-    _entry4 = (index_entry_t*) refcounter_reference((refcounter_t*)index_find(index, block4->hash));
-    _entry5 = (index_entry_t*) refcounter_reference((refcounter_t*)index_find(index, block5->hash));
-    _entry6 = (index_entry_t*) refcounter_reference((refcounter_t*)index_find(index, block6->hash));
-    _entry7 = (index_entry_t*) refcounter_reference((refcounter_t*)index_find(index, block7->hash));
-    _entry8 = (index_entry_t*) refcounter_reference((refcounter_t*)index_find(index, block8->hash));
-
-    EXPECT_EQ(buffer_compare(_entry1->hash, entry1->hash), 0);
-    EXPECT_EQ(buffer_compare(_entry2->hash, entry2->hash), 0);
-    EXPECT_EQ(buffer_compare(_entry3->hash, entry3->hash), 0);
-    EXPECT_EQ(buffer_compare(_entry4->hash, entry4->hash), 0);
-    EXPECT_EQ(buffer_compare(_entry5->hash, entry5->hash), 0);
-    EXPECT_EQ(buffer_compare(_entry6->hash, entry6->hash), 0);
-    EXPECT_EQ(buffer_compare(_entry7->hash, entry7->hash), 0);
-    EXPECT_EQ(buffer_compare(_entry8->hash, entry8->hash), 0);
-
-    index_entry_destroy(_entry1);
-    index_entry_destroy(_entry2);
-    index_entry_destroy(_entry3);
-    index_entry_destroy(_entry4);
-    index_entry_destroy(_entry5);
-    index_entry_destroy(_entry6);
-    index_entry_destroy(_entry7);
-    index_entry_destroy(_entry8);
-
-    index_remove(index, block1->hash);
-    index_remove(index, block2->hash);
-    index_remove(index, block3->hash);
-    index_remove(index, block4->hash);
-    index_remove(index, block5->hash);
-    index_remove(index, block6->hash);
-    index_remove(index, block7->hash);
-    index_remove(index, block8->hash);
-
-
-    _entry1 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block1->hash));
-    _entry2 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block2->hash));
-    _entry3 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block3->hash));
-    _entry4 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block4->hash));
-    _entry5 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block5->hash));
-    _entry6 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block6->hash));
-    _entry7 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block7->hash));
-    _entry8 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(index, block8->hash));
-
-
-    EXPECT_TRUE(_entry1 == NULL);
-    EXPECT_TRUE(_entry2 == NULL);
-    EXPECT_TRUE(_entry3 == NULL);
-    EXPECT_TRUE(_entry4 == NULL);
-    EXPECT_TRUE(_entry5 == NULL);
-    EXPECT_TRUE(_entry6 == NULL);
-    EXPECT_TRUE(_entry7 == NULL);
-    EXPECT_TRUE(_entry8 == NULL);
+    for (size_t i = 0; i < 8; i++) {
+      _entries[i] = REFERENCE(index_find(index, blocks[i]->hash), index_entry_t);
+      EXPECT_EQ(buffer_compare(_entries[i]->hash, entries[i]->hash), 0);
+      DESTROY(_entries[i], index_entry);
+    }
 
 
     cbor_item_t *cbor = index_to_cbor(index);
@@ -275,60 +170,28 @@ namespace indexTest {
     cbor_item_t *cbor2 = cbor_load(cbor_data, cbor_size, &result);
     EXPECT_EQ(result.error.code == CBOR_ERR_NONE, true);
     EXPECT_EQ(cbor_isa_array(cbor2), true);
+    index_destroy(index);
     index_t* from_cbor = cbor_to_index(cbor2, location, wheel, wait, max_wait);
     EXPECT_FALSE(from_cbor == NULL);
 
+    for (size_t i = 0; i < 8; i++) {
+      _entries[i] = REFERENCE(index_find(from_cbor, blocks[i]->hash), index_entry_t);
+      EXPECT_EQ(buffer_compare(_entries[i]->hash, entries[i]->hash), 0);
+      DESTROY(_entries[i], index_entry);
+    }
 
-    _entry1 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(from_cbor, block1->hash));
-    _entry2 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(from_cbor, block2->hash));
-    _entry3 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(from_cbor, block3->hash));
-    _entry4 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(from_cbor, block4->hash));
-    _entry5 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(from_cbor, block5->hash));
-    _entry6 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(from_cbor, block6->hash));
-    _entry7 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(from_cbor, block7->hash));
-    _entry8 = (index_entry_t*) refcounter_reference((refcounter_t*)index_get(from_cbor, block8->hash));
 
-    EXPECT_TRUE(_entry1 == NULL);
-    EXPECT_TRUE(_entry2 == NULL);
-    EXPECT_TRUE(_entry3 == NULL);
-    EXPECT_TRUE(_entry4 == NULL);
-    EXPECT_TRUE(_entry5 == NULL);
-    EXPECT_TRUE(_entry6 == NULL);
-    EXPECT_TRUE(_entry7 == NULL);
-    EXPECT_TRUE(_entry8 == NULL);
+    for (size_t i = 0; i < 8; i++) {
+      index_remove(from_cbor, blocks[i]->hash);
+      _entries[i] = REFERENCE(index_get(from_cbor, blocks[i]->hash), index_entry_t);
+      EXPECT_TRUE(_entries[i] == NULL);
+    }
 
     cbor_decref(&cbor);
     cbor_decref(&cbor2);
     free(cbor_data);
-    index_destroy(index);
+
     index_destroy(from_cbor);
-    hierarchical_timing_wheel_wait_for_idle_signal(wheel);
-    hierarchical_timing_wheel_stop(wheel);
-    work_pool_shutdown(pool);
-    work_pool_join_all(pool);
-    work_pool_destroy(pool);
-    hierarchical_timing_wheel_destroy(wheel);
-
-    DESTROY(entry1, index_entry);
-    index_entry_destroy(entry2);
-    index_entry_destroy(entry3);
-    index_entry_destroy(entry4);
-    index_entry_destroy(entry5);
-    index_entry_destroy(entry6);
-    index_entry_destroy(entry7);
-    index_entry_destroy(entry8);
-
-
-    DESTROY(block1, block);
-    block_destroy(block2);
-    block_destroy(block3);
-    block_destroy(block4);
-    block_destroy(block5);
-    block_destroy(block6);
-    block_destroy(block7);
-    block_destroy(block8);
-
-    free(location);
 
   }
 }
