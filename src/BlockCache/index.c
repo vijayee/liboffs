@@ -161,6 +161,7 @@ index_t* _index_new_empty(size_t bucket_size, char* location, hierarchical_timin
 }
 
 index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wheel_t* wheel, uint64_t wait, uint64_t max_wait, int* error_code) {
+  *error_code = 0;
   index_t* index;
   char* index_location = path_join(location,"index");
   char* parent_location = strdup(location);
@@ -176,37 +177,41 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
       char* index_file_location = path_join(index_location, last);
       char delims[] = "-";
       char* last_id_str = strtok(last,delims);
-      uint64_t last_id = atoll(last_id_str);
+      uint64_t last_id = strtoull(last_id_str, NULL, 10);
       if (i == (files->length - 1)) {
         most_recent_id = last_id;
       }
       char* last_crc_str = strtok(NULL, delims);
       if (strcmp(last_crc_str, "crc_error") == 0) {
         log_error("index file %lu invalid", i);
-         continue;
+        continue;
       }
-      uint64_t last_crc = atoll(last_crc_str);
+      uint64_t last_crc = strtoull(last_crc_str, NULL, 10);
 
 #ifdef _WIN32
       int32_t index_fd = open(index_file_location, O_RDWR | O_CREAT, 0644);
 #else
       int32_t index_fd = open(index_file_location, O_RDWR | O_CREAT, 0644);
 #endif
+      free(index_file_location);
       int32_t size = lseek(index_fd, 0,SEEK_END);
       if(size < 0) {
+        log_error("index file %lu empty", i);
         *error_code= -1;
-        return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+        continue;
       }
       if (lseek(index_fd, 0, SEEK_SET) < 0) {
+        log_error("index file %lu failed to seek start", i);
         *error_code= -2;
-        return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+        continue;
       }
       uint8_t buffer[size];
       size_t bytes = read(index_fd, buffer, size);
 
       if (size != bytes) {
+        log_error("index file %lu failed to read file", i);
         *error_code= -3;
-        return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+        continue;
       }
       struct cbor_load_result result;
 
@@ -214,14 +219,17 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
 
       if (result.error.code != CBOR_ERR_NONE) {
         *error_code= -4;
-        return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+        log_error("index file %lu failed to load CBOR", i);
+        continue;
       }
       if(!cbor_isa_array(cbor)) {
         cbor_decref(&cbor);
         *error_code= -5;
-        return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
+        log_error("index file %lu CBOR is invalid", i);
+        continue;
       }
       index = cbor_to_index(cbor, location, wheel, wait, max_wait);
+      cbor_decref(&cbor);
       uint64_t crc;
       _index_to_crc(index, &crc);
       if (crc != last_crc) { //Index is invalid, continue to iterate backward until we have a valid index
@@ -229,7 +237,7 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
         free(index_file_location);
         free(last);
         continue;
-      } else { // // Index is valid rebuild if it is not the most recent index
+      } else { // Index is valid rebuild if it is not the most recent index
         if (i != (files->length - 1)) { //incorporate every wal's changes until we get to the most recent index
           index->is_rebuilding = 1;
           for (size_t j = i + 1; j < (files->length - 1); j++) {
@@ -253,6 +261,8 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
                     cbor_decref(&cbor);
                     DESTROY(index, index);
                     *error_code= -6;
+                    free(index_location);
+                    free(parent_location);
                     return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
                   }
                   break;
@@ -266,6 +276,8 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
                     cbor_decref(&cbor);
                     DESTROY(index, index);
                     *error_code= -7;
+                    free(index_location);
+                    free(parent_location);
                     return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
                   }
                   break;
@@ -288,6 +300,8 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
                         cbor_decref(&cbor);
                         DESTROY(index, index);
                         *error_code = read_result;
+                        free(index_location);
+                        free(parent_location);
                         return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
                       }
                     }
@@ -295,6 +309,8 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
                     cbor_decref(&cbor);
                     DESTROY(index, index);
                     *error_code = -8;
+                    free(index_location);
+                    free(parent_location);
                     return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
                   }
                   break;
@@ -308,6 +324,8 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
                       cbor_decref(&cbor);
                       DESTROY(index, index);
                       *error_code = -9;
+                      free(index_location);
+                      free(parent_location);
                       return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
                     }
                     cbor_decref(&cbor);
@@ -315,6 +333,8 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
                     cbor_decref(&cbor);
                     DESTROY(index, index);
                     *error_code = -10;
+                    free(index_location);
+                    free(parent_location);
                     return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
                   }
                   break;
@@ -325,23 +345,32 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
             if ((read_result != 0) || (cursor != wal_size)) { // some error other than end of file
               DESTROY(index, index);
               *error_code = read_result;
+              free(index_location);
+              free(parent_location);
               return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
             }
-            index->is_rebuilding = 0;
-            return index;
           }
+
+          index->is_rebuilding = 0;
+          index->next_id = last_id + 2;
+          sprintf(id,"%lu", last_id + 1);
+          index->location = location;
+          index->parent_location = parent_location;
+          index->current_file = path_join(index_location, id);
+          index->last_file = path_join(index->location, last);
+          return index;
         } else {
+          free(index_location);
+          free(parent_location);
+          destroy_files(files);
           return index;
         }
       }
-
-      index->next_id = last_id + 2;
-      sprintf(id,"%lu", last_id + 1);
-
-      index->current_file = path_join(index_location, id);
-      index->last_file = path_join(index->location, last);
     }
   } else {
+    destroy_files(files);
+    free(index_location);
+    free(parent_location);
     return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
   }
 }
@@ -357,7 +386,7 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root, char* locatio
     char* last = vec_last(files);
     char delims[] = "-";
     char* last_id_str = strtok(last,delims);
-    uint64_t last_id = atoll(last_id_str);
+    uint64_t last_id = strtoull(last_id_str, NULL, 10);
     index->next_id = last_id + 2; // TODO Handle integer rollover
     sprintf(id,"%lu", last_id + 1);
     index->current_file = path_join(index->location, id);

@@ -143,7 +143,8 @@ namespace indexTest {
 
   TEST_F(TestIndex, TestIndexFunctions) {
     int error_code;
-    index_t *index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    index_t* index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    EXPECT_TRUE(error_code == 0);
     for (size_t i = 0; i < 8; i++) {
       index_add(index, entries[i]);
     }
@@ -190,8 +191,11 @@ namespace indexTest {
     cbor_decref(&cbor);
     cbor_decref(&cbor2);
     free(cbor_data);
+    DESTROY(from_cbor, index);
 
-    index_destroy(from_cbor);
+    index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    EXPECT_TRUE(error_code == 0);
+    DESTROY(index, index);
 
   }
 }

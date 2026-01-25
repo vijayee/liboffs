@@ -23,7 +23,7 @@ wal_t* wal_create(char* location) {
   if (files->length > 0) {
     char id[20];
     char* last = vec_last(files);
-    uint64_t last_id = atoll(last);
+    uint64_t last_id = strtoull(last, NULL, 10);
     last_id++;
     sprintf(id,"%lu", last_id);
     wal->current_file = path_join(wal->location, id);
