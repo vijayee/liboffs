@@ -12,31 +12,24 @@
 #include <unistd.h>
 
 
-
-wal_t* wal_create(char* location) {
+wal_t* wal_create(char* location, uint64_t id) {
   wal_t* wal = get_clear_memory(sizeof(wal_t));
   wal->location = path_join(location, "wal");
 
   mkdir_p(wal->location);
-  vec_str_t* files = get_dir(wal->location);
 
-  if (files->length > 0) {
-    char id[20];
-    char* last = vec_last(files);
-    uint64_t last_id = strtoull(last, NULL, 10);
-    last_id++;
-    sprintf(id,"%lu", last_id);
-    wal->current_file = path_join(wal->location, id);
-    wal->last_file = path_join(wal->location, last);
-    wal->next_id = last_id + 1;
+  char id_str[20];
+
+  sprintf(id_str,"%lu", id);
+  wal->next_id = id + 1;
+  wal->current_file = path_join(wal->location, id_str);
+  if (id > 1) {
+    char last_id_str[20];
+    sprintf(last_id_str,"%lu", (uint64_t)(id - 1));
+    wal->last_file = path_join(wal->location, last_id_str);
   } else {
-    char id[20];
-    sprintf(id,"%lu", (uint64_t)1);
-    wal->next_id = 2;
-    wal->current_file = path_join(wal->location, id);
     wal->last_file = NULL;
   }
-  destroy_files(files);
   return wal;
 }
 wal_t* wal_load(char* location, uint64_t id) {

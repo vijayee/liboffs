@@ -24,7 +24,7 @@ typedef struct {
   uint64_t next_id;
 } wal_t;
 
-wal_t* wal_create(char* location);
+wal_t* wal_create(char* location, uint64_t id);
 wal_t* wal_create_next(char* location, uint64_t next_id, char* last_file);
 wal_t* wal_load(char* location, uint64_t id);
 void wal_write(wal_t* wal, wal_type_e type, buffer_t* data);

@@ -20,6 +20,7 @@ void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node,
 void index_split_node(index_t* index, index_node_t* node, size_t current);
 int _index_node_to_crc(index_node_t* node, XXH64_state_t* const state);
 int _index_to_crc(index_t* index, uint64_t* crc);
+int _sort_indexes( const void *str1, const void *str2 );
 
 index_entry_t* index_get_from_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current);
 index_entry_t* index_find_in_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current);
@@ -145,14 +146,14 @@ index_t* _index_new_empty(size_t bucket_size, char* location, hierarchical_timin
   index->location = path_join(location,"index");
   index->parent_location = strdup(location);
   mkdir_p(index->location);
-
+  uint64_t current_id = most_recent_id + 1;
   char id[20];
-  sprintf(id,"%lu", (uint64_t) (most_recent_id + 1));
+  sprintf(id,"%lu", current_id);
   index->next_id = most_recent_id + 2;
   index->current_file = path_join(index->location, id);
   index->last_file = NULL;
 
-  index->wal = wal_create(index->parent_location);
+  index->wal = wal_create(index->parent_location, current_id);
   index->debouncer = debouncer_create(wheel, index, index_debounce, index_debounce, wait, max_wait);
   hashmap_init(&index->ranks, (void*)hash_uint32, (void*)compare_uint32);
   hashmap_set_key_alloc_funcs(&index->ranks, duplicate_uint32, (void*)free);
@@ -170,6 +171,7 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
   uint64_t most_recent_id = 0;
 
   if (files->length > 0) {
+    vec_sort(files, _sort_indexes);
     char id[20];
     for (size_t i = files->length - 1; i >= 0; i--) { //loop through index files to find first valid file
       //Get index's crc
@@ -380,20 +382,21 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root, char* locatio
   index->location = path_join(location,"index");
   index->parent_location = strdup(location);
   vec_str_t* files = get_dir(index->location);
-
+  uint64_t last_id = 0 ;
   if (files->length > 0) {
     char id[20];
+    vec_sort(files, _sort_indexes);
     char* last = vec_last(files);
     char delims[] = "-";
     char* last_id_str = strtok(last,delims);
-    uint64_t last_id = strtoull(last_id_str, NULL, 10);
+    last_id = strtoull(last_id_str, NULL, 10);
     index->next_id = last_id + 2; // TODO Handle integer rollover
     sprintf(id,"%lu", last_id + 1);
     index->current_file = path_join(index->location, id);
     index->last_file = path_join(index->location, last);
   } else {
     char id[20];
-    sprintf(id,"%lu", (uint64_t)1);
+    sprintf(id,"%lu", last_id + 1);
     index->next_id = 2;
     index->current_file = path_join(index->location, id);
     index->last_file = NULL;
@@ -401,7 +404,7 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root, char* locatio
   destroy_files(files);
 
   index->root = (index_node_t*) refcounter_reference((refcounter_t*) root);
-  index->wal = wal_create(index->parent_location);
+  index->wal = wal_create(index->parent_location, last_id + 1);
   index->debouncer = debouncer_create(wheel, index, index_debounce, index_debounce, wait, max_wait);
   hashmap_init(&index->ranks, (void*)hash_uint32, (void*)compare_uint32);
   hashmap_set_key_alloc_funcs(&index->ranks, duplicate_uint32, (void*)free);
@@ -974,7 +977,7 @@ void index_debounce(void* ctx) {
   cbor_item_t *cbor = _index_to_cbor(index);
   uint64_t crc = 0;
   int result = _index_to_crc(index, &crc);
-  char file[41];
+  char file[strlen(index->current_file) + 22];
   if (result == 0) {
     sprintf(file, "%s-%lu", index->current_file, crc);
   } else {
@@ -1028,4 +1031,32 @@ int _index_to_crc(index_t* index, uint64_t* crc) {
   *crc = XXH64_digest(state);
   XXH64_freeState(state);
   return 0;
+}
+
+int index_to_crc(index_t* index, uint64_t* crc) {
+  platform_lock(&index->lock);
+  int result = _index_to_crc(index, crc);
+  platform_unlock(&index->lock);
+  return result;
+}
+
+int _sort_indexes( const void *str1, const void *str2 ){
+  char *const *pp1 = str1;
+  char *const *pp2 = str2;
+  char* cp1 = strdup(*pp1);
+  char* cp2 = strdup(*pp2);
+  char delims[] = "-";
+  char* id_str1 = strtok(cp1,delims);
+  char* id_str2 = strtok(cp2,delims);
+  uint64_t id1 = strtoull(id_str1, NULL, 10);
+  uint64_t id2 = strtoull(id_str2, NULL, 10);
+  free(cp1);
+  free(cp2);
+  if (id1 < id2) {
+    return -1;
+  } else if (id1 > id2) {
+    return 1;
+  } else {
+    return 0;
+  }
 }

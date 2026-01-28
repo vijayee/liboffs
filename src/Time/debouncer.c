@@ -45,9 +45,11 @@ void debouncer_debounce(debouncer_t* bouncer) {
 }
 
 void debouncer_flush(debouncer_t* bouncer) {
-  hierarchical_timing_wheel_cancel_timer(bouncer->wheel, bouncer->timerId);
-  bouncer->timerId = 0;
-  bouncer->cb(bouncer->ctx);
+  if (bouncer->timerId != 0) {
+    hierarchical_timing_wheel_cancel_timer(bouncer->wheel, bouncer->timerId);
+    bouncer->timerId = 0;
+    bouncer->cb(bouncer->ctx);
+  }
 }
 
 uint64_t elapsed_time(timeval_t start, timeval_t end) {
