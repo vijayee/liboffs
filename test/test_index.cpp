@@ -14,6 +14,7 @@ extern "C" {
 #include <cbor.h>
 #include "../src/Time/wheel.h"
 #include "../src/BlockCache/frand.h"
+#include "../src/Util/get_dir.h"
 }
 
 namespace indexTest {
@@ -139,6 +140,39 @@ namespace indexTest {
       }
       free(location);
     }
+    void CorruptCRC(int count) {
+      char* index_location = path_join(location,"index");
+      vec_str_t* files = get_dir(index_location);
+      if (files->length > 0) {
+        vec_sort(files, _sort_indexes);
+        for (size_t i = files->length - 1; ((i >= 0) && (count >= 0)); i--) {
+          char* last = files->data[i];
+          char* index_file_location = path_join(index_location, last);
+          char delims[] = "-";
+          char* last_id_str = strtok(last,delims);
+          uint64_t last_id = strtoull(last_id_str, NULL, 10);
+
+          char* last_crc_str = strtok(NULL, delims);
+          uint64_t last_crc = strtoull(last_crc_str, NULL, 10);
+          last_crc++;
+          char file[41];
+          sprintf(file, "%lu-%lu", last_id, last_crc);
+          char* new_location = path_join(index_location, file);
+          int result = rename(index_file_location, new_location);
+          if (result != 0){
+            throw result;
+          }
+          count--;
+        }
+      }
+
+    }
+    void CorruptCBOR() {
+
+    }
+    void CorruptOrder() {
+
+    }
   };
 
   TEST_F(TestIndex, TestIndexFunctions) {
@@ -197,5 +231,37 @@ namespace indexTest {
     EXPECT_TRUE(error_code == 0);
     DESTROY(index, index);
 
+  }
+  TEST_F(TestIndex, TestIndexRecovery) {
+    int error_code;
+    index_t* index;
+    for (size_t i = 0; i < 8; i++) {
+      index = index_create(25, location, wheel, wait, max_wait, &error_code);
+      EXPECT_TRUE(error_code == 0);
+      index_add(index, entries[i]);
+      DESTROY(index, index);
+    }
+    for (size_t i = 0; i < 8; i++) {
+      index = index_create(25, location, wheel, wait, max_wait, &error_code);
+      EXPECT_TRUE(error_code == 0);
+      index_entry_t* entry = REFERENCE(index_get(index, blocks[i]->hash), index_entry_t);
+      DESTROY(entry, index_entry);
+      DESTROY(index, index);
+    }
+    index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    cbor_item_t *cbor = index_to_cbor(index);
+    DESTROY(index, index);
+
+    CorruptCRC(5);
+
+    index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    uint64_t index_crc;
+    EXPECT_EQ(index_to_crc(index, &index_crc), 0);
+    DESTROY(index, index);
+    index_t* from_cbor = cbor_to_index(cbor, location, wheel, wait, max_wait);
+    uint64_t cbor_crc;
+    EXPECT_EQ(index_to_crc(from_cbor, &cbor_crc), 0);
+    DESTROY(from_cbor, index);
+    EXPECT_EQ(cbor_crc, index_crc);
   }
 }
