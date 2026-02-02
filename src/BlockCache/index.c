@@ -363,7 +363,14 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
           }
 
           index->is_rebuilding = 0;
-          index->next_id = (files->length - i) + last_id;
+          uint64_t current_id = (files->length - i) + last_id;
+          char id[20];
+          sprintf(id,"%lu", current_id);
+          index->next_id = most_recent_id + 2;
+          index->current_file = path_join(index->location, id);
+          index->next_id = current_id + 1;
+          sprintf(id,"%lu", current_id - 1 );
+          index->last_file = path_join(index->location, id);
           destroy_files(files);
           free(index_location);
           free(parent_location);
