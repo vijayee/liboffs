@@ -241,7 +241,7 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
             uint64_t next_crc = 0;
             _index_get_id_crc(next, &next_id, &next_crc);
             wal_t* wal = wal_load(parent_location, next_id);
-            wal_type_e type;
+            wal_type_e type = 'r';
             buffer_t* data;
             uint64_t cursor;
             int32_t wal_size;
@@ -262,6 +262,7 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
                     *error_code= -6;
                     free(index_location);
                     free(parent_location);
+                    destroy_files(files);
                     return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
                   }
                   break;
@@ -281,6 +282,7 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
                     *error_code= -7;
                     free(index_location);
                     free(parent_location);
+                    destroy_files(files);
                     return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
                   }
                   break;
@@ -305,6 +307,7 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
                         *error_code = read_result;
                         free(index_location);
                         free(parent_location);
+                        destroy_files(files);
                         return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
                       }
                     }
@@ -314,6 +317,7 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
                     *error_code = -8;
                     free(index_location);
                     free(parent_location);
+                    destroy_files(files);
                     return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
                   }
                   break;
@@ -329,6 +333,7 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
                       *error_code = -9;
                       free(index_location);
                       free(parent_location);
+                      destroy_files(files);
                       return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
                     }
                     cbor_decref(&cbor);
@@ -338,6 +343,7 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
                     *error_code = -10;
                     free(index_location);
                     free(parent_location);
+                    destroy_files(files);
                     return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
                   }
                   break;
@@ -345,10 +351,11 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
               buffer_destroy(data);
               read_result = wal_read(wal, &type, &data, &cursor, &wal_size);
             }
+
+            DESTROY(wal, wal);
             if ((read_result != -3) || (cursor != wal_size)) { // some error other than end of file
               DESTROY(index, index);
               *error_code = read_result;
-              //destroy_files(files);
               free(index_location);
               free(parent_location);
               return _index_new_empty(bucket_size, location, wheel, wait, max_wait, most_recent_id);
@@ -356,13 +363,10 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
           }
 
           index->is_rebuilding = 0;
-          index->next_id = last_id + 2;
-          sprintf(id,"%lu", last_id + 1);
-          index->location = path_join(location, "index");
-          index->parent_location = parent_location;
-          index->current_file = path_join(index_location, id);
-          index->last_file = path_join(index->location, last);
-          //destroy_files(files);
+          index->next_id = (files->length - i) + last_id;
+          destroy_files(files);
+          free(index_location);
+          free(parent_location);
           return index;
         } else {
           free(index_location);

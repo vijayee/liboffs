@@ -159,13 +159,16 @@ namespace indexTest {
           sprintf(file, "%lu-%lu", last_id, last_crc);
           char* new_location = path_join(index_location, file);
           int result = rename(index_file_location, new_location);
-          if (result != 0){
+          free(index_file_location);
+          free(new_location);
+          if (result != 0) {
             throw result;
           }
           count--;
         }
       }
-
+      free(index_location);
+      destroy_files(files);
     }
     void CorruptCBOR() {
 
@@ -259,6 +262,7 @@ namespace indexTest {
     EXPECT_EQ(index_to_crc(index, &index_crc), 0);
     DESTROY(index, index);
     index_t* from_cbor = cbor_to_index(cbor, location, wheel, wait, max_wait);
+    cbor_decref(&cbor);
     uint64_t cbor_crc;
     EXPECT_EQ(index_to_crc(from_cbor, &cbor_crc), 0);
     DESTROY(from_cbor, index);
