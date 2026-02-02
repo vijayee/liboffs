@@ -254,7 +254,7 @@ index_t* index_create(size_t bucket_size, char* location, hierarchical_timing_wh
                   cbor = cbor_load(data->data, data->size, &result);
                   if (result.error.code == CBOR_ERR_NONE) {
                     index_entry_t *entry = cbor_to_index_entry(cbor);
-                    index_add(index, entry);
+                    index_add(index, CONSUME(entry, index_entry_t));
                     cbor_decref(&cbor);
                   } else {
                     cbor_decref(&cbor);

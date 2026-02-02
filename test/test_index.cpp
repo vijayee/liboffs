@@ -238,13 +238,20 @@ namespace indexTest {
   TEST_F(TestIndex, TestIndexRecovery) {
     int error_code;
     index_t* index;
-    for (size_t i = 0; i < 8; i++) {
+    for (size_t i = 0; i < 4; i++) {
       index = index_create(25, location, wheel, wait, max_wait, &error_code);
       EXPECT_TRUE(error_code == 0);
       index_add(index, entries[i]);
       DESTROY(index, index);
     }
-    for (size_t i = 0; i < 8; i++) {
+    index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    EXPECT_TRUE(error_code == 0);
+    for (size_t i = 4; i < 8; i++) {
+      index_add(index, entries[i]);
+    }
+    DESTROY(index, index);
+
+    for (size_t i = 0; i < 4; i++) {
       index = index_create(25, location, wheel, wait, max_wait, &error_code);
       EXPECT_TRUE(error_code == 0);
       index_entry_t* entry = REFERENCE(index_get(index, blocks[i]->hash), index_entry_t);
@@ -252,8 +259,31 @@ namespace indexTest {
       DESTROY(index, index);
     }
     index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    EXPECT_TRUE(error_code == 0);
+    for (size_t i = 4; i < 8; i++) {
+      index_entry_t* entry = REFERENCE(index_get(index, blocks[i]->hash), index_entry_t);
+      DESTROY(entry, index_entry);
+    }
+    DESTROY(index, index);
+
+    index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    EXPECT_TRUE(error_code == 0);
     cbor_item_t *cbor = index_to_cbor(index);
     DESTROY(index, index);
+
+    for (size_t i = 0; i < 4; i++) {
+      index = index_create(25, location, wheel, wait, max_wait, &error_code);
+      EXPECT_TRUE(error_code == 0);
+      index_remove(index, entries[i]->hash);
+      DESTROY(index, index);
+    }
+    index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    EXPECT_TRUE(error_code == 0);
+    for (size_t i = 4; i < 8; i++) {
+      index_remove(index, entries[i]->hash);
+    }
+    DESTROY(index, index);
+
 
     CorruptCRC(5);
 
