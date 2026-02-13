@@ -1,0 +1,450 @@
+//
+// Created by victor on 10/12/25.
+//
+#include "stream.h"
+#include "../Util/allocator.h"
+#include "../Util/log.h"
+#include "../Workers/error.h"
+#include "../RefCounter/refcounter.h"
+
+void _stream_start_message_worker(stream_t* stream);
+void _stream_message_worker(stream_t* stream);
+void _stream_message_worker_abort(stream_t* stream);
+void _readable_push_stream_piped_notify(stream_t* stream, void* payload);
+void _readable_push_stream_error_notify(stream_t* stream, void* payload);
+void _readable_push_stream_close_notify(stream_t* stream, void* payload);
+stream_event_handler_list_t* stream_event_list_create() {
+  stream_event_handler_list_t* list = get_clear_memory(sizeof(stream_event_handler_list_t));
+  list->first = NULL;
+  list->last = NULL;
+  return list;
+}
+
+void stream_event_list_destroy(stream_event_handler_list_t* list) {
+  stream_event_handler_list_node_t* current = list->first;
+  stream_event_handler_list_node_t* next = NULL;
+  while (current != NULL ) {
+    next = current->next;
+    free(current->handler);
+    free(current);
+    current = next;
+  }
+  free(list);
+}
+
+void stream_event_list_enqueue(stream_event_handler_list_t* list, stream_event_handler_t* event) {
+  stream_event_handler_list_node_t* node = get_clear_memory(sizeof(stream_event_handler_list_node_t));
+  node->handler = event;
+  node->previous = NULL;
+  node->next = NULL;
+  if ((list->last == NULL) && (list->first == NULL)) {
+    list->first = node;
+    list->last = node;
+  } else {
+    node->previous = list->last;
+    list->last->next= node;
+    list->last = node;
+  }
+  list->count++;
+}
+
+stream_event_handler_t* stream_event_list_dequeue(stream_event_handler_list_t* list) {
+  if ((list->last == NULL) && (list->first == NULL)) {
+    return NULL;
+  } else {
+    stream_event_handler_list_node_t* node = list->first;
+    list->first = node->next;
+    if (node->next != NULL) {
+      list->first->previous = NULL;
+    }
+    if (list->last == node) {
+      list->last = NULL;
+    }
+    stream_event_handler_t* event = node->handler;
+    free(node);
+    list->count--;
+    return event;
+  }
+}
+
+stream_event_handler_t* stream_event_list_remove(stream_event_handler_list_t* list, stream_event_handler_list_node_t* node) {
+  if ((list->last == NULL) && (list->first == NULL)) {
+    return NULL;
+  }
+  if (list->last == node) {
+    list->last = node->previous;
+  }
+  if (list->first == node) {
+    list->first = node->next;
+  }
+  if (node->previous != NULL) {
+    node->previous->next = node->next;
+  }
+  if (node->next != NULL) {
+    node->next->previous = node->previous;
+  }
+  stream_event_handler_t* event = node->handler;
+  list->count--;
+  free(node);
+  return event;
+}
+
+message_queue_t* message_create() {
+  message_queue_t* queue = get_clear_memory(sizeof(message_queue_t));
+  platform_lock_init(&queue->lock);
+  queue->first = NULL;
+  queue->last = NULL;
+  return queue;
+}
+
+void message_queue_destroy(message_queue_t* queue) {
+  message_list_node_t* current = queue->first;
+  message_list_node_t* next = NULL;
+  while (current != NULL ) {
+    next = current->next;
+    free(current->message);
+    free(current);
+    current = next;
+  }
+  platform_lock_destroy(&queue->lock);
+  free(queue);
+}
+
+
+void message_queue_enqueue(message_queue_t* queue, message_t* message) {
+  platform_lock(&queue->lock);
+  message_list_node_t* node = get_clear_memory(sizeof(message_list_node_t));
+  node->message = message;
+  node->previous = NULL;
+  node->next = NULL;
+  if ((queue->last == NULL) && (queue->first == NULL)) {
+    queue->first = node;
+    queue->last = node;
+  } else {
+    node->previous = queue->last;
+    queue->last->next= node;
+    queue->last = node;
+  }
+  queue->count++;
+  platform_unlock(&queue->lock);
+}
+
+
+message_t* message_queue_dequeue(message_queue_t* queue) {
+  platform_lock(&queue->lock);
+  if ((queue->last == NULL) && (queue->first == NULL)) {
+    platform_unlock(&queue->lock);
+    return NULL;
+  } else {
+    message_list_node_t* node = queue->first;
+    queue->first = node->next;
+    if (node->next != NULL) {
+      queue->first->previous = NULL;
+    }
+    if (queue->last == node) {
+      queue->last = NULL;
+    }
+    message_t* message = node->message;
+    free(node);
+    queue->count--;
+    platform_unlock(&queue->lock);
+    return message;
+  }
+}
+
+void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, void (*destructor)(stream_t*)) {
+  refcounter_init(&stream->refcounter);
+  platform_lock_init(&stream->lock);
+  platform_lock_init(&stream->worker_status.lock);
+  stream->force = force;
+  stream->type = type;
+  stream->queue = message_create();
+  stream->pipe_notifiers = NULL;
+  stream->on_pipe = _readable_push_stream_on_pipe;
+  stream->on_piped = _writeable_push_stream_on_piped;
+  for (size_t i = 0; i < STREAM_HANDLER_COUNT; i++) {
+    stream->handlers[i].first = NULL;
+    stream->handlers[i].last = NULL;
+    stream->handlers[i].count = 0;
+  }
+}
+void stream_deinit(stream_t* stream) {
+  refcounter_destroy_lock(&stream->lock);
+  refcounter_destroy_lock(&stream->worker_status.lock);
+  message_queue_destroy(stream->queue);
+  if (stream->pipe_notifiers != NULL) {
+    free(stream->pipe_notifiers);
+  }
+  for (size_t i = 0; i < STREAM_HANDLER_COUNT; i++) {
+    stream_event_handler_list_t* list = &stream->handlers[i];
+    stream_event_handler_list_node_t* current = list->first;
+    stream_event_handler_list_node_t* next;
+    while (current != NULL) {
+      next = current->next;
+      stream_event_handler_t* handler = stream_event_list_remove(current);
+      if (handler->ctx_destroy != NULL) {
+        handler->ctx_destroy(handler->ctx);
+      }
+      free(handler);
+      current = next;
+    }
+  }
+}
+
+void writeable_stream_data_handler(stream_t* stream, void (*on_data)(stream_t*, void*)) {
+  if (stream->type == readable_stream) {
+    log_error("Only Writeable Stream can set data handlers");
+    abort();
+  }
+  stream->on_data = on_data;
+}
+
+void readable_stream_push_handler(stream_t* stream, void (*on_push)(stream_t*)) {
+  if (stream->type == writeable_stream) {
+    log_error("Only Readable Stream can set data handlers");
+    abort();
+  }
+  stream->on_push = on_push;
+}
+
+void readable_push_stream_pipe(stream_t* rs, stream_t* ws) {
+  rs->on_pipe(rs,ws);
+}
+void _readable_push_stream_on_pipe(stream_t* rs, stream_t* ws) {
+  platform_lock(&rs->lock);
+  if(rs->type != readable_stream){
+    log_error("Invalid readable push stream being piped");
+    abort();
+  }
+  if (rs->is_deactivated == 1) {
+    platform_unlock(&rs->lock);
+    stream_notify(rs, error_event, ERROR("Stream has been destroyed"));
+  } else {
+    if (rs->pipe_notifiers == NULL) {//TODO: revisit this
+      rs->pipe_notifiers = get_clear_memory(3 * sizeof(stream_notifier_t));
+    }
+    rs->pipe_notifiers[0].event = piped_event;
+    rs->pipe_notifiers[0].id = stream_subscribe(ws, piped_event, REFERENCE(rs, stream_t), (void(*)(void*, void*)) _readable_push_stream_piped_notify, (void (*)(void*))rs->destructor);
+    rs->pipe_notifiers[1].event = error_event;
+    rs->pipe_notifiers[1].id = stream_subscribe(ws, error_event,REFERENCE(rs, stream_t), (void(*)(void*, void*)) _readable_push_stream_error_notify, (void (*)(void*))rs->destructor);
+    rs->pipe_notifiers[2].event = close_event;
+    rs->pipe_notifiers[2].id = stream_subscribe(ws, close_event,REFERENCE(rs, stream_t), (void(*)(void*, void*)) _readable_push_stream_close_notify, (void (*)(void*))rs->destructor);
+  }
+  platform_unlock(&rs->lock);
+}
+void _readable_push_stream_piped_notify(stream_t* stream, void* payload) {
+  readable_push_stream_push(stream);
+}
+void _readable_push_stream_error_notify(stream_t* stream, void* payload) {
+  stream_deactivate(stream, (async_error_t*) payload);
+}
+
+void _readable_push_stream_close_notify(stream_t* stream, void* payload) {
+  stream_close(stream);
+}
+
+void writeable_push_stream_piped(stream_t* ws, stream_t* rs) {
+  platform_lock(&ws->lock);
+  if(ws->type != writeable_stream){
+    log_error("Invalid writeable push stream being piped ");
+    abort();
+  }
+  if (ws->is_deactivated == 1) {
+    platform_unlock(&ws->lock);
+    stream_notify(ws, error_event, ERROR("Stream has been destroyed"));
+  } else {
+    if (ws->pipe_notifiers == NULL) {//TODO: revisit this
+      ws->pipe_notifiers = get_clear_memory(4 * sizeof(stream_notifier_t));
+    }
+    ws->pipe_notifiers[0].event = data_event;
+    ws->pipe_notifiers[0].id = stream_subscribe(rs, data_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _readable_push_stream_piped_notify, (void (*)(void*))ws->destructor);
+    ws->pipe_notifiers[1].event = error_event;
+    ws->pipe_notifiers[1].id = stream_subscribe(rs, error_event,REFERENCE(ws, stream_t), (void(*)(void*, void*)) _readable_push_stream_error_notify, (void (*)(void*))ws->destructor);
+    ws->pipe_notifiers[2].event = close_event;
+    ws->pipe_notifiers[2].id = stream_subscribe(rs, close_event,REFERENCE(ws, stream_t), (void(*)(void*, void*)) _readable_push_stream_close_notify, (void (*)(void*))ws->destructor);
+    ws->pipe_notifiers[3].event = complete_event;
+    ws->pipe_notifiers[3].id = stream_subscribe(rs, complete_event,REFERENCE(ws, stream_t), (void(*)(void*, void*)) _readable_push_stream_close_notify, (void (*)(void*))ws->destructor);
+  }
+}
+void stream_notify(stream_t* stream, stream_event_e event, void* payload) {
+  platform_lock(&stream->lock);
+  stream_event_handler_list_t handlers = stream->handlers[event];
+  stream_event_handler_list_node_t* current = handlers.first;
+  if ((event == error_event) && (current == NULL)) {
+    log_error("No error event handler defined");
+    async_error_t* error = (async_error_t*) payload;
+    log_error(error->message);
+    abort();
+  }
+  while (current != NULL) {
+    current->handler->handler(current->handler->ctx, payload);
+    current = current->next;
+  }
+  platform_unlock(&stream->lock);
+}
+
+void stream_deactivate(stream_t* stream, async_error_t* error) {
+  platform_lock(&stream->lock);
+  stream->is_deactivated = 1;
+  platform_unlock(&stream->lock);
+  stream_notify(stream, error_event, (void*) error);
+}
+
+void readable_push_stream_on_piped(stream_t* stream, void* payload) {
+  readable_push_stream_push(stream);
+}
+
+void readable_push_stream_push(stream_t* stream) {
+  message_t* message = get_memory(sizeof(message_t));
+  message->ctx = NULL;
+  message->payload= NULL;
+  message->type = readable_push;
+  message_queue_enqueue(stream->queue, message);
+  platform_lock(&stream->worker_status.lock);
+  if (stream->worker_status.is_working == 0) {
+    platform_unlock(&stream->worker_status.lock);
+    _stream_start_message_worker(stream);
+  } else {
+    platform_unlock(&stream->worker_status.lock);
+  }
+}
+void _stream_start_message_worker(stream_t* stream) {
+  platform_lock(&stream->worker_status.lock);
+  if (stream->worker_status.is_working == 0) {
+    stream->worker_status.is_working = 1;
+    platform_unlock(&stream->worker_status.lock);
+    work_t *work = work_create(stream->priority, (void *) stream, (void *) _stream_message_worker,
+                               (void *) _stream_message_worker_abort);
+    work_pool_enqueue(stream->pool, work);
+  } else {
+    platform_unlock(&stream->worker_status.lock);
+  }
+}
+void _stream_message_worker(stream_t* stream) {
+  message_t* current = message_queue_dequeue(&stream->queue);
+  if (current != NULL) {
+    switch(current->type) {
+      case readable_push:
+        if (stream->on_push != NULL) {
+          stream->on_push(stream);
+        } else {
+          stream_notify(stream, error_event, ERROR("No Push Handler Defined"));
+        }
+        break;
+      case readable_read:
+        if (stream->on_read != NULL) {
+          read_payload* payload = current->payload;
+          stream->on_read(stream, payload->size, current->ctx, payload->cb);
+          free(payload);
+        } else {
+          stream_notify(stream, error_event, ERROR("No Read Handler Defined"));
+        }
+        break;
+      case writeable_write:
+        if (stream->on_write != NULL) {
+          stream->on_write(stream, current->payload);
+        } else {
+          stream_notify(stream, error_event, ERROR("No Write Handler Defined"));
+        }
+        break;
+      case close_stream:
+        if (stream->on_close != NULL) {
+          stream->on_close(stream);
+        } else {
+          stream_notify(stream, error_event, ERROR("No Close Handler Defined"));
+        }
+        break;
+    }
+    free(current);
+    work_t* work = work_create(stream->priority, (void*) stream, (void*)_stream_message_worker, (void*)_stream_message_worker_abort);
+    work_pool_enqueue(stream->pool, work);
+  } else {
+    platform_lock(&stream->worker_status.lock);
+    stream->worker_status.is_working = 0;
+    platform_unlock(&stream->worker_status.lock);
+  }
+}
+
+void _stream_message_worker_abort(stream_t* stream) {
+
+}
+
+size_t stream_subscribe(stream_t* stream, stream_event_e event, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*)) {
+ stream_event_handler_t* _handler = get_clear_memory(sizeof(stream_event_handler_t));
+  _handler->handler = handler;
+  _handler->ctx = ctx;
+  _handler->ctx_destroy = ctx_destroy;
+  _handler->once = 0;
+  platform_lock(&stream->lock);
+  _handler->id= ++stream->next_handler_id;
+  stream_event_list_enqueue(&stream->handlers[event], _handler);
+  platform_unlock(&stream->lock);
+}
+
+void stream_unsubscribe(stream_t* stream, stream_event_e event, size_t id) {
+  platform_lock(&stream->lock);
+  stream_event_handler_list_t* list = &stream->handlers[event];
+  stream_event_handler_list_node_t* current = list->first;
+  stream_event_handler_list_node_t* next= NULL;
+  while (current == NULL) {
+    next = current->next;
+    if (current->handler->id == id) {
+      stream_event_list_remove(list, current);
+      break;
+    }
+    current = next;
+  }
+  platform_unlock(&stream->lock);
+}
+
+size_t stream_once(stream_t* stream, stream_event_e event, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*)) {
+  stream_event_handler_t* _handler = get_clear_memory(sizeof(stream_event_handler_t));
+  _handler->handler = handler;
+  _handler->ctx = ctx;
+  _handler->ctx_destroy = ctx_destroy;
+  _handler->once = 1;
+  platform_lock(&stream->lock);
+  _handler->id= ++stream->next_handler_id;
+  stream_event_list_enqueue(&stream->handlers[event], _handler);
+  platform_unlock(&stream->lock);
+}
+
+
+void readable_stream_read(stream_t* stream, size_t size, void* ctx, void (*cb)(void*, void*)) {
+  message_t* message = get_memory(sizeof(message_t));
+  read_payload* payload = get_clear_memory(sizeof(read_payload));
+  message->ctx = ctx;
+  message->payload = payload;
+  message->type = readable_read;
+  message_queue_enqueue(stream->queue, message);
+  platform_lock(&stream->worker_status.lock);
+  if (stream->worker_status.is_working == 0) {
+    platform_unlock(&stream->worker_status.lock);
+    _stream_start_message_worker(stream);
+  } else {
+    platform_unlock(&stream->worker_status.lock);
+  }
+}
+
+void writeable_stream_write_handler(stream_t* stream, void (*handler)(stream_t*, void*)) {
+  if(stream->type == readable_stream) {
+    stream_notify(stream, error_event, ERROR("Read Stream cannot set write hanlders"));
+  } else {
+    stream->on_write = handler;
+  }
+}
+
+void writeable_stream_write(stream_t* stream, void* data) {
+  message_t* message = get_memory(sizeof(message_t));
+  message->ctx = NULL;
+  message->payload = data;
+  message->type = writeable_write;
+  message_queue_enqueue(stream->queue, message);
+  platform_lock(&stream->worker_status.lock);
+  if (stream->worker_status.is_working == 0) {
+    platform_unlock(&stream->worker_status.lock);
+    _stream_start_message_worker(stream);
+  } else {
+    platform_unlock(&stream->worker_status.lock);
+  }
+}

@@ -53,7 +53,11 @@ set(C_SRC ""
         src/BlockCache/block_cache.h
         src/BlockCache/block_cache.c
         src/Configuration/config.h
-        src/Configuration/config.c)
+        src/Configuration/config.c
+        src/Streams/stream.h
+        src/Streams/stream.c
+        src/Streams/file-stream.h
+        src/Streams/file-stream.c)
 set(blake3_SOURCE_DIR deps/BLAKE3)
 set(xxHash_SOURCE_DIR deps/xxHash)
 set(hashmap_SOURCE_DIR deps/hashmap)

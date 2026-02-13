@@ -78,6 +78,7 @@ void wal_write(wal_t* wal,wal_type_e type, buffer_t* data) {
   write(wal->log, &crc, 4);
   write(wal->log, data->data, data->size);
 }
+
 int wal_read(wal_t* wal, wal_type_e* type, buffer_t** data, uint64_t* cursor, int32_t* wal_size) {
   if (wal->log == 0) {
     *cursor = 0;
