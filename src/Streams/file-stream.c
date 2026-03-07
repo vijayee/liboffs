@@ -4,36 +4,49 @@
 #include "../Buffer/buffer.h"
 #include <fcntl.h>
 #include <unistd.h>
+#include <string.h>
 
 
-readable_file_stream_t* readable_file_stream_create(char* filename, size_t chunk_size, int* error_code) {
+readable_file_stream_t* readable_file_stream_create(priority_t priority, work_pool_t* pool, char* filename, size_t chunk_size, int* error_code) {
+  *error_code = 0;
   readable_file_stream_t* rs= get_clear_memory(sizeof(readable_file_stream_t));
-  stream_init(rs, push, readable_stream,
+  stream_init((stream_t*) rs, push, readable_stream, priority, 1, pool,
               (void(*)(stream_t*))readable_file_stream_destroy);
-  rs->filename = filename;
+  rs->filename = strdup(filename);
   rs->chunk_size = chunk_size;
   readable_stream_push_handler((stream_t*) rs, (void (*)(stream_t*))readable_file_stream_push);
-
+  stream_close_handler((stream_t*) rs,(void(*)(stream_t*))readable_file_stream_close);
 #ifdef _WIN32
   rs->fd = open(rs->filename, _O_RDONLY | _O_BINARY | _O_CREAT, 0644);
 #else
   rs->fd = open(rs->filename, O_RDONLY | O_CREAT, 0644);
 #endif
   int file_size = lseek(rs->fd, 0, SEEK_END);
+  rs->file_size = file_size;
   if (lseek(rs->fd, 0, SEEK_SET) < 0) {
     *error_code = -1;
   }
   return rs;
 }
-void readable_file_stream_destyoy(readable_file_stream_t* stream) {
-
+void readable_file_stream_destroy(readable_file_stream_t* stream) {
+  refcounter_dereference((refcounter_t*) stream);
+  if (refcounter_count((refcounter_t*) stream) == 0) {
+#ifdef _WIN32
+    _close(stream->fd);
+#else
+    close(stream->fd);
+#endif
+    stream_deinit((stream_t*) stream);
+    free(stream->filename);
+    free(stream);
+  }
 }
 
 void readable_file_stream_push(readable_file_stream_t* stream) {
   platform_lock(&stream->stream.lock);
-  if (stream->stream.is_destroyed == 1) {
+  if (stream->stream.is_deactivated == 1) {
     platform_unlock(&stream->stream.lock);
-    stream_notify(stream, error_event, ERROR("Stream is already destroyed"));
+    stream_notify((stream_t*)stream, error_event, ERROR("Stream is already destroyed"));
   } else {
     int32_t diff = stream->file_size - stream->cursor;
     size_t size;
@@ -47,7 +60,7 @@ void readable_file_stream_push(readable_file_stream_t* stream) {
     if (bytes != size) {
       free(buf);
       platform_unlock(&stream->stream.lock);
-      stream_notify(stream, error_event, ERROR("Invalid Read Size"));
+      stream_notify((stream_t*)stream, error_event, ERROR("Invalid Read Size"));
       return;
     }
 
@@ -55,15 +68,21 @@ void readable_file_stream_push(readable_file_stream_t* stream) {
 
     stream->cursor += size;
     platform_unlock(&stream->stream.lock);
-    stream_notify(stream, data_event, CONSUME(buffer, buffer_t));
+    stream_notify((stream_t*)stream, data_event, CONSUME(buffer, buffer_t));
+    if (stream->file_size == stream->cursor) {
+      stream_notify((stream_t*) stream, complete_event, NULL);
+      stream_close((stream_t*) stream);
+    } else {
+      readable_push_stream_push((stream_t*) stream);
+    }
   }
 }
 
 void readable_file_stream_read(readable_file_stream_t* stream, size_t size, void* ctx, void (*cb)(void*, void*)) {
   platform_lock(&stream->stream.lock);
-  if (stream->stream.is_destroyed == 1) {
+  if (stream->stream.is_deactivated == 1) {
     platform_unlock(&stream->stream.lock);
-    stream_notify(stream, error_event, ERROR("Stream is already destroyed"));
+    stream_notify((stream_t*)stream, error_event, ERROR("Stream is already destroyed"));
   } else {
     int32_t diff = stream->file_size - stream->cursor;
     if (size < diff) {
@@ -74,7 +93,7 @@ void readable_file_stream_read(readable_file_stream_t* stream, size_t size, void
     if (bytes != size) {
       free(buf);
       platform_unlock(&stream->stream.lock);
-      stream_notify(stream, error_event, ERROR("Invalid Read Size"));
+      stream_notify((stream_t*)stream, error_event, ERROR("Invalid Read Size"));
       return;
     }
 
@@ -86,11 +105,24 @@ void readable_file_stream_read(readable_file_stream_t* stream, size_t size, void
   }
 }
 
-writeable_file_stream_t* writeable_file_stream_create(char* filename) {
-  writeable_file_stream_t* ws = get_clear_memory(sizeof(writeable_file_stream_t));
-  stream_init((stream_t*) ws, push, writeable_stream);
-  writeable_stream_write_handler((stream_t*) ws, (void (*)(stream_t*, void*)) writeable_file_stream_write);
+void readable_file_stream_close(readable_file_stream_t* stream) {
+  platform_lock(&stream->stream.lock);
+  uint8_t deactivated = stream->stream.is_deactivated;
+  if (deactivated == 0) {
+    stream->stream.is_deactivated = 1;
+    stream->stream.is_piped = 0;
+  }
+  platform_unlock(&stream->stream.lock);
+  if (deactivated == 0) {
+    stream_notify((stream_t *) stream, close_event, NULL);
+  }
+}
 
+writeable_file_stream_t* writeable_file_stream_create(priority_t priority, work_pool_t* pool, char* filename) {
+  writeable_file_stream_t* ws = get_clear_memory(sizeof(writeable_file_stream_t));
+  stream_init((stream_t*) ws, push, writeable_stream, priority, 0, pool, (void(*)(stream_t*)) writeable_file_stream_destroy);
+  writeable_stream_write_handler((stream_t*) ws, (void (*)(stream_t*, void*)) writeable_file_stream_write);
+  ws->filename = strdup(filename);
 #ifdef _WIN32
   ws->fd = open(ws->filename, _O_WRONLY | _O_BINARY | _O_CREAT, 0644);
 #else
@@ -101,4 +133,29 @@ writeable_file_stream_t* writeable_file_stream_create(char* filename) {
 
 void writeable_file_stream_write(writeable_file_stream_t* stream, buffer_t* data) {
   write(stream->fd, data->data, data->size);
+}
+void writeable_file_stream_destroy(writeable_file_stream_t* stream) {
+  refcounter_dereference((refcounter_t*) stream);
+  if (refcounter_count((refcounter_t*) stream) == 0) {
+#ifdef _WIN32
+    _close(stream->fd);
+#else
+    close(stream->fd);
+#endif
+    stream_deinit((stream_t*) stream);
+    free(stream->filename);
+    free(stream);
+  }
+}
+void writeable_file_stream_close(writeable_file_stream_t* stream) {
+  platform_lock(&stream->stream.lock);
+  uint8_t deactivated = stream->stream.is_deactivated;
+  if (deactivated == 0) {
+    stream->stream.is_deactivated = 1;
+    stream->stream.is_piped = 0;
+  }
+  platform_unlock(&stream->stream.lock);
+  if (deactivated == 0) {
+    stream_notify((stream_t *) stream, close_event, NULL);
+  }
 }

@@ -10,7 +10,8 @@ if (BUILD_TESTING)
             test_index.cpp
             test_time.cpp
             test_section.cpp
-            test_block_cache.cpp)
+            test_block_cache.cpp
+            test_file_stream.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
@@ -26,4 +27,5 @@ if (BUILD_TESTING)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     # Finds all the Google tests associated with the executable
     gtest_discover_tests(testliboffs)
+    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/test.pdf DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 endif()

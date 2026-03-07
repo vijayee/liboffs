@@ -22,21 +22,21 @@ typedef enum {
 } stream_force_e;
 
 typedef enum {
-  readable_event = 0x1,
-  complete_event = 0x2,
-  data_event = 0x3,
-  overflow_event = 0x4,
-  empty_event = 0x5,
-  pause_event = 0x6,
-  resume_event = 0x7,
-  pipe_event = 0x8,
-  unpipe_event = 0x9,
-  close_event = 0x10,
-  finished_event = 0x11,
-  unpiped_event = 0x12,
-  piped_event = 0x13,
-  drain_event = 0x15,
-  error_event = 0x16
+  readable_event = 0,
+  complete_event = 1,
+  data_event = 2,
+  overflow_event = 3,
+  empty_event = 4,
+  pause_event = 5,
+  resume_event = 6,
+  pipe_event = 7,
+  unpipe_event = 8,
+  close_event = 9,
+  finished_event = 10,
+  unpiped_event = 12,
+  piped_event = 13,
+  drain_event = 14,
+  error_event = 15
 } stream_event_e;
 
 typedef struct {
@@ -122,7 +122,7 @@ struct stream_t {
   stream_type_e type;
   stream_force_e force;
   size_t next_handler_id;
-  stream_event_handler_list_t handlers[STREAM_HANDLER_COUNT];
+  stream_event_handler_list_t* handlers[STREAM_HANDLER_COUNT];
   uint8_t readable;
   uint8_t is_piped;
   uint8_t auto_push;
@@ -184,10 +184,11 @@ typedef struct {
   void (*cb)(void*, void*);
 } read_payload;
 
-void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, void (*destructor)(stream_t*));
+void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, priority_t priority, uint8_t auto_push, work_pool_t* pool, void (*destructor)(stream_t*));
 void stream_deinit(stream_t* stream);
 void stream_deactivate(stream_t* stream, async_error_t* error);
 void stream_close(stream_t* stream);
+void stream_close_handler(stream_t* stream,  void (*on_close)(stream_t*));
 size_t stream_subscribe(stream_t* stream, stream_event_e event, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*));
 size_t stream_once(stream_t* stream, stream_event_e event, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*));
 void stream_unsubscribe(stream_t* stream, stream_event_e event, size_t id);
@@ -200,6 +201,5 @@ void readable_push_stream_push(stream_t* stream);
 void readable_stream_read(stream_t* stream, size_t size, void* ctx, void (*cb)(void*, void*));
 void writeable_stream_write_handler(stream_t* stream, void (*)(stream_t*, void*));
 void writeable_stream_write(stream_t* stream, void* data);
-void writeable_push_stream_piped(stream_t* ws, stream_t* rs);
 void _writeable_push_stream_on_piped(stream_t* ws, stream_t* rs);
 #endif //OFFS_STREAM_H

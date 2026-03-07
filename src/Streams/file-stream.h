@@ -18,10 +18,10 @@ typedef struct {
   int32_t file_size;
   int32_t cursor;
 } readable_file_stream_t;
-readable_file_stream_t* readable_file_stream_create(char* filename, size_t chunk_size, int* error_code);
+readable_file_stream_t* readable_file_stream_create(priority_t priority, work_pool_t* pool, char* filename, size_t chunk_size, int* error_code);
 void readable_file_stream_destroy(readable_file_stream_t* stream);
-
 void readable_file_stream_push(readable_file_stream_t* stream);
+void readable_file_stream_close(readable_file_stream_t* stream);
 
 typedef struct {
   stream_t stream;
@@ -30,6 +30,8 @@ typedef struct {
   int32_t cursor;
 } writeable_file_stream_t;
 
-writeable_file_stream_t* writeable_file_stream_create(char* filename);
+writeable_file_stream_t* writeable_file_stream_create(priority_t priority, work_pool_t* pool, char* filename);
 void writeable_file_stream_write(writeable_file_stream_t* stream, buffer_t* data);
+void writeable_file_stream_destroy(writeable_file_stream_t* stream);
+void writeable_file_stream_close(writeable_file_stream_t* stream);
 #endif //OFFS_FILE_STREAM_H
