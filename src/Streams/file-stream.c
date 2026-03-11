@@ -122,6 +122,7 @@ writeable_file_stream_t* writeable_file_stream_create(priority_t priority, work_
   writeable_file_stream_t* ws = get_clear_memory(sizeof(writeable_file_stream_t));
   stream_init((stream_t*) ws, push, writeable_stream, priority, 0, pool, (void(*)(stream_t*)) writeable_file_stream_destroy);
   writeable_stream_write_handler((stream_t*) ws, (void (*)(stream_t*, void*)) writeable_file_stream_write);
+  stream_close_handler((stream_t*) ws, (void (*)(stream_t*))writeable_file_stream_close);
   ws->filename = strdup(filename);
 #ifdef _WIN32
   ws->fd = open(ws->filename, _O_WRONLY | _O_BINARY | _O_CREAT, 0644);
@@ -132,7 +133,9 @@ writeable_file_stream_t* writeable_file_stream_create(priority_t priority, work_
 }
 
 void writeable_file_stream_write(writeable_file_stream_t* stream, buffer_t* data) {
+  REFERENCE(data, buffer_t);
   write(stream->fd, data->data, data->size);
+  DESTROY(data, buffer);
 }
 void writeable_file_stream_destroy(writeable_file_stream_t* stream) {
   refcounter_dereference((refcounter_t*) stream);

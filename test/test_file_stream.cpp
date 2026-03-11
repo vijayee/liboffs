@@ -16,11 +16,12 @@ using ::testing::_;
 using ::testing::MockFunction;
 using ::testing::AtLeast;
 
-class TestReadFileStream : public testing::Test {
+class TestFileStream : public testing::Test {
 public:
   work_pool_t* pool;
-  std::promise<void> close_promise;
-  std::promise<void> complete_promise;
+  std::promise<void> r_close_promise;
+  std::promise<void> r_complete_promise;
+  std::promise<void> w_close_promise;
   MockFunction<void((void*, void*))> mock_data_callback;
   void SetUp() override {
     pool = work_pool_create(4);
@@ -34,47 +35,72 @@ public:
 };
 void on_data(void* ctx, buffer_t* buffer) {
   REFERENCE(buffer, buffer_t);
-  auto testRS = static_cast<TestReadFileStream*>(ctx);
-  testRS->mock_data_callback.Call(ctx, (void*) buffer);
+  auto testFS = static_cast<TestFileStream*>(ctx);
+  testFS->mock_data_callback.Call(ctx, (void*) buffer);
   DESTROY(buffer, buffer);
 }
-void on_close(void* ctx, void*) {
-  auto testRS = static_cast<TestReadFileStream*>(ctx);
-  testRS->close_promise.set_value();
+void on_close_r(void* ctx, void*) {
+  auto testFS = static_cast<TestFileStream*>(ctx);
+  testFS->r_close_promise.set_value();
 }
-void on_complete(void* ctx, void*) {
-  auto testRS = static_cast<TestReadFileStream*>(ctx);
-  testRS->complete_promise.set_value();
+void on_complete_r(void* ctx, void*) {
+  auto testFS = static_cast<TestFileStream*>(ctx);
+  testFS->r_complete_promise.set_value();
 }
-void on_error(void* ctx,  async_error_t* error) {
-  auto testRS = static_cast<TestReadFileStream*>(ctx);
+void on_close_w(void* ctx, void*) {
+  auto testFS = static_cast<TestFileStream*>(ctx);
+  testFS->w_close_promise.set_value();
+}
+void on_error_r(void* ctx,  async_error_t* error) {
+  auto testFS = static_cast<TestFileStream*>(ctx);
   try {
     throw std::runtime_error((const char*)error->message);
   } catch(...) {
-    testRS->close_promise.set_exception(std::current_exception());
+    testFS->r_close_promise.set_exception(std::current_exception());
   }
-
 }
-TEST_F(TestReadFileStream, TestReadFileStreamFunctions) {
+void on_error_w(void* ctx,  async_error_t* error) {
+  auto testFS = static_cast<TestFileStream*>(ctx);
+  try {
+    throw std::runtime_error((const char*)error->message);
+  } catch(...) {
+    testFS->w_close_promise.set_exception(std::current_exception());
+  }
+}
+TEST_F(TestFileStream, TestReadFileStreamFunctions) {
   priority_t priority = priority_get_next();
   int error_code;
   char* filename = "./test.pdf";
-  EXPECT_CALL(mock_data_callback, Call(_,_)).Times(25);
+  EXPECT_CALL(mock_data_callback, Call(_,_)).Times(23);
   readable_file_stream_t* rs = readable_file_stream_create(priority, pool, filename, DEFAULT_CHUNK_SIZE, &error_code);
   EXPECT_EQ(error_code, 0);
   if(error_code != 0) {
     GTEST_FATAL_FAILURE_("Stream Creation error");
   }
-  stream_subscribe((stream_t*) rs, error_event, this, (void(*)(void*, void*)) on_error, NULL);
-  stream_subscribe((stream_t*) rs, close_event, this, on_close, NULL );
+  stream_subscribe((stream_t*) rs, error_event, this, (void(*)(void*, void*)) on_error_r, NULL);
+  stream_subscribe((stream_t*) rs, close_event, this, on_close_r, NULL );
+  stream_subscribe((stream_t*) rs, complete_event, this, (void(*)(void*, void*)) on_complete_r, NULL);
   stream_subscribe((stream_t*) rs, data_event, this, (void(*)(void*, void*)) on_data, NULL);
-  std::future<void> close_future = close_promise.get_future();
-  std::future<void> complete_future = complete_promise.get_future();
+  std::future<void> r_close_future = r_close_promise.get_future();
+  std::future<void> r_complete_future = r_complete_promise.get_future();
   try {
-    close_future.get();
-    EXPECT_EQ(complete_future.valid(), true);
+    r_close_future.get();
+    EXPECT_EQ(r_complete_future.valid(), true);
   } catch (const std::exception& e) {
     GTEST_FATAL_FAILURE_(e.what());
   }
   DESTROY(rs, readable_file_stream);
+  rs = readable_file_stream_create(priority, pool, filename, DEFAULT_CHUNK_SIZE, &error_code);
+  std::future<void> w_close_future = w_close_promise.get_future();
+  writeable_file_stream_t*  ws = writeable_file_stream_create(priority, pool, "./test2.pdf");
+  stream_subscribe((stream_t*) ws, error_event, this, (void(*)(void*, void*)) on_error_w, NULL);
+  stream_subscribe((stream_t*) ws, close_event, this, (void(*)(void*, void*)) on_close_w, NULL);
+  readable_push_stream_pipe((stream_t*) rs, (stream_t*) ws);
+  try {
+    w_close_future.get();
+  } catch (const std::exception& e) {
+    GTEST_FATAL_FAILURE_(e.what());
+  }
+  DESTROY(rs, readable_file_stream);
+  DESTROY(ws, writeable_file_stream);
 };

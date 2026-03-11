@@ -40,13 +40,15 @@ typedef enum {
 } stream_event_e;
 
 typedef struct {
+  refcounter_t refcounter;
   size_t id;
   void* ctx;
   void (* handler)(void*, void*);
   void (* ctx_destroy)(void*);
   uint8_t once;
 } stream_event_handler_t;
-
+stream_event_handler_t* stream_event_handler_create(size_t id, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*), uint8_t once);
+void stream_event_handler_destroy(stream_event_handler_t* handler);
 typedef struct stream_event_handler_list_node_t stream_event_handler_list_node_t;
 
 struct stream_event_handler_list_node_t {
@@ -55,10 +57,10 @@ struct stream_event_handler_list_node_t {
   stream_event_handler_list_node_t* previous;
 };
 
-stream_event_handler_list_node_t* stream_event_handler_list_node_create(stream_event_handler_t* event, stream_event_handler_list_node_t* next, stream_event_handler_list_node_t* previous);
 
 
 typedef struct {
+  PLATFORMLOCKTYPE(lock);
   stream_event_handler_list_node_t *first;
   stream_event_handler_list_node_t *last;
   size_t count;
@@ -68,8 +70,8 @@ stream_event_handler_list_t* stream_event_list_create();
 void stream_event_list_destroy(stream_event_handler_list_t* list);
 void stream_event_list_enqueue(stream_event_handler_list_t* list, stream_event_handler_t* handler);
 stream_event_handler_t* stream_event_list_dequeue(stream_event_handler_list_t* list);
-stream_event_handler_t* stream_event_list_remove(stream_event_handler_list_t* list, stream_event_handler_list_node_t* node);
-
+void stream_event_list_remove(stream_event_handler_list_t* list, stream_event_handler_list_node_t* node);
+void stream_event_list_remove_onces(stream_event_handler_list_t* list);
 typedef enum {
   readable_push = 0x1,
   readable_read = 0x2,

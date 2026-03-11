@@ -19,22 +19,43 @@ void _writeable_push_stream_close_notify(stream_t* stream, void* payload);
 void _writeable_push_stream_complete_notify(stream_t* stream, void* payload);
 void _writeable_push_stream_on_piped(stream_t* ws, stream_t* rs);
 
+stream_event_handler_t* stream_event_handler_create(size_t id, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*), uint8_t once) {
+  stream_event_handler_t* _handler = get_clear_memory(sizeof(stream_event_handler_t));
+  refcounter_init((refcounter_t*) _handler);
+  _handler->handler = handler;
+  _handler->ctx = ctx;
+  _handler->ctx_destroy = ctx_destroy;
+  _handler->once = 0;
+  _handler->id= id;
+  return _handler;
+}
+
+void stream_event_handler_destroy(stream_event_handler_t* handler) {
+  refcounter_dereference((refcounter_t*) handler);
+  if (refcounter_count((refcounter_t*) handler) == 0) {
+    refcounter_destroy_lock((refcounter_t*) handler);
+    if (handler->ctx_destroy != NULL) {
+      handler->ctx_destroy(handler->ctx);
+    }
+    free(handler);
+  }
+}
+
 stream_event_handler_list_t* stream_event_list_create() {
   stream_event_handler_list_t* list = get_clear_memory(sizeof(stream_event_handler_list_t));
+  platform_lock_init(&list->lock);
   list->first = NULL;
   list->last = NULL;
   return list;
 }
 
 void stream_event_list_destroy(stream_event_handler_list_t* list) {
+  platform_lock_destroy(&list->lock);
   stream_event_handler_list_node_t* current = list->first;
   stream_event_handler_list_node_t* next = NULL;
   while (current != NULL ) {
     next = current->next;
-    if (current->handler->ctx_destroy != NULL) {
-      current->handler->ctx_destroy(current->handler->ctx);
-    }
-    free(current->handler);
+    stream_event_handler_destroy(current->handler);
     free(current);
     current = next;
   }
@@ -42,6 +63,7 @@ void stream_event_list_destroy(stream_event_handler_list_t* list) {
 }
 
 void stream_event_list_enqueue(stream_event_handler_list_t* list, stream_event_handler_t* event) {
+  platform_lock(&list->lock);
   stream_event_handler_list_node_t* node = get_clear_memory(sizeof(stream_event_handler_list_node_t));
   node->handler = event;
   node->previous = NULL;
@@ -55,10 +77,13 @@ void stream_event_list_enqueue(stream_event_handler_list_t* list, stream_event_h
     list->last = node;
   }
   list->count++;
+  platform_unlock(&list->lock);
 }
 
 stream_event_handler_t* stream_event_list_dequeue(stream_event_handler_list_t* list) {
+  platform_lock(&list->lock);
   if ((list->last == NULL) && (list->first == NULL)) {
+    platform_unlock(&list->lock);
     return NULL;
   } else {
     stream_event_handler_list_node_t* node = list->first;
@@ -72,13 +97,16 @@ stream_event_handler_t* stream_event_list_dequeue(stream_event_handler_list_t* l
     stream_event_handler_t* event = node->handler;
     free(node);
     list->count--;
+    platform_unlock(&list->lock);
     return event;
   }
 }
 
-stream_event_handler_t* stream_event_list_remove(stream_event_handler_list_t* list, stream_event_handler_list_node_t* node) {
+void stream_event_list_remove(stream_event_handler_list_t* list, stream_event_handler_list_node_t* node) {
+  platform_lock(&list->lock);
   if ((list->last == NULL) && (list->first == NULL)) {
-    return NULL;
+    platform_unlock(&list->lock);
+    return;
   }
   if (list->last == node) {
     list->last = node->previous;
@@ -92,10 +120,45 @@ stream_event_handler_t* stream_event_list_remove(stream_event_handler_list_t* li
   if (node->next != NULL) {
     node->next->previous = node->previous;
   }
-  stream_event_handler_t* event = node->handler;
+  stream_event_handler_t* handler = node->handler;
+  stream_event_handler_destroy(handler);
   list->count--;
   free(node);
-  return event;
+  platform_unlock(&list->lock);
+}
+
+void stream_event_list_remove_onces(stream_event_handler_list_t* list) {
+  platform_lock(&list->lock);
+  if ((list->last == NULL) && (list->first == NULL)) {
+    platform_unlock(&list->lock);
+    return;
+  }
+  stream_event_handler_list_node_t* current = list->first;
+  stream_event_handler_list_node_t* next = NULL;
+  while (current != NULL) {
+    next= current->next;
+    if (current->handler->once == 1) {
+      if (list->last == current) {
+        list->last = current->previous;
+      }
+      if (list->first == current) {
+        list->first = current->next;
+      }
+      if (current->previous != NULL) {
+        current->previous->next = current->next;
+      }
+      if (current->next != NULL) {
+        current->next->previous = current->previous;
+      }
+
+      stream_event_handler_t* handler = current->handler;
+      stream_event_handler_destroy(handler);
+      list->count--;
+      free(current);
+    }
+    current = next;
+  }
+  platform_unlock(&list->lock);
 }
 
 message_queue_t* message_create() {
@@ -174,6 +237,7 @@ void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, pri
   stream->auto_push = auto_push;
   stream->on_pipe = _readable_push_stream_on_pipe;
   stream->on_piped = _writeable_push_stream_on_piped;
+  stream->destructor = destructor;
   for (size_t i = 0; i < STREAM_HANDLER_COUNT; i++) {
     stream->handlers[i] = stream_event_list_create();
   }
@@ -265,6 +329,7 @@ void _writeable_push_stream_on_piped(stream_t* ws, stream_t* rs) {
     ws->pipe_notifiers[2].id = stream_subscribe(rs, close_event,REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_push_stream_close_notify, (void (*)(void*))ws->destructor);
     ws->pipe_notifiers[3].event = complete_event;
     ws->pipe_notifiers[3].id = stream_subscribe(rs, complete_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_push_stream_complete_notify, (void (*)(void*))ws->destructor);
+    platform_unlock(&ws->lock);
   }
 }
 void _writeable_push_stream_data_notify(stream_t* stream, void* data) {
@@ -283,20 +348,33 @@ void _writeable_push_stream_complete_notify(stream_t* stream, void* payload) {
 }
 
 void stream_notify(stream_t* stream, stream_event_e event, void* payload) {
-  platform_lock(&stream->lock);
-  stream_event_handler_list_t* handlers = stream->handlers[event];
-  stream_event_handler_list_node_t* current = handlers->first;
+  stream_event_handler_list_t* list = stream->handlers[event];
+  platform_lock(&list->lock);
+  stream_event_handler_t* handlers[list->count];
+  stream_event_handler_list_node_t* current = list->first;
   if ((event == error_event) && (current == NULL)) {
     log_error("No error event handler defined");
     async_error_t* error = (async_error_t*) payload;
     log_error(error->message);
     abort();
   }
+  size_t i = 0;
+  uint8_t has_onces = 0;
   while (current != NULL) {
-    current->handler->handler(current->handler->ctx, payload);
+    if (has_onces == 0) {
+      has_onces = current->handler->once; ;
+    }
+    handlers[i++] = REFERENCE(current->handler, stream_event_handler_t);
     current = current->next;
   }
-  platform_unlock(&stream->lock);
+  platform_unlock(&list->lock);
+  for (size_t c = 0; c < i; c++) {
+    handlers[c]->handler(handlers[c]->ctx, payload);
+    DESTROY(handlers[c], stream_event_handler);
+  }
+  if (has_onces == 1) {
+    stream_event_list_remove_onces(list);
+  }
 }
 
 void stream_deactivate(stream_t* stream, async_error_t* error) {
@@ -386,47 +464,55 @@ void _stream_message_worker_abort(stream_t* stream) {
 }
 
 size_t stream_subscribe(stream_t* stream, stream_event_e event, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*)) {
- stream_event_handler_t* _handler = get_clear_memory(sizeof(stream_event_handler_t));
-  _handler->handler = handler;
-  _handler->ctx = ctx;
-  _handler->ctx_destroy = ctx_destroy;
-  _handler->once = 0;
   platform_lock(&stream->lock);
-  _handler->id= ++stream->next_handler_id;
-  stream_event_list_enqueue(stream->handlers[event], _handler);
-  uint8_t push = ((!stream->is_piped) && stream->auto_push);
+  size_t id = ++stream->next_handler_id;
+  uint8_t push = 0;
+  if((event == data_event) && (stream->handlers[event]->count == 0)) {
+    push = ((!stream->is_piped) && stream->auto_push);
+  }
   platform_unlock(&stream->lock);
+  stream_event_handler_t* _handler = stream_event_handler_create(id, ctx,handler,ctx_destroy, 0);
+
+  stream_event_list_enqueue(stream->handlers[event], _handler);
   if (push) {
     readable_push_stream_push(stream);
   }
 }
 
 void stream_unsubscribe(stream_t* stream, stream_event_e event, size_t id) {
-  platform_lock(&stream->lock);
   stream_event_handler_list_t* list = stream->handlers[event];
   stream_event_handler_list_node_t* current = list->first;
   stream_event_handler_list_node_t* next= NULL;
+  stream_event_handler_list_node_t* node= NULL;
+  platform_lock(&list->lock);
   while (current == NULL) {
     next = current->next;
     if (current->handler->id == id) {
-      stream_event_list_remove(list, current);
+      node = current;
       break;
     }
     current = next;
   }
-  platform_unlock(&stream->lock);
+  platform_unlock(&list->lock);
+  if (node != NULL) {
+    stream_event_list_remove(list, node);
+  }
 }
 
 size_t stream_once(stream_t* stream, stream_event_e event, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*)) {
-  stream_event_handler_t* _handler = get_clear_memory(sizeof(stream_event_handler_t));
-  _handler->handler = handler;
-  _handler->ctx = ctx;
-  _handler->ctx_destroy = ctx_destroy;
-  _handler->once = 1;
   platform_lock(&stream->lock);
-  _handler->id= ++stream->next_handler_id;
-  stream_event_list_enqueue(stream->handlers[event], _handler);
+  size_t id = ++stream->next_handler_id;
+  uint8_t push = 0;
+  if((event == data_event) && (stream->handlers[event]->count == 1)) {
+    push = ((!stream->is_piped) && stream->auto_push);
+  }
   platform_unlock(&stream->lock);
+  stream_event_handler_t* _handler = stream_event_handler_create(id, ctx,handler,ctx_destroy, 1);
+
+  stream_event_list_enqueue(stream->handlers[event], _handler);
+  if (push) {
+    readable_push_stream_push(stream);
+  };
 }
 
 
