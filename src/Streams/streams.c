@@ -18,6 +18,7 @@ void _writeable_push_stream_error_notify(stream_t* stream, void* payload);
 void _writeable_push_stream_close_notify(stream_t* stream, void* payload);
 void _writeable_push_stream_complete_notify(stream_t* stream, void* payload);
 void _writeable_push_stream_on_piped(stream_t* ws, stream_t* rs);
+void _stream_purge_handlers(stream_t* stream);
 
 stream_event_handler_t* stream_event_handler_create(size_t id, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*), uint8_t once) {
   stream_event_handler_t* _handler = get_clear_memory(sizeof(stream_event_handler_t));
@@ -243,12 +244,38 @@ void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, pri
   }
 }
 void stream_deinit(stream_t* stream) {
-  platform_lock_destroy(&stream->lock);
-  platform_lock_destroy(&stream->worker_status.lock);
-  message_queue_destroy(stream->queue);
-  if (stream->pipe_notifiers != NULL) {
-    free(stream->pipe_notifiers);
+  if (refcounter_count((refcounter_t*) stream) == 0) {
+    platform_lock_destroy(&stream->lock);
+    platform_lock_destroy(&stream->worker_status.lock);
+    message_queue_destroy(stream->queue);
+    if (stream->pipe_notifiers != NULL) {
+      size_t count = 0;
+      switch (stream->type) {
+        case readable_stream:
+          count = 3;
+          break;
+        case writeable_stream:
+          count = 4;
+          break;
+        case duplex_stream:
+        case transform_stream:
+          count = 7;
+          break;
+      }
+      for (size_t i = 0; i < count; i++) {
+        stream_notifier_t notifier = stream->pipe_notifiers[i];
+        notifier.stream->destructor(notifier.stream);
+      }
+      free(stream->pipe_notifiers);
+    }
+    //_stream_purge_handlers(stream);
   }
+}
+void stream_destroy(stream_t* stream) {
+  stream->destructor(stream);
+}
+
+void _stream_purge_handlers(stream_t* stream) {
   for (size_t i = 0; i < STREAM_HANDLER_COUNT; i++) {
     stream_event_list_destroy(stream->handlers[i]);
   }
@@ -283,19 +310,34 @@ void _readable_push_stream_on_pipe(stream_t* rs, stream_t* ws) {
     platform_unlock(&rs->lock);
     stream_notify(rs, error_event, ERROR("Stream has been destroyed"));
   } else {
-    if (rs->pipe_notifiers == NULL) {//TODO: revisit this
-      rs->pipe_notifiers = get_clear_memory(3 * sizeof(stream_notifier_t));
+    if (rs->pipe_notifiers == NULL) {
+      size_t size = 0;
+      switch (rs->type) {
+        case readable_stream:
+          size = 3;
+          break;
+        case writeable_stream:
+          size = 4;
+          break;
+        case duplex_stream :
+        case transform_stream:
+          size = 7;
+          break;
+      }
+      rs->pipe_notifiers = get_clear_memory(size * sizeof(stream_notifier_t));
     }
     rs->pipe_notifiers[0].event = piped_event;
     rs->pipe_notifiers[0].id = stream_subscribe(ws, piped_event, REFERENCE(rs, stream_t), (void(*)(void*, void*)) _readable_push_stream_piped_notify, (void (*)(void*))rs->destructor);
+    rs->pipe_notifiers[0].stream = REFERENCE(ws, stream_t);
     rs->pipe_notifiers[1].event = error_event;
     rs->pipe_notifiers[1].id = stream_subscribe(ws, error_event,REFERENCE(rs, stream_t), (void(*)(void*, void*)) _readable_push_stream_error_notify, (void (*)(void*))rs->destructor);
+    rs->pipe_notifiers[1].stream = REFERENCE(ws, stream_t);
     rs->pipe_notifiers[2].event = close_event;
     rs->pipe_notifiers[2].id = stream_subscribe(ws, close_event,REFERENCE(rs, stream_t), (void(*)(void*, void*)) _readable_push_stream_close_notify, (void (*)(void*))rs->destructor);
+    rs->pipe_notifiers[2].stream = REFERENCE(ws, stream_t);
     platform_unlock(&rs->lock);
     ws->on_piped(ws, rs);
   }
-
 }
 void _readable_push_stream_piped_notify(stream_t* stream, void* payload) {
   readable_push_stream_push(stream);
@@ -318,17 +360,49 @@ void _writeable_push_stream_on_piped(stream_t* ws, stream_t* rs) {
     platform_unlock(&ws->lock);
     stream_notify(ws, error_event, ERROR("Stream has been destroyed"));
   } else {
-    if (ws->pipe_notifiers == NULL) {//TODO: revisit this
-      ws->pipe_notifiers = get_clear_memory(4 * sizeof(stream_notifier_t));
+    if (ws->pipe_notifiers == NULL) {
+      size_t size = 0;
+      switch (rs->type) {
+        case readable_stream:
+          size = 3;
+          break;
+        case writeable_stream:
+          size = 4;
+          break;
+        case duplex_stream :
+        case transform_stream:
+          size = 7;
+          break;
+      }
+      ws->pipe_notifiers = get_clear_memory(size * sizeof(stream_notifier_t));
     }
-    ws->pipe_notifiers[0].event = data_event;
-    ws->pipe_notifiers[0].id = stream_subscribe(rs, data_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_push_stream_data_notify, (void (*)(void*))ws->destructor);
-    ws->pipe_notifiers[1].event = error_event;
-    ws->pipe_notifiers[1].id = stream_subscribe(rs, error_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_push_stream_error_notify, (void (*)(void*))ws->destructor);
-    ws->pipe_notifiers[2].event = close_event;
-    ws->pipe_notifiers[2].id = stream_subscribe(rs, close_event,REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_push_stream_close_notify, (void (*)(void*))ws->destructor);
-    ws->pipe_notifiers[3].event = complete_event;
-    ws->pipe_notifiers[3].id = stream_subscribe(rs, complete_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_push_stream_complete_notify, (void (*)(void*))ws->destructor);
+    if ((ws->type == duplex_stream)||(ws->type == transform_stream)) {
+      ws->pipe_notifiers[3].event = data_event;
+      ws->pipe_notifiers[3].id = stream_subscribe(rs, data_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_push_stream_data_notify, (void (*)(void*))ws->destructor);
+      ws->pipe_notifiers[3].stream = REFERENCE(rs, stream_t);
+      ws->pipe_notifiers[4].event = error_event;
+      ws->pipe_notifiers[4].id = stream_subscribe(rs, error_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_push_stream_error_notify, (void (*)(void*))ws->destructor);
+      ws->pipe_notifiers[3].stream = REFERENCE(rs, stream_t);
+      ws->pipe_notifiers[5].event = close_event;
+      ws->pipe_notifiers[5].id = stream_subscribe(rs, close_event,REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_push_stream_close_notify, (void (*)(void*))ws->destructor);
+      ws->pipe_notifiers[3].stream = REFERENCE(rs, stream_t);
+      ws->pipe_notifiers[6].event = complete_event;
+      ws->pipe_notifiers[6].id = stream_subscribe(rs, complete_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_push_stream_complete_notify, (void (*)(void*))ws->destructor);
+      ws->pipe_notifiers[3].stream = REFERENCE(rs, stream_t);
+    } else {
+      ws->pipe_notifiers[0].event = data_event;
+      ws->pipe_notifiers[0].id = stream_subscribe(rs, data_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_push_stream_data_notify, (void (*)(void*))ws->destructor);
+      ws->pipe_notifiers[0].stream = REFERENCE(rs, stream_t);
+      ws->pipe_notifiers[1].event = error_event;
+      ws->pipe_notifiers[1].id = stream_subscribe(rs, error_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_push_stream_error_notify, (void (*)(void*))ws->destructor);
+      ws->pipe_notifiers[1].stream = REFERENCE(rs, stream_t);
+      ws->pipe_notifiers[2].event = close_event;
+      ws->pipe_notifiers[2].id = stream_subscribe(rs, close_event,REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_push_stream_close_notify, (void (*)(void*))ws->destructor);
+      ws->pipe_notifiers[2].stream = REFERENCE(rs, stream_t);
+      ws->pipe_notifiers[3].event = complete_event;
+      ws->pipe_notifiers[3].id = stream_subscribe(rs, complete_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_push_stream_complete_notify, (void (*)(void*))ws->destructor);
+      ws->pipe_notifiers[3].stream = REFERENCE(rs, stream_t);
+    }
     platform_unlock(&ws->lock);
   }
 }
@@ -345,6 +419,30 @@ void _writeable_push_stream_close_notify(stream_t* stream, void* payload) {
 
 void _writeable_push_stream_complete_notify(stream_t* stream, void* payload) {
   stream_close(stream);
+}
+
+void stream_unsubscribe_pipe_notifiers(stream_t* stream) {
+  platform_lock(&stream->lock);
+  if ( stream->pipe_notifiers != NULL ) {
+    size_t count = 0;
+    switch (stream->type) {
+      case readable_stream:
+        count = 3;
+        break;
+      case writeable_stream:
+        count = 4;
+        break;
+      case duplex_stream:
+      case transform_stream:
+        count = 7;
+        break;
+    }
+    for (size_t i = 0; i < count; i++) {
+      stream_notifier_t notifier = stream->pipe_notifiers[i];
+      stream_unsubscribe(notifier.stream, notifier.event, notifier.id);
+    }
+  }
+  platform_unlock(&stream->lock);
 }
 
 void stream_notify(stream_t* stream, stream_event_e event, void* payload) {
@@ -394,20 +492,16 @@ void readable_push_stream_push(stream_t* stream) {
   message->payload= NULL;
   message->type = readable_push;
   message_queue_enqueue(stream->queue, message);
-  platform_lock(&stream->worker_status.lock);
-  if (stream->worker_status.is_working == 0) {
-    platform_unlock(&stream->worker_status.lock);
-    _stream_start_message_worker(stream);
-  } else {
-    platform_unlock(&stream->worker_status.lock);
-  }
+  _stream_start_message_worker(stream);
 }
 void _stream_start_message_worker(stream_t* stream) {
   platform_lock(&stream->worker_status.lock);
   if (stream->worker_status.is_working == 0) {
     stream->worker_status.is_working = 1;
     platform_unlock(&stream->worker_status.lock);
-    work_t *work = work_create(stream->priority, (void *) stream, (void *) _stream_message_worker,
+    REFERENCE(stream, stream_t);
+    YIELD(stream);
+    work_t *work = work_create(stream->priority, (void *)stream, (void *) _stream_message_worker,
                                (void *) _stream_message_worker_abort);
     work_pool_enqueue(stream->pool, CONSUME(work, work_t));
   } else {
@@ -415,6 +509,7 @@ void _stream_start_message_worker(stream_t* stream) {
   }
 }
 void _stream_message_worker(stream_t* stream) {
+  REFERENCE(stream, stream_t);
   message_t* current = message_queue_dequeue(stream->queue);
   if (current != NULL) {
     switch(current->type) {
@@ -450,12 +545,14 @@ void _stream_message_worker(stream_t* stream) {
         break;
     }
     free(current);
+    YIELD(stream);
     work_t* work = work_create(stream->priority, (void*) stream, (void*)_stream_message_worker, (void*)_stream_message_worker_abort);
     work_pool_enqueue(stream->pool, CONSUME(work, work_t));
   } else {
     platform_lock(&stream->worker_status.lock);
     stream->worker_status.is_working = 0;
     platform_unlock(&stream->worker_status.lock);
+    DESTROY(stream, stream);
   }
 }
 
@@ -477,6 +574,7 @@ size_t stream_subscribe(stream_t* stream, stream_event_e event, void* ctx, void 
   if (push) {
     readable_push_stream_push(stream);
   }
+  return id;
 }
 
 void stream_unsubscribe(stream_t* stream, stream_event_e event, size_t id) {
@@ -512,7 +610,8 @@ size_t stream_once(stream_t* stream, stream_event_e event, void* ctx, void (* ha
   stream_event_list_enqueue(stream->handlers[event], _handler);
   if (push) {
     readable_push_stream_push(stream);
-  };
+  }
+  return id;
 }
 
 
@@ -523,13 +622,7 @@ void readable_stream_read(stream_t* stream, size_t size, void* ctx, void (*cb)(v
   message->payload = payload;
   message->type = readable_read;
   message_queue_enqueue(stream->queue, message);
-  platform_lock(&stream->worker_status.lock);
-  if (stream->worker_status.is_working == 0) {
-    platform_unlock(&stream->worker_status.lock);
-    _stream_start_message_worker(stream);
-  } else {
-    platform_unlock(&stream->worker_status.lock);
-  }
+  _stream_start_message_worker(stream);
 }
 
 void stream_close_handler(stream_t* stream, void (*on_close)(stream_t*)) {
@@ -544,13 +637,7 @@ void stream_close(stream_t* stream) {
   message->payload = NULL;
   message->type = close_stream;
   message_queue_enqueue(stream->queue, message);
-  platform_lock(&stream->worker_status.lock);
-  if (stream->worker_status.is_working == 0) {
-    platform_unlock(&stream->worker_status.lock);
-    _stream_start_message_worker(stream);
-  } else {
-    platform_unlock(&stream->worker_status.lock);
-  }
+  _stream_start_message_worker(stream);
 }
 
 void writeable_stream_write_handler(stream_t* stream, void (*handler)(stream_t*, void*)) {

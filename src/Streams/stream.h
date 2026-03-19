@@ -106,14 +106,18 @@ message_t* message_queue_dequeue(message_queue_t* queue);
 typedef struct {
   PLATFORMLOCKTYPE(lock);
   uint8_t is_working;
+  uint8_t purge_handlers;
 } stream_worker_status;
+
+typedef struct stream_t stream_t;
 
 typedef struct {
   stream_event_e event;
   size_t id;
+  stream_t* stream;
 } stream_notifier_t;
 
-typedef struct stream_t stream_t;
+
 #define STREAM_HANDLER_COUNT 16
 struct stream_t {
   refcounter_t refcounter;
@@ -188,6 +192,7 @@ typedef struct {
 
 void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, priority_t priority, uint8_t auto_push, work_pool_t* pool, void (*destructor)(stream_t*));
 void stream_deinit(stream_t* stream);
+void stream_destroy(stream_t* stream);
 void stream_deactivate(stream_t* stream, async_error_t* error);
 void stream_close(stream_t* stream);
 void stream_close_handler(stream_t* stream,  void (*on_close)(stream_t*));
@@ -204,4 +209,5 @@ void readable_stream_read(stream_t* stream, size_t size, void* ctx, void (*cb)(v
 void writeable_stream_write_handler(stream_t* stream, void (*)(stream_t*, void*));
 void writeable_stream_write(stream_t* stream, void* data);
 void _writeable_push_stream_on_piped(stream_t* ws, stream_t* rs);
+void stream_unsubscribe_pipe_notifiers(stream_t* stream);
 #endif //OFFS_STREAM_H

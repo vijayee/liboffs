@@ -106,6 +106,7 @@ void readable_file_stream_read(readable_file_stream_t* stream, size_t size, void
 }
 
 void readable_file_stream_close(readable_file_stream_t* stream) {
+  stream_unsubscribe_pipe_notifiers((stream_t*) stream);
   platform_lock(&stream->stream.lock);
   uint8_t deactivated = stream->stream.is_deactivated;
   if (deactivated == 0) {
@@ -151,6 +152,7 @@ void writeable_file_stream_destroy(writeable_file_stream_t* stream) {
   }
 }
 void writeable_file_stream_close(writeable_file_stream_t* stream) {
+  stream_unsubscribe_pipe_notifiers((stream_t*) stream);
   platform_lock(&stream->stream.lock);
   uint8_t deactivated = stream->stream.is_deactivated;
   if (deactivated == 0) {
