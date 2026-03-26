@@ -129,12 +129,14 @@ void promiseErrWrapper(void* ctx) {
 
 TEST_F(TestWork, TestWorkExecution) {
   priority_init();
+  priority_t priority1 = priority_get_next();
+  priority_t priority2 = priority_get_next();
   promise_t* promise1 = promise_create(callbackWrapper, callbackErrWrapper, this);
   promise_t* promise2 = promise_create(callbackWrapper, callbackErrWrapper, this);
   EXPECT_CALL(mockCallback, Call(_,_)).Times(1);
   EXPECT_CALL(mockErrCallback, Call(_,_)).Times(1);
-  work_t* work1 = work_create(priority_get_next(), refcounter_reference((refcounter_t*)promise1), promiseWrapper, promiseErrWrapper);
-  work_t* work2 = work_create(priority_get_next(), refcounter_reference((refcounter_t*)promise2), promiseWrapper, promiseErrWrapper);
+  work_t* work1 = work_create(&priority1, refcounter_reference((refcounter_t*)promise1), promiseWrapper, promiseErrWrapper);
+  work_t* work2 = work_create(&priority2, refcounter_reference((refcounter_t*)promise2), promiseWrapper, promiseErrWrapper);
   work_execute(work1);
   work_abort(work2);
   work_destroy(work1);
@@ -151,11 +153,11 @@ TEST(TestWorkQueue, TestWorkQueueFunctions) {
   priority_t secondPriority = priority_get_next();
   priority_t thirdPriority = priority_get_next();
   priority_t fourthPriority = priority_get_next();
-  work_t* work1 = work_create(secondPriority, NULL, fakeWork, fakeWork);
-  work_t* work2 = work_create(fourthPriority, NULL, fakeWork, fakeWork);
-  work_t* work3 = work_create(fourthPriority, NULL, fakeWork, fakeWork);
-  work_t* work4 = work_create(secondPriority, NULL, fakeWork, fakeWork);
-  work_t* work5 = work_create(firstPriority, NULL, fakeWork, fakeWork);
+  work_t* work1 = work_create(&secondPriority, NULL, fakeWork, fakeWork);
+  work_t* work2 = work_create(&fourthPriority, NULL, fakeWork, fakeWork);
+  work_t* work3 = work_create(&fourthPriority, NULL, fakeWork, fakeWork);
+  work_t* work4 = work_create(&secondPriority, NULL, fakeWork, fakeWork);
+  work_t* work5 = work_create(&firstPriority, NULL, fakeWork, fakeWork);
   work_queue_t queue = {0};
   work_queue_init(&queue);
   work_enqueue(&queue,work1);
@@ -234,12 +236,12 @@ TEST_F(TestWorkerPool, TestPoolLaunch) {
 
   for (int i = 0; i < size; i++) {
     workId[i] = i;
-    work_t* work = work_create(priority, this, onExecute, onAbort);
+    work_t* work = work_create(&priority, this, onExecute, onAbort);
     refcounter_yield((refcounter_t*) work);
     work_pool_enqueue(pool, work);
   }
   work_pool_wait_for_idle_signal(pool);
-  work_t* work = work_create(priority, this, Shutdown, ShutdownAborted);
+  work_t* work = work_create(&priority, this, Shutdown, ShutdownAborted);
   refcounter_yield((refcounter_t*) work);
   work_pool_enqueue(pool, work);
   work_pool_wait_for_shutdown_signal(pool);
@@ -263,12 +265,12 @@ TEST_F(TestWorkerPool, TestPoolShutdown) {
 
   for (int i = 0; i < size; i++) {
     if(i == 100) {
-      work_t* work = work_create(priority, this, Shutdown, ShutdownAborted);
+      work_t* work = work_create(&priority, this, Shutdown, ShutdownAborted);
       refcounter_yield((refcounter_t*) work);
       work_pool_enqueue(pool, work);
     }
     workId[i] = i;
-    work_t *work = work_create(priority, this, onExecute, onAbort);
+    work_t *work = work_create(&priority, this, onExecute, onAbort);
     refcounter_yield((refcounter_t *) work);
     work_pool_enqueue(pool, work);
   }

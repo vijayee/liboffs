@@ -10,15 +10,15 @@
 #include "../Workers/error.h"
 
 typedef enum {
-  readable_stream = 0x0,
-  writeable_stream = 0x1,
-  duplex_stream = 0x2,
-  transform_stream = 0x3
+  readable_stream = 0,
+  writeable_stream = 1,
+  duplex_stream = 2,
+  transform_stream = 3
 }  stream_type_e;
 
 typedef enum {
-  push = 0x0,
-  pull = 0x1
+  push = 0,
+  pull = 1
 } stream_force_e;
 
 typedef enum {
@@ -73,10 +73,10 @@ stream_event_handler_t* stream_event_list_dequeue(stream_event_handler_list_t* l
 void stream_event_list_remove(stream_event_handler_list_t* list, stream_event_handler_list_node_t* node);
 void stream_event_list_remove_onces(stream_event_handler_list_t* list);
 typedef enum {
-  readable_push = 0x1,
-  readable_read = 0x2,
-  writeable_write = 0x3,
-  close_stream = 0x4
+  readable_push = 0,
+  readable_read = 1,
+  writeable_write = 2,
+  close_stream = 3
 } message_type_e;
 typedef struct {
   int type;
@@ -190,7 +190,7 @@ typedef struct {
   void (*cb)(void*, void*);
 } read_payload;
 
-void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, priority_t priority, uint8_t auto_push, work_pool_t* pool, void (*destructor)(stream_t*));
+void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, priority_t* priority, uint8_t auto_push, work_pool_t* pool, void (*destructor)(stream_t*));
 void stream_deinit(stream_t* stream);
 void stream_destroy(stream_t* stream);
 void stream_deactivate(stream_t* stream, async_error_t* error);

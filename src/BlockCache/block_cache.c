@@ -252,7 +252,7 @@ void block_cache_destroy(block_cache_t* block_cache) {
 }
 
 
-void block_cache_put(block_cache_t* block_cache, priority_t priority, block_t* block, promise_t* promise) {
+void block_cache_put(block_cache_t* block_cache, priority_t* priority, block_t* block, promise_t* promise) {
   block_cache_put_ctx* ctx = get_memory(sizeof(block_cache_put_ctx));
   ctx->block_cache = block_cache;
   ctx->block = REFERENCE(block, block_t);
@@ -299,7 +299,7 @@ void _block_cache_put_abort(block_cache_put_ctx* ctx) {
 }
 
 
-void block_cache_get(block_cache_t* block_cache, priority_t priority, buffer_t* hash, promise_t* promise)  {
+void block_cache_get(block_cache_t* block_cache, priority_t* priority, buffer_t* hash, promise_t* promise)  {
   block_cache_get_ctx* ctx = get_memory(sizeof(block_cache_get_ctx));
   ctx->promise = promise;
   ctx->block_cache = block_cache;
@@ -354,7 +354,7 @@ void _block_cache_get_abort(block_cache_get_ctx* ctx) {
 }
 
 
-void block_cache_remove(block_cache_t* block_cache, priority_t priority, buffer_t* hash, promise_t* promise) {
+void block_cache_remove(block_cache_t* block_cache, priority_t* priority, buffer_t* hash, promise_t* promise) {
   block_cache_remove_ctx* ctx = get_memory(sizeof(block_cache_remove_ctx));
   ctx->promise = promise;
   ctx->block_cache = block_cache;

@@ -52,8 +52,8 @@ typedef struct {
 
 block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, work_pool_t* pool, hierarchical_timing_wheel_t* wheel);
 void block_cache_destroy(block_cache_t* block_cache);
-void block_cache_put(block_cache_t* block_cache, priority_t priority, block_t* block, promise_t* promise);
-void block_cache_get(block_cache_t* block_cache, priority_t priority, buffer_t* hash, promise_t* promise);
-void block_cache_remove(block_cache_t* block_cache, priority_t priority, buffer_t* hash, promise_t* promise);
+void block_cache_put(block_cache_t* block_cache, priority_t* priority, block_t* block, promise_t* promise);
+void block_cache_get(block_cache_t* block_cache, priority_t* priority, buffer_t* hash, promise_t* promise);
+void block_cache_remove(block_cache_t* block_cache, priority_t* priority, buffer_t* hash, promise_t* promise);
 size_t block_cache_count(block_cache_t* block_cache);
 #endif //OFFS_BLOCK_CACHE_H

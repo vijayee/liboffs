@@ -157,7 +157,7 @@ void timing_wheel_run(timing_wheel_t* wheel) {
   if (wheel->wheel == NULL) {
     wheel->stopped = 0;
     priority_t priority = {0};
-    work_t* work = work_create(priority, (void *) wheel, timing_wheel_worker_execute, timing_wheel_worker_abort);
+    work_t* work = work_create(&priority, (void *) wheel, timing_wheel_worker_execute, timing_wheel_worker_abort);
     refcounter_yield((refcounter_t*) work);
     work_pool_enqueue(wheel->pool, work);
   } else {
@@ -206,7 +206,7 @@ void timing_wheel_fire_expired(timing_wheel_t* wheel, timer_list_t* expired) {
       }
     }
     priority_t priority = {0};
-    work_t* work = work_create(priority, current->ctx, current->cb, current->abort);
+    work_t* work = work_create(&priority, current->ctx, current->cb, current->abort);
     refcounter_yield((refcounter_t*) work);
     work_pool_enqueue(wheel->pool, work);
 

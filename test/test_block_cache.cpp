@@ -250,7 +250,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
     ctx->test = this;
     promise_t* promise = promise_create(put_callback_wrapper,put_callback_err_wrapper,ctx);
     put_promises_c[i] = promise;
-    block_cache_put(block_cache, priority, blocks[i], promise);
+    block_cache_put(block_cache, &priority, blocks[i], promise);
   }
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
     std::future<void> put_future = put_promise[i].get_future();
@@ -280,7 +280,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
     ctx->test = this;
     promise_t* promise = promise_create(re_put_callback_wrapper,re_put_callback_err_wrapper,ctx);
     re_put_promises_c[i] = promise;
-    block_cache_put(block_cache, priority, blocks[i], promise);
+    block_cache_put(block_cache, &priority, blocks[i], promise);
   }
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
     std::future<void> re_put_future = re_put_promise[i].get_future();
@@ -311,7 +311,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
     ctx->test = this;
     promise_t* promise = promise_create(get_callback_wrapper,get_callback_err_wrapper,ctx);
     get_promises_c[i] = promise;
-    block_cache_get(block_cache, priority, blocks[i]->hash, promise);
+    block_cache_get(block_cache, &priority, blocks[i]->hash, promise);
   }
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
     std::future<block_t*> get_future = get_promise[i].get_future();
@@ -348,7 +348,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
     ctx->test = this;
     promise_t* promise = promise_create(remove_callback_wrapper,remove_callback_err_wrapper,ctx);
     remove_promises_c[i] = promise;
-    block_cache_remove(block_cache, priority, blocks[i]->hash, promise);
+    block_cache_remove(block_cache, &priority, blocks[i]->hash, promise);
   }
 
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
@@ -378,7 +378,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
     ctx->test = this;
     promise_t* promise = promise_create(re_get_callback_wrapper,re_get_callback_err_wrapper,ctx);
     re_get_promises_c[i] = promise;
-    block_cache_get(block_cache, priority, blocks[i]->hash, promise);
+    block_cache_get(block_cache, &priority, blocks[i]->hash, promise);
   }
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
     std::future<block_t*> get_future = re_get_promise[i].get_future();

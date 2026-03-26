@@ -4,9 +4,9 @@
 #include "work.h"
 #include "../Util/allocator.h"
 
-work_t* work_create(priority_t priority, void* ctx, void (* execute)(void*), void (* abort)(void*)) {
+work_t* work_create(priority_t* priority, void* ctx, void (* execute)(void*), void (* abort)(void*)) {
   work_t* work = get_clear_memory(sizeof(work_t));
-  work->priority = priority;
+  work->priority = *priority;
   work->ctx = ctx;
   work->execute= execute;
   work->abort = abort;

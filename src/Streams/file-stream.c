@@ -7,11 +7,10 @@
 #include <string.h>
 
 
-readable_file_stream_t* readable_file_stream_create(priority_t priority, work_pool_t* pool, char* filename, size_t chunk_size, int* error_code) {
+readable_file_stream_t* readable_file_stream_create(priority_t* priority, work_pool_t* pool, char* filename, size_t chunk_size, int* error_code) {
   *error_code = 0;
   readable_file_stream_t* rs= get_clear_memory(sizeof(readable_file_stream_t));
-  stream_init((stream_t*) rs, push, readable_stream, priority, 1, pool,
-              (void(*)(stream_t*))readable_file_stream_destroy);
+
   rs->filename = strdup(filename);
   rs->chunk_size = chunk_size;
   readable_stream_push_handler((stream_t*) rs, (void (*)(stream_t*))readable_file_stream_push);
@@ -26,6 +25,8 @@ readable_file_stream_t* readable_file_stream_create(priority_t priority, work_po
   if (lseek(rs->fd, 0, SEEK_SET) < 0) {
     *error_code = -1;
   }
+  stream_init((stream_t*) rs, push, readable_stream, priority, 1, pool,
+              (void(*)(stream_t*))readable_file_stream_destroy);
   return rs;
 }
 void readable_file_stream_destroy(readable_file_stream_t* stream) {
@@ -106,7 +107,6 @@ void readable_file_stream_read(readable_file_stream_t* stream, size_t size, void
 }
 
 void readable_file_stream_close(readable_file_stream_t* stream) {
-  stream_unsubscribe_pipe_notifiers((stream_t*) stream);
   platform_lock(&stream->stream.lock);
   uint8_t deactivated = stream->stream.is_deactivated;
   if (deactivated == 0) {
@@ -115,15 +115,16 @@ void readable_file_stream_close(readable_file_stream_t* stream) {
   }
   platform_unlock(&stream->stream.lock);
   if (deactivated == 0) {
-    stream_notify((stream_t *) stream, close_event, NULL);
+    stream_unsubscribe_pipe_notifiers((stream_t*) stream);
+    stream_notify((stream_t*) stream, close_event, NULL);
   }
 }
 
-writeable_file_stream_t* writeable_file_stream_create(priority_t priority, work_pool_t* pool, char* filename) {
+writeable_file_stream_t* writeable_file_stream_create(priority_t* priority, work_pool_t* pool, char* filename) {
   writeable_file_stream_t* ws = get_clear_memory(sizeof(writeable_file_stream_t));
   stream_init((stream_t*) ws, push, writeable_stream, priority, 0, pool, (void(*)(stream_t*)) writeable_file_stream_destroy);
   writeable_stream_write_handler((stream_t*) ws, (void (*)(stream_t*, void*)) writeable_file_stream_write);
-  stream_close_handler((stream_t*) ws, (void (*)(stream_t*))writeable_file_stream_close);
+  stream_close_handler((stream_t*) ws, (void(*)(stream_t*))writeable_file_stream_close);
   ws->filename = strdup(filename);
 #ifdef _WIN32
   ws->fd = open(ws->filename, _O_WRONLY | _O_BINARY | _O_CREAT, 0644);
@@ -152,15 +153,16 @@ void writeable_file_stream_destroy(writeable_file_stream_t* stream) {
   }
 }
 void writeable_file_stream_close(writeable_file_stream_t* stream) {
-  stream_unsubscribe_pipe_notifiers((stream_t*) stream);
+  printf("close happened on ws\n");
   platform_lock(&stream->stream.lock);
   uint8_t deactivated = stream->stream.is_deactivated;
   if (deactivated == 0) {
     stream->stream.is_deactivated = 1;
     stream->stream.is_piped = 0;
-  }
-  platform_unlock(&stream->stream.lock);
-  if (deactivated == 0) {
+    platform_unlock(&stream->stream.lock);
+    stream_unsubscribe_pipe_notifiers((stream_t*) stream);
     stream_notify((stream_t *) stream, close_event, NULL);
+  } else {
+    platform_unlock(&stream->stream.lock);
   }
 }
