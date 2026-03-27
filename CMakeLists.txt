@@ -92,6 +92,7 @@ ExternalProject_Add(libcbor
 )
 add_library(cbor STATIC IMPORTED)
 set_target_properties(cbor PROPERTIES IMPORTED_LOCATION ${LIBCBOR_BUILD_PATH}/libcbor.a)
+add_dependencies(cbor libcbor)
 
 
 add_library(offs STATIC ${C_SRC})

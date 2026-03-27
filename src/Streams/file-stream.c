@@ -153,7 +153,6 @@ void writeable_file_stream_destroy(writeable_file_stream_t* stream) {
   }
 }
 void writeable_file_stream_close(writeable_file_stream_t* stream) {
-  printf("close happened on ws\n");
   platform_lock(&stream->stream.lock);
   uint8_t deactivated = stream->stream.is_deactivated;
   if (deactivated == 0) {

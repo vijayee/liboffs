@@ -437,8 +437,12 @@ void stream_unsubscribe_pipe_notifiers(stream_t* stream) {
     }
     for (size_t i = 0; i < count; i++) {
       stream_notifier_t* notifier = &stream->pipe_notifiers[i];
+      // Unsubscribe the event handler - this will decrement the reference
+      // that was created when the handler was subscribed (via REFERENCE macro)
+      // and call ctx_destroy if the handler is destroyed
       stream_unsubscribe(notifier->stream, notifier->event, notifier->id);
-      refcounter_dereference((refcounter_t*) notifier->stream);
+      // Dereference the stream stored in pipe_notifiers
+      // This decrements the reference created by REFERENCE(ws/rs) when piping
       notifier->stream->destructor(notifier->stream);
       notifier->stream = NULL;
     }
@@ -560,7 +564,8 @@ void _stream_message_worker(stream_t* stream) {
 }
 
 void _stream_message_worker_abort(stream_t* stream) {
-printf("cancelled\n");
+  REFERENCE(stream, stream_t);
+  stream->destructor(stream);
 }
 
 size_t stream_subscribe(stream_t* stream, stream_event_e event, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*)) {
