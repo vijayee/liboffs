@@ -68,7 +68,7 @@ void on_error_w(void* ctx,  async_error_t* error) {
     testFS->w_close_promise.set_exception(std::current_exception());
   }
 }
-TEST_F(TestFileStream, TestReadFileStreamFunctions) {
+TEST_F(TestFileStream, TestFileStreamFunctions) {
   priority_t priority = priority_get_next();
   int error_code;
   std::string filename = "./test.pdf";
