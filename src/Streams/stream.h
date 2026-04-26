@@ -76,7 +76,8 @@ typedef enum {
   readable_push = 0,
   readable_read = 1,
   writeable_write = 2,
-  close_stream = 3
+  close_stream = 3,
+  readable_pull = 5
 } message_type_e;
 typedef struct {
   int type;
@@ -132,10 +133,13 @@ struct stream_t {
   uint8_t readable;
   uint8_t is_piped;
   uint8_t auto_push;
+  uint8_t is_pulling;
   uint8_t is_deactivated;
+  stream_t* pullable_stream;
   stream_notifier_t* pipe_notifiers;
   void (*on_data)(stream_t*, void*);
   void (*on_push)(stream_t*);
+  void (*on_pull)(stream_t*);
   void (*on_read)(stream_t*, size_t, void*, void (*)(void*, void*));
   void (*on_write)(stream_t*, void*);
   void (*on_close)(stream_t*);
@@ -202,7 +206,6 @@ void stream_unsubscribe(stream_t* stream, stream_event_e event, size_t id);
 void writeable_stream_data_handler(stream_t* stream, void (*on_data)(stream_t*, void*));
 void readable_stream_push_handler(stream_t* stream, void (*on_push)(stream_t*));
 void readable_push_stream_pipe(stream_t* rs, stream_t* ws);
-void _readable_push_stream_on_pipe(stream_t* rs, stream_t* ws);
 void stream_notify(stream_t* stream, stream_event_e event, void* payload);
 void readable_push_stream_push(stream_t* stream);
 void readable_stream_read(stream_t* stream, size_t size, void* ctx, void (*cb)(void*, void*));
@@ -210,4 +213,7 @@ void writeable_stream_write_handler(stream_t* stream, void (*)(stream_t*, void*)
 void writeable_stream_write(stream_t* stream, void* data);
 void _writeable_push_stream_on_piped(stream_t* ws, stream_t* rs);
 void stream_unsubscribe_pipe_notifiers(stream_t* stream);
+void readable_stream_pull_handler(stream_t* stream, void (*on_pull)(stream_t*));
+void writeable_pull_stream_pipe(stream_t* ws, stream_t* rs);
+void readable_pull_stream_pull(stream_t* stream);
 #endif //OFFS_STREAM_H
