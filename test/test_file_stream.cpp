@@ -91,7 +91,6 @@ namespace PushFileStream {
     } catch (const std::exception& e) {
       GTEST_FATAL_FAILURE_(e.what());
     }
-    work_pool_wait_for_idle_signal(pool);
     DESTROY(rs, readable_push_file_stream);
     rs = readable_push_file_stream_create(&priority, pool, (char*) filename.c_str(), DEFAULT_CHUNK_SIZE, &error_code);
     EXPECT_EQ(error_code, 0);
@@ -111,9 +110,7 @@ namespace PushFileStream {
     } catch (const std::exception& e) {
       GTEST_FATAL_FAILURE_(e.what());
     }
-    work_pool_wait_for_idle_signal(pool);
     DESTROY(rs, readable_push_file_stream);
-    work_pool_wait_for_idle_signal(pool);
     DESTROY(ws, writeable_push_file_stream);
   }
 }
@@ -197,7 +194,6 @@ namespace PullFileStream {
     } catch (const std::exception& e) {
       GTEST_FATAL_FAILURE_(e.what());
     }
-    work_pool_wait_for_idle_signal(pool);
     DESTROY(rs, readable_pull_file_stream);
     rs = readable_pull_file_stream_create(&priority, pool, (char*) filename.c_str(), DEFAULT_CHUNK_SIZE, &error_code);
     EXPECT_EQ(error_code, 0);
@@ -217,9 +213,7 @@ namespace PullFileStream {
     } catch (const std::exception& e) {
       GTEST_FATAL_FAILURE_(e.what());
     }
-    work_pool_wait_for_idle_signal(pool);
     DESTROY(rs, readable_pull_file_stream);
-    work_pool_wait_for_idle_signal(pool);
     DESTROY(ws, writeable_pull_file_stream);
   }
 };

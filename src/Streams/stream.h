@@ -77,7 +77,8 @@ typedef enum {
   readable_read = 1,
   writeable_write = 2,
   close_stream = 3,
-  readable_pull = 5
+  readable_pull = 5,
+  deferred_deref = 6
 } message_type_e;
 typedef struct {
   int type;

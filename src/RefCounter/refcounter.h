@@ -11,13 +11,16 @@
 #define DEREFERENCE(N) refcounter_dereference((refcounter_t*) N); N = NULL
 #define DESTROY(N,T)  T##_destroy(N); N = NULL
 #define CONSUME(N, T) (T*) refcounter_consume((refcounter_t**) &N)
+#define OFFS_ATOMIC
 typedef struct refcounter_t {
 #ifdef OFFS_ATOMIC
-  _Atomic uint16_t count;
-  _Atomic uint8_t yield;
+  uint16_t count;
+  uint8_t yield;
+  uint8_t pending_deref;
 #else
   uint16_t count;
   uint8_t yield;
+  uint8_t pending_deref;
   PLATFORMLOCKTYPE(lock);
 #endif
 } refcounter_t;
@@ -27,5 +30,6 @@ void* refcounter_reference(refcounter_t* refcounter);
 void refcounter_dereference(refcounter_t* refcounter);
 refcounter_t* refcounter_consume(refcounter_t** refcounter);
 uint16_t refcounter_count(refcounter_t* refcounter);
+uint8_t refcounter_pending_derefs(refcounter_t* refcounter);
 void refcounter_destroy_lock(refcounter_t* refcounter);
 #endif //LIBOFFS_REFCOUNTER_H

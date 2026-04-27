@@ -10,10 +10,9 @@ void refcounter_init(refcounter_t* refcounter) {
   platform_lock_init(&refcounter->lock);
   platform_lock(&refcounter->lock);
   refcounter->count++;
+  refcounter->pending_deref = 0;
   platform_unlock(&refcounter->lock);
 #else
-  // Initialize to 1 (reference count starts at 1)
-  // Direct assignment is atomic for aligned types
   refcounter->count = 1;
   refcounter->yield = 0;
 #endif
@@ -25,7 +24,6 @@ void refcounter_yield(refcounter_t* refcounter) {
   refcounter->yield++;
   platform_unlock(&refcounter->lock);
 #else
-  // Atomic increment
   __atomic_add_fetch(&refcounter->yield, 1, __ATOMIC_RELAXED);
 #endif
 }
@@ -38,12 +36,15 @@ void* refcounter_reference(refcounter_t* refcounter) {
   platform_lock(&refcounter->lock);
   if (refcounter->yield > 0) {
     refcounter->yield--;
+    if (refcounter->pending_deref > 0) {
+      refcounter->pending_deref--;
+      refcounter->count--;
+    }
   } else if (refcounter->count < USHRT_MAX) {
     refcounter->count++;
   }
   platform_unlock(&refcounter->lock);
 #else
-  // Fast atomic operations - no CAS loops needed
   if (__atomic_load_n(&refcounter->yield, __ATOMIC_RELAXED) > 0) {
     __atomic_fetch_sub(&refcounter->yield, 1, __ATOMIC_RELAXED);
   } else {
@@ -58,11 +59,13 @@ void refcounter_dereference(refcounter_t* refcounter) {
   platform_lock(&refcounter->lock);
   if ((refcounter->yield == 0) && (refcounter->count > 0)) {
     refcounter->count--;
+  } else if (refcounter->yield > 0) {
+    refcounter->pending_deref++;
   }
   platform_unlock(&refcounter->lock);
 #else
-  // Fast atomic decrement - no CAS loop needed
-  if (__atomic_load_n(&refcounter->yield, __ATOMIC_RELAXED) == 0) {
+  if ((__atomic_load_n(&refcounter->yield, __ATOMIC_RELAXED) == 0) &&
+      (__atomic_load_n(&refcounter->count, __ATOMIC_RELAXED) > 0)) {
     __atomic_fetch_sub(&refcounter->count, 1, __ATOMIC_RELAXED);
   }
 #endif
@@ -75,8 +78,18 @@ uint16_t refcounter_count(refcounter_t* refcounter) {
   platform_unlock(&refcounter->lock);
   return count;
 #else
-  // Fast atomic read
   return __atomic_load_n(&refcounter->count, __ATOMIC_RELAXED);
+#endif
+}
+
+uint8_t refcounter_pending_derefs(refcounter_t* refcounter) {
+#ifndef OFFS_ATOMIC
+  platform_lock(&refcounter->lock);
+  uint8_t pending = refcounter->pending_deref;
+  platform_unlock(&refcounter->lock);
+  return pending;
+#else
+  return 0;
 #endif
 }
 
@@ -92,4 +105,3 @@ void refcounter_destroy_lock(refcounter_t* refcounter) {
   platform_lock_destroy(&refcounter->lock);
 #endif
 }
-

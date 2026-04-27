@@ -9,6 +9,7 @@
 
 void _stream_start_message_worker(stream_t* stream);
 void _stream_message_worker(stream_t* stream);
+void stream_deferred_deref(stream_t* stream);
 void _stream_message_worker_abort(stream_t* stream);
 void _readable_push_stream_piped_notify(stream_t* stream, void* payload);
 void _readable_push_stream_error_notify(stream_t* stream, void* payload);
@@ -285,7 +286,7 @@ void stream_deinit(stream_t* stream) {
     }
     _stream_purge_handlers(stream);
     if (stream->pullable_stream != NULL) {
-      stream->pullable_stream->destructor(stream->pullable_stream);
+      stream_deferred_deref(stream->pullable_stream);
       stream->pullable_stream = NULL;
     }
   }
@@ -445,6 +446,15 @@ void _writeable_push_stream_complete_notify(stream_t* stream, void* payload) {
   // Only close if not already deactivated
 }
 
+void stream_deferred_deref(stream_t* stream) {
+  message_t* message = get_memory(sizeof(message_t));
+  message->ctx = NULL;
+  message->payload = NULL;
+  message->type = deferred_deref;
+  message_queue_enqueue(stream->queue, message);
+  _stream_start_message_worker(stream);
+}
+
 void stream_unsubscribe_pipe_notifiers(stream_t* stream) {
   platform_lock(&stream->lock);
   if ( stream->pipe_notifiers != NULL ) {
@@ -467,13 +477,8 @@ void stream_unsubscribe_pipe_notifiers(stream_t* stream) {
     }
     for (size_t i = 0; i < count; i++) {
       stream_notifier_t* notifier = &stream->pipe_notifiers[i];
-      // Unsubscribe the event handler - this will decrement the reference
-      // that was created when the handler was subscribed (via REFERENCE macro)
-      // and call ctx_destroy if the handler is destroyed
       stream_unsubscribe(notifier->stream, notifier->event, notifier->id);
-      // Dereference the stream stored in pipe_notifiers
-      // This decrements the reference created by REFERENCE(ws/rs) when piping
-      notifier->stream->destructor(notifier->stream);
+      stream_deferred_deref(notifier->stream);
       notifier->stream = NULL;
     }
     free(stream->pipe_notifiers);
@@ -587,6 +592,9 @@ void _stream_message_worker(stream_t* stream) {
           stream_notify(stream, error_event, ERROR("No Readable Pull Handler Defined"));
         }
         break;
+      case deferred_deref:
+        stream->destructor(stream);
+        break;
     }
     free(current);
     YIELD(stream);
@@ -596,7 +604,7 @@ void _stream_message_worker(stream_t* stream) {
     platform_lock(&stream->worker_status.lock);
     stream->worker_status.is_working = 0;
     platform_unlock(&stream->worker_status.lock);
-    DESTROY(stream, stream);
+    stream->destructor(stream);
   }
 }
 
