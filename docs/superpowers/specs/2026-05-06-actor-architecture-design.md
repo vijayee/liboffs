@@ -267,11 +267,36 @@ void stream_dispatch(void* state, message_t* msg) {
 4. **`writeable_stream_write` race** (streams.c:704-717): Move `_stream_start_message_worker` call to avoid race
 5. **Actor-internal refcounts become non-atomic**: Once index_entry_t, index_t, etc. are only touched by one actor, switch to plain uint16_t
 
-### 11b. Promises vs. Actor Messages
+### 11b. Async Completion: Actor Messages, Not Promises
 
-The current `promise_t` mechanism (callback function pointers) continues to work in the actor model. When a caller sends `CACHE_GET` to BlockCache, it provides a callback (or a promise) in the message payload. When BlockCache completes the operation, it calls the callback or resolves the promise. This is the same pattern as the Pony version's callback-based async composition.
+The current `promise_t` mechanism (resolve/reject callbacks) is replaced by **actor messages** for all async completion within the actor system. When BlockCache completes a `CACHE_GET`, it sends a `CACHE_BLOCK_LOADED` message back to the requesting actor. No promises, no cross-thread callbacks — just messages.
 
-For cross-actor communication, `actor_send` is the primary mechanism. Promises are only used at the boundary between the actor system and synchronous callers (e.g., the main thread waiting for a result).
+The key pattern is **"collect N async results"**, used heavily by ReadableOffStream:
+- A tuple of N block hashes needs to be fetched from BlockCache
+- The actor sends N `CACHE_GET` messages and tracks `pending_blocks` in its own state
+- Each `CACHE_BLOCK_LOADED` message decrements the counter
+- When `pending_blocks == 0`, the actor proceeds (XOR reconstruction, emit data)
+
+```c
+// OffStream actor state
+uint8_t pending_blocks;
+block_t** collected_blocks;
+
+// Handler for CACHE_BLOCK_LOADED messages
+void off_stream_on_block_loaded(void* state, message_t* msg) {
+    off_stream_t* stream = state;
+    block_t* block = msg->payload;
+    stream->collected_blocks[stream->current_index++] = block;
+    stream->pending_blocks--;
+    if (stream->pending_blocks == 0) {
+        render_origin_data(stream);  // XOR and emit
+    }
+}
+```
+
+This matches the Pony pattern exactly — each `_bc.get()` callback sends a message back to the actor, and the actor collects them. No promises needed within the actor system.
+
+**External API boundary:** For callers outside the actor system (e.g., the main thread), a simple callback in the initial message payload is sufficient. The actor sends a completion message to a designated handler. This replaces `promise_t` for most use cases.
 
 ### 12. Deleted Code
 
