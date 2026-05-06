@@ -18,7 +18,7 @@ typedef struct timeval timeval_t;
 
 
 typedef struct {
-  refcounter_t refcounter_t;
+  refcounter_t refcounter;
   uint64_t timerId;
   void* ctx;
   void (* cb)(void*);
