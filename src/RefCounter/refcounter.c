@@ -15,6 +15,7 @@ void refcounter_init(refcounter_t* refcounter) {
 #else
   refcounter->count = 1;
   refcounter->yield = 0;
+  refcounter->pending_deref = 0;
 #endif
 }
 
@@ -47,7 +48,11 @@ void* refcounter_reference(refcounter_t* refcounter) {
 #else
   if (__atomic_load_n(&refcounter->yield, __ATOMIC_RELAXED) > 0) {
     __atomic_fetch_sub(&refcounter->yield, 1, __ATOMIC_RELAXED);
-  } else {
+    if (__atomic_load_n(&refcounter->pending_deref, __ATOMIC_RELAXED) > 0) {
+      __atomic_fetch_sub(&refcounter->pending_deref, 1, __ATOMIC_RELAXED);
+      __atomic_fetch_sub(&refcounter->count, 1, __ATOMIC_RELAXED);
+    }
+  } else if (__atomic_load_n(&refcounter->count, __ATOMIC_RELAXED) < USHRT_MAX) {
     __atomic_fetch_add(&refcounter->count, 1, __ATOMIC_RELAXED);
   }
 #endif
@@ -64,8 +69,9 @@ void refcounter_dereference(refcounter_t* refcounter) {
   }
   platform_unlock(&refcounter->lock);
 #else
-  if ((__atomic_load_n(&refcounter->yield, __ATOMIC_RELAXED) == 0) &&
-      (__atomic_load_n(&refcounter->count, __ATOMIC_RELAXED) > 0)) {
+  if (__atomic_load_n(&refcounter->yield, __ATOMIC_RELAXED) > 0) {
+    __atomic_fetch_add(&refcounter->pending_deref, 1, __ATOMIC_RELAXED);
+  } else if (__atomic_load_n(&refcounter->count, __ATOMIC_RELAXED) > 0) {
     __atomic_fetch_sub(&refcounter->count, 1, __ATOMIC_RELAXED);
   }
 #endif
@@ -89,7 +95,7 @@ uint8_t refcounter_pending_derefs(refcounter_t* refcounter) {
   platform_unlock(&refcounter->lock);
   return pending;
 #else
-  return 0;
+  return __atomic_load_n(&refcounter->pending_deref, __ATOMIC_RELAXED);
 #endif
 }
 
