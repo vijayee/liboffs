@@ -706,8 +706,8 @@ void writeable_stream_write(stream_t* stream, void* data) {
   message->ctx = NULL;
   message->payload = data;
   message->type = writeable_write;
-  message_queue_enqueue(stream->queue, message);
   platform_lock(&stream->worker_status.lock);
+  message_queue_enqueue(stream->queue, message);
   if (stream->worker_status.is_working == 0) {
     platform_unlock(&stream->worker_status.lock);
     _stream_start_message_worker(stream);
@@ -727,8 +727,8 @@ void readable_pull_stream_pull(stream_t* stream) {
   message_t* message = get_memory(sizeof(message_t));
   message->ctx = NULL;
   message->type = readable_pull;
-  message_queue_enqueue(stream->queue, message);
   platform_lock(&stream->worker_status.lock);
+  message_queue_enqueue(stream->queue, message);
   if (stream->worker_status.is_working == 0) {
     platform_unlock(&stream->worker_status.lock);
     _stream_start_message_worker(stream);
