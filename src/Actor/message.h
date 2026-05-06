@@ -1,0 +1,41 @@
+//
+// Created by victor on 5/6/25.
+//
+
+#ifndef OFFS_MESSAGE_H
+#define OFFS_MESSAGE_H
+
+#include <stdint.h>
+
+typedef enum message_type_e {
+  SECTION_WRITE = 0,
+  SECTION_READ,
+  SECTION_DEALLOCATE,
+  SECTION_SAVE_META,
+  SECTION_CLOSE,
+  SECTIONS_WRITE,
+  SECTIONS_READ,
+  SECTIONS_DEALLOCATE,
+  SECTIONS_SECTION_FULL,
+  SECTIONS_WRITE_COMPLETE,
+  CACHE_GET,
+  CACHE_PUT,
+  CACHE_REMOVE,
+  CACHE_BLOCK_LOADED,
+  TIMER_SET,
+  TIMER_CANCEL,
+  TIMER_DEBOUNCE,
+  READABLE_PUSH,
+  WRITEABLE_WRITE,
+  CLOSE_STREAM,
+  READABLE_PULL,
+  DEFERRED_DEREF
+} message_type_e;
+
+typedef struct message_t {
+  uint32_t type;
+  void* payload;
+  void (*payload_destroy)(void*);
+} message_t;
+
+#endif // OFFS_MESSAGE_H

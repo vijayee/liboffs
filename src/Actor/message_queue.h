@@ -5,15 +5,9 @@
 #ifndef OFFS_MESSAGE_QUEUE_H
 #define OFFS_MESSAGE_QUEUE_H
 
+#include "message.h"
 #include <stdbool.h>
 #include <stdatomic.h>
-#include <stdint.h>
-
-typedef struct message_t {
-  uint32_t type;
-  void* payload;
-  void (*payload_destroy)(void*);
-} message_t;
 
 typedef struct message_node_t message_node_t;
 struct message_node_t {
