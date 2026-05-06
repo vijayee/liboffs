@@ -11,7 +11,10 @@ if (BUILD_TESTING)
             test_time.cpp
             test_section.cpp
             test_block_cache.cpp
-            test_file_stream.cpp)
+            test_file_stream.cpp
+            test_message_queue.cpp
+            test_actor.cpp
+            test_pool.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)

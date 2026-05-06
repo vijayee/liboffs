@@ -87,7 +87,6 @@ void message_queue_destroy(message_queue_t* queue) {
     if (node->msg.payload_destroy != NULL && node->msg.payload != NULL) {
       node->msg.payload_destroy(node->msg.payload);
     }
-    free(node);
   }
   message_node_t* sentinel = queue->tail;
   if (sentinel != NULL) {

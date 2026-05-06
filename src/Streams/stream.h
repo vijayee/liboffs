@@ -79,32 +79,32 @@ typedef enum {
   close_stream = 3,
   readable_pull = 5,
   deferred_deref = 6
-} message_type_e;
+} stream_message_type_e;
 typedef struct {
   int type;
   void* payload;
   void* ctx;
-} message_t;
-typedef struct message_list_node_t message_list_node_t;
+} stream_message_t;
+typedef struct stream_message_list_node_t stream_message_list_node_t;
 
 
-struct message_list_node_t {
-  message_t* message;
-  message_list_node_t* next;
-  message_list_node_t* previous;
+struct stream_message_list_node_t {
+  stream_message_t* message;
+  stream_message_list_node_t* next;
+  stream_message_list_node_t* previous;
 };
 
 typedef struct {
   PLATFORMLOCKTYPE(lock);
-  message_list_node_t* first;
-  message_list_node_t* last;
+  stream_message_list_node_t* first;
+  stream_message_list_node_t* last;
   size_t count;
-} message_queue_t;
+} stream_msgqueue_t;
 
-message_queue_t* message_queue_create();
-void message_queue_destroy(message_queue_t* queue);
-void message_queue_enqueue(message_queue_t* queue, message_t* message);
-message_t* message_queue_dequeue(message_queue_t* queue);
+stream_msgqueue_t* stream_msgqueue_create();
+void stream_msgqueue_destroy(stream_msgqueue_t* queue);
+void stream_msgqueue_enqueue(stream_msgqueue_t* queue, stream_message_t* message);
+stream_message_t* stream_msgqueue_dequeue(stream_msgqueue_t* queue);
 typedef struct {
   PLATFORMLOCKTYPE(lock);
   uint8_t is_working;
@@ -125,7 +125,7 @@ struct stream_t {
   refcounter_t refcounter;
   PLATFORMLOCKTYPE(lock);
   priority_t priority;
-  message_queue_t* queue;
+  stream_msgqueue_t* queue;
   work_pool_t* pool;
   stream_type_e type;
   stream_force_e force;

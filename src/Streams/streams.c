@@ -174,17 +174,17 @@ void stream_event_list_remove_onces(stream_event_handler_list_t* list) {
   platform_unlock(&list->lock);
 }
 
-message_queue_t* message_create() {
-  message_queue_t* queue = get_clear_memory(sizeof(message_queue_t));
+stream_msgqueue_t* stream_msgqueue_create() {
+  stream_msgqueue_t* queue = get_clear_memory(sizeof(stream_msgqueue_t));
   platform_lock_init(&queue->lock);
   queue->first = NULL;
   queue->last = NULL;
   return queue;
 }
 
-void message_queue_destroy(message_queue_t* queue) {
-  message_list_node_t* current = queue->first;
-  message_list_node_t* next = NULL;
+void stream_msgqueue_destroy(stream_msgqueue_t* queue) {
+  stream_message_list_node_t* current = queue->first;
+  stream_message_list_node_t* next = NULL;
   while (current != NULL ) {
     next = current->next;
     free(current->message);
@@ -196,9 +196,9 @@ void message_queue_destroy(message_queue_t* queue) {
 }
 
 
-void message_queue_enqueue(message_queue_t* queue, message_t* message) {
+void stream_msgqueue_enqueue(stream_msgqueue_t* queue, stream_message_t* message) {
   platform_lock(&queue->lock);
-  message_list_node_t* node = get_clear_memory(sizeof(message_list_node_t));
+  stream_message_list_node_t* node = get_clear_memory(sizeof(stream_message_list_node_t));
   node->message = message;
   node->previous = NULL;
   node->next = NULL;
@@ -215,13 +215,13 @@ void message_queue_enqueue(message_queue_t* queue, message_t* message) {
 }
 
 
-message_t* message_queue_dequeue(message_queue_t* queue) {
+stream_message_t* stream_msgqueue_dequeue(stream_msgqueue_t* queue) {
   platform_lock(&queue->lock);
   if ((queue->last == NULL) && (queue->first == NULL)) {
     platform_unlock(&queue->lock);
     return NULL;
   } else {
-    message_list_node_t* node = queue->first;
+    stream_message_list_node_t* node = queue->first;
     queue->first = node->next;
     if (node->next != NULL) {
       queue->first->previous = NULL;
@@ -229,7 +229,7 @@ message_t* message_queue_dequeue(message_queue_t* queue) {
     if (queue->last == node) {
       queue->last = NULL;
     }
-    message_t* message = node->message;
+    stream_message_t* message = node->message;
     free(node);
     queue->count--;
     platform_unlock(&queue->lock);
@@ -245,7 +245,7 @@ void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, pri
   stream->type = type;
   stream->priority = *priority;
   stream->pool = pool;
-  stream->queue = message_create();
+  stream->queue = stream_msgqueue_create();
   stream->pipe_notifiers = NULL;
   stream->auto_push = auto_push;
   if (force == push) {
@@ -264,7 +264,7 @@ void stream_deinit(stream_t* stream) {
   if (refcounter_count((refcounter_t*) stream) == 0) {
     platform_lock_destroy(&stream->lock);
     platform_lock_destroy(&stream->worker_status.lock);
-    message_queue_destroy(stream->queue);
+    stream_msgqueue_destroy(stream->queue);
     if (stream->pipe_notifiers != NULL) {
       size_t count = 0;
       switch (stream->type) {
@@ -447,11 +447,11 @@ void _writeable_push_stream_complete_notify(stream_t* stream, void* payload) {
 }
 
 void stream_deferred_deref(stream_t* stream) {
-  message_t* message = get_memory(sizeof(message_t));
+  stream_message_t* message = get_memory(sizeof(stream_message_t));
   message->ctx = NULL;
   message->payload = NULL;
   message->type = deferred_deref;
-  message_queue_enqueue(stream->queue, message);
+  stream_msgqueue_enqueue(stream->queue, message);
   _stream_start_message_worker(stream);
 }
 
@@ -529,11 +529,11 @@ void readable_push_stream_on_piped(stream_t* stream, void* payload) {
 }
 
 void readable_push_stream_push(stream_t* stream) {
-  message_t* message = get_memory(sizeof(message_t));
+  stream_message_t* message = get_memory(sizeof(stream_message_t));
   message->ctx = NULL;
   message->payload= NULL;
   message->type = readable_push;
-  message_queue_enqueue(stream->queue, message);
+  stream_msgqueue_enqueue(stream->queue, message);
   _stream_start_message_worker(stream);
 }
 void _stream_start_message_worker(stream_t* stream) {
@@ -552,7 +552,7 @@ void _stream_start_message_worker(stream_t* stream) {
 }
 void _stream_message_worker(stream_t* stream) {
   REFERENCE(stream, stream_t);
-  message_t* current = message_queue_dequeue(stream->queue);
+  stream_message_t* current = stream_msgqueue_dequeue(stream->queue);
   if (current != NULL) {
     switch(current->type) {
       case readable_push:
@@ -669,12 +669,12 @@ size_t stream_once(stream_t* stream, stream_event_e event, void* ctx, void (* ha
 
 
 void readable_stream_read(stream_t* stream, size_t size, void* ctx, void (*cb)(void*, void*)) {
-  message_t* message = get_memory(sizeof(message_t));
+  stream_message_t* message = get_memory(sizeof(stream_message_t));
   read_payload* payload = get_clear_memory(sizeof(read_payload));
   message->ctx = ctx;
   message->payload = payload;
   message->type = readable_read;
-  message_queue_enqueue(stream->queue, message);
+  stream_msgqueue_enqueue(stream->queue, message);
   _stream_start_message_worker(stream);
 }
 
@@ -685,11 +685,11 @@ void stream_close_handler(stream_t* stream, void (*on_close)(stream_t*)) {
 }
 
 void stream_close(stream_t* stream) {
-  message_t* message = get_memory(sizeof(message_t));
+  stream_message_t* message = get_memory(sizeof(stream_message_t));
   message->ctx = stream;
   message->payload = NULL;
   message->type = close_stream;
-  message_queue_enqueue(stream->queue, message);
+  stream_msgqueue_enqueue(stream->queue, message);
   _stream_start_message_worker(stream);
 }
 
@@ -702,12 +702,12 @@ void writeable_stream_write_handler(stream_t* stream, void (*handler)(stream_t*,
 }
 
 void writeable_stream_write(stream_t* stream, void* data) {
-  message_t* message = get_memory(sizeof(message_t));
+  stream_message_t* message = get_memory(sizeof(stream_message_t));
   message->ctx = NULL;
   message->payload = data;
   message->type = writeable_write;
   platform_lock(&stream->worker_status.lock);
-  message_queue_enqueue(stream->queue, message);
+  stream_msgqueue_enqueue(stream->queue, message);
   if (stream->worker_status.is_working == 0) {
     platform_unlock(&stream->worker_status.lock);
     _stream_start_message_worker(stream);
@@ -724,11 +724,11 @@ void readable_pull_stream_pull(stream_t* stream) {
     return;
   }
   platform_unlock(&stream->lock);
-  message_t* message = get_memory(sizeof(message_t));
+  stream_message_t* message = get_memory(sizeof(stream_message_t));
   message->ctx = NULL;
   message->type = readable_pull;
   platform_lock(&stream->worker_status.lock);
-  message_queue_enqueue(stream->queue, message);
+  stream_msgqueue_enqueue(stream->queue, message);
   if (stream->worker_status.is_working == 0) {
     platform_unlock(&stream->worker_status.lock);
     _stream_start_message_worker(stream);

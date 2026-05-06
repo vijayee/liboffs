@@ -38,7 +38,6 @@ bool actor_run(actor_t* actor, size_t batch_size) {
     if (node->msg.payload_destroy != NULL && node->msg.payload != NULL) {
       node->msg.payload_destroy(node->msg.payload);
     }
-    free(node);
   }
   if (message_queue_markempty(&actor->queue)) {
     atomic_fetch_and(&actor->flags, ~ACTOR_FLAG_SCHEDULED);
