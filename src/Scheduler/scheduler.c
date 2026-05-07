@@ -139,12 +139,20 @@ static void* _scheduler_worker_loop(void* arg) {
     } else {
       spin_count++;
       if (spin_count >= STEAL_THRESHOLD) {
+        // Going idle: track idle count and signal if all workers sleeping
+        atomic_fetch_add(&pool->idle_count, 1);
+        if (atomic_load(&pool->idle_count) == pool->worker_count) {
+          platform_lock(&pool->idle_lock);
+          platform_signal_condition(&pool->idle);
+          platform_unlock(&pool->idle_lock);
+        }
         // Suspend: wait on condition variable
         platform_lock(&pool->inject.lock);
         if (!atomic_load_explicit(&pool->terminate, memory_order_acquire)) {
           platform_condition_wait(&pool->inject.lock, &pool->inject.condition);
         }
         platform_unlock(&pool->inject.lock);
+        atomic_fetch_sub(&pool->idle_count, 1);
         spin_count = 0;
       }
     }
@@ -165,6 +173,9 @@ scheduler_pool_t* scheduler_pool_create(size_t worker_count) {
   }
   _inject_queue_init(&pool->inject);
   platform_barrier_init(&pool->barrier, worker_count + 1);
+  platform_lock_init(&pool->idle_lock);
+  platform_condition_init(&pool->idle);
+  atomic_store_explicit(&pool->idle_count, 0, memory_order_relaxed);
   atomic_store_explicit(&pool->active_count, 0, memory_order_relaxed);
   atomic_store_explicit(&pool->terminate, 0, memory_order_relaxed);
   return pool;
@@ -176,11 +187,14 @@ void scheduler_pool_destroy(scheduler_pool_t* pool) {
   }
   _inject_queue_destroy(&pool->inject);
   platform_barrier_destroy(&pool->barrier);
+  platform_lock_destroy(&pool->idle_lock);
+  platform_condition_destroy(&pool->idle);
   free(pool->workers);
   free(pool);
 }
 
 void scheduler_pool_start(scheduler_pool_t* pool) {
+  atomic_store_explicit(&pool->idle_count, 0, memory_order_relaxed);
   atomic_store_explicit(&pool->active_count, 0, memory_order_relaxed);
   for (size_t index = 0; index < pool->worker_count; index++) {
 #if _WIN32
@@ -212,6 +226,14 @@ void scheduler_pool_stop(scheduler_pool_t* pool) {
 
 void scheduler_inject(scheduler_pool_t* pool, actor_t* actor) {
   _inject_queue_push(&pool->inject, actor);
+}
+
+void scheduler_pool_wait_for_idle(scheduler_pool_t* pool) {
+  platform_lock(&pool->idle_lock);
+  while (atomic_load(&pool->idle_count) != pool->worker_count) {
+    platform_condition_wait(&pool->idle_lock, &pool->idle);
+  }
+  platform_unlock(&pool->idle_lock);
 }
 
 scheduler_t* scheduler_get_current(void) {

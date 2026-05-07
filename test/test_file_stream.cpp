@@ -29,7 +29,6 @@ namespace PushFileStream {
       scheduler_pool_start(pool);
     }
     void TearDown() override {
-      scheduler_pool_stop(pool);
       scheduler_pool_destroy(pool);
     }
   };
@@ -94,6 +93,7 @@ namespace PushFileStream {
     } catch (const std::exception& e) {
       GTEST_FATAL_FAILURE_(e.what());
     }
+    scheduler_pool_wait_for_idle(pool);
     scheduler_pool_stop(pool);
     DESTROY(rs, readable_push_file_stream);
     DESTROY(ws, writeable_push_file_stream);
@@ -113,7 +113,6 @@ namespace PullFileStream {
       scheduler_pool_start(pool);
     }
     void TearDown() override {
-      scheduler_pool_stop(pool);
       scheduler_pool_destroy(pool);
     }
   };
@@ -178,6 +177,7 @@ namespace PullFileStream {
     } catch (const std::exception& e) {
       GTEST_FATAL_FAILURE_(e.what());
     }
+    scheduler_pool_wait_for_idle(pool);
     scheduler_pool_stop(pool);
     DESTROY(rs, readable_pull_file_stream);
     DESTROY(ws, writeable_pull_file_stream);

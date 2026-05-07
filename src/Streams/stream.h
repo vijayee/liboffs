@@ -181,7 +181,7 @@ void stream_unsubscribe(stream_t* stream, stream_event_e event, size_t id);
 void writeable_stream_data_handler(stream_t* stream, void (*on_data)(stream_t*, void*));
 void readable_stream_push_handler(stream_t* stream, void (*on_push)(stream_t*));
 void readable_push_stream_pipe(stream_t* rs, stream_t* ws);
-void stream_notify(stream_t* stream, stream_event_e event, void* payload);
+void stream_notify(stream_t* stream, stream_event_e event, void* payload, void (*payload_destroy)(void*));
 void readable_push_stream_push(stream_t* stream);
 void readable_stream_read(stream_t* stream, size_t size, void* ctx, void (*cb)(void*, void*));
 void writeable_stream_write_handler(stream_t* stream, void (*)(stream_t*, void*));
