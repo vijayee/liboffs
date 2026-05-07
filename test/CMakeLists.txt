@@ -18,7 +18,9 @@ if (BUILD_TESTING)
             test_deque.cpp
             test_scheduler.cpp
             test_timer_actor.cpp
-            test_stream.cpp)
+            test_stream.cpp
+            test_tuple_ori.cpp
+            test_tuple_cache.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
