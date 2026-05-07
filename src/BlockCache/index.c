@@ -817,6 +817,13 @@ index_entry_t* index_find(index_t* index, buffer_t* hash) {
   return entry;
 }
 
+index_entry_t* index_peek(index_t* index, buffer_t* hash) {
+  platform_lock(&index->lock);
+  index_entry_t* entry = index_find_in_node(index, hash, index->root, 0);
+  platform_unlock(&index->lock);
+  return entry;
+}
+
 index_entry_t* index_get_from_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current) {
   if (node->bucket == NULL) {
     if (get_bit(hash, current + 1)) {

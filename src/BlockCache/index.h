@@ -79,6 +79,7 @@ size_t index_count(index_t* index);
 void index_add(index_t* index, index_entry_t* entry);
 index_entry_t* index_get(index_t* index, buffer_t* hash);
 index_entry_t* index_find(index_t* index, buffer_t* hash);
+index_entry_t* index_peek(index_t* index, buffer_t* hash);
 void index_increment(index_t* index, index_entry_t* entry);
 void index_remove(index_t* index, buffer_t* hash);
 void index_destroy(index_t* index);
