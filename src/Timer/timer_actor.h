@@ -1,0 +1,57 @@
+//
+// Created by victor on 5/6/25.
+//
+
+#ifndef OFFS_TIMER_ACTOR_H
+#define OFFS_TIMER_ACTOR_H
+
+#include "../Actor/actor.h"
+#include "../Util/threadding.h"
+#include <poll-dancer/types.h>
+#include <stdint.h>
+
+typedef struct timer_actor_t {
+  actor_t actor;
+  pd_loop_t* loop;
+  PLATFORMTHREADTYPE thread;
+  _Atomic uint8_t running;
+} timer_actor_t;
+
+typedef struct {
+  uint64_t timer_id;
+  uint64_t timeout_ms;
+  uint64_t interval_ms;
+  actor_t* target;
+  uint32_t completion_type;
+} timer_set_payload_t;
+
+typedef struct {
+  uint64_t timer_id;
+} timer_cancel_payload_t;
+
+typedef struct {
+  uint64_t timer_id;
+  uint64_t timeout_ms;
+  uint64_t interval_ms;
+  actor_t* target;
+  uint32_t completion_type;
+} timer_debounce_payload_t;
+
+typedef struct {
+  uint64_t timer_id;
+  actor_t* target;
+  uint32_t completion_type;
+} timer_completion_payload_t;
+
+timer_actor_t* timer_actor_create(void);
+void timer_actor_destroy(timer_actor_t* timer_actor);
+uint64_t timer_actor_set(timer_actor_t* timer_actor, uint64_t timeout_ms,
+                         uint64_t interval_ms, actor_t* target,
+                         uint32_t completion_type);
+void timer_actor_cancel(timer_actor_t* timer_actor, uint64_t timer_id);
+uint64_t timer_actor_debounce(timer_actor_t* timer_actor,
+                              uint64_t existing_timer_id,
+                              uint64_t timeout_ms, uint64_t interval_ms,
+                              actor_t* target, uint32_t completion_type);
+
+#endif // OFFS_TIMER_ACTOR_H
