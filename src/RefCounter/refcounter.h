@@ -17,6 +17,7 @@ typedef struct refcounter_t {
   uint16_t count;
   uint8_t yield;
   uint8_t pending_deref;
+  uint8_t is_actor;
 #else
   uint16_t count;
   uint8_t yield;
@@ -25,6 +26,7 @@ typedef struct refcounter_t {
 #endif
 } refcounter_t;
 void refcounter_init(refcounter_t* refcounter);
+void refcounter_init_actor(refcounter_t* refcounter);
 void refcounter_yield(refcounter_t* refcounter);
 void* refcounter_reference(refcounter_t* refcounter);
 void refcounter_dereference(refcounter_t* refcounter);

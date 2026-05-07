@@ -284,7 +284,7 @@ void section_dispatch(void* state, message_t* msg) {
 
 section_t* section_create(char* path, char* meta_path, size_t size, size_t id, block_size_e type) {
   section_t* section = get_clear_memory(sizeof(section_t));
-  refcounter_init((refcounter_t*) section);
+  refcounter_init_actor((refcounter_t*) section);
   actor_init(&section->actor, section, section_dispatch);
   char section_id[20];
   sprintf(section_id, "%lu", id);

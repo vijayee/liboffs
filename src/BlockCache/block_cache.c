@@ -293,7 +293,7 @@ static void _block_cache_run_until_done(block_cache_t* block_cache) {
 
 block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, timer_actor_t* timer_actor) {
   block_cache_t* block_cache = get_clear_memory(sizeof(block_cache_t));
-  refcounter_init((refcounter_t*) block_cache);
+  refcounter_init_actor((refcounter_t*) block_cache);
   block_cache->type = type;
   char* folder;
   switch (type) {

@@ -178,7 +178,7 @@ index_t* _index_new_empty(size_t bucket_size, char* location, timer_actor_t* tim
   actor_init(&index->actor, index, index_dispatch);
   hashmap_init(&index->ranks, (void*)hash_uint32, (void*)compare_uint32);
   hashmap_set_key_alloc_funcs(&index->ranks, duplicate_uint32, (void*)free);
-  refcounter_init((refcounter_t*) index);
+  refcounter_init_actor((refcounter_t*) index);
   return index;
 }
 
@@ -446,7 +446,7 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root, char* locatio
   actor_init(&index->actor, index, index_dispatch);
   hashmap_init(&index->ranks, (void*)hash_uint32, (void*)compare_uint32);
   hashmap_set_key_alloc_funcs(&index->ranks, duplicate_uint32, (void*)free);
-  refcounter_init((refcounter_t*) index);
+  refcounter_init_actor((refcounter_t*) index);
   index_entry_vec_t* entries = index_to_array(index);
   for (size_t i = 0; i < entries->length; i++) {
     index_entry_t* entry = entries->data[i];
