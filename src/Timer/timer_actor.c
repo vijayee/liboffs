@@ -7,8 +7,31 @@
 #include "../Util/allocator.h"
 #include "../Util/threadding.h"
 #include <poll-dancer/poll-dancer.h>
+#include <internal/timer.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <string.h>
+
+static void _timer_actor_track(timer_actor_t* ta, pd_timer_t* timer) {
+  if (ta->active_timer_count >= ta->active_timer_capacity) {
+    size_t new_cap = ta->active_timer_capacity == 0 ? 8 : ta->active_timer_capacity * 2;
+    pd_timer_t** new_arr = realloc(ta->active_timers, new_cap * sizeof(pd_timer_t*));
+    if (new_arr == NULL) return;
+    ta->active_timers = new_arr;
+    ta->active_timer_capacity = new_cap;
+  }
+  ta->active_timers[ta->active_timer_count++] = timer;
+}
+
+static void _timer_actor_untrack(timer_actor_t* ta, pd_timer_t* timer) {
+  for (size_t i = 0; i < ta->active_timer_count; i++) {
+    if (ta->active_timers[i] == timer) {
+      ta->active_timers[i] = ta->active_timers[ta->active_timer_count - 1];
+      ta->active_timer_count--;
+      return;
+    }
+  }
+}
 
 static void _timer_completion_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                        pd_event_t events, void* user_data) {
@@ -16,11 +39,16 @@ static void _timer_completion_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   (void)watcher;
   (void)events;
   timer_completion_payload_t* completion = (timer_completion_payload_t*)user_data;
+  /* Allocate a fresh copy for each firing — actor_send takes ownership and
+     frees via payload_destroy. The original completion stays alive for
+     repeating timers until pd_timer_destroy is called. */
+  timer_completion_payload_t* copy = get_clear_memory(sizeof(timer_completion_payload_t));
+  *copy = *completion;
   message_t msg;
-  msg.type = completion->completion_type;
-  msg.payload = completion;
+  msg.type = copy->completion_type;
+  msg.payload = copy;
   msg.payload_destroy = free;
-  actor_send(completion->target, &msg);
+  actor_send(copy->target, &msg);
 }
 
 static void _timer_actor_dispatch(void* state, message_t* msg) {
@@ -39,6 +67,7 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
       if (timer != NULL) {
         pd_timer_start(timer);
         completion->timer_id = (uint64_t)(uintptr_t)timer;
+        _timer_actor_track(timer_actor, timer);
       }
       if (msg->payload_destroy != NULL) {
         msg->payload_destroy(msg->payload);
@@ -52,7 +81,12 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
       if (payload->timer_id != 0) {
         pd_timer_t* timer = (pd_timer_t*)(uintptr_t)payload->timer_id;
         pd_timer_stop(timer);
+        /* The completion payload (user_data) was allocated in TIMER_SET/
+           TIMER_DEBOUNCE and must be freed when the timer is cancelled. */
+        void* user_data = timer->user_data;
+        _timer_actor_untrack(timer_actor, timer);
         pd_timer_destroy(timer);
+        free(user_data);
       }
       if (msg->payload_destroy != NULL) {
         msg->payload_destroy(msg->payload);
@@ -66,7 +100,11 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
       if (payload->timer_id != 0) {
         pd_timer_t* existing = (pd_timer_t*)(uintptr_t)payload->timer_id;
         pd_timer_stop(existing);
+        /* Free the old completion payload associated with the old timer. */
+        void* old_user_data = existing->user_data;
+        _timer_actor_untrack(timer_actor, existing);
         pd_timer_destroy(existing);
+        free(old_user_data);
       }
       timer_completion_payload_t* completion = get_clear_memory(sizeof(timer_completion_payload_t));
       completion->timer_id = 0;
@@ -78,6 +116,7 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
       if (timer != NULL) {
         pd_timer_start(timer);
         completion->timer_id = (uint64_t)(uintptr_t)timer;
+        _timer_actor_track(timer_actor, timer);
       }
       if (msg->payload_destroy != NULL) {
         msg->payload_destroy(msg->payload);
@@ -93,7 +132,6 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
 
 static void* _timer_actor_thread(void* arg) {
   timer_actor_t* timer_actor = (timer_actor_t*)arg;
-  atomic_store(&timer_actor->running, 1);
 
   while (atomic_load(&timer_actor->running)) {
     /* Process any pending actor messages before waiting for events */
@@ -118,7 +156,7 @@ timer_actor_t* timer_actor_create(void) {
     free(timer_actor);
     return NULL;
   }
-  atomic_store(&timer_actor->running, 0);
+  atomic_store(&timer_actor->running, 1);
 #ifdef _WIN32
   timer_actor->thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)_timer_actor_thread,
                                      timer_actor, 0, NULL);
@@ -141,6 +179,17 @@ void timer_actor_destroy(timer_actor_t* timer_actor) {
 #else
   pthread_join(timer_actor->thread, NULL);
 #endif
+  /* Stop and destroy all active timers, freeing their completion payloads. */
+  for (size_t i = 0; i < timer_actor->active_timer_count; i++) {
+    pd_timer_t* timer = timer_actor->active_timers[i];
+    if (timer != NULL) {
+      void* user_data = timer->user_data;
+      pd_timer_stop(timer);
+      pd_timer_destroy(timer);
+      free(user_data);
+    }
+  }
+  free(timer_actor->active_timers);
   pd_loop_destroy(timer_actor->loop);
   actor_destroy(&timer_actor->actor);
   free(timer_actor);

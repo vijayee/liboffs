@@ -16,7 +16,8 @@ if (BUILD_TESTING)
             test_actor.cpp
             test_pool.cpp
             test_deque.cpp
-            test_scheduler.cpp)
+            test_scheduler.cpp
+            test_timer_actor.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)

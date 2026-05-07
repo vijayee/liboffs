@@ -15,6 +15,10 @@ typedef struct timer_actor_t {
   pd_loop_t* loop;
   PLATFORMTHREADTYPE thread;
   _Atomic uint8_t running;
+  /* Active timers tracked for cleanup on destroy. */
+  pd_timer_t** active_timers;
+  size_t active_timer_count;
+  size_t active_timer_capacity;
 } timer_actor_t;
 
 typedef struct {
