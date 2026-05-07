@@ -475,3 +475,180 @@ TEST_F(TestSections, SectionsFunctions) {
     EXPECT_NE(result, 0);
   }
 }
+
+/* ---- Bitmap-specific tests ---- */
+
+TEST_F(TestSection, TestBitmapAllocationOrder) {
+  /* Verify that ffs-based allocation returns the lowest free index first */
+  mkdir_p(section_location);
+  mkdir_p(meta_location);
+  section_t* section = section_create(section_location, meta_location, 32, 6000, mini);
+
+  /* Allocate all blocks one by one and verify they come in order 0,1,2,... */
+  uint8_t full;
+  for (size_t i = 0; i < 32; i++) {
+    block_t* block = block_create_random_block_by_type(mini);
+    size_t index;
+    int result = section_write(section, block->data, &index, &full);
+    EXPECT_EQ(result, 0);
+    EXPECT_EQ(index, i);
+    block_destroy(block);
+  }
+  EXPECT_EQ(full, 1);
+
+  section_destroy(section);
+  free(meta_location);
+  free(section_location);
+}
+
+TEST_F(TestSection, TestBitmapFullDetection) {
+  /* Verify section_full reports correctly after filling and freeing */
+  mkdir_p(section_location);
+  mkdir_p(meta_location);
+  section_t* section = section_create(section_location, meta_location, 5, 7000, mini);
+
+  EXPECT_EQ(section_full(section), 0);
+
+  uint8_t full;
+  block_t* blocks[5];
+  size_t indices[5];
+  for (size_t i = 0; i < 5; i++) {
+    blocks[i] = block_create_random_block_by_type(mini);
+    int result = section_write(section, blocks[i]->data, &indices[i], &full);
+    EXPECT_EQ(result, 0);
+  }
+  EXPECT_EQ(full, 1);
+  EXPECT_EQ(section_full(section), 1);
+
+  /* Deallocate one and verify not full */
+  section_deallocate(section, indices[2]);
+  EXPECT_EQ(section_full(section), 0);
+
+  /* Re-allocate the freed slot */
+  size_t new_index;
+  int result = section_write(section, blocks[2]->data, &new_index, &full);
+  EXPECT_EQ(result, 0);
+  EXPECT_EQ(new_index, indices[2]);
+  EXPECT_EQ(full, 1);
+
+  for (size_t i = 0; i < 5; i++) {
+    block_destroy(blocks[i]);
+  }
+  section_destroy(section);
+  free(meta_location);
+  free(section_location);
+}
+
+TEST_F(TestSection, TestBitmapDeallocateDoubleFree) {
+  /* Deallocating the same index twice should fail on the second attempt */
+  mkdir_p(section_location);
+  mkdir_p(meta_location);
+  section_t* section = section_create(section_location, meta_location, 10, 8000, mini);
+
+  uint8_t full;
+  block_t* block = block_create_random_block_by_type(mini);
+  size_t index;
+  int result = section_write(section, block->data, &index, &full);
+  EXPECT_EQ(result, 0);
+
+  result = section_deallocate(section, index);
+  EXPECT_EQ(result, 0);
+
+  /* Second deallocation of same index should fail (already free) */
+  result = section_deallocate(section, index);
+  EXPECT_NE(result, 0);
+
+  block_destroy(block);
+  section_destroy(section);
+  free(meta_location);
+  free(section_location);
+}
+
+TEST_F(TestSection, TestBitmapPersistenceRoundTrip) {
+  /* Verify bitmap state persists across section destroy/create cycles */
+  mkdir_p(section_location);
+  mkdir_p(meta_location);
+  section_t* section = section_create(section_location, meta_location, 10, 9000, mini);
+
+  uint8_t full;
+  block_t* blocks[7];
+  size_t indices[7];
+  for (size_t i = 0; i < 7; i++) {
+    blocks[i] = block_create_random_block_by_type(mini);
+    int result = section_write(section, blocks[i]->data, &indices[i], &full);
+    EXPECT_EQ(result, 0);
+  }
+
+  /* Deallocate some blocks */
+  section_deallocate(section, indices[1]);
+  section_deallocate(section, indices[4]);
+  section_save_meta(section);
+
+  /* Destroy and recreate */
+  section_destroy(section);
+  section = section_create(section_location, meta_location, 10, 9000, mini);
+
+  /* Write should re-use the freed slots */
+  size_t new_index1, new_index2;
+  int result = section_write(section, blocks[1]->data, &new_index1, &full);
+  EXPECT_EQ(result, 0);
+  /* Bitmap allocates lowest free bit first, so one of {1, 4} */
+  EXPECT_TRUE(new_index1 == indices[1] || new_index1 == indices[4]);
+
+  result = section_write(section, blocks[4]->data, &new_index2, &full);
+  EXPECT_EQ(result, 0);
+  EXPECT_TRUE(new_index2 == indices[1] || new_index2 == indices[4]);
+
+  for (size_t i = 0; i < 7; i++) {
+    block_destroy(blocks[i]);
+  }
+  section_destroy(section);
+  free(meta_location);
+  free(section_location);
+}
+
+/* ---- Actor queue tests ---- */
+
+TEST_F(TestSection, TestActorMultipleMessagesQueued) {
+  /* Queue multiple SECTION_WRITE messages and process them in batch */
+  mkdir_p(section_location);
+  mkdir_p(meta_location);
+  section_t* section = section_create(section_location, meta_location, 10, 10000, mini);
+
+  section_completion_state_t completion_state;
+  int write_count = 0;
+
+  /* Send 5 write messages without processing */
+  block_t* blocks[5];
+  for (int i = 0; i < 5; i++) {
+    blocks[i] = block_create_random_block_by_type(mini);
+    section_write_payload_t* payload = (section_write_payload_t*)get_clear_memory(sizeof(section_write_payload_t));
+    payload->data = blocks[i]->data;
+    payload->reply_to = NULL; /* sync mode: dispatch fills result directly */
+    message_t msg;
+    msg.type = SECTION_WRITE;
+    msg.payload = payload;
+    msg.payload_destroy = free;
+    actor_send(&section->actor, &msg);
+  }
+
+  /* Process all messages in one batch */
+  bool has_more = actor_run(&section->actor, ACTOR_BATCH_SIZE);
+
+  /* All 5 messages should have been processed */
+  /* We can verify by checking the free_map: 5 blocks should be allocated */
+  EXPECT_EQ(section_full(section), 0);
+
+  /* Read back the blocks to verify writes succeeded */
+  for (int i = 0; i < 5; i++) {
+    buffer_t* buf = section_read(section, (size_t)i);
+    ASSERT_NE(buf, (buffer_t*)NULL);
+    EXPECT_EQ(buffer_compare(buf, blocks[i]->data), 0);
+    buffer_destroy(buf);
+    block_destroy(blocks[i]);
+  }
+
+  section_destroy(section);
+  free(meta_location);
+  free(section_location);
+}
