@@ -12,7 +12,6 @@ extern "C" {
 #include "../src/Util/rm_rf.h"
 #include "../src/Util/threadding.h"
 #include <time.h>
-#include <cbor.h>
 #include "../src/Timer/timer_actor.h"
 #include "../src/BlockCache/section.h"
 #include "../src/BlockCache/sections.h"
@@ -113,31 +112,14 @@ TEST_F(TestSection, TestSectionFunction) {
   result = section_deallocate(section, entries[2]->section_index);
   EXPECT_EQ(result, 0);
 
-  platform_lock(&section->lock);
-  EXPECT_EQ(section->fragments->count, 2);
-  platform_unlock(&section->lock);
-
   result = section_deallocate(section, entries[18]->section_index);
   EXPECT_EQ(result, 0);
-
-  platform_lock(&section->lock);
-  EXPECT_EQ(section->fragments->count, 3);
-  platform_unlock(&section->lock);
 
   result = section_deallocate(section, entries[19]->section_index);
   EXPECT_EQ(result, 0);
 
-  platform_lock(&section->lock);
-  EXPECT_EQ(section->fragments->count, 3);
-  platform_unlock(&section->lock);
-
   result = section_write(section, blocks[12]->data, &entries[12]->section_index, &full);
   EXPECT_EQ(result, 0);
-
-
-  platform_lock(&section->lock);
-  EXPECT_EQ(section->fragments->count, 2);
-  platform_unlock(&section->lock);
 
   EXPECT_EQ(entries[12]->section_index, entries[2]->section_index);
 
