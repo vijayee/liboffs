@@ -25,6 +25,7 @@ typedef enum message_type_e {
   TIMER_SET,
   TIMER_CANCEL,
   TIMER_DEBOUNCE,
+  INDEX_SAVE,
   READABLE_PUSH,
   WRITEABLE_WRITE,
   CLOSE_STREAM,

@@ -8,6 +8,7 @@
 #include "../Util/log.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/get_dir.h"
+#include "../Actor/message.h"
 #include "block.h"
 #ifdef _WIN32
 #include <io.h>
@@ -25,6 +26,7 @@ size_t sections_get_next_id(sections_t* sections);
 void sections_free(sections_t* sections, size_t section_id);
 section_t* sections_checkout(sections_t* sections, size_t section_id);
 void sections_checkin(sections_t* sections, section_t* section);
+void sections_dispatch(void* state, message_t* msg);
 
 sections_lru_cache_t* sections_lru_cache_create(size_t size) {
   sections_lru_cache_t* lru = get_clear_memory(sizeof(sections_lru_cache_t));
@@ -180,17 +182,34 @@ void sections_lru_cache_move(sections_lru_cache_t* lru, sections_lru_node_t* nod
 }
 
 
-round_robin_t* round_robin_create(char* robin_path, hierarchical_timing_wheel_t* wheel) {
+void sections_dispatch(void* state, message_t* msg) {
+  sections_t* sections = (sections_t*)state;
+  switch (msg->type) {
+    case SECTION_SAVE_META:
+      round_robin_save(sections->robin);
+      break;
+    default:
+      break;
+  }
+  if (msg->payload_destroy != NULL) {
+    msg->payload_destroy(msg->payload);
+  }
+}
+
+round_robin_t* round_robin_create(char* robin_path, timer_actor_t* timer_actor, actor_t* save_target, uint64_t wait, uint64_t max_wait) {
   round_robin_t* robin = get_clear_memory(sizeof(round_robin_t));
   platform_lock_init(&robin->lock);
-  robin->debouncer = debouncer_create(wheel, (void*) robin, round_robin_save, round_robin_save,5, 5000);
+  robin->timer_actor = timer_actor;
+  robin->timer_id = 0;
+  robin->save_target = save_target;
+  robin->wait = wait;
+  robin->max_wait = max_wait;
   robin->path = robin_path;
   return robin;
 }
 
 void round_robin_destroy(round_robin_t* robin) {
-  debouncer_flush(robin->debouncer);
-  debouncer_destroy(robin->debouncer);
+  round_robin_save(robin);
   free(robin->path);
   platform_lock_destroy(&robin->lock);
   round_robin_node_t* current = robin->first;
@@ -216,7 +235,9 @@ void round_robin_add(round_robin_t* robin, size_t id) {
     robin->last->next= node;
     robin->last = node;
   }
-  debouncer_debounce(robin->debouncer);
+  if (robin->timer_actor != NULL) {
+    timer_actor_debounce(robin->timer_actor, robin->timer_id, robin->wait, robin->max_wait, robin->save_target, SECTION_SAVE_META);
+  }
   robin->size++;
   platform_unlock(&robin->lock);
 }
@@ -270,7 +291,9 @@ void round_robin_remove(round_robin_t* robin, size_t id){
         current->next->previous = current->previous;
       }
       free(current);
-      debouncer_debounce(robin->debouncer);
+      if (robin->timer_actor != NULL) {
+        timer_actor_debounce(robin->timer_actor, robin->timer_id, robin->wait, robin->max_wait, robin->save_target, SECTION_SAVE_META);
+      }
       robin->size--;
       platform_unlock(&robin->lock);
       return;
@@ -316,11 +339,11 @@ cbor_item_t* round_robin_to_cbor(round_robin_t* robin) {
   }
 }
 
-round_robin_t* cbor_to_round_robin(cbor_item_t* cbor, char* robin_path, hierarchical_timing_wheel_t* wheel) {
+round_robin_t* cbor_to_round_robin(cbor_item_t* cbor, char* robin_path, timer_actor_t* timer_actor, actor_t* save_target, uint64_t wait, uint64_t max_wait) {
   if(!cbor_isa_array(cbor)) {
     return NULL;
   }
-  round_robin_t* robin = round_robin_create(robin_path, wheel);
+  round_robin_t* robin = round_robin_create(robin_path, timer_actor, save_target, wait, max_wait);
   size_t size = cbor_array_size(cbor);
   for(size_t i = 0; i < size; i++) {
     cbor_item_t* cbor_id = cbor_array_get(cbor, i);
@@ -353,18 +376,19 @@ void round_robin_save(void* ctx) {
   cbor_decref(&cbor);
 }
 
-sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t max_tuple_size, block_size_e type, hierarchical_timing_wheel_t* wheel, size_t wait, size_t max_wait) {
+sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t max_tuple_size, block_size_e type, timer_actor_t* timer_actor, size_t wait, size_t max_wait) {
   char* robin_folder = path_join(path, "robin");
   mkdir_p(robin_folder);
   char* robin_path = path_join(robin_folder, ".robin");
   free(robin_folder);
   sections_t* sections = get_clear_memory(sizeof(sections_t));
-  sections->wheel = (hierarchical_timing_wheel_t*) refcounter_reference((refcounter_t*) wheel);
+  sections->timer_actor = timer_actor;
   sections->wait = wait;
   sections->max_wait = max_wait;
   sections->type = type;
   sections->max_tuple_size = max_tuple_size;
   sections->size = size;
+  actor_init(&sections->actor, sections, sections_dispatch);
   platform_lock_init(&sections->lock);
   platform_lock_init(&sections->checkout.lock);
   hashmap_init(&sections->checkout.sections, (void*) hash_size_t, (void*) compare_size_t);
@@ -395,9 +419,9 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
       log_error("Failed to Parse Round Robin File: Malformed Data");
       abort();
     }
-    sections->robin = cbor_to_round_robin(cbor, robin_path, wheel);
+    sections->robin = cbor_to_round_robin(cbor, robin_path, timer_actor, &sections->actor, wait, max_wait);
   } else {
-    sections->robin = round_robin_create(robin_path, wheel);
+    sections->robin = round_robin_create(robin_path, timer_actor, &sections->actor, wait, max_wait);
   }
   sections->lru = sections_lru_cache_create(cache_size);
   sections->data_path = path_join(path, "data");
@@ -429,7 +453,7 @@ void sections_destroy(sections_t* sections) {
   hashmap_cleanup(&sections->checkout.sections);
   sections_lru_cache_destroy(sections->lru);
   round_robin_destroy(sections->robin);
-  hierarchical_timing_wheel_destroy(sections->wheel);
+  actor_destroy(&sections->actor);
   free(sections->meta_path);
   free(sections->data_path);
   free(sections->robin_path);

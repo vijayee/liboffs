@@ -11,6 +11,7 @@ extern "C" {
 #include "../src/Util/rm_rf.h"
 #include "../src/Configuration/config.h"
 #include "../src/Workers/priority.h"
+#include "../src/Timer/timer_actor.h"
 #include <cbor.h>
 #include "../src/Util/allocator.h"
 }
@@ -86,7 +87,7 @@ public:
   block_size_e type = standard;
   char* location;
   work_pool_t* pool;
-  hierarchical_timing_wheel_t* wheel;
+  timer_actor_t* timer_actor;
   block_cache_t* block_cache;
   block_t* blocks[BLOCK_COUNT];
   std::promise<void> put_promise[BLOCK_COUNT];
@@ -111,8 +112,7 @@ public:
     rm_rf(location);
     pool = work_pool_create(platform_core_count());
     work_pool_launch(pool);
-    wheel = hierarchical_timing_wheel_create(8, pool);
-    hierarchical_timing_wheel_run(wheel);
+    timer_actor = timer_actor_create();
     mkdir_p(location);
     config = config_default();
     for (size_t i = 0; i < BLOCK_COUNT; i++) {
@@ -120,14 +120,12 @@ public:
     }
   }
   void TearDown() override {
-    hierarchical_timing_wheel_wait_for_idle_signal(wheel);
-    hierarchical_timing_wheel_stop(wheel);
     work_pool_shutdown(pool);
     work_pool_join_all(pool);
     free(location);
-    work_pool_destroy(pool);
-    hierarchical_timing_wheel_destroy(wheel);
     block_cache_destroy(block_cache);
+    timer_actor_destroy(timer_actor);
+    work_pool_destroy(pool);
     for (size_t i = 0; i < BLOCK_COUNT; i++) {
       block_destroy(blocks[i]);
     }
@@ -238,7 +236,7 @@ void re_get_callback_err_wrapper(void* ctx, async_error_t* payload) {
 
 
 TEST_F(TestBlockCache, TestBlockCache) {
-  block_cache = block_cache_create(config, location, type, pool, wheel);
+  block_cache = block_cache_create(config, location, type, pool, timer_actor);
   priority_t priority = priority_get_next();
 
   EXPECT_CALL(mock_put_callback, Call(_,_)).Times(BLOCK_COUNT);

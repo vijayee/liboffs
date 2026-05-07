@@ -211,7 +211,7 @@ void block_lru_cache_move(block_lru_cache_t* lru, block_lru_node_t* node) {
   }
 }
 
-block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, work_pool_t* pool, hierarchical_timing_wheel_t* wheel) {
+block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, work_pool_t* pool, timer_actor_t* timer_actor) {
   block_cache_t* block_cache = get_clear_memory(sizeof(block_cache_t));
   refcounter_init((refcounter_t*) block_cache);
   block_cache->pool = REFERENCE(pool, work_pool_t);
@@ -232,9 +232,9 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
       break;
   }
   block_cache->lru = block_lru_cache_create(config.lru_size);
-  block_cache->sections = sections_create(folder, config.section_size, config.cache_size, config.max_tuple_size, type, wheel, config.section_wait, config.section_max_wait);
+  block_cache->sections = sections_create(folder, config.section_size, config.cache_size, config.max_tuple_size, type, timer_actor, config.section_wait, config.section_max_wait);
   int error_code;
-  block_cache->index = index_create(config.index_bucket_size,folder, wheel, config.index_wait, config.index_max_wait, &error_code);
+  block_cache->index = index_create(config.index_bucket_size,folder, timer_actor, config.index_wait, config.index_max_wait, &error_code);
   free(folder);
   return block_cache;
 }

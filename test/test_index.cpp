@@ -12,7 +12,7 @@ extern "C" {
 #include "../src/Util/rm_rf.h"
 #include <time.h>
 #include <cbor.h>
-#include "../src/Time/wheel.h"
+#include "../src/Timer/timer_actor.h"
 #include "../src/BlockCache/frand.h"
 #include "../src/Util/get_dir.h"
 }
@@ -97,20 +97,12 @@ namespace indexTest {
     index_entry_destroy(from_cbor);
   }
 
-  void Shutdown(void* ctx) {
-    auto pool = (work_pool_t*)ctx;
-    platform_signal_condition(&pool->shutdown);
-  }
-  void ShutdownAborted(void* ctx) {
-  }
-
   class TestIndex : public testing::Test {
   public:
     block_t* blocks[8];
     index_entry_t* entries[8];
     char* location;
-    work_pool_t* pool;
-    hierarchical_timing_wheel_t* wheel;
+    timer_actor_t* timer_actor_inst;
     uint64_t wait = 200;
     uint64_t max_wait = 5000;
     void SetUp() override {
@@ -122,23 +114,15 @@ namespace indexTest {
       location = path_join(".", "block_index");
       rm_rf(location);
       mkdir_p(location);
-      pool = work_pool_create(4);
-      work_pool_launch(pool);
-      wheel = hierarchical_timing_wheel_create(8, pool);
-      hierarchical_timing_wheel_run(wheel);
+      timer_actor_inst = timer_actor_create();
     }
     void TearDown() override {
-      hierarchical_timing_wheel_wait_for_idle_signal(wheel);
-      hierarchical_timing_wheel_stop(wheel);
-      work_pool_shutdown(pool);
-      work_pool_join_all(pool);
-      work_pool_destroy(pool);
-      hierarchical_timing_wheel_destroy(wheel);
       for (size_t i = 0; i < 8; i++) {
         DESTROY(blocks[i], block);
         DESTROY(entries[i], index_entry);
       }
       free(location);
+      timer_actor_destroy(timer_actor_inst);
     }
     void CorruptCRC(int count) {
       char* index_location = path_join(location,"index");
@@ -180,7 +164,7 @@ namespace indexTest {
 
   TEST_F(TestIndex, TestIndexFunctions) {
     int error_code;
-    index_t* index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    index_t* index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
     EXPECT_TRUE(error_code == 0);
     for (size_t i = 0; i < 8; i++) {
       index_add(index, entries[i]);
@@ -209,7 +193,7 @@ namespace indexTest {
     EXPECT_EQ(result.error.code == CBOR_ERR_NONE, true);
     EXPECT_EQ(cbor_isa_array(cbor2), true);
     index_destroy(index);
-    index_t* from_cbor = cbor_to_index(cbor2, location, wheel, wait, max_wait);
+    index_t* from_cbor = cbor_to_index(cbor2, location, timer_actor_inst, wait, max_wait);
     EXPECT_FALSE(from_cbor == NULL);
 
     for (size_t i = 0; i < 8; i++) {
@@ -230,7 +214,7 @@ namespace indexTest {
     free(cbor_data);
     DESTROY(from_cbor, index);
 
-    index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
     EXPECT_TRUE(error_code == 0);
     DESTROY(index, index);
 
@@ -239,12 +223,12 @@ namespace indexTest {
     int error_code;
     index_t* index;
     for (size_t i = 0; i < 4; i++) {
-      index = index_create(25, location, wheel, wait, max_wait, &error_code);
+      index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
       EXPECT_TRUE(error_code == 0);
       index_add(index, entries[i]);
       DESTROY(index, index);
     }
-    index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
     EXPECT_TRUE(error_code == 0);
     for (size_t i = 4; i < 8; i++) {
       index_add(index, entries[i]);
@@ -252,13 +236,13 @@ namespace indexTest {
     DESTROY(index, index);
 
     for (size_t i = 0; i < 4; i++) {
-      index = index_create(25, location, wheel, wait, max_wait, &error_code);
+      index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
       EXPECT_TRUE(error_code == 0);
       index_entry_t* entry = REFERENCE(index_get(index, blocks[i]->hash), index_entry_t);
       DESTROY(entry, index_entry);
       DESTROY(index, index);
     }
-    index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
     EXPECT_TRUE(error_code == 0);
     for (size_t i = 4; i < 8; i++) {
       index_entry_t* entry = REFERENCE(index_get(index, blocks[i]->hash), index_entry_t);
@@ -266,18 +250,18 @@ namespace indexTest {
     }
     DESTROY(index, index);
 
-    index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
     EXPECT_TRUE(error_code == 0);
     cbor_item_t *cbor = index_to_cbor(index);
     DESTROY(index, index);
 
     for (size_t i = 0; i < 4; i++) {
-      index = index_create(25, location, wheel, wait, max_wait, &error_code);
+      index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
       EXPECT_TRUE(error_code == 0);
       index_remove(index, entries[i]->hash);
       DESTROY(index, index);
     }
-    index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
     EXPECT_TRUE(error_code == 0);
     for (size_t i = 4; i < 8; i++) {
       index_remove(index, entries[i]->hash);
@@ -287,11 +271,11 @@ namespace indexTest {
 
     CorruptCRC(5);
 
-    index = index_create(25, location, wheel, wait, max_wait, &error_code);
+    index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
     uint64_t index_crc;
     EXPECT_EQ(index_to_crc(index, &index_crc), 0);
     DESTROY(index, index);
-    index_t* from_cbor = cbor_to_index(cbor, location, wheel, wait, max_wait);
+    index_t* from_cbor = cbor_to_index(cbor, location, timer_actor_inst, wait, max_wait);
     cbor_decref(&cbor);
     uint64_t cbor_crc;
     EXPECT_EQ(index_to_crc(from_cbor, &cbor_crc), 0);

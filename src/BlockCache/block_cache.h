@@ -9,7 +9,7 @@
 #include "sections.h"
 #include "../RefCounter/refcounter.h"
 #include "../Workers/pool.h"
-#include "../Time/wheel.h"
+#include "../Timer/timer_actor.h"
 #include "../Util/threadding.h"
 #include "../Configuration/config.h"
 #include "../Workers/promise.h"
@@ -50,7 +50,7 @@ typedef struct {
   block_size_e type;
 } block_cache_t;
 
-block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, work_pool_t* pool, hierarchical_timing_wheel_t* wheel);
+block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, work_pool_t* pool, timer_actor_t* timer_actor);
 void block_cache_destroy(block_cache_t* block_cache);
 void block_cache_put(block_cache_t* block_cache, priority_t* priority, block_t* block, promise_t* promise);
 void block_cache_get(block_cache_t* block_cache, priority_t* priority, buffer_t* hash, promise_t* promise);

@@ -13,7 +13,7 @@ extern "C" {
 #include "../src/Util/threadding.h"
 #include <time.h>
 #include <cbor.h>
-#include "../src/Time/wheel.h"
+#include "../src/Timer/timer_actor.h"
 #include "../src/BlockCache/section.h"
 #include "../src/BlockCache/sections.h"
 #include "../src/Util/allocator.h"
@@ -265,32 +265,23 @@ TEST_F(TestSectionsLRU, TestSectionLRUSize0) {
 class TestRoundRobin : public testing::Test {
 public:
   char* robin_location;
-  work_pool_t* pool;
-  hierarchical_timing_wheel_t* wheel;
+  timer_actor_t* timer_actor_inst;
   round_robin_t* robin;
   void SetUp() override {
     robin_location = path_join(".", "robin");
     rm_rf(robin_location);
-    pool = work_pool_create(platform_core_count());
-    work_pool_launch(pool);
-    wheel = hierarchical_timing_wheel_create(8, pool);
-    hierarchical_timing_wheel_run(wheel);
+    timer_actor_inst = timer_actor_create();
     mkdir_p(robin_location);
   }
   void TearDown() override {
     round_robin_destroy(robin);
-    hierarchical_timing_wheel_wait_for_idle_signal(wheel);
-    hierarchical_timing_wheel_stop(wheel);
-    work_pool_shutdown(pool);
-    work_pool_join_all(pool);
     free(robin_location);
-    work_pool_destroy(pool);
-    hierarchical_timing_wheel_destroy(wheel);
+    timer_actor_destroy(timer_actor_inst);
   }
 };
 
 TEST_F(TestRoundRobin, TestRoundRobinFunctions) {
-  robin = round_robin_create(path_join(robin_location,".robin"), wheel);
+  robin = round_robin_create(path_join(robin_location,".robin"), timer_actor_inst, NULL, 5, 5000);
   size_t size = 6;
   for (size_t i = 0; i < size; i++) {
     round_robin_add(robin, i);
@@ -321,36 +312,27 @@ public:
   uint64_t wait = 5;
   uint64_t max_wait = 5000;
   char* path;
-  work_pool_t* pool;
-  hierarchical_timing_wheel_t* wheel;
+  timer_actor_t* timer_actor_inst;
   sections_t* sections = NULL;
   void SetUp() override {
     path = path_join(".", "sections");
     rm_rf(path);
-    pool = work_pool_create(platform_core_count());
-    work_pool_launch(pool);
-    wheel = hierarchical_timing_wheel_create(8, pool);
-    hierarchical_timing_wheel_run(wheel);
+    timer_actor_inst = timer_actor_create();
     mkdir_p(path);
     for (size_t i = 0; i < 25; i++) {
       blocks[i] = block_create_random_block_by_type(block_type);
       entries[i] = index_entry_create(blocks[i]->hash);
     }
-    sections = sections_create(path, size, cache_size, max_tuple_size, block_type, wheel, wait, max_wait);
+    sections = sections_create(path, size, cache_size, max_tuple_size, block_type, timer_actor_inst, wait, max_wait);
   }
   void TearDown() override {
     for (size_t i = 0; i < 25; i++) {
       block_destroy(blocks[i]);
       index_entry_destroy(entries[i]);
     }
-    hierarchical_timing_wheel_wait_for_idle_signal(wheel);
-    hierarchical_timing_wheel_stop(wheel);
-    work_pool_shutdown(pool);
-    work_pool_join_all(pool);
     free(path);
     sections_destroy(sections);
-    work_pool_destroy(pool);
-    hierarchical_timing_wheel_destroy(wheel);
+    timer_actor_destroy(timer_actor_inst);
   }
 };
 
