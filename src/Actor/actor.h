@@ -12,6 +12,7 @@
 #define ACTOR_BATCH_SIZE 32
 #define ACTOR_FLAG_SCHEDULED 0x01
 #define ACTOR_FLAG_OVERLOADED 0x02
+#define ACTOR_FLAG_RUNNING 0x04
 
 typedef struct actor_t {
   message_queue_t queue;

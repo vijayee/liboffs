@@ -122,9 +122,9 @@ public:
   void TearDown() override {
     work_pool_shutdown(pool);
     work_pool_join_all(pool);
-    free(location);
-    block_cache_destroy(block_cache);
     timer_actor_destroy(timer_actor);
+    block_cache_destroy(block_cache);
+    free(location);
     work_pool_destroy(pool);
     for (size_t i = 0; i < BLOCK_COUNT; i++) {
       block_destroy(blocks[i]);

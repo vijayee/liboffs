@@ -204,6 +204,21 @@ void sections_dispatch(void* state, message_t* msg) {
       }
       break;
     }
+    case SECTION_WRITE_COMPLETE: {
+      /* Section actor completed a write. Payload is section_write_result_t.
+         Reserved for fully-async sections_write flow. */
+      break;
+    }
+    case SECTION_READ_COMPLETE: {
+      /* Section actor completed a read. Payload is section_read_result_t.
+         Reserved for fully-async sections_read flow. */
+      break;
+    }
+    case SECTION_DEALLOCATE_COMPLETE: {
+      /* Section actor completed a deallocate. Payload is section_deallocate_result_t.
+         Reserved for fully-async sections_deallocate flow. */
+      break;
+    }
     default:
       break;
   }

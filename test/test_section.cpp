@@ -13,6 +13,8 @@ extern "C" {
 #include "../src/Util/threadding.h"
 #include <time.h>
 #include "../src/Timer/timer_actor.h"
+#include "../src/Actor/actor.h"
+#include "../src/Actor/message.h"
 #include "../src/BlockCache/section.h"
 #include "../src/BlockCache/sections.h"
 #include "../src/Util/allocator.h"
@@ -137,6 +139,130 @@ TEST_F(TestSection, TestSectionFunction) {
     index_entry_destroy(entries[i]);
     block_destroy(blocks[i]);
   }
+}
+
+/* ---- Async actor-based section test ---- */
+
+/* Completion actor state: stores the last completion result and a done flag */
+typedef struct {
+  _Atomic uint8_t done;
+  section_write_result_t write_result;
+  buffer_t* read_buffer;
+  int deallocate_result;
+} section_completion_state_t;
+
+static void section_completion_dispatch(void* state, message_t* msg) {
+  section_completion_state_t* cs = (section_completion_state_t*)state;
+  switch (msg->type) {
+    case SECTION_WRITE_COMPLETE: {
+      section_write_result_t* r = (section_write_result_t*)msg->payload;
+      cs->write_result = *r;
+      /* payload_destroy (free) will free r after dispatch returns */
+      break;
+    }
+    case SECTION_READ_COMPLETE: {
+      section_read_result_t* r = (section_read_result_t*)msg->payload;
+      cs->read_buffer = r->data;
+      /* Transfer buffer ownership to cs; payload_destroy (section_read_result_destroy)
+         will free the result struct but skip the buffer since we nulled it. */
+      r->data = NULL;
+      break;
+    }
+    case SECTION_DEALLOCATE_COMPLETE: {
+      section_deallocate_result_t* r = (section_deallocate_result_t*)msg->payload;
+      cs->deallocate_result = r->result;
+      /* payload_destroy (free) will free r after dispatch returns */
+      break;
+    }
+    default:
+      break;
+  }
+  atomic_store(&cs->done, 1);
+}
+
+TEST_F(TestSection, TestSectionAsyncWrite) {
+  mkdir_p(section_location);
+  mkdir_p(meta_location);
+  section_t* section = section_create(section_location, meta_location, 20, 5000, mini);
+
+  /* Create completion actor for async results */
+  section_completion_state_t completion_state;
+  memset(&completion_state, 0, sizeof(completion_state));
+  actor_t completion_actor;
+  actor_init(&completion_actor, &completion_state, section_completion_dispatch);
+
+  /* Write a block asynchronously */
+  block_t* block = block_create_random_block_by_type(mini);
+  section_write_payload_t* payload = (section_write_payload_t*)get_clear_memory(sizeof(section_write_payload_t));
+  payload->data = block->data;
+  payload->reply_to = &completion_actor;
+
+  message_t msg;
+  msg.type = SECTION_WRITE;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+
+  actor_send(&section->actor, &msg);
+
+  /* Process both actors until completion */
+  while (!atomic_load(&completion_state.done)) {
+    actor_run(&section->actor, ACTOR_BATCH_SIZE);
+    actor_run(&completion_actor, ACTOR_BATCH_SIZE);
+  }
+
+  EXPECT_EQ(completion_state.write_result.result, 0);
+  EXPECT_EQ(completion_state.write_result.full, 0);
+  size_t written_index = completion_state.write_result.index;
+
+  /* Read back the block asynchronously */
+  atomic_store(&completion_state.done, 0);
+  completion_state.read_buffer = NULL;
+  section_read_payload_t* read_payload = (section_read_payload_t*)get_clear_memory(sizeof(section_read_payload_t));
+  read_payload->index = written_index;
+  read_payload->reply_to = &completion_actor;
+
+  message_t read_msg;
+  read_msg.type = SECTION_READ;
+  read_msg.payload = read_payload;
+  read_msg.payload_destroy = free;
+
+  actor_send(&section->actor, &read_msg);
+
+  while (!atomic_load(&completion_state.done)) {
+    actor_run(&section->actor, ACTOR_BATCH_SIZE);
+    actor_run(&completion_actor, ACTOR_BATCH_SIZE);
+  }
+
+  ASSERT_NE(completion_state.read_buffer, (buffer_t*)NULL);
+  EXPECT_EQ(buffer_compare(completion_state.read_buffer, block->data), 0);
+
+  /* Deallocate the block asynchronously */
+  atomic_store(&completion_state.done, 0);
+  section_deallocate_payload_t* dealloc_payload = (section_deallocate_payload_t*)get_clear_memory(sizeof(section_deallocate_payload_t));
+  dealloc_payload->index = written_index;
+  dealloc_payload->reply_to = &completion_actor;
+
+  message_t dealloc_msg;
+  dealloc_msg.type = SECTION_DEALLOCATE;
+  dealloc_msg.payload = dealloc_payload;
+  dealloc_msg.payload_destroy = free;
+
+  actor_send(&section->actor, &dealloc_msg);
+
+  while (!atomic_load(&completion_state.done)) {
+    actor_run(&section->actor, ACTOR_BATCH_SIZE);
+    actor_run(&completion_actor, ACTOR_BATCH_SIZE);
+  }
+
+  EXPECT_EQ(completion_state.deallocate_result, 0);
+
+  /* Cleanup */
+  buffer_destroy(completion_state.read_buffer);
+  block_destroy(block);
+  actor_destroy(&completion_actor);
+  section_destroy(section);
+  free(meta_location);
+  free(section_location);
 }
 
 class TestSectionsLRU : public testing::Test {
@@ -308,13 +434,13 @@ public:
     sections = sections_create(path, size, cache_size, max_tuple_size, block_type, timer_actor_inst, wait, max_wait);
   }
   void TearDown() override {
+    timer_actor_destroy(timer_actor_inst);
     for (size_t i = 0; i < 25; i++) {
       block_destroy(blocks[i]);
       index_entry_destroy(entries[i]);
     }
     free(path);
     sections_destroy(sections);
-    timer_actor_destroy(timer_actor_inst);
   }
 };
 

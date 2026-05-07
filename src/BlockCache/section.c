@@ -2,6 +2,7 @@
 // Created by victor on 7/19/25.
 //
 #include "section.h"
+#include "../Actor/message.h"
 #include "../Util/allocator.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
@@ -17,6 +18,7 @@
 #define access _access
 #else
 #include <unistd.h>
+#include <sched.h>
 #endif
 
 /* ---- free_map helpers ---- */
@@ -110,12 +112,180 @@ static int free_map_deserialize(free_map_t* fm, const uint8_t* buf, size_t buf_s
   return 0;
 }
 
+/* ---- async payload destroy helpers ---- */
+
+static void section_read_result_destroy(void* ptr) {
+  section_read_result_t* result = (section_read_result_t*)ptr;
+  if (result->data != NULL) {
+    buffer_destroy(result->data);
+  }
+  free(result);
+}
+
+/* ---- section dispatch ---- */
+
+void section_dispatch(void* state, message_t* msg) {
+  section_t* section = (section_t*)state;
+  switch (msg->type) {
+    case SECTION_WRITE: {
+      section_write_payload_t* p = (section_write_payload_t*)msg->payload;
+      p->result = -1;
+      p->index = 0;
+      p->full = 0;
+      if (p->data->size != section->block_size) {
+        p->result = 1;
+        p->full = free_map_is_full(&section->free_map);
+        break;
+      }
+      size_t alloc_index;
+      if (free_map_alloc(&section->free_map, &alloc_index) != 0) {
+        p->result = 2;
+        p->full = 1;
+        break;
+      }
+      if (section->fd == -1) {
+#ifdef _WIN32
+        section->fd = _open(section->path, _O_RDWR | _O_BINARY | _O_CREAT, 0644);
+#else
+        section->fd = open(section->path, O_RDWR | O_CREAT, 0644);
+#endif
+        if (section->fd < 0) {
+          free_map_dealloc(&section->free_map, alloc_index);
+          p->result = 3;
+          p->full = free_map_is_full(&section->free_map);
+          break;
+        }
+      }
+      size_t byte_offset = p->data->size * alloc_index;
+      ssize_t written;
+#ifdef _WIN32
+      if (_lseeki64(section->fd, (__int64)byte_offset, SEEK_SET) != (__int64)byte_offset) {
+        free_map_dealloc(&section->free_map, alloc_index);
+        p->result = 4;
+        p->full = free_map_is_full(&section->free_map);
+        break;
+      }
+      written = _write(section->fd, p->data->data, p->data->size);
+#else
+      written = pwrite(section->fd, p->data->data, p->data->size, (off_t)byte_offset);
+#endif
+      if (written < (ssize_t)section->block_size) {
+        free_map_dealloc(&section->free_map, alloc_index);
+        p->result = 5;
+        p->full = free_map_is_full(&section->free_map);
+        break;
+      }
+      atomic_store(&section->dirty, 1);
+      if (section->on_dirty != NULL) {
+        section->on_dirty(section->on_dirty_context, section);
+      }
+      p->result = 0;
+      p->index = alloc_index;
+      p->full = free_map_is_full(&section->free_map);
+      /* Send completion message if async (reply_to is set) */
+      if (p->reply_to != NULL) {
+        section_write_result_t* result = get_clear_memory(sizeof(section_write_result_t));
+        result->result = p->result;
+        result->index = p->index;
+        result->full = p->full;
+        message_t reply;
+        reply.type = SECTION_WRITE_COMPLETE;
+        reply.payload = result;
+        reply.payload_destroy = free;
+        actor_send(p->reply_to, &reply);
+      }
+      break;
+    }
+    case SECTION_READ: {
+      section_read_payload_t* p = (section_read_payload_t*)msg->payload;
+      p->result = NULL;
+      int read_fd = section->fd;
+      if (read_fd == -1) {
+#ifdef _WIN32
+        read_fd = _open(section->path, _O_RDONLY | _O_BINARY, 0644);
+#else
+        read_fd = open(section->path, O_RDONLY, 0644);
+#endif
+      }
+      if (read_fd < 0) {
+        break;
+      }
+      size_t byte_offset = p->index * section->block_size;
+      uint8_t* data = get_memory(section->block_size);
+      ssize_t read_size;
+#ifdef _WIN32
+      if (_lseeki64(read_fd, (__int64)byte_offset, SEEK_SET) != (__int64)byte_offset) {
+        if (read_fd != section->fd) close(read_fd);
+        free(data);
+        break;
+      }
+      read_size = _read(read_fd, data, section->block_size);
+#else
+      read_size = pread(read_fd, data, section->block_size, (off_t)byte_offset);
+#endif
+      if (read_fd != section->fd) close(read_fd);
+      if (read_size < (ssize_t)section->block_size) {
+        free(data);
+        break;
+      }
+      if (p->reply_to != NULL) {
+        /* Async: transfer buffer ownership to completion message */
+        section_read_result_t* result = get_clear_memory(sizeof(section_read_result_t));
+        result->data = buffer_create_from_existing_memory(data, section->block_size);
+        message_t reply;
+        reply.type = SECTION_READ_COMPLETE;
+        reply.payload = result;
+        reply.payload_destroy = section_read_result_destroy;
+        actor_send(p->reply_to, &reply);
+      } else {
+        /* Sync: store result in payload for caller */
+        p->result = buffer_create_from_existing_memory(data, section->block_size);
+      }
+      break;
+    }
+    case SECTION_DEALLOCATE: {
+      section_deallocate_payload_t* p = (section_deallocate_payload_t*)msg->payload;
+      p->result = free_map_dealloc(&section->free_map, p->index);
+      if (p->result == 0) {
+        atomic_store(&section->dirty, 1);
+        if (section->on_dirty != NULL) {
+          section->on_dirty(section->on_dirty_context, section);
+        }
+      }
+      /* Send completion message if async (reply_to is set) */
+      if (p->reply_to != NULL) {
+        section_deallocate_result_t* result = get_clear_memory(sizeof(section_deallocate_result_t));
+        result->result = p->result;
+        message_t reply;
+        reply.type = SECTION_DEALLOCATE_COMPLETE;
+        reply.payload = result;
+        reply.payload_destroy = free;
+        actor_send(p->reply_to, &reply);
+      }
+      break;
+    }
+    case SECTION_SAVE_META: {
+      section_save_meta(section);
+      break;
+    }
+    case SECTION_CLOSE: {
+      if (section->fd != -1) {
+        close(section->fd);
+        section->fd = -1;
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
 /* ---- section implementation ---- */
 
 section_t* section_create(char* path, char* meta_path, size_t size, size_t id, block_size_e type) {
   section_t* section = get_clear_memory(sizeof(section_t));
   refcounter_init((refcounter_t*) section);
-  platform_lock_init(&section->lock);
+  actor_init(&section->actor, section, section_dispatch);
   char section_id[20];
   sprintf(section_id, "%lu", id);
   section->fd = -1;
@@ -126,7 +296,7 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id, b
   section->block_size = (size_t)type;
 
   if (access(section->meta_path, F_OK) == 0) {
-    /* Existing section — load metadata */
+    /* Existing section -- load metadata */
 #ifdef _WIN32
     int meta_fd = _open(section->meta_path, _O_RDONLY | _O_BINARY, 0644);
 #else
@@ -167,7 +337,7 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id, b
     }
     free(buffer);
   } else {
-    /* New section — all blocks are free */
+    /* New section -- all blocks are free */
     free_map_init(&section->free_map, size);
   }
   return section;
@@ -181,7 +351,7 @@ void section_destroy(section_t* section) {
       section_save_meta(section);
     }
     refcounter_destroy_lock((refcounter_t*) section);
-    platform_lock_destroy(&section->lock);
+    actor_destroy(&section->actor);
     if (section->fd != -1) {
       close(section->fd);
       section->fd = -1;
@@ -193,110 +363,105 @@ void section_destroy(section_t* section) {
   }
 }
 
+/* Helper: run the section actor until our message is processed.
+   Uses ACTOR_FLAG_RUNNING to prevent concurrent actor_run calls on the
+   same actor (message_queue_pop is single-consumer only).
+   Spins until our message has been processed by either this thread or
+   another thread that claimed the running flag first. */
+static void _section_run_until_done(section_t* section, int* done) {
+  while (!*done) {
+    uint8_t flags = atomic_load(&section->actor.flags);
+    if (flags & ACTOR_FLAG_RUNNING) {
+      /* Another thread is running the actor. Yield and check again. */
+      sched_yield();
+      continue;
+    }
+    if (!atomic_compare_exchange_strong(&section->actor.flags, &flags,
+                                         flags | ACTOR_FLAG_RUNNING)) {
+      /* CAS failed, retry. */
+      sched_yield();
+      continue;
+    }
+    /* We claimed the running flag. Process messages until the queue is empty. */
+    bool has_more = true;
+    while (has_more) {
+      has_more = actor_run(&section->actor, ACTOR_BATCH_SIZE);
+    }
+    atomic_fetch_and(&section->actor.flags, ~ACTOR_FLAG_RUNNING);
+    /* After processing all messages, our message is done. */
+    break;
+  }
+}
+
+/* Sync wrapper: sends SECTION_WRITE message to the section actor and
+   processes it inline. Returns the result through the output parameters. */
 int section_write(section_t* section, buffer_t* data, size_t* index, uint8_t* full) {
-  platform_lock(&section->lock);
-  if (data->size != section->block_size) {
-    *full = free_map_is_full(&section->free_map);
-    platform_unlock(&section->lock);
-    return 1;
-  }
-  size_t alloc_index;
-  if (free_map_alloc(&section->free_map, &alloc_index) != 0) {
-    *full = 1;
-    platform_unlock(&section->lock);
-    return 2;
-  }
-  if (section->fd == -1) {
-#ifdef _WIN32
-    section->fd = _open(section->path, _O_RDWR | _O_BINARY | _O_CREAT, 0644);
-#else
-    section->fd = open(section->path, O_RDWR | O_CREAT, 0644);
-#endif
-    if (section->fd < 0) {
-      free_map_dealloc(&section->free_map, alloc_index);
-      *full = free_map_is_full(&section->free_map);
-      platform_unlock(&section->lock);
-      return 3;
-    }
-  }
-  size_t byte_offset = data->size * alloc_index;
-  if (lseek(section->fd, (off_t)byte_offset, SEEK_SET) != (off_t)byte_offset) {
-    free_map_dealloc(&section->free_map, alloc_index);
-    *full = free_map_is_full(&section->free_map);
-    platform_unlock(&section->lock);
-    return 4;
-  }
-  ssize_t result = write(section->fd, data->data, data->size);
-  if (result < (ssize_t)section->block_size) {
-    free_map_dealloc(&section->free_map, alloc_index);
-    *full = free_map_is_full(&section->free_map);
-    platform_unlock(&section->lock);
-    return 5;
-  }
-  atomic_store(&section->dirty, 1);
-  if (section->on_dirty != NULL) {
-    section->on_dirty(section->on_dirty_context, section);
-  }
-  *index = alloc_index;
-  *full = free_map_is_full(&section->free_map);
-  platform_unlock(&section->lock);
-  return 0;
+  section_write_payload_t payload;
+  int done = 0;
+  payload.data = data;
+  payload.reply_to = NULL;
+  payload.result = -1;
+  payload.index = 0;
+  payload.full = 0;
+
+  message_t msg;
+  msg.type = SECTION_WRITE;
+  msg.payload = &payload;
+  msg.payload_destroy = NULL;
+
+  actor_send(&section->actor, &msg);
+  _section_run_until_done(section, &done);
+
+  *index = payload.index;
+  *full = payload.full;
+  return payload.result;
 }
 
+/* Sync wrapper: sends SECTION_READ message to the section actor and
+   processes it inline. Returns the read buffer or NULL on failure. */
 buffer_t* section_read(section_t* section, size_t index) {
-  platform_lock(&section->lock);
-  /* If the section fd is already open, use it for reading. Otherwise open
-     a temporary read-only fd so we don't set section->fd to O_RDONLY which
-     would break subsequent writes. */
-  int read_fd = section->fd;
-  if (read_fd == -1) {
-#ifdef _WIN32
-    read_fd = _open(section->path, _O_RDONLY | _O_BINARY, 0644);
-#else
-    read_fd = open(section->path, O_RDONLY, 0644);
-#endif
-  }
-  if (read_fd < 0) {
-    platform_unlock(&section->lock);
-    return NULL;
-  }
-  size_t byte_offset = index * section->block_size;
-  if (lseek(read_fd, (off_t)byte_offset, SEEK_SET) != (off_t)byte_offset) {
-    if (read_fd != section->fd) close(read_fd);
-    platform_unlock(&section->lock);
-    return NULL;
-  }
-  uint8_t* data = get_memory(section->block_size);
-  ssize_t read_size = read(read_fd, data, section->block_size);
-  if (read_fd != section->fd) close(read_fd);
-  if (read_size < (ssize_t)section->block_size) {
-    free(data);
-    platform_unlock(&section->lock);
-    return NULL;
-  }
-  platform_unlock(&section->lock);
-  buffer_t* buf = buffer_create_from_existing_memory(data, section->block_size);
-  return buf;
+  section_read_payload_t payload;
+  int done = 0;
+  payload.index = index;
+  payload.reply_to = NULL;
+  payload.result = NULL;
+
+  message_t msg;
+  msg.type = SECTION_READ;
+  msg.payload = &payload;
+  msg.payload_destroy = NULL;
+
+  actor_send(&section->actor, &msg);
+  _section_run_until_done(section, &done);
+
+  return payload.result;
 }
 
+/* Sync wrapper: sends SECTION_DEALLOCATE message to the section actor and
+   processes it inline. Returns 0 on success, non-zero on failure. */
 int section_deallocate(section_t* section, size_t index) {
-  platform_lock(&section->lock);
-  int result = free_map_dealloc(&section->free_map, index);
-  if (result == 0) {
-    atomic_store(&section->dirty, 1);
-    if (section->on_dirty != NULL) {
-      section->on_dirty(section->on_dirty_context, section);
-    }
-  }
-  platform_unlock(&section->lock);
-  return result;
+  section_deallocate_payload_t payload;
+  int done = 0;
+  payload.index = index;
+  payload.reply_to = NULL;
+  payload.result = -1;
+
+  message_t msg;
+  msg.type = SECTION_DEALLOCATE;
+  msg.payload = &payload;
+  msg.payload_destroy = NULL;
+
+  actor_send(&section->actor, &msg);
+  _section_run_until_done(section, &done);
+
+  return payload.result;
 }
 
+/* Direct read of free_map state. Safe because the actor serializes all
+   modifications. May return stale data if called from outside the actor
+   context while modifications are pending. */
 uint8_t section_full(section_t* section) {
-  platform_lock(&section->lock);
-  uint8_t result = free_map_is_full(&section->free_map);
-  platform_unlock(&section->lock);
-  return result;
+  return free_map_is_full(&section->free_map);
 }
 
 void section_save_meta(section_t* section) {

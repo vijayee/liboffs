@@ -31,7 +31,10 @@ typedef enum message_type_e {
   WRITEABLE_WRITE,
   CLOSE_STREAM,
   READABLE_PULL,
-  DEFERRED_DEREF
+  DEFERRED_DEREF,
+  SECTION_WRITE_COMPLETE,
+  SECTION_READ_COMPLETE,
+  SECTION_DEALLOCATE_COMPLETE
 } message_type_e;
 
 typedef struct message_t {
