@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #ifdef _WIN32
 #include <io.h>
@@ -111,8 +112,6 @@ static int free_map_deserialize(free_map_t* fm, const uint8_t* buf, size_t buf_s
 
 /* ---- section implementation ---- */
 
-static void section_save_meta(section_t* section);
-
 section_t* section_create(char* path, char* meta_path, size_t size, size_t id, block_size_e type) {
   section_t* section = get_clear_memory(sizeof(section_t));
   refcounter_init((refcounter_t*) section);
@@ -177,6 +176,10 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id, b
 void section_destroy(section_t* section) {
   refcounter_dereference((refcounter_t*) section);
   if (refcounter_count((refcounter_t*) section) == 0) {
+    /* Flush dirty metadata before destroying */
+    if (atomic_load(&section->dirty)) {
+      section_save_meta(section);
+    }
     refcounter_destroy_lock((refcounter_t*) section);
     platform_lock_destroy(&section->lock);
     if (section->fd != -1) {
@@ -230,7 +233,10 @@ int section_write(section_t* section, buffer_t* data, size_t* index, uint8_t* fu
     platform_unlock(&section->lock);
     return 5;
   }
-  section_save_meta(section);
+  atomic_store(&section->dirty, 1);
+  if (section->on_dirty != NULL) {
+    section->on_dirty(section->on_dirty_context, section);
+  }
   *index = alloc_index;
   *full = free_map_is_full(&section->free_map);
   platform_unlock(&section->lock);
@@ -277,7 +283,10 @@ int section_deallocate(section_t* section, size_t index) {
   platform_lock(&section->lock);
   int result = free_map_dealloc(&section->free_map, index);
   if (result == 0) {
-    section_save_meta(section);
+    atomic_store(&section->dirty, 1);
+    if (section->on_dirty != NULL) {
+      section->on_dirty(section->on_dirty_context, section);
+    }
   }
   platform_unlock(&section->lock);
   return result;
@@ -290,7 +299,7 @@ uint8_t section_full(section_t* section) {
   return result;
 }
 
-static void section_save_meta(section_t* section) {
+void section_save_meta(section_t* section) {
   size_t size;
   uint8_t* data = free_map_serialize(&section->free_map, &size);
 #ifdef _WIN32

@@ -27,6 +27,7 @@ void sections_free(sections_t* sections, size_t section_id);
 section_t* sections_checkout(sections_t* sections, size_t section_id);
 void sections_checkin(sections_t* sections, section_t* section);
 void sections_dispatch(void* state, message_t* msg);
+static void section_on_dirty(void* context, section_t* section);
 
 sections_lru_cache_t* sections_lru_cache_create(size_t size) {
   sections_lru_cache_t* lru = get_clear_memory(sizeof(sections_lru_cache_t));
@@ -182,17 +183,46 @@ void sections_lru_cache_move(sections_lru_cache_t* lru, sections_lru_node_t* nod
 }
 
 
+static void section_on_dirty(void* context, section_t* section);
+
 void sections_dispatch(void* state, message_t* msg) {
   sections_t* sections = (sections_t*)state;
   switch (msg->type) {
-    case SECTION_SAVE_META:
+    case SECTION_SAVE_META: {
+      /* Debounced save: save the round robin metadata */
       round_robin_save(sections->robin);
       break;
+    }
+    case SECTION_WRITE_META: {
+      /* Debounced save: flush any dirty sections in the LRU cache */
+      sections_lru_node_t* node;
+      hashmap_foreach_data(node, &sections->lru->cache) {
+        if (atomic_load(&node->value->dirty)) {
+          section_save_meta(node->value);
+          atomic_store(&node->value->dirty, 0);
+        }
+      }
+      break;
+    }
     default:
       break;
   }
   if (msg->payload_destroy != NULL) {
     msg->payload_destroy(msg->payload);
+  }
+}
+
+static void section_on_dirty(void* context, section_t* section) {
+  (void)section;
+  sections_t* sections = (sections_t*)context;
+  if (sections->timer_actor != NULL) {
+    timer_actor_debounce(sections->timer_actor, 0,
+                         sections->wait, sections->max_wait,
+                         &sections->actor, SECTION_WRITE_META);
+  } else {
+    /* No timer actor available — save immediately */
+    section_save_meta(section);
+    atomic_store(&section->dirty, 0);
   }
 }
 
@@ -441,6 +471,8 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
   free(files);
   while (sections->robin->size < sections->max_tuple_size) {
     section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections_get_next_id(sections), sections->type);
+    section->on_dirty = section_on_dirty;
+    section->on_dirty_context = sections;
     refcounter_yield((refcounter_t*) section);
     sections_lru_cache_put(sections->lru, section);
     round_robin_add(sections->robin, section->id);
@@ -503,6 +535,8 @@ section_t* sections_checkout(sections_t* sections, size_t section_id) {
   section_t* section = sections_lru_cache_get(sections->lru, section_id);
   if (section == NULL) {
     section = section_create(sections->data_path, sections->meta_path, sections->size,section_id, sections->type);
+    section->on_dirty = section_on_dirty;
+    section->on_dirty_context = sections;
     refcounter_yield((refcounter_t*) section);
     if (section_full(section) == 0) {
       round_robin_add(sections->robin, section_id);
@@ -549,6 +583,8 @@ void sections_full(sections_t* sections, size_t section_id) {
   round_robin_remove(sections->robin, section_id);
   while (sections->robin->size < sections->max_tuple_size) {
     section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections_get_next_id(sections), sections->type);
+    section->on_dirty = section_on_dirty;
+    section->on_dirty_context = sections;
     refcounter_yield((refcounter_t*) section);
     sections_lru_cache_put(sections->lru, section);
     round_robin_add(sections->robin, section->id);
