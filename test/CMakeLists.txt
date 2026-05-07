@@ -20,7 +20,8 @@ if (BUILD_TESTING)
             test_timer_actor.cpp
             test_stream.cpp
             test_tuple_ori.cpp
-            test_tuple_cache.cpp)
+            test_tuple_cache.cpp
+            test_readable_off_stream.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
