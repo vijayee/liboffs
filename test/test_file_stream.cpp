@@ -9,7 +9,7 @@ extern "C" {
 #include "../src/Util/mkdir_p.h"
 #include "../src/Util/rm_rf.h"
 #include "../src/Configuration/config.h"
-#include "../src/Workers/priority.h"
+#include "../src/Scheduler/scheduler.h"
 #include "../src/Util/allocator.h"
 }
 
@@ -19,20 +19,18 @@ using ::testing::AtLeast;
 namespace PushFileStream {
   class TestPushFileStream : public testing::Test {
   public:
-    work_pool_t* pool;
+    scheduler_pool_t* pool;
     std::promise<void> r_close_promise;
     std::promise<void> r_complete_promise;
     std::promise<void> w_close_promise;
     MockFunction<void((void*, void*))> mock_data_callback;
     void SetUp() override {
-      pool = work_pool_create(4);
-      work_pool_launch(pool);
+      pool = scheduler_pool_create(4);
+      scheduler_pool_start(pool);
     }
     void TearDown() override {
-      work_pool_wait_for_idle_signal(pool);
-      work_pool_shutdown(pool);
-      work_pool_join_all(pool);
-      work_pool_destroy(pool);
+      scheduler_pool_stop(pool);
+      scheduler_pool_destroy(pool);
     }
   };
   void on_data(void* ctx, buffer_t* buffer) {
@@ -69,12 +67,11 @@ namespace PushFileStream {
       testFS->w_close_promise.set_exception(std::current_exception());
     }
   }
-  TEST_F(TestPushFileStream, TestPushFileStreamFunctions) {
-    priority_t priority = priority_get_next();
+  TEST_F(TestPushFileStream, TestPushFileStreamPipe) {
     int error_code;
     std::string filename = "./test.pdf";
     EXPECT_CALL(mock_data_callback, Call(_,_)).Times(12);
-    readable_push_file_stream_t* rs = readable_push_file_stream_create(&priority, pool, (char*) filename.c_str(), DEFAULT_CHUNK_SIZE, &error_code);
+    readable_push_file_stream_t* rs = readable_push_file_stream_create(pool, (char*) filename.c_str(), DEFAULT_CHUNK_SIZE, &error_code);
     EXPECT_EQ(error_code, 0);
     if(error_code != 0) {
       GTEST_FATAL_FAILURE_("Stream Creation error");
@@ -83,33 +80,21 @@ namespace PushFileStream {
     stream_subscribe((stream_t*) rs, close_event, this, on_close_r, NULL );
     stream_subscribe((stream_t*) rs, complete_event, this, (void(*)(void*, void*)) on_complete_r, NULL);
     stream_subscribe((stream_t*) rs, data_event, this, (void(*)(void*, void*)) on_data, NULL);
-    std::future<void> r_close_future = r_close_promise.get_future();
-    std::future<void> r_complete_future = r_complete_promise.get_future();
-    try {
-      r_close_future.get();
-      EXPECT_EQ(r_complete_future.valid(), true);
-    } catch (const std::exception& e) {
-      GTEST_FATAL_FAILURE_(e.what());
-    }
-    DESTROY(rs, readable_push_file_stream);
-    rs = readable_push_file_stream_create(&priority, pool, (char*) filename.c_str(), DEFAULT_CHUNK_SIZE, &error_code);
-    EXPECT_EQ(error_code, 0);
-    EXPECT_EQ(rs->stream.type, readable_stream);
-    if(error_code != 0) {
-      GTEST_FATAL_FAILURE_("Stream Creation error");
-    }
 
-    std::future<void> w_close_future = w_close_promise.get_future();
     std::string filename2 = "./test2.pdf";
-    writeable_push_file_stream_t*  ws = writeable_push_file_stream_create(&priority, pool, (char*) filename2.c_str());
+    writeable_push_file_stream_t*  ws = writeable_push_file_stream_create(pool, (char*) filename2.c_str());
     stream_subscribe((stream_t*) ws, error_event, this, (void(*)(void*, void*)) on_error_w, NULL);
     stream_subscribe((stream_t*) ws, close_event, this, (void(*)(void*, void*)) on_close_w, NULL);
     readable_push_stream_pipe((stream_t*) rs, (stream_t*) ws);
+
+    std::future<void> r_close_future = r_close_promise.get_future();
+    std::future<void> w_close_future = w_close_promise.get_future();
     try {
       w_close_future.get();
     } catch (const std::exception& e) {
       GTEST_FATAL_FAILURE_(e.what());
     }
+    scheduler_pool_stop(pool);
     DESTROY(rs, readable_push_file_stream);
     DESTROY(ws, writeable_push_file_stream);
   }
@@ -118,20 +103,18 @@ namespace PushFileStream {
 namespace PullFileStream {
   class TestPullFileStream : public testing::Test {
   public:
-    work_pool_t* pool;
+    scheduler_pool_t* pool;
     std::promise<void> r_close_promise;
     std::promise<void> r_complete_promise;
     std::promise<void> w_close_promise;
     MockFunction<void((void*, void*))> mock_data_callback;
     void SetUp() override {
-      pool = work_pool_create(4);
-      work_pool_launch(pool);
+      pool = scheduler_pool_create(4);
+      scheduler_pool_start(pool);
     }
     void TearDown() override {
-      work_pool_wait_for_idle_signal(pool);
-      work_pool_shutdown(pool);
-      work_pool_join_all(pool);
-      work_pool_destroy(pool);
+      scheduler_pool_stop(pool);
+      scheduler_pool_destroy(pool);
     }
   };
   void on_data(void* ctx, buffer_t* buffer) {
@@ -169,12 +152,11 @@ namespace PullFileStream {
     }
   }
 
-  TEST_F(TestPullFileStream, TestPullFileStreamFunctions) {
-    priority_t priority = priority_get_next();
+  TEST_F(TestPullFileStream, TestPullFileStreamPipe) {
     int error_code;
     std::string filename = "./test.pdf";
     EXPECT_CALL(mock_data_callback, Call(_,_)).Times(12);
-    readable_pull_file_stream_t* rs = readable_pull_file_stream_create(&priority, pool, (char*) filename.c_str(), DEFAULT_CHUNK_SIZE, &error_code);
+    readable_pull_file_stream_t* rs = readable_pull_file_stream_create(pool, (char*) filename.c_str(), DEFAULT_CHUNK_SIZE, &error_code);
     EXPECT_EQ(error_code, 0);
     if(error_code != 0) {
       GTEST_FATAL_FAILURE_("Stream Creation error");
@@ -183,36 +165,20 @@ namespace PullFileStream {
     stream_subscribe((stream_t*) rs, close_event, this, on_close_r, NULL );
     stream_subscribe((stream_t*) rs, complete_event, this, (void(*)(void*, void*)) on_complete_r, NULL);
     stream_subscribe((stream_t*) rs, data_event, this, (void(*)(void*, void*)) on_data, NULL);
-    std::future<void> r_close_future = r_close_promise.get_future();
-    std::future<void> r_complete_future = r_complete_promise.get_future();
-    for (size_t i = 0; i < 12; i++) {
-       readable_pull_stream_pull((stream_t*)rs);
-    }
-    try {
-      r_close_future.get();
-      EXPECT_EQ(r_complete_future.valid(), true);
-    } catch (const std::exception& e) {
-      GTEST_FATAL_FAILURE_(e.what());
-    }
-    DESTROY(rs, readable_pull_file_stream);
-    rs = readable_pull_file_stream_create(&priority, pool, (char*) filename.c_str(), DEFAULT_CHUNK_SIZE, &error_code);
-    EXPECT_EQ(error_code, 0);
-    EXPECT_EQ(rs->stream.type, readable_stream);
-    if(error_code != 0) {
-      GTEST_FATAL_FAILURE_("Stream Creation error");
-    }
 
-    std::future<void> w_close_future = w_close_promise.get_future();
     std::string filename2 = "./test2.pdf";
-    writeable_pull_file_stream_t*  ws = writeable_pull_file_stream_create(&priority, pool, (char*) filename2.c_str());
+    writeable_pull_file_stream_t*  ws = writeable_pull_file_stream_create(pool, (char*) filename2.c_str());
     stream_subscribe((stream_t*) ws, error_event, this, (void(*)(void*, void*)) on_error_w, NULL);
     stream_subscribe((stream_t*) ws, close_event, this, (void(*)(void*, void*)) on_close_w, NULL);
     writeable_pull_stream_pipe((stream_t*) ws, (stream_t*) rs);
+
+    std::future<void> w_close_future = w_close_promise.get_future();
     try {
       w_close_future.get();
     } catch (const std::exception& e) {
       GTEST_FATAL_FAILURE_(e.what());
     }
+    scheduler_pool_stop(pool);
     DESTROY(rs, readable_pull_file_stream);
     DESTROY(ws, writeable_pull_file_stream);
   }

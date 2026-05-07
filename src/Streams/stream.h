@@ -5,8 +5,8 @@
 #ifndef OFFS_STREAM_H
 #define OFFS_STREAM_H
 #include "../RefCounter/refcounter.h"
-#include "../Workers/priority.h"
-#include "../Workers/pool.h"
+#include "../Actor/actor.h"
+#include "../Scheduler/scheduler.h"
 #include "../Workers/error.h"
 
 typedef enum {
@@ -57,8 +57,6 @@ struct stream_event_handler_list_node_t {
   stream_event_handler_list_node_t* previous;
 };
 
-
-
 typedef struct {
   PLATFORMLOCKTYPE(lock);
   stream_event_handler_list_node_t *first;
@@ -72,44 +70,11 @@ void stream_event_list_enqueue(stream_event_handler_list_t* list, stream_event_h
 stream_event_handler_t* stream_event_list_dequeue(stream_event_handler_list_t* list);
 void stream_event_list_remove(stream_event_handler_list_t* list, stream_event_handler_list_node_t* node);
 void stream_event_list_remove_onces(stream_event_handler_list_t* list);
-typedef enum {
-  readable_push = 0,
-  readable_read = 1,
-  writeable_write = 2,
-  close_stream = 3,
-  readable_pull = 5,
-  deferred_deref = 6
-} stream_message_type_e;
-typedef struct {
-  int type;
-  void* payload;
-  void* ctx;
-} stream_message_t;
-typedef struct stream_message_list_node_t stream_message_list_node_t;
-
-
-struct stream_message_list_node_t {
-  stream_message_t* message;
-  stream_message_list_node_t* next;
-  stream_message_list_node_t* previous;
-};
 
 typedef struct {
-  PLATFORMLOCKTYPE(lock);
-  stream_message_list_node_t* first;
-  stream_message_list_node_t* last;
-  size_t count;
-} stream_msgqueue_t;
-
-stream_msgqueue_t* stream_msgqueue_create();
-void stream_msgqueue_destroy(stream_msgqueue_t* queue);
-void stream_msgqueue_enqueue(stream_msgqueue_t* queue, stream_message_t* message);
-stream_message_t* stream_msgqueue_dequeue(stream_msgqueue_t* queue);
-typedef struct {
-  PLATFORMLOCKTYPE(lock);
-  uint8_t is_working;
-  uint8_t purge_handlers;
-} stream_worker_status;
+  size_t size;
+  void (*cb)(void*, void*);
+} stream_read_payload_t;
 
 typedef struct stream_t stream_t;
 
@@ -119,14 +84,26 @@ typedef struct {
   stream_t* stream;
 } stream_notifier_t;
 
+typedef struct {
+  stream_t* stream;
+} stream_close_payload_t;
+
+typedef struct {
+  stream_t* stream;
+  void* data;
+} stream_write_payload_t;
+
+typedef struct {
+  stream_t* stream;
+  size_t size;
+  void* ctx;
+  void (*cb)(void*, void*);
+} stream_read_message_payload_t;
 
 #define STREAM_HANDLER_COUNT 16
 struct stream_t {
   refcounter_t refcounter;
   PLATFORMLOCKTYPE(lock);
-  priority_t priority;
-  stream_msgqueue_t* queue;
-  work_pool_t* pool;
   stream_type_e type;
   stream_force_e force;
   size_t next_handler_id;
@@ -138,6 +115,8 @@ struct stream_t {
   uint8_t is_deactivated;
   stream_t* pullable_stream;
   stream_notifier_t* pipe_notifiers;
+  scheduler_pool_t* pool;
+  actor_t actor;
   void (*on_data)(stream_t*, void*);
   void (*on_push)(stream_t*);
   void (*on_pull)(stream_t*);
@@ -150,7 +129,6 @@ struct stream_t {
   void (*on_pipe)(stream_t*, stream_t*);
   void (*on_piped)(stream_t*, stream_t*);
   void (*destructor)(stream_t*);
-  stream_worker_status worker_status;
 };
 
 
@@ -190,14 +168,10 @@ typedef struct {
   void* error;
 } writeable_push_stream_events_t;
 
-typedef struct {
-  size_t size;
-  void (*cb)(void*, void*);
-} read_payload;
-
-void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, priority_t* priority, uint8_t auto_push, work_pool_t* pool, void (*destructor)(stream_t*));
+void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, uint8_t auto_push, scheduler_pool_t* pool, void (*destructor)(stream_t*));
 void stream_deinit(stream_t* stream);
 void stream_destroy(stream_t* stream);
+void stream_dispatch(void* state, message_t* msg);
 void stream_deactivate(stream_t* stream, async_error_t* error);
 void stream_close(stream_t* stream);
 void stream_close_handler(stream_t* stream,  void (*on_close)(stream_t*));

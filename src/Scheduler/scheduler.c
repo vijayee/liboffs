@@ -116,7 +116,18 @@ static void* _scheduler_worker_loop(void* arg) {
     if (actor != NULL) {
       spin_count = 0;
       self->current = actor;
+      uint8_t flags = atomic_load(&actor->flags);
+      if (flags & ACTOR_FLAG_RUNNING) {
+        /* Another worker is already running this actor; re-queue it */
+        deque_push(&self->local_queue, (void*)actor);
+        continue;
+      }
+      if (!atomic_compare_exchange_strong(&actor->flags, &flags, flags | ACTOR_FLAG_RUNNING)) {
+        deque_push(&self->local_queue, (void*)actor);
+        continue;
+      }
       bool has_more = actor_run(actor, ACTOR_BATCH_SIZE);
+      atomic_fetch_and(&actor->flags, ~ACTOR_FLAG_RUNNING);
       self->current = NULL;
       if (has_more) {
         deque_push(&self->local_queue, (void*)actor);

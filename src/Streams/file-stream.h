@@ -18,7 +18,7 @@ typedef struct {
   int32_t file_size;
   int32_t cursor;
 } readable_push_file_stream_t;
-readable_push_file_stream_t* readable_push_file_stream_create(priority_t* priority, work_pool_t* pool, char* filename, size_t chunk_size, int* error_code);
+readable_push_file_stream_t* readable_push_file_stream_create(scheduler_pool_t* pool, char* filename, size_t chunk_size, int* error_code);
 void readable_push_file_stream_destroy(readable_push_file_stream_t* stream);
 void readable_push_file_stream_push(readable_push_file_stream_t* stream);
 void readable_push_file_stream_close(readable_push_file_stream_t* stream);
@@ -30,7 +30,7 @@ typedef struct {
   int32_t cursor;
 } writeable_push_file_stream_t;
 
-writeable_push_file_stream_t* writeable_push_file_stream_create(priority_t* priority, work_pool_t* pool, char* filename);
+writeable_push_file_stream_t* writeable_push_file_stream_create(scheduler_pool_t* pool, char* filename);
 void writeable_push_file_stream_write(writeable_push_file_stream_t* stream, buffer_t* data);
 void writeable_push_file_stream_destroy(writeable_push_file_stream_t* stream);
 void writeable_push_file_stream_close(writeable_push_file_stream_t* stream);
@@ -45,7 +45,7 @@ typedef struct {
   int32_t cursor;
 } readable_pull_file_stream_t;
 
-readable_pull_file_stream_t* readable_pull_file_stream_create(priority_t* priority, work_pool_t* pool, char* filename, size_t chunk_size, int* error_code);
+readable_pull_file_stream_t* readable_pull_file_stream_create(scheduler_pool_t* pool, char* filename, size_t chunk_size, int* error_code);
 void readable_pull_file_stream_destroy(readable_pull_file_stream_t* stream);
 void readable_pull_file_stream_close(readable_pull_file_stream_t* stream);
 
@@ -57,7 +57,7 @@ typedef struct {
   int32_t cursor;
 } writeable_pull_file_stream_t;
 
-writeable_pull_file_stream_t* writeable_pull_file_stream_create(priority_t* priority, work_pool_t* pool, char* filename);
+writeable_pull_file_stream_t* writeable_pull_file_stream_create(scheduler_pool_t* pool, char* filename);
 void writeable_pull_file_stream_write(writeable_pull_file_stream_t* stream, buffer_t* data);
 void writeable_pull_file_stream_pull(writeable_pull_file_stream_t* stream);
 void writeable_pull_file_stream_destroy(writeable_pull_file_stream_t* stream);

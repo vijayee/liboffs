@@ -8,7 +8,7 @@
 
 void _readable_pull_file_stream_on_pull(readable_pull_file_stream_t* stream);
 
-readable_push_file_stream_t* readable_push_file_stream_create(priority_t* priority, work_pool_t* pool, char* filename, size_t chunk_size, int* error_code) {
+readable_push_file_stream_t* readable_push_file_stream_create(scheduler_pool_t* pool, char* filename, size_t chunk_size, int* error_code) {
   *error_code = 0;
   readable_push_file_stream_t* rs= get_clear_memory(sizeof(readable_push_file_stream_t));
 
@@ -24,7 +24,7 @@ readable_push_file_stream_t* readable_push_file_stream_create(priority_t* priori
   if (lseek(rs->fd, 0, SEEK_SET) < 0) {
     *error_code = -1;
   }
-  stream_init((stream_t*) rs, push, readable_stream, priority, 1, pool,
+  stream_init((stream_t*) rs, push, readable_stream, 1, pool,
               (void(*)(stream_t*))readable_push_file_stream_destroy);
   readable_stream_push_handler((stream_t*) rs, (void (*)(stream_t*))readable_push_file_stream_push);
   stream_close_handler((stream_t*) rs,(void(*)(stream_t*))readable_push_file_stream_close);
@@ -45,9 +45,7 @@ void readable_push_file_stream_destroy(readable_push_file_stream_t* stream) {
 }
 
 void readable_push_file_stream_push(readable_push_file_stream_t* stream) {
-  platform_lock(&stream->stream.lock);
   if (stream->stream.is_deactivated == 1) {
-    platform_unlock(&stream->stream.lock);
     stream_notify((stream_t*)stream, error_event, ERROR("Stream is already destroyed"));
   } else {
     int32_t diff = stream->file_size - stream->cursor;
@@ -61,7 +59,6 @@ void readable_push_file_stream_push(readable_push_file_stream_t* stream) {
     size_t bytes = read(stream->fd, buf, size);
     if (bytes != size) {
       free(buf);
-      platform_unlock(&stream->stream.lock);
       stream_notify((stream_t*)stream, error_event, ERROR("Invalid Read Size"));
       return;
     }
@@ -69,7 +66,6 @@ void readable_push_file_stream_push(readable_push_file_stream_t* stream) {
     buffer_t* buffer = buffer_create_from_existing_memory(buf, size);
 
     stream->cursor += size;
-    platform_unlock(&stream->stream.lock);
     stream_notify((stream_t*)stream, data_event, CONSUME(buffer, buffer_t));
     if (stream->file_size == stream->cursor) {
       stream_notify((stream_t*) stream, complete_event, NULL);
@@ -121,9 +117,9 @@ void readable_push_file_stream_close(readable_push_file_stream_t* stream) {
   }
 }
 
-writeable_push_file_stream_t* writeable_push_file_stream_create(priority_t* priority, work_pool_t* pool, char* filename) {
+writeable_push_file_stream_t* writeable_push_file_stream_create(scheduler_pool_t* pool, char* filename) {
   writeable_push_file_stream_t* ws = get_clear_memory(sizeof(writeable_push_file_stream_t));
-  stream_init((stream_t*) ws, push, writeable_stream, priority, 0, pool, (void(*)(stream_t*)) writeable_push_file_stream_destroy);
+  stream_init((stream_t*) ws, push, writeable_stream, 0, pool, (void(*)(stream_t*)) writeable_push_file_stream_destroy);
   writeable_stream_write_handler((stream_t*) ws, (void (*)(stream_t*, void*)) writeable_push_file_stream_write);
   stream_close_handler((stream_t*) ws, (void(*)(stream_t*))writeable_push_file_stream_close);
   ws->filename = strdup(filename);
@@ -167,7 +163,7 @@ void writeable_push_file_stream_close(writeable_push_file_stream_t* stream) {
   }
 }
 
-readable_pull_file_stream_t* readable_pull_file_stream_create(priority_t* priority, work_pool_t* pool, char* filename, size_t chunk_size, int* error_code) {
+readable_pull_file_stream_t* readable_pull_file_stream_create(scheduler_pool_t* pool, char* filename, size_t chunk_size, int* error_code) {
   *error_code = 0;
   readable_pull_file_stream_t* rs= get_clear_memory(sizeof(readable_pull_file_stream_t));
 
@@ -183,7 +179,7 @@ readable_pull_file_stream_t* readable_pull_file_stream_create(priority_t* priori
   if (lseek(rs->fd, 0, SEEK_SET) < 0) {
     *error_code = -1;
   }
-  stream_init((stream_t*) rs, pull, readable_stream, priority, 0, pool,
+  stream_init((stream_t*) rs, pull, readable_stream, 0, pool,
               (void(*)(stream_t*))readable_pull_file_stream_destroy);
   stream_close_handler((stream_t*) rs,(void(*)(stream_t*))readable_pull_file_stream_close);
   readable_stream_pull_handler((stream_t*)rs,(void(*)(stream_t*)) _readable_pull_file_stream_on_pull);
@@ -252,9 +248,9 @@ void readable_pull_file_stream_close(readable_pull_file_stream_t* stream) {
   }
 }
 
-writeable_pull_file_stream_t* writeable_pull_file_stream_create(priority_t* priority, work_pool_t* pool, char* filename) {
+writeable_pull_file_stream_t* writeable_pull_file_stream_create(scheduler_pool_t* pool, char* filename) {
   writeable_pull_file_stream_t* ws = get_clear_memory(sizeof(writeable_pull_file_stream_t));
-  stream_init((stream_t*) ws, pull, writeable_stream, priority, 0, pool, (void(*)(stream_t*)) writeable_pull_file_stream_destroy);
+  stream_init((stream_t*) ws, pull, writeable_stream, 0, pool, (void(*)(stream_t*)) writeable_pull_file_stream_destroy);
   writeable_stream_write_handler((stream_t*) ws, (void (*)(stream_t*, void*)) writeable_pull_file_stream_write);
   stream_close_handler((stream_t*) ws, (void(*)(stream_t*))writeable_pull_file_stream_close);
   ws->filename = strdup(filename);
