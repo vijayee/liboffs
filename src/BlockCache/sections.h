@@ -9,7 +9,6 @@
 #include "../Buffer/buffer.h"
 #include "section.h"
 #include "../Timer/timer_actor.h"
-#include "../Util/threadding.h"
 #include <cbor.h>
 typedef struct sections_lru_node_t sections_lru_node_t;
 struct sections_lru_node_t {
@@ -42,7 +41,6 @@ struct round_robin_node_t {
 };
 
 typedef struct {
-  PLATFORMLOCKTYPE(lock);
   timer_actor_t* timer_actor;
   uint64_t timer_id;
   actor_t* save_target;
@@ -63,19 +61,58 @@ uint8_t round_robin_contains(round_robin_t* robin, size_t id);
 cbor_item_t* round_robin_to_cbor(round_robin_t* robin);
 round_robin_t* cbor_to_round_robin(cbor_item_t* cbor, char* robin_path, timer_actor_t* timer_actor, actor_t* save_target, uint64_t wait, uint64_t max_wait);
 
+/* Payload for SECTIONS_WRITE message.
+   When reply_to is NULL (sync), result/section_id/section_index are filled
+   by dispatch. When reply_to is set (async), a SECTIONS_WRITE_COMPLETE is
+   sent back. */
 typedef struct {
-  section_t* section;
-  uint8_t count;
-} checkout_t;
-typedef HASHMAP(size_t, checkout_t) section_checkout_t;
+  buffer_t* data;
+  actor_t* reply_to;
+  int result;
+  size_t section_id;
+  size_t section_index;
+} sections_write_payload_t;
+
+/* Payload for SECTIONS_READ message.
+   When reply_to is NULL (sync), result is filled by dispatch.
+   When reply_to is set (async), a SECTIONS_READ_COMPLETE is sent back. */
 typedef struct {
-  PLATFORMLOCKTYPE(lock);
+  size_t section_id;
+  size_t section_index;
+  actor_t* reply_to;
+  buffer_t* result;
+} sections_read_payload_t;
+
+/* Payload for SECTIONS_DEALLOCATE message.
+   When reply_to is NULL (sync), result is filled by dispatch.
+   When reply_to is set (async), a SECTIONS_DEALLOCATE_COMPLETE is sent back. */
+typedef struct {
+  size_t section_id;
+  size_t section_index;
+  actor_t* reply_to;
+  int result;
+} sections_deallocate_payload_t;
+
+/* Completion result for SECTIONS_WRITE_COMPLETE */
+typedef struct {
+  int result;
+  size_t section_id;
+  size_t section_index;
+} sections_write_result_t;
+
+/* Completion result for SECTIONS_READ_COMPLETE */
+typedef struct {
+  buffer_t* data;
+} sections_read_result_t;
+
+/* Completion result for SECTIONS_DEALLOCATE_COMPLETE */
+typedef struct {
+  int result;
+} sections_deallocate_result_t;
+
+typedef struct {
   sections_lru_cache_t* lru;
   round_robin_t* robin;
-  struct {
-    PLATFORMLOCKTYPE(lock);
-    section_checkout_t sections;
-  } checkout;
   size_t max_tuple_size;
   size_t next_id;
   size_t size;
@@ -94,4 +131,5 @@ void sections_destroy(sections_t* sections);
 int sections_write(sections_t* sections, buffer_t* data, size_t* section_id, size_t* section_index);
 buffer_t* sections_read(sections_t* sections, size_t section_id, size_t section_index);
 int sections_deallocate(sections_t* sections, size_t section_id, size_t section_index);
+void sections_dispatch(void* state, message_t* msg);
 #endif //OFFS_SECTIONS_H

@@ -8,24 +8,23 @@
 #include "../Util/log.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/get_dir.h"
+#include "../Actor/actor.h"
 #include "../Actor/message.h"
 #include "block.h"
+#include <stdatomic.h>
 #ifdef _WIN32
 #include <io.h>
 #define F_OK 0
 #define access _access
 #else
 #include <unistd.h>
+#include <sched.h>
 #endif
-
 
 void sections_lru_cache_move(sections_lru_cache_t* lru, sections_lru_node_t* node);
 void round_robin_save(void* ctx);
 void sections_full(sections_t* sections, size_t section_id);
-size_t sections_get_next_id(sections_t* sections);
 void sections_free(sections_t* sections, size_t section_id);
-section_t* sections_checkout(sections_t* sections, size_t section_id);
-void sections_checkin(sections_t* sections, section_t* section);
 void sections_dispatch(void* state, message_t* msg);
 static void section_on_dirty(void* context, section_t* section);
 
@@ -62,8 +61,8 @@ section_t* sections_lru_cache_get(sections_lru_cache_t* lru, size_t section_id) 
 void sections_lru_cache_delete(sections_lru_cache_t* lru, size_t section_id) {
   sections_lru_node_t* node = hashmap_get(&lru->cache, &section_id);
   if (node != NULL) {
-    if (node->previous == NULL) { // Node is the _start of the list
-      if (node->next == NULL) {// List has only one node
+    if (node->previous == NULL) {
+      if (node->next == NULL) {
         if (lru->first != NULL) {
           lru->first = NULL;
         }
@@ -77,11 +76,11 @@ void sections_lru_cache_delete(sections_lru_cache_t* lru, size_t section_id) {
         }
         lru->first = node->next;
       }
-    } else {//Node is not at the start
+    } else {
       sections_lru_node_t* previous_node = node->previous;
-      if (node->next == NULL) { // Node is the end of the list
+      if (node->next == NULL) {
         previous_node->next = NULL;
-      } else { // Node is in the middle of the list
+      } else {
         sections_lru_node_t* next_node = node->next;
         next_node->previous = node->previous;
         previous_node->next = node->next;
@@ -98,18 +97,16 @@ void sections_lru_cache_put(sections_lru_cache_t* lru, section_t* section) {
     return;
   }
   sections_lru_node_t* node = hashmap_get(&lru->cache, &section->id);
-  // Add a new node if none exists already
   if (node == NULL) {
     node = get_clear_memory(sizeof(sections_lru_node_t));
     node->previous = NULL;
     node->next = NULL;
     node->value = refcounter_reference((refcounter_t*) section);
   }
-  // Cache Ejection
   if (hashmap_size(&lru->cache) == lru->size) {
     if (lru->last != NULL) {
       sections_lru_node_t* last_node = lru->last;
-      if(last_node->previous == NULL) { // We are at the end and its equal to the start
+      if(last_node->previous == NULL) {
         lru->last = NULL;
         if (lru->first != NULL) {
           lru->first = NULL;
@@ -136,65 +133,176 @@ uint8_t sections_lru_cache_contains(sections_lru_cache_t* lru, size_t section_id
 }
 
 void sections_lru_cache_move(sections_lru_cache_t* lru, sections_lru_node_t* node) {
-   if (lru->first == NULL) {
+  if (lru->first == NULL) {
     lru->first = node;
     lru->last = node;
-   } else {
-     if (lru->first == node) { //id is already most recently used
-       return;
-     }
-     if (lru->first == lru->last) { //cache has one node
-       node->next = lru->first;
-       sections_lru_node_t* first_node = lru->first;
-       first_node->previous = node;
-       lru->last = first_node;
-       lru->first = node;
-     } else if (lru->last == node) { // section is the lru
-       lru->last = node->previous;
-       sections_lru_node_t* last_node = lru->last;
-       last_node->next = NULL;
-       node->next = lru->first;
-       node->previous = NULL;
-       sections_lru_node_t* first_node  = lru->first;
-       first_node->previous = node;
-       lru->first = node;
-     } else { // section is somewhere in the middle;
-       if ((node->next == NULL) && (node->previous == NULL)) {
-         sections_lru_node_t* first_node = lru->first;
-         first_node->previous = node;
-         node->next = first_node;
-         lru->first = node;
-       } else {
-         sections_lru_node_t* next_node = node->next;
-         if (node->previous != NULL) {
-           sections_lru_node_t* previous_node = node->previous;
-           previous_node->next = next_node;
-         }
-         if (node->next != NULL) {
-           next_node->previous = node->previous;
-         }
-         sections_lru_node_t* first_node = lru->first;
-         first_node->previous = node;
-         node->next = first_node;
-         lru->first = node;
-       }
-     }
-   }
+  } else {
+    if (lru->first == node) {
+      return;
+    }
+    if (lru->first == lru->last) {
+      node->next = lru->first;
+      sections_lru_node_t* first_node = lru->first;
+      first_node->previous = node;
+      lru->last = first_node;
+      lru->first = node;
+    } else if (lru->last == node) {
+      lru->last = node->previous;
+      sections_lru_node_t* last_node = lru->last;
+      last_node->next = NULL;
+      node->next = lru->first;
+      node->previous = NULL;
+      sections_lru_node_t* first_node = lru->first;
+      first_node->previous = node;
+      lru->first = node;
+    } else {
+      if ((node->next == NULL) && (node->previous == NULL)) {
+        sections_lru_node_t* first_node = lru->first;
+        first_node->previous = node;
+        node->next = first_node;
+        lru->first = node;
+      } else {
+        sections_lru_node_t* next_node = node->next;
+        if (node->previous != NULL) {
+          sections_lru_node_t* previous_node = node->previous;
+          previous_node->next = next_node;
+        }
+        if (node->next != NULL) {
+          next_node->previous = node->previous;
+        }
+        sections_lru_node_t* first_node = lru->first;
+        first_node->previous = node;
+        node->next = first_node;
+        lru->first = node;
+      }
+    }
+  }
 }
 
+/* ---- section async payload destroy helpers ---- */
 
-static void section_on_dirty(void* context, section_t* section);
+static void sections_read_result_destroy(void* ptr) {
+  sections_read_result_t* result = (sections_read_result_t*)ptr;
+  if (result->data != NULL) {
+    buffer_destroy(result->data);
+  }
+  free(result);
+}
+
+/* ---- sections dispatch ---- */
 
 void sections_dispatch(void* state, message_t* msg) {
   sections_t* sections = (sections_t*)state;
   switch (msg->type) {
+    case SECTIONS_WRITE: {
+      sections_write_payload_t* p = (sections_write_payload_t*)msg->payload;
+      p->result = -1;
+      p->section_id = 0;
+      p->section_index = 0;
+      uint8_t tries = 0;
+      do {
+        p->section_id = round_robin_next(sections->robin);
+        section_t* section = sections_lru_cache_get(sections->lru, p->section_id);
+        if (section == NULL) {
+          section = section_create(sections->data_path, sections->meta_path,
+                                   sections->size, p->section_id, sections->type);
+          section->on_dirty = section_on_dirty;
+          section->on_dirty_context = sections;
+          refcounter_yield((refcounter_t*) section);
+          sections_lru_cache_put(sections->lru, section);
+          if (section_full(section) == 0) {
+            round_robin_add(sections->robin, p->section_id);
+          }
+        }
+        uint8_t full;
+        p->result = section_write(section, p->data, &p->section_index, &full);
+        if ((p->result == 2) || full) {
+          sections_full(sections, p->section_id);
+        }
+        tries++;
+      } while ((p->result == 2) && (tries < sections->max_tuple_size));
+      if (p->reply_to != NULL) {
+        sections_write_result_t* result = get_clear_memory(sizeof(sections_write_result_t));
+        result->result = p->result;
+        result->section_id = p->section_id;
+        result->section_index = p->section_index;
+        message_t reply;
+        reply.type = SECTIONS_WRITE_COMPLETE;
+        reply.payload = result;
+        reply.payload_destroy = free;
+        actor_send(p->reply_to, &reply);
+      }
+      break;
+    }
+    case SECTIONS_READ: {
+      sections_read_payload_t* p = (sections_read_payload_t*)msg->payload;
+      p->result = NULL;
+      section_t* section = sections_lru_cache_get(sections->lru, p->section_id);
+      if (section == NULL) {
+        section = section_create(sections->data_path, sections->meta_path,
+                                 sections->size, p->section_id, sections->type);
+        section->on_dirty = section_on_dirty;
+        section->on_dirty_context = sections;
+        refcounter_yield((refcounter_t*) section);
+        sections_lru_cache_put(sections->lru, section);
+        if (section_full(section) == 0) {
+          round_robin_add(sections->robin, p->section_id);
+        }
+      }
+      p->result = section_read(section, p->section_index);
+      if (p->reply_to != NULL) {
+        sections_read_result_t* result = get_clear_memory(sizeof(sections_read_result_t));
+        result->data = p->result;
+        message_t reply;
+        reply.type = SECTIONS_READ_COMPLETE;
+        reply.payload = result;
+        reply.payload_destroy = sections_read_result_destroy;
+        actor_send(p->reply_to, &reply);
+      }
+      break;
+    }
+    case SECTIONS_DEALLOCATE: {
+      sections_deallocate_payload_t* p = (sections_deallocate_payload_t*)msg->payload;
+      p->result = -1;
+      section_t* section = sections_lru_cache_get(sections->lru, p->section_id);
+      if (section == NULL) {
+        section = section_create(sections->data_path, sections->meta_path,
+                                 sections->size, p->section_id, sections->type);
+        section->on_dirty = section_on_dirty;
+        section->on_dirty_context = sections;
+        refcounter_yield((refcounter_t*) section);
+        sections_lru_cache_put(sections->lru, section);
+        if (section_full(section) == 0) {
+          round_robin_add(sections->robin, p->section_id);
+        }
+      }
+      p->result = section_deallocate(section, p->section_index);
+      if (p->result == 0) {
+        sections_free(sections, p->section_id);
+      }
+      if (p->reply_to != NULL) {
+        sections_deallocate_result_t* result = get_clear_memory(sizeof(sections_deallocate_result_t));
+        result->result = p->result;
+        message_t reply;
+        reply.type = SECTIONS_DEALLOCATE_COMPLETE;
+        reply.payload = result;
+        reply.payload_destroy = free;
+        actor_send(p->reply_to, &reply);
+      }
+      break;
+    }
+    case SECTIONS_SECTION_FULL: {
+      /* A section reported it is full. Remove from round robin and create
+         replacement sections to maintain the pool. Payload is section_id. */
+      size_t section_id = (size_t)(uintptr_t)msg->payload;
+      sections_full(sections, section_id);
+      break;
+    }
     case SECTION_SAVE_META: {
-      /* Debounced save: save the round robin metadata */
       round_robin_save(sections->robin);
       break;
     }
     case SECTION_WRITE_META: {
-      /* Debounced save: flush any dirty sections in the LRU cache */
       sections_lru_node_t* node;
       hashmap_foreach_data(node, &sections->lru->cache) {
         if (atomic_load(&node->value->dirty)) {
@@ -204,26 +312,36 @@ void sections_dispatch(void* state, message_t* msg) {
       }
       break;
     }
-    case SECTION_WRITE_COMPLETE: {
-      /* Section actor completed a write. Payload is section_write_result_t.
-         Reserved for fully-async sections_write flow. */
+    case SECTION_WRITE_COMPLETE:
+    case SECTION_READ_COMPLETE:
+    case SECTION_DEALLOCATE_COMPLETE:
+      /* Reserved for fully-async block_cache flow. */
       break;
-    }
-    case SECTION_READ_COMPLETE: {
-      /* Section actor completed a read. Payload is section_read_result_t.
-         Reserved for fully-async sections_read flow. */
-      break;
-    }
-    case SECTION_DEALLOCATE_COMPLETE: {
-      /* Section actor completed a deallocate. Payload is section_deallocate_result_t.
-         Reserved for fully-async sections_deallocate flow. */
-      break;
-    }
     default:
       break;
   }
-  if (msg->payload_destroy != NULL) {
-    msg->payload_destroy(msg->payload);
+}
+
+/* Sync helper: run the sections actor until our message is processed.
+   Uses ACTOR_FLAG_RUNNING to prevent concurrent actor_run calls. */
+static void _sections_run_until_done(sections_t* sections) {
+  while (true) {
+    uint8_t flags = atomic_load(&sections->actor.flags);
+    if (flags & ACTOR_FLAG_RUNNING) {
+      sched_yield();
+      continue;
+    }
+    if (!atomic_compare_exchange_strong(&sections->actor.flags, &flags,
+                                        flags | ACTOR_FLAG_RUNNING)) {
+      sched_yield();
+      continue;
+    }
+    bool has_more = true;
+    while (has_more) {
+      has_more = actor_run(&sections->actor, ACTOR_BATCH_SIZE);
+    }
+    atomic_fetch_and(&sections->actor.flags, ~ACTOR_FLAG_RUNNING);
+    break;
   }
 }
 
@@ -235,15 +353,15 @@ static void section_on_dirty(void* context, section_t* section) {
                          sections->wait, sections->max_wait,
                          &sections->actor, SECTION_WRITE_META);
   } else {
-    /* No timer actor available — save immediately */
     section_save_meta(section);
     atomic_store(&section->dirty, 0);
   }
 }
 
+/* ---- round_robin (lock-free, only called from sections_dispatch) ---- */
+
 round_robin_t* round_robin_create(char* robin_path, timer_actor_t* timer_actor, actor_t* save_target, uint64_t wait, uint64_t max_wait) {
   round_robin_t* robin = get_clear_memory(sizeof(round_robin_t));
-  platform_lock_init(&robin->lock);
   robin->timer_actor = timer_actor;
   robin->timer_id = 0;
   robin->save_target = save_target;
@@ -256,7 +374,6 @@ round_robin_t* round_robin_create(char* robin_path, timer_actor_t* timer_actor, 
 void round_robin_destroy(round_robin_t* robin) {
   round_robin_save(robin);
   free(robin->path);
-  platform_lock_destroy(&robin->lock);
   round_robin_node_t* current = robin->first;
   while (current != NULL) {
     round_robin_node_t* next = current->next;
@@ -271,33 +388,27 @@ void round_robin_add(round_robin_t* robin, size_t id) {
   node->id = id;
   node->previous = NULL;
   node->next = NULL;
-  platform_lock(&robin->lock);
   if ((robin->last == NULL) && (robin->first == NULL)) {
     robin->first = node;
     robin->last = node;
   } else {
     node->previous = robin->last;
-    robin->last->next= node;
+    robin->last->next = node;
     robin->last = node;
   }
-  if (robin->timer_actor != NULL) {
+  if (robin->timer_actor != NULL && robin->save_target != NULL) {
     timer_actor_debounce(robin->timer_actor, robin->timer_id, robin->wait, robin->max_wait, robin->save_target, SECTION_SAVE_META);
   }
   robin->size++;
-  platform_unlock(&robin->lock);
 }
 
-size_t round_robin_next(round_robin_t* robin){
-  platform_lock(&robin->lock);
-  if ((robin->last == NULL) && (robin->first == NULL)) { // No nodes
-    platform_unlock(&robin->lock);
+size_t round_robin_next(round_robin_t* robin) {
+  if ((robin->last == NULL) && (robin->first == NULL)) {
     return 0;
   } else {
     round_robin_node_t* node = robin->first;
-    if (robin->last == node) { // One node
-      size_t id = node->id;
-      platform_unlock(&robin->lock);
-      return id;
+    if (robin->last == node) {
+      return node->id;
     } else {
       robin->first = node->next;
       if (node->next != NULL) {
@@ -306,18 +417,15 @@ size_t round_robin_next(round_robin_t* robin){
       }
       size_t id = node->id;
       node->previous = robin->last;
-      robin->last->next= node;
+      robin->last->next = node;
       robin->last = node;
-      platform_unlock(&robin->lock);
       return id;
     }
   }
 }
 
-void round_robin_remove(round_robin_t* robin, size_t id){
-  platform_lock(&robin->lock);
+void round_robin_remove(round_robin_t* robin, size_t id) {
   if ((robin->last == NULL) && (robin->first == NULL)) {
-    platform_unlock(&robin->lock);
     return;
   }
   round_robin_node_t* current = robin->first;
@@ -336,49 +444,43 @@ void round_robin_remove(round_robin_t* robin, size_t id){
         current->next->previous = current->previous;
       }
       free(current);
-      if (robin->timer_actor != NULL) {
+      if (robin->timer_actor != NULL && robin->save_target != NULL) {
         timer_actor_debounce(robin->timer_actor, robin->timer_id, robin->wait, robin->max_wait, robin->save_target, SECTION_SAVE_META);
       }
       robin->size--;
-      platform_unlock(&robin->lock);
       return;
     } else {
       current = current->next;
     }
   }
-  platform_unlock(&robin->lock);
 }
 
 uint8_t round_robin_contains(round_robin_t* robin, size_t id) {
-  platform_lock(&robin->lock);
   if ((robin->last == NULL) && (robin->first == NULL)) {
-    platform_unlock(&robin->lock);
     return 0;
   }
   round_robin_node_t* current = robin->first;
   while (current != NULL) {
     if (current->id == id) {
-      platform_unlock(&robin->lock);
       return 1;
     } else {
       current = current->next;
     }
   }
-  platform_unlock(&robin->lock);
   return 0;
 }
 
 cbor_item_t* round_robin_to_cbor(round_robin_t* robin) {
-  cbor_item_t* array= cbor_new_definite_array(robin->size);
+  cbor_item_t* array = cbor_new_definite_array(robin->size);
   round_robin_node_t* current = robin->first;
   bool success = true;
   while (current != NULL) {
     success &= cbor_array_push(array, cbor_move(cbor_build_uint64(current->id)));
     current = current->next;
   }
-  if (!success){
-   cbor_decref(&array);
-   return NULL;
+  if (!success) {
+    cbor_decref(&array);
+    return NULL;
   } else {
     return array;
   }
@@ -392,16 +494,14 @@ round_robin_t* cbor_to_round_robin(cbor_item_t* cbor, char* robin_path, timer_ac
   size_t size = cbor_array_size(cbor);
   for(size_t i = 0; i < size; i++) {
     cbor_item_t* cbor_id = cbor_array_get(cbor, i);
-    round_robin_add(robin,cbor_get_uint64(cbor_id));
+    round_robin_add(robin, cbor_get_uint64(cbor_id));
   }
   return robin;
 }
 
 void round_robin_save(void* ctx) {
   round_robin_t* robin = (round_robin_t*) ctx;
-  platform_lock(&robin->lock);
   cbor_item_t* cbor = round_robin_to_cbor(robin);
-  platform_unlock(&robin->lock);
   if (cbor == NULL) {
     log_error("Failed to save robin file");
     return;
@@ -414,12 +514,14 @@ void round_robin_save(void* ctx) {
     log_error("Failed to save robin file");
     return;
   }
-  fwrite(cbor_data,cbor_size,1,robin_file);
+  fwrite(cbor_data, cbor_size, 1, robin_file);
   fflush(robin_file);
   fclose(robin_file);
   free(cbor_data);
   cbor_decref(&cbor);
 }
+
+/* ---- sections implementation ---- */
 
 sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t max_tuple_size, block_size_e type, timer_actor_t* timer_actor, size_t wait, size_t max_wait) {
   char* robin_folder = path_join(path, "robin");
@@ -434,28 +536,25 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
   sections->max_tuple_size = max_tuple_size;
   sections->size = size;
   actor_init(&sections->actor, sections, sections_dispatch);
-  platform_lock_init(&sections->lock);
-  platform_lock_init(&sections->checkout.lock);
-  hashmap_init(&sections->checkout.sections, (void*) hash_size_t, (void*) compare_size_t);
-  hashmap_set_key_alloc_funcs(&sections->checkout.sections, duplicate_size_t, (void*)free);
-  if (access(robin_path,F_OK) == 0) {
-    //Existing File
+  if (access(robin_path, F_OK) == 0) {
     FILE* robin_file = fopen(robin_path, "rb");
-    if(fseek(robin_file, 0,SEEK_END)) {
+    if(fseek(robin_file, 0, SEEK_END)) {
       log_error("Failed to Read Round Robin File Size");
       abort();
     }
-    int32_t size = ftell(robin_file);
+    long file_size = ftell(robin_file);
     rewind(robin_file);
-    uint8_t buffer[size];
-    int32_t read_size = fread(buffer, sizeof(uint8_t), size, robin_file);
+    uint8_t* buffer = get_memory((size_t)file_size);
+    size_t read_size = fread(buffer, sizeof(uint8_t), (size_t)file_size, robin_file);
     fclose(robin_file);
-    if (size != read_size) {
+    if ((size_t)file_size != read_size) {
       log_error("Failed to Read Round Robin File");
+      free(buffer);
       abort();
     }
     struct cbor_load_result result;
-    cbor_item_t* cbor = cbor_load(buffer, size, &result);
+    cbor_item_t* cbor = cbor_load(buffer, (size_t)file_size, &result);
+    free(buffer);
     if (result.error.code != CBOR_ERR_NONE) {
       log_error("Failed to Parse Round Robin File");
       abort();
@@ -465,6 +564,7 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
       abort();
     }
     sections->robin = cbor_to_round_robin(cbor, robin_path, timer_actor, &sections->actor, wait, max_wait);
+    cbor_decref(&cbor);
   } else {
     sections->robin = round_robin_create(robin_path, timer_actor, &sections->actor, wait, max_wait);
   }
@@ -485,7 +585,7 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
   vec_deinit(files);
   free(files);
   while (sections->robin->size < sections->max_tuple_size) {
-    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections_get_next_id(sections), sections->type);
+    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type);
     section->on_dirty = section_on_dirty;
     section->on_dirty_context = sections;
     refcounter_yield((refcounter_t*) section);
@@ -496,8 +596,6 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
 }
 
 void sections_destroy(sections_t* sections) {
-  platform_lock_destroy(&sections->checkout.lock);
-  hashmap_cleanup(&sections->checkout.sections);
   sections_lru_cache_destroy(sections->lru);
   round_robin_destroy(sections->robin);
   actor_destroy(&sections->actor);
@@ -507,97 +605,73 @@ void sections_destroy(sections_t* sections) {
   free(sections);
 }
 
+/* Sync wrapper: sends SECTIONS_WRITE message to the sections actor and
+   processes it inline. Returns the result through the output parameters. */
 int sections_write(sections_t* sections, buffer_t* data, size_t* section_id, size_t* section_index) {
-  section_t* section;
-  uint8_t full;
-  uint8_t tries = 0;
-  int result;
-  do {
-    *section_id = round_robin_next(sections->robin);
-    section = sections_checkout(sections, *section_id);
-    if (section == NULL) {
-      section = section_create(sections->data_path, sections->meta_path, sections->size,*section_id, sections->type);
-    }
-    result = section_write(section, data, section_index, &full);
+  sections_write_payload_t payload;
+  payload.data = data;
+  payload.reply_to = NULL;
+  payload.result = -1;
+  payload.section_id = 0;
+  payload.section_index = 0;
 
-    if ((result == 2) || full) {
-      sections_full(sections, *section_id);
-    }
-    tries++;
-    sections_checkin(sections, section);
-  } while((result == 2) && (tries < sections->max_tuple_size));
-  return result;
+  message_t msg;
+  msg.type = SECTIONS_WRITE;
+  msg.payload = &payload;
+  msg.payload_destroy = NULL;
+
+  actor_send(&sections->actor, &msg);
+  _sections_run_until_done(sections);
+
+  *section_id = payload.section_id;
+  *section_index = payload.section_index;
+  return payload.result;
 }
 
+/* Sync wrapper: sends SECTIONS_READ message to the sections actor and
+   processes it inline. Returns the read buffer or NULL on failure. */
 buffer_t* sections_read(sections_t* sections, size_t section_id, size_t section_index) {
-  section_t* section = sections_checkout(sections, section_id);
-  buffer_t* data = section_read(section, section_index);
-  sections_checkin(sections, section);
-  return data;
+  sections_read_payload_t payload;
+  payload.section_id = section_id;
+  payload.section_index = section_index;
+  payload.reply_to = NULL;
+  payload.result = NULL;
+
+  message_t msg;
+  msg.type = SECTIONS_READ;
+  msg.payload = &payload;
+  msg.payload_destroy = NULL;
+
+  actor_send(&sections->actor, &msg);
+  _sections_run_until_done(sections);
+
+  return payload.result;
 }
 
+/* Sync wrapper: sends SECTIONS_DEALLOCATE message to the sections actor and
+   processes it inline. Returns 0 on success, non-zero on failure. */
 int sections_deallocate(sections_t* sections, size_t section_id, size_t section_index) {
-  section_t* section = sections_checkout(sections, section_id);
-  int result = section_deallocate(section, section_index);
-  if(result == 0) {
-    sections_free(sections, section_id);
-  }
-  sections_checkin(sections, section);
-  return result;
-}
+  sections_deallocate_payload_t payload;
+  payload.section_id = section_id;
+  payload.section_index = section_index;
+  payload.reply_to = NULL;
+  payload.result = -1;
 
-section_t* sections_checkout(sections_t* sections, size_t section_id) {
-  section_t* section = sections_lru_cache_get(sections->lru, section_id);
-  if (section == NULL) {
-    section = section_create(sections->data_path, sections->meta_path, sections->size,section_id, sections->type);
-    section->on_dirty = section_on_dirty;
-    section->on_dirty_context = sections;
-    refcounter_yield((refcounter_t*) section);
-    if (section_full(section) == 0) {
-      round_robin_add(sections->robin, section_id);
-    }
-  }
-  platform_lock(&sections->checkout.lock);
-  checkout_t* checkout = hashmap_get(&sections->checkout.sections, &section_id);
-  if (checkout == NULL) {
-    checkout = get_clear_memory(sizeof(checkout_t));
-    checkout->section = (section_t*) refcounter_reference((refcounter_t*) section);
-    checkout->count = 1;
-    hashmap_put(&sections->checkout.sections, &section_id, checkout);
-  } else {
-    checkout->count++;
-  }
-  platform_unlock(&sections->checkout.lock);
-  return (section_t*) refcounter_reference((refcounter_t*)section);
-}
+  message_t msg;
+  msg.type = SECTIONS_DEALLOCATE;
+  msg.payload = &payload;
+  msg.payload_destroy = NULL;
 
-void sections_checkin(sections_t* sections, section_t* section) {
-  platform_lock(&sections->checkout.lock);
-  checkout_t* checkout = hashmap_get(&sections->checkout.sections, &section->id);
-  if (checkout != NULL) {
-    checkout->count--;
-    if (checkout->count == 0) {
-      hashmap_remove(&sections->checkout.sections, &section->id);
-      free(checkout);
-      section_destroy(section);
-    }
-  }
-  platform_unlock(&sections->checkout.lock);
-  section_destroy(section);
-}
+  actor_send(&sections->actor, &msg);
+  _sections_run_until_done(sections);
 
-size_t sections_get_next_id(sections_t* sections) {
-  size_t id;
-  platform_lock(&sections->lock);
-  id = sections->next_id++;
-  platform_unlock(&sections->lock);
-  return id;
+  return payload.result;
 }
 
 void sections_full(sections_t* sections, size_t section_id) {
   round_robin_remove(sections->robin, section_id);
   while (sections->robin->size < sections->max_tuple_size) {
-    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections_get_next_id(sections), sections->type);
+    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type);
     section->on_dirty = section_on_dirty;
     section->on_dirty_context = sections;
     refcounter_yield((refcounter_t*) section);
@@ -607,8 +681,7 @@ void sections_full(sections_t* sections, size_t section_id) {
 }
 
 void sections_free(sections_t* sections, size_t section_id) {
-  if(round_robin_contains(sections->robin, section_id) == 0) {
+  if (round_robin_contains(sections->robin, section_id) == 0) {
     round_robin_add(sections->robin, section_id);
   }
 }
-
