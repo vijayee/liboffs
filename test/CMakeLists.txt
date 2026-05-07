@@ -14,7 +14,9 @@ if (BUILD_TESTING)
             test_file_stream.cpp
             test_message_queue.cpp
             test_actor.cpp
-            test_pool.cpp)
+            test_pool.cpp
+            test_deque.cpp
+            test_scheduler.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
