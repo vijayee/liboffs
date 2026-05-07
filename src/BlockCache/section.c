@@ -239,24 +239,30 @@ int section_write(section_t* section, buffer_t* data, size_t* index, uint8_t* fu
 
 buffer_t* section_read(section_t* section, size_t index) {
   platform_lock(&section->lock);
-  if (section->fd == -1) {
+  /* If the section fd is already open, use it for reading. Otherwise open
+     a temporary read-only fd so we don't set section->fd to O_RDONLY which
+     would break subsequent writes. */
+  int read_fd = section->fd;
+  if (read_fd == -1) {
 #ifdef _WIN32
-    section->fd = _open(section->path, _O_RDWR | _O_BINARY | _O_CREAT, 0644);
+    read_fd = _open(section->path, _O_RDONLY | _O_BINARY, 0644);
 #else
-    section->fd = open(section->path, O_RDWR | O_CREAT, 0644);
+    read_fd = open(section->path, O_RDONLY, 0644);
 #endif
   }
-  if (section->fd < 0) {
+  if (read_fd < 0) {
     platform_unlock(&section->lock);
     return NULL;
   }
   size_t byte_offset = index * section->block_size;
-  if (lseek(section->fd, (off_t)byte_offset, SEEK_SET) != (off_t)byte_offset) {
+  if (lseek(read_fd, (off_t)byte_offset, SEEK_SET) != (off_t)byte_offset) {
+    if (read_fd != section->fd) close(read_fd);
     platform_unlock(&section->lock);
     return NULL;
   }
   uint8_t* data = get_memory(section->block_size);
-  ssize_t read_size = read(section->fd, data, section->block_size);
+  ssize_t read_size = read(read_fd, data, section->block_size);
+  if (read_fd != section->fd) close(read_fd);
   if (read_size < (ssize_t)section->block_size) {
     free(data);
     platform_unlock(&section->lock);
@@ -297,7 +303,10 @@ static void section_save_meta(section_t* section) {
     free(data);
     return;
   }
-  write(meta_fd, data, size);
+  ssize_t written = write(meta_fd, data, size);
+  if (written < (ssize_t)size) {
+    log_error("Failed to write section meta data");
+  }
   close(meta_fd);
   free(data);
 }
