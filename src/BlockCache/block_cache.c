@@ -187,7 +187,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
     case CACHE_PUT: {
       cache_put_payload_t* p = (cache_put_payload_t*)msg->payload;
       p->result = -1;
-      index_entry_t* entry = index_get(block_cache->index, p->block->hash);
+      index_entry_t* entry = index_peek(block_cache->index, p->block->hash);
       if (entry == NULL) {
         entry = index_entry_create(p->block->hash);
         int result = sections_write(block_cache->sections, p->block->data,
@@ -207,7 +207,9 @@ void block_cache_dispatch(void* state, message_t* msg) {
           p->result = 0;
         }
       } else {
-        /* Block already exists in index — nothing to do */
+        /* Block already exists — consume the yielded reference and release it */
+        refcounter_reference((refcounter_t*) p->block);
+        block_destroy(p->block);
         p->result = 0;
       }
       break;
@@ -215,8 +217,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
     case CACHE_GET: {
       cache_get_payload_t* p = (cache_get_payload_t*)msg->payload;
       p->result = NULL;
-      index_entry_t* entry = (index_entry_t*)refcounter_reference(
-          (refcounter_t*)index_get(block_cache->index, p->hash));
+      index_entry_t* entry = index_peek(block_cache->index, p->hash);
       if (entry == NULL) {
         /* Block not in index */
       } else {
@@ -226,6 +227,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
                                          entry->section_id, entry->section_index);
           if (data != NULL) {
             block = block_create_existing_data_hash(data, entry->hash);
+            buffer_destroy(data);
             if (block != NULL) {
               index_entry_t* ejection = (index_entry_t*)refcounter_reference(
                   (refcounter_t*)block_lru_cache_put(block_cache->lru, block, entry));
@@ -239,7 +241,6 @@ void block_cache_dispatch(void* state, message_t* msg) {
         } else {
           p->result = block;
         }
-        index_entry_destroy(entry);
       }
       break;
     }
