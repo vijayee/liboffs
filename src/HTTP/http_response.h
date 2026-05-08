@@ -30,4 +30,8 @@ void http_response_set_header(http_response_t* response, const char* name, const
 void http_response_write(http_response_t* response, const char* data, size_t length);
 void http_response_end(http_response_t* response);
 
+void http_response_pipe(http_response_t* response, stream_t* source);
+
+const char* mime_type_from_extension(const char* filename);
+
 #endif // OFFS_HTTP_RESPONSE_H

@@ -4,6 +4,7 @@
 #include "http_response.h"
 #include "http_connection.h"
 #include "../Util/allocator.h"
+#include "../Buffer/buffer.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -101,4 +102,71 @@ void http_response_end(http_response_t* response) {
   }
   _send_headers(response);
   http_connection_close(response->connection);
+}
+
+static void _pipe_on_data(void* ctx, void* chunk) {
+    http_response_t* response = (http_response_t*)ctx;
+    buffer_t* buf = (buffer_t*)chunk;
+    http_response_write(response, (const char*)buf->data, buf->size);
+}
+
+static void _pipe_on_close(void* ctx, void* unused) {
+    (void)unused;
+    http_response_t* response = (http_response_t*)ctx;
+    http_response_end(response);
+}
+
+static void _pipe_on_error(void* ctx, async_error_t* error) {
+    (void)error;
+    http_response_t* response = (http_response_t*)ctx;
+    http_response_set_status(response, 500);
+    http_response_end(response);
+}
+
+void http_response_pipe(http_response_t* response, stream_t* source) {
+    if (!response || !source) return;
+    stream_subscribe(source, data_event, response,
+                     (void(*)(void*, void*))_pipe_on_data, NULL);
+    stream_once(source, close_event, response,
+                (void(*)(void*, void*))_pipe_on_close, NULL);
+    stream_once(source, error_event, response,
+                (void(*)(void*, void*))_pipe_on_error, NULL);
+}
+
+static const char* _mime_map[][2] = {
+    {"html", "text/html"},
+    {"htm", "text/html"},
+    {"css", "text/css"},
+    {"js", "application/javascript"},
+    {"json", "application/json"},
+    {"png", "image/png"},
+    {"jpg", "image/jpeg"},
+    {"jpeg", "image/jpeg"},
+    {"gif", "image/gif"},
+    {"svg", "image/svg+xml"},
+    {"ico", "image/x-icon"},
+    {"webp", "image/webp"},
+    {"woff", "font/woff"},
+    {"woff2", "font/woff2"},
+    {"ttf", "font/ttf"},
+    {"otf", "font/otf"},
+    {"pdf", "application/pdf"},
+    {"txt", "text/plain"},
+    {"xml", "application/xml"},
+    {"md", "text/markdown"},
+    {"ofd", "application/cbor"},
+    {NULL, NULL}
+};
+
+const char* mime_type_from_extension(const char* filename) {
+    if (!filename) return "application/octet-stream";
+    const char* dot = strrchr(filename, '.');
+    if (!dot || dot == filename) return "application/octet-stream";
+    const char* ext = dot + 1;
+    for (int i = 0; _mime_map[i][0] != NULL; i++) {
+        if (strcasecmp(ext, _mime_map[i][0]) == 0) {
+            return _mime_map[i][1];
+        }
+    }
+    return "application/octet-stream";
 }
