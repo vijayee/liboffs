@@ -5,7 +5,7 @@
 #include "../Buffer/buffer.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
-#include "../Workers/error.h"
+#include "../Util/error.h"
 #include "../RefCounter/refcounter.h"
 #include <string.h>
 

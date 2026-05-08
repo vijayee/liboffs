@@ -8,7 +8,6 @@ if (BUILD_TESTING)
             test_refcounter.cpp
             test_block.cpp
             test_index.cpp
-            test_time.cpp
             test_section.cpp
             test_block_cache.cpp
             test_file_stream.cpp

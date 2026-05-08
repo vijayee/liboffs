@@ -5,7 +5,7 @@ extern "C" {
 #include "../src/Streams/stream.h"
 #include "../src/Streams/file-stream.h"
 #include "../src/Scheduler/scheduler.h"
-#include "../src/Workers/error.h"
+#include "../src/Util/error.h"
 }
 
 namespace StreamActorTests {

@@ -2,7 +2,7 @@
 // Created by victor on 4/7/25.
 //
 #include "error.h"
-#include "../Util/allocator.h"
+#include "allocator.h"
 #include <string.h>
 
 async_error_t* error_create(char* message, char* file, char* function, int line) {

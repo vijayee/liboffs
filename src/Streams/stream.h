@@ -7,7 +7,7 @@
 #include "../RefCounter/refcounter.h"
 #include "../Actor/actor.h"
 #include "../Scheduler/scheduler.h"
-#include "../Workers/error.h"
+#include "../Util/error.h"
 
 typedef enum {
   readable_stream = 0,

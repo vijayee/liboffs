@@ -1,6 +1,6 @@
 #include "file-stream.h"
 #include "../Util/allocator.h"
-#include "../Workers/error.h"
+#include "../Util/error.h"
 #include "../Buffer/buffer.h"
 #include <fcntl.h>
 #include <unistd.h>

@@ -2,70 +2,14 @@ cmake_minimum_required(VERSION 3.22)
 project(offs C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
-set(C_SRC ""
-        src/BlockCache/frand.c
-        src/Util/allocator.c
-        src/Util/log.h
-        src/BlockCache/block.h
-        src/BlockCache/block.h
-        src/BlockCache/block.h
-        src/Workers/promise.h
-        src/Workers/priority.h
-        src/Workers/priority.c
-        src/Workers/work.c
-        src/Workers/queue.h
-        src/Workers/queue.h
-        src/Workers/queue.c
-        src/Workers/pool.h
-        src/Workers/pool.c
-        src/BlockCache/fibonacci.h
-        src/BlockCache/fibonacci.c
-        src/BlockCache/index.h
-        src/BlockCache/index.c
-        src/Util/hash.h
-        src/Util/hash.c
-        src/Util/vec.h
-        src/Util/vec.c
-        src/BlockCache/wal.h
-        src/Util/mkdir_p.c
-        src/Util/mkdir_p.h
-        src/BlockCache/wal.c
-        src/BlockCache/wal.c
-        src/Util/path_join.h
-        src/Util/path_join.c
-        src/Util/get_dir.h
-        src/Util/get_dir.c
-        src/Util/get_dir.c
-        src/Time/ticker.h
-        src/Time/ticker.c
-        src/Time/wheel.h
-        src/Time/wheel.c
-        src/Time/debouncer.h
-        src/Time/debouncer.c
-        src/BlockCache/section.h
-        src/BlockCache/section.c
-        src/BlockCache/section.h
-        src/Util/rm_rf.h
-        src/Util/rm_rf.c
-        src/Util/lru.h
-        src/BlockCache/sections.h
-        src/BlockCache/sections.h
-        src/BlockCache/sections.c
-        src/BlockCache/block_cache.h
-        src/BlockCache/block_cache.c
-        src/Configuration/config.h
-        src/Configuration/config.c
-        src/Streams/stream.h
-        src/Streams/stream.c
-        src/Streams/file-stream.h
-        src/Streams/file-stream.c)
+
 set(blake3_SOURCE_DIR deps/BLAKE3)
 set(xxHash_SOURCE_DIR deps/xxHash)
 set(hashmap_SOURCE_DIR deps/hashmap)
 set(cbor_ROOT_DIR ${CMAKE_BINARY_DIR}/deps/libcbor)
-set(C_INC "")
-file(GLOB_RECURSE C_SRC "src/*/*.c" )
-file(GLOB_RECURSE C_INC "/src/*/*.h")
+
+file(GLOB_RECURSE C_SRC "src/*/*.c")
+file(GLOB_RECURSE C_INC "src/*/*.h")
 
 include(CTest)
 add_subdirectory(deps)
@@ -111,21 +55,12 @@ target_include_directories(offs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../poll-danc
 target_include_directories(offs PUBLIC ${LIBCBOR_BUILD_PATH}/include)
 target_link_libraries(offs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../poll-dancer/build/libpoll_dancer.a)
 target_link_libraries(offs PRIVATE http-parser)
-#target_link_libraries(offs PUBLIC ${hashmap_SOURCE_DIR}/libhashmap)
-
-#target_include_directories(offs PUBLIC ${BLAKE3_INC})
-#target_link_libraries(offs ${BLAKE3_SRC})
-
 
 find_package(OpenSSL REQUIRED)
 if(OPENSSL_FOUND)
     include_directories(${OPENSSL_INCLUDE_DIR})
-    # Link against the OpenSSL libraries
     target_link_libraries(offs PRIVATE ${OPENSSL_LIBRARIES})
 else()
     message(FATAL_ERROR "OpenSSL not found.")
 endif()
 add_subdirectory(test)
-
-
-
