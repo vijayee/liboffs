@@ -25,6 +25,8 @@ typedef struct http_server_t {
   vec_route_t routes;
   SSL_CTX* ssl_ctx;
   scheduler_pool_t* pool;
+  size_t max_connections;
+  _Atomic size_t active_connections;
 } http_server_t;
 
 http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint16_t port);
@@ -38,8 +40,14 @@ void http_server_put(http_server_t* server, const char* pattern, http_handler_t 
 void http_server_post(http_server_t* server, const char* pattern, http_handler_t handler, void* user_data);
 void http_server_delete(http_server_t* server, const char* pattern, http_handler_t handler, void* user_data);
 
+void http_server_get_with_data(http_server_t* server, const char* pattern, http_handler_t handler, void* user_data, void (*user_data_destroy)(void*));
+void http_server_put_with_data(http_server_t* server, const char* pattern, http_handler_t handler, void* user_data, void (*user_data_destroy)(void*));
+void http_server_post_with_data(http_server_t* server, const char* pattern, http_handler_t handler, void* user_data, void (*user_data_destroy)(void*));
+void http_server_delete_with_data(http_server_t* server, const char* pattern, http_handler_t handler, void* user_data, void (*user_data_destroy)(void*));
+
 void http_server_listen(http_server_t* server);
 void http_server_stop(http_server_t* server);
+void http_server_set_max_connections(http_server_t* server, size_t max_connections);
 
 void http_server_dispatch(http_server_t* server, http_request_t* request, http_response_t* response);
 

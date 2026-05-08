@@ -30,6 +30,8 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
   server->running = 0;
   server->listen_fd = -1;
   server->listen_watcher = NULL;
+  server->max_connections = 0;
+  atomic_store(&server->active_connections, 0);
 
   server->listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (server->listen_fd < 0) {
@@ -129,6 +131,7 @@ void http_server_destroy(http_server_t* server) {
   if (server->ssl_ctx != NULL) {
     SSL_CTX_free(server->ssl_ctx);
   }
+  actor_destroy(&server->actor);
   pd_loop_destroy(server->loop);
   free(server);
 }
@@ -158,6 +161,22 @@ void http_server_post(http_server_t* server, const char* pattern, http_handler_t
 
 void http_server_delete(http_server_t* server, const char* pattern, http_handler_t handler, void* user_data) {
   _add_route(server, HTTP_DELETE, pattern, handler, user_data, NULL);
+}
+
+void http_server_get_with_data(http_server_t* server, const char* pattern, http_handler_t handler, void* user_data, void (*user_data_destroy)(void*)) {
+  _add_route(server, HTTP_GET, pattern, handler, user_data, user_data_destroy);
+}
+
+void http_server_put_with_data(http_server_t* server, const char* pattern, http_handler_t handler, void* user_data, void (*user_data_destroy)(void*)) {
+  _add_route(server, HTTP_PUT, pattern, handler, user_data, user_data_destroy);
+}
+
+void http_server_post_with_data(http_server_t* server, const char* pattern, http_handler_t handler, void* user_data, void (*user_data_destroy)(void*)) {
+  _add_route(server, HTTP_POST, pattern, handler, user_data, user_data_destroy);
+}
+
+void http_server_delete_with_data(http_server_t* server, const char* pattern, http_handler_t handler, void* user_data, void (*user_data_destroy)(void*)) {
+  _add_route(server, HTTP_DELETE, pattern, handler, user_data, user_data_destroy);
 }
 
 void http_server_dispatch(http_server_t* server, http_request_t* request, http_response_t* response) {
@@ -197,11 +216,18 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
       return;
     }
 
+    if (server->max_connections > 0 &&
+        atomic_load(&server->active_connections) >= server->max_connections) {
+      close(client_fd);
+      return;
+    }
+
     http_connection_t* connection = http_connection_create(server, client_fd);
     if (connection == NULL) {
       close(client_fd);
       return;
     }
+    atomic_fetch_add(&server->active_connections, 1);
 
     if (server->ssl_ctx != NULL) {
       connection->ssl = SSL_new(server->ssl_ctx);
@@ -252,4 +278,8 @@ void http_server_stop(http_server_t* server) {
 #else
   pthread_join(server->thread, NULL);
 #endif
+}
+
+void http_server_set_max_connections(http_server_t* server, size_t max_connections) {
+  server->max_connections = max_connections;
 }

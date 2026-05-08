@@ -15,6 +15,16 @@ static void _send_headers(http_response_t* response) {
   }
   response->headers_sent = 1;
 
+  if (http_headers_get(&response->headers, "Content-Length") == NULL) {
+    char content_length_str[32];
+    snprintf(content_length_str, sizeof(content_length_str), "%zu", response->body_length);
+    http_headers_set(&response->headers, "Content-Length", content_length_str);
+  }
+
+  if (http_headers_get(&response->headers, "Connection") == NULL) {
+    http_headers_set(&response->headers, "Connection", "close");
+  }
+
   const char* phrase = http_status_str((enum http_status)response->status_code);
   char status_line[256];
   int line_len = snprintf(status_line, sizeof(status_line),
@@ -80,6 +90,7 @@ void http_response_write(http_response_t* response, const char* data, size_t len
   if (response->connection == NULL) {
     return;
   }
+  response->body_length += length;
   _send_headers(response);
   http_connection_write(response->connection, data, length);
 }

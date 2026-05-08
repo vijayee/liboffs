@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <ctype.h>
 #include <stdio.h>
 
 #define READ_BUFFER_SIZE 4096
@@ -78,6 +79,24 @@ static void _accumulate_value(http_connection_t* connection, const char* at, siz
   connection->header_value[connection->header_value_len] = '\0';
 }
 
+static char* _url_decode(const char* src, size_t length) {
+  char* decoded = get_memory(length + 1);
+  size_t decoded_len = 0;
+  for (size_t i = 0; i < length; i++) {
+    if (src[i] == '%' && i + 2 < length && isxdigit((unsigned char)src[i + 1]) && isxdigit((unsigned char)src[i + 2])) {
+      char hex[3] = {src[i + 1], src[i + 2], '\0'};
+      decoded[decoded_len++] = (char)strtol(hex, NULL, 16);
+      i += 2;
+    } else if (src[i] == '+') {
+      decoded[decoded_len++] = ' ';
+    } else {
+      decoded[decoded_len++] = src[i];
+    }
+  }
+  decoded[decoded_len] = '\0';
+  return decoded;
+}
+
 static void _flush_header(http_connection_t* connection) {
   if (connection->header_field != NULL && connection->header_field_len > 0 &&
       connection->header_value != NULL && connection->header_value_len > 0) {
@@ -136,12 +155,14 @@ static int _on_headers_complete(http_parser* parser) {
     char* query = strchr(url, '?');
     if (query != NULL) {
       size_t path_len = query - url;
-      connection->request->path = get_memory(path_len + 1);
-      memcpy(connection->request->path, url, path_len);
-      connection->request->path[path_len] = '\0';
-      connection->request->query_string = strdup(query + 1);
+      char* raw_path = get_memory(path_len + 1);
+      memcpy(raw_path, url, path_len);
+      raw_path[path_len] = '\0';
+      connection->request->path = _url_decode(raw_path, path_len);
+      free(raw_path);
+      connection->request->query_string = _url_decode(query + 1, strlen(query + 1));
     } else {
-      connection->request->path = strdup(url);
+      connection->request->path = _url_decode(url, strlen(url));
     }
   }
   return 0;
@@ -282,6 +303,9 @@ void http_connection_destroy(http_connection_t* connection) {
   }
   refcounter_dereference((refcounter_t*)connection);
   if (refcounter_count((refcounter_t*)connection) == 0) {
+    if (connection->server != NULL) {
+      atomic_fetch_sub(&connection->server->active_connections, 1);
+    }
     if (connection->watcher != NULL) {
       pd_watcher_stop(connection->watcher);
       pd_watcher_destroy(connection->watcher);
@@ -313,10 +337,28 @@ void http_connection_write(http_connection_t* connection, const char* data, size
     return;
   }
 
-  if (connection->is_ssl && connection->ssl != NULL) {
-    SSL_write(connection->ssl, data, (int)length);
-  } else {
-    send(connection->fd, data, length, MSG_NOSIGNAL);
+  size_t written = 0;
+  while (written < length) {
+    ssize_t result;
+    if (connection->is_ssl && connection->ssl != NULL) {
+      result = SSL_write(connection->ssl, data + written, (int)(length - written));
+      if (result <= 0) {
+        int ssl_error = SSL_get_error(connection->ssl, (int)result);
+        if (ssl_error == SSL_ERROR_WANT_WRITE) {
+          continue;
+        }
+        break;
+      }
+    } else {
+      result = send(connection->fd, data + written, length - written, MSG_NOSIGNAL);
+      if (result < 0) {
+        if (errno == EINTR) {
+          continue;
+        }
+        break;
+      }
+    }
+    written += (size_t)result;
   }
 }
 

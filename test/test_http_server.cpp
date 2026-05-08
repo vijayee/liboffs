@@ -15,7 +15,15 @@ extern "C" {
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdlib.h>
 #include <pthread.h>
+#include <poll.h>
+
+#ifdef _WIN32
+#define platform_usleep(ms) Sleep(ms)
+#else
+#define platform_usleep(us) usleep(us)
+#endif
 }
 
 namespace http_test {
@@ -32,6 +40,16 @@ static void _test_post_handler(http_request_t* request, http_response_t* respons
   http_response_end(response);
 }
 
+static void _test_put_handler(http_request_t* request, http_response_t* response, void* user_data) {
+  http_response_set_status(response, HTTP_STATUS_OK);
+  http_response_end(response);
+}
+
+static void _test_delete_handler(http_request_t* request, http_response_t* response, void* user_data) {
+  http_response_set_status(response, HTTP_STATUS_OK);
+  http_response_end(response);
+}
+
 static void _test_param_handler(http_request_t* request, http_response_t* response, void* user_data) {
   const char* name = http_request_param(request, 1);
   if (name != NULL) {
@@ -39,6 +57,14 @@ static void _test_param_handler(http_request_t* request, http_response_t* respon
     http_response_write(response, name, strlen(name));
   } else {
     http_response_set_status(response, HTTP_STATUS_BAD_REQUEST);
+  }
+  http_response_end(response);
+}
+
+static void _test_echo_body_handler(http_request_t* request, http_response_t* response, void* user_data) {
+  http_response_set_status(response, HTTP_STATUS_OK);
+  if (request->body != NULL && request->body->size > 0) {
+    http_response_write(response, (const char*)request->body->data, request->body->size);
   }
   http_response_end(response);
 }
@@ -95,7 +121,7 @@ TEST(TestHttpRoute, TestRouteCaptureGroups) {
   vec_init(&captures);
 
   EXPECT_EQ(http_route_match(&route, HTTP_GET, "/users/victor", &captures), 1);
-  EXPECT_GE(captures.length, 2);
+  EXPECT_EQ(captures.length, 2);
   EXPECT_STREQ(captures.data[1].match, "victor");
   vec_capture_deinit(&captures);
 
@@ -112,13 +138,16 @@ TEST(TestHttpStatus, TestStatusPhrase) {
 
 // --- Integration Tests ---
 
+static uint16_t _next_port = 18080;
+
 class TestHttpServer : public testing::Test {
 public:
   scheduler_pool_t* pool;
   http_server_t* server;
-  uint16_t port = 18080;
+  uint16_t port;
 
   void SetUp() override {
+    port = _next_port++;
     pool = scheduler_pool_create(4);
     scheduler_pool_start(pool);
   }
@@ -155,12 +184,42 @@ static int _send_and_recv(int fd, const char* request, char* response, size_t re
   ssize_t sent = send(fd, request, req_len, 0);
   if (sent != (ssize_t)req_len) return -1;
 
-  usleep(100000);
+  size_t total_received = 0;
+  for (int attempts = 0; attempts < 100; attempts++) {
+    struct pollfd poll_fd;
+    poll_fd.fd = fd;
+    poll_fd.events = POLLIN;
+    poll_fd.revents = 0;
+    int poll_result = poll(&poll_fd, 1, 10);
+    if (poll_result > 0 && (poll_fd.revents & POLLIN)) {
+      ssize_t received = recv(fd, response + total_received, response_size - total_received - 1, 0);
+      if (received > 0) {
+        total_received += (size_t)received;
+        response[total_received] = '\0';
+        char* header_end = strstr(response, "\r\n\r\n");
+        if (header_end != NULL) {
+          size_t header_len = (header_end - response) + 4;
+          char* content_length_str = strstr(response, "Content-Length: ");
+          if (content_length_str != NULL && content_length_str < header_end) {
+            size_t content_length = (size_t)atol(content_length_str + 16);
+            if (total_received >= header_len + content_length) {
+              return 0;
+            }
+          } else if (strstr(response, "Content-Length: 0") != NULL ||
+                     strstr(response, "Connection: close") != NULL) {
+            if (total_received > header_len) {
+              return 0;
+            }
+          }
+          if (total_received > header_len) {
+            return 0;
+          }
+        }
+      }
+    }
+  }
 
-  ssize_t received = recv(fd, response, response_size - 1, 0);
-  if (received < 0) return -1;
-  response[received] = '\0';
-  return 0;
+  return total_received > 0 ? 0 : -1;
 }
 
 TEST_F(TestHttpServer, TestCreateDestroy) {
@@ -184,9 +243,12 @@ TEST_F(TestHttpServer, TestGetRequest) {
   http_server_get(server, "^/hello$", _test_get_handler, NULL);
   http_server_listen(server);
 
-  usleep(50000);
-
-  int fd = _connect_to_server(port);
+  int fd = -1;
+  for (int attempts = 0; attempts < 50; attempts++) {
+    platform_usleep(10000);
+    fd = _connect_to_server(port);
+    if (fd >= 0) break;
+  }
   ASSERT_GE(fd, 0);
 
   char response[4096];
@@ -196,6 +258,132 @@ TEST_F(TestHttpServer, TestGetRequest) {
 
   EXPECT_NE(strstr(response, "200"), nullptr);
   EXPECT_NE(strstr(response, "Hello, World!"), nullptr);
+
+  close(fd);
+}
+
+TEST_F(TestHttpServer, TestPostRequest) {
+  server = http_server_create(pool, "127.0.0.1", port);
+  ASSERT_TRUE(server != NULL);
+
+  http_server_post(server, "^/items$", _test_post_handler, NULL);
+  http_server_listen(server);
+
+  int fd = -1;
+  for (int attempts = 0; attempts < 50; attempts++) {
+    platform_usleep(10000);
+    fd = _connect_to_server(port);
+    if (fd >= 0) break;
+  }
+  ASSERT_GE(fd, 0);
+
+  char response[4096];
+  const char* request = "POST /items HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
+  int result = _send_and_recv(fd, request, response, sizeof(response));
+  EXPECT_EQ(result, 0);
+
+  EXPECT_NE(strstr(response, "201"), nullptr);
+
+  close(fd);
+}
+
+TEST_F(TestHttpServer, TestPutRequest) {
+  server = http_server_create(pool, "127.0.0.1", port);
+  ASSERT_TRUE(server != NULL);
+
+  http_server_put(server, "^/items/([0-9]+)$", _test_put_handler, NULL);
+  http_server_listen(server);
+
+  int fd = -1;
+  for (int attempts = 0; attempts < 50; attempts++) {
+    platform_usleep(10000);
+    fd = _connect_to_server(port);
+    if (fd >= 0) break;
+  }
+  ASSERT_GE(fd, 0);
+
+  char response[4096];
+  const char* request = "PUT /items/42 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
+  int result = _send_and_recv(fd, request, response, sizeof(response));
+  EXPECT_EQ(result, 0);
+
+  EXPECT_NE(strstr(response, "200"), nullptr);
+
+  close(fd);
+}
+
+TEST_F(TestHttpServer, TestDeleteRequest) {
+  server = http_server_create(pool, "127.0.0.1", port);
+  ASSERT_TRUE(server != NULL);
+
+  http_server_delete(server, "^/items/([0-9]+)$", _test_delete_handler, NULL);
+  http_server_listen(server);
+
+  int fd = -1;
+  for (int attempts = 0; attempts < 50; attempts++) {
+    platform_usleep(10000);
+    fd = _connect_to_server(port);
+    if (fd >= 0) break;
+  }
+  ASSERT_GE(fd, 0);
+
+  char response[4096];
+  const char* request = "DELETE /items/42 HTTP/1.1\r\nHost: localhost\r\n\r\n";
+  int result = _send_and_recv(fd, request, response, sizeof(response));
+  EXPECT_EQ(result, 0);
+
+  EXPECT_NE(strstr(response, "200"), nullptr);
+
+  close(fd);
+}
+
+TEST_F(TestHttpServer, TestRequestBody) {
+  server = http_server_create(pool, "127.0.0.1", port);
+  ASSERT_TRUE(server != NULL);
+
+  http_server_post(server, "^/echo$", _test_echo_body_handler, NULL);
+  http_server_listen(server);
+
+  int fd = -1;
+  for (int attempts = 0; attempts < 50; attempts++) {
+    platform_usleep(10000);
+    fd = _connect_to_server(port);
+    if (fd >= 0) break;
+  }
+  ASSERT_GE(fd, 0);
+
+  char response[4096];
+  const char* request = "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 11\r\n\r\nHello World";
+  int result = _send_and_recv(fd, request, response, sizeof(response));
+  EXPECT_EQ(result, 0);
+
+  EXPECT_NE(strstr(response, "200"), nullptr);
+  EXPECT_NE(strstr(response, "Hello World"), nullptr);
+
+  close(fd);
+}
+
+TEST_F(TestHttpServer, TestNotFoundRoute) {
+  server = http_server_create(pool, "127.0.0.1", port);
+  ASSERT_TRUE(server != NULL);
+
+  http_server_get(server, "^/exists$", _test_get_handler, NULL);
+  http_server_listen(server);
+
+  int fd = -1;
+  for (int attempts = 0; attempts < 50; attempts++) {
+    platform_usleep(10000);
+    fd = _connect_to_server(port);
+    if (fd >= 0) break;
+  }
+  ASSERT_GE(fd, 0);
+
+  char response[4096];
+  const char* request = "GET /nonexistent HTTP/1.1\r\nHost: localhost\r\n\r\n";
+  int result = _send_and_recv(fd, request, response, sizeof(response));
+  EXPECT_EQ(result, 0);
+
+  EXPECT_NE(strstr(response, "404"), nullptr);
 
   close(fd);
 }
