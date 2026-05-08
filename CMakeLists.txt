@@ -95,8 +95,13 @@ set_target_properties(cbor PROPERTIES IMPORTED_LOCATION ${LIBCBOR_BUILD_PATH}/li
 add_dependencies(cbor libcbor)
 
 
+# http-parser
+add_library(http-parser STATIC deps/http-parser/http_parser.c)
+target_include_directories(http-parser PUBLIC deps/http-parser)
+
 add_library(offs STATIC ${C_SRC})
 add_dependencies(offs cbor)
+add_dependencies(offs http-parser)
 target_include_directories(offs PRIVATE ${blake3_SOURCE_DIR}/c)
 target_include_directories(offs PRIVATE ${C_INC})
 target_include_directories(offs PRIVATE ${xxHash_SOURCE_DIR})
@@ -105,6 +110,7 @@ target_include_directories(offs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../poll-danc
 target_include_directories(offs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../poll-dancer/src)
 target_include_directories(offs PUBLIC ${LIBCBOR_BUILD_PATH}/include)
 target_link_libraries(offs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../poll-dancer/build/libpoll_dancer.a)
+target_link_libraries(offs PRIVATE http-parser)
 #target_link_libraries(offs PUBLIC ${hashmap_SOURCE_DIR}/libhashmap)
 
 #target_include_directories(offs PUBLIC ${BLAKE3_INC})

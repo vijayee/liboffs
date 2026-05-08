@@ -1,0 +1,330 @@
+//
+// Created by victor on 5/7/26.
+//
+#include "http_connection.h"
+#include "http_server.h"
+#include "http_request.h"
+#include "http_response.h"
+#include "http_route.h"
+#include "../Util/allocator.h"
+#include "../Buffer/buffer.h"
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <stdio.h>
+
+#define READ_BUFFER_SIZE 4096
+
+static int _on_message_begin(http_parser* parser);
+static int _on_url(http_parser* parser, const char* at, size_t length);
+static int _on_header_field(http_parser* parser, const char* at, size_t length);
+static int _on_header_value(http_parser* parser, const char* at, size_t length);
+static int _on_headers_complete(http_parser* parser);
+static int _on_body(http_parser* parser, const char* at, size_t length);
+static int _on_message_complete(http_parser* parser);
+
+static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
+                                       pd_event_t events, void* user_data);
+
+static http_parser_settings _parser_settings = {
+  .on_message_begin = _on_message_begin,
+  .on_url = _on_url,
+  .on_status = NULL,
+  .on_header_field = _on_header_field,
+  .on_header_value = _on_header_value,
+  .on_headers_complete = _on_headers_complete,
+  .on_body = _on_body,
+  .on_message_complete = _on_message_complete,
+  .on_chunk_header = NULL,
+  .on_chunk_complete = NULL
+};
+
+static void _reset_header_accumulator(http_connection_t* connection) {
+  if (connection->header_field != NULL) {
+    connection->header_field[0] = '\0';
+    connection->header_field_len = 0;
+  }
+  if (connection->header_value != NULL) {
+    connection->header_value[0] = '\0';
+    connection->header_value_len = 0;
+  }
+}
+
+static void _accumulate_field(http_connection_t* connection, const char* at, size_t length) {
+  if (connection->header_field == NULL) {
+    connection->header_field_cap = length * 2 + 1;
+    connection->header_field = get_memory(connection->header_field_cap);
+  } else if (connection->header_field_len + length + 1 > connection->header_field_cap) {
+    connection->header_field_cap = (connection->header_field_len + length) * 2 + 1;
+    connection->header_field = realloc(connection->header_field, connection->header_field_cap);
+  }
+  memcpy(connection->header_field + connection->header_field_len, at, length);
+  connection->header_field_len += length;
+  connection->header_field[connection->header_field_len] = '\0';
+}
+
+static void _accumulate_value(http_connection_t* connection, const char* at, size_t length) {
+  if (connection->header_value == NULL) {
+    connection->header_value_cap = length * 2 + 1;
+    connection->header_value = get_memory(connection->header_value_cap);
+  } else if (connection->header_value_len + length + 1 > connection->header_value_cap) {
+    connection->header_value_cap = (connection->header_value_len + length) * 2 + 1;
+    connection->header_value = realloc(connection->header_value, connection->header_value_cap);
+  }
+  memcpy(connection->header_value + connection->header_value_len, at, length);
+  connection->header_value_len += length;
+  connection->header_value[connection->header_value_len] = '\0';
+}
+
+static void _flush_header(http_connection_t* connection) {
+  if (connection->header_field != NULL && connection->header_field_len > 0 &&
+      connection->header_value != NULL && connection->header_value_len > 0) {
+    http_headers_set(&connection->request->headers, connection->header_field, connection->header_value);
+  }
+  _reset_header_accumulator(connection);
+}
+
+static int _on_message_begin(http_parser* parser) {
+  http_connection_t* connection = (http_connection_t*)parser->data;
+  if (connection->request != NULL) {
+    DESTROY(connection->request, http_request);
+  }
+  connection->request = http_request_create(connection->server->pool);
+  _reset_header_accumulator(connection);
+  return 0;
+}
+
+static int _on_url(http_parser* parser, const char* at, size_t length) {
+  http_connection_t* connection = (http_connection_t*)parser->data;
+  if (connection->request->url == NULL) {
+    connection->request->url = get_memory(length + 1);
+    memcpy(connection->request->url, at, length);
+    connection->request->url[length] = '\0';
+  } else {
+    size_t current_len = strlen(connection->request->url);
+    connection->request->url = realloc(connection->request->url, current_len + length + 1);
+    memcpy(connection->request->url + current_len, at, length);
+    connection->request->url[current_len + length] = '\0';
+  }
+  return 0;
+}
+
+static int _on_header_field(http_parser* parser, const char* at, size_t length) {
+  http_connection_t* connection = (http_connection_t*)parser->data;
+  _accumulate_field(connection, at, length);
+  return 0;
+}
+
+static int _on_header_value(http_parser* parser, const char* at, size_t length) {
+  http_connection_t* connection = (http_connection_t*)parser->data;
+  _accumulate_value(connection, at, length);
+  return 0;
+}
+
+static int _on_headers_complete(http_parser* parser) {
+  http_connection_t* connection = (http_connection_t*)parser->data;
+  _flush_header(connection);
+  connection->request->method = parser->method;
+  connection->request->content_length = parser->content_length;
+  connection->request->keep_alive = http_should_keep_alive(parser);
+  connection->headers_complete = 1;
+
+  if (connection->request->url != NULL) {
+    char* url = connection->request->url;
+    char* query = strchr(url, '?');
+    if (query != NULL) {
+      size_t path_len = query - url;
+      connection->request->path = get_memory(path_len + 1);
+      memcpy(connection->request->path, url, path_len);
+      connection->request->path[path_len] = '\0';
+      connection->request->query_string = strdup(query + 1);
+    } else {
+      connection->request->path = strdup(url);
+    }
+  }
+  return 0;
+}
+
+static int _on_body(http_parser* parser, const char* at, size_t length) {
+  http_connection_t* connection = (http_connection_t*)parser->data;
+  if (connection->request->body == NULL) {
+    connection->request->body = buffer_create(length);
+    memcpy(connection->request->body->data, at, length);
+  } else {
+    size_t new_size = connection->request->body->size + length;
+    connection->request->body->data = realloc(connection->request->body->data, new_size);
+    memcpy(connection->request->body->data + connection->request->body->size, at, length);
+    connection->request->body->size = new_size;
+  }
+  return 0;
+}
+
+static int _on_message_complete(http_parser* parser) {
+  http_connection_t* connection = (http_connection_t*)parser->data;
+  connection->request_complete = 1;
+
+  http_response_t* response = http_response_create(
+    connection->server->pool, connection);
+
+  http_server_dispatch(connection->server, connection->request, response);
+
+  DESTROY(response, http_response);
+
+  if (!connection->request->keep_alive) {
+    shutdown(connection->fd, SHUT_WR);
+  }
+
+  DESTROY(connection->request, http_request);
+  connection->request = NULL;
+
+  http_parser_init(&connection->parser, HTTP_REQUEST);
+  connection->headers_complete = 0;
+  connection->request_complete = 0;
+  return 0;
+}
+
+static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
+                                     pd_event_t events, void* user_data) {
+  http_connection_t* connection = (http_connection_t*)user_data;
+  char buffer[READ_BUFFER_SIZE];
+
+  if (events & PD_EVENT_READ) {
+    ssize_t bytes_read;
+    if (connection->is_ssl && connection->ssl != NULL) {
+      bytes_read = SSL_read(connection->ssl, buffer, sizeof(buffer));
+      if (bytes_read <= 0) {
+        int ssl_error = SSL_get_error(connection->ssl, (int)bytes_read);
+        if (ssl_error == SSL_ERROR_WANT_READ) {
+          return;
+        }
+        goto close;
+      }
+    } else {
+      bytes_read = recv(connection->fd, buffer, sizeof(buffer), 0);
+      if (bytes_read <= 0) {
+        if (bytes_read == 0) {
+          goto close;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          return;
+        }
+        goto close;
+      }
+    }
+
+    size_t nparsed = http_parser_execute(&connection->parser, &_parser_settings,
+                                          buffer, (size_t)bytes_read);
+    if (connection->parser.http_errno != HPE_OK) {
+      goto close;
+    }
+    (void)nparsed;
+  }
+
+  if (events & PD_EVENT_HANGUP) {
+    goto close;
+  }
+
+  if (events & PD_EVENT_ERROR) {
+    goto close;
+  }
+
+  return;
+
+close:
+  pd_watcher_stop(watcher);
+  pd_watcher_destroy(watcher);
+  connection->watcher = NULL;
+  if (connection->fd >= 0) {
+    close(connection->fd);
+    connection->fd = -1;
+  }
+  DESTROY(connection, http_connection);
+}
+
+http_connection_t* http_connection_create(http_server_t* server, int fd) {
+  http_connection_t* connection = get_clear_memory(sizeof(http_connection_t));
+  refcounter_init((refcounter_t*)connection);
+  connection->server = server;
+  connection->fd = fd;
+  connection->ssl = NULL;
+  connection->is_ssl = 0;
+  connection->headers_complete = 0;
+  connection->request_complete = 0;
+  connection->request = NULL;
+  connection->write_buffer = NULL;
+  connection->header_field = NULL;
+  connection->header_field_len = 0;
+  connection->header_field_cap = 0;
+  connection->header_value = NULL;
+  connection->header_value_len = 0;
+  connection->header_value_cap = 0;
+
+  int flags = fcntl(fd, F_GETFL, 0);
+  fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+  http_parser_init(&connection->parser, HTTP_REQUEST);
+  connection->parser.data = connection;
+
+  connection->watcher = pd_watcher_create(server->loop, fd,
+    PD_EVENT_READ, _connection_read_callback, connection);
+  if (connection->watcher != NULL) {
+    pd_watcher_start(connection->watcher);
+  }
+
+  return connection;
+}
+
+void http_connection_destroy(http_connection_t* connection) {
+  if (connection == NULL) {
+    return;
+  }
+  refcounter_dereference((refcounter_t*)connection);
+  if (refcounter_count((refcounter_t*)connection) == 0) {
+    if (connection->watcher != NULL) {
+      pd_watcher_stop(connection->watcher);
+      pd_watcher_destroy(connection->watcher);
+    }
+    if (connection->fd >= 0) {
+      close(connection->fd);
+    }
+    if (connection->request != NULL) {
+      DESTROY(connection->request, http_request);
+    }
+    if (connection->write_buffer != NULL) {
+      DESTROY(connection->write_buffer, buffer);
+    }
+    if (connection->header_field != NULL) {
+      free(connection->header_field);
+    }
+    if (connection->header_value != NULL) {
+      free(connection->header_value);
+    }
+    if (connection->ssl != NULL) {
+      SSL_free(connection->ssl);
+    }
+    free(connection);
+  }
+}
+
+void http_connection_write(http_connection_t* connection, const char* data, size_t length) {
+  if (connection == NULL || connection->fd < 0) {
+    return;
+  }
+
+  if (connection->is_ssl && connection->ssl != NULL) {
+    SSL_write(connection->ssl, data, (int)length);
+  } else {
+    send(connection->fd, data, length, MSG_NOSIGNAL);
+  }
+}
+
+void http_connection_close(http_connection_t* connection) {
+  if (connection == NULL) {
+    return;
+  }
+  if (connection->fd >= 0) {
+    shutdown(connection->fd, SHUT_WR);
+  }
+}

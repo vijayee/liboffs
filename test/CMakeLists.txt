@@ -26,19 +26,23 @@ if (BUILD_TESTING)
             test_readable_descriptor.cpp
             test_writeable_descriptor.cpp
             test_off_stream_integration.cpp
-            test_block_recipe.cpp)
+            test_block_recipe.cpp
+            test_http_server.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
+    add_dependencies(testliboffs http-parser)
     target_link_libraries(testliboffs PRIVATE offs)
     target_link_libraries(testliboffs PRIVATE blake3)
     target_link_libraries(testliboffs PRIVATE hashmap)
+    target_link_libraries(testliboffs PRIVATE http-parser)
     target_link_libraries(testliboffs PUBLIC cbor)
     target_link_libraries(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../poll-dancer/build/libpoll_dancer.a)
     target_link_libraries(testliboffs PRIVATE GTest::gtest_main)
     target_link_libraries(testliboffs PRIVATE GTest::gmock)
     target_include_directories(testliboffs PUBLIC ${C_INC})
     target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../poll-dancer/include)
+    target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/http-parser)
 
     include(GoogleTest)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
