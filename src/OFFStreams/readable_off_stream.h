@@ -19,7 +19,7 @@ typedef struct {
   size_t descriptor_pad;
   size_t sent_bytes;
   size_t offset_remainder;
-  tuple_t* first_tuple;
+  uint8_t offset_applied;
 } readable_off_stream_t;
 
 readable_off_stream_t* readable_off_stream_create(

@@ -22,7 +22,7 @@ static size_t _block_size_for_type(block_size_e type) {
 static void _render_origin_data(readable_off_stream_t* stream, buffer_t* data) {
   size_t start;
   size_t length;
-  if (stream->first_tuple != NULL) {
+  if (!stream->offset_applied && stream->offset_remainder > 0) {
     size_t available = data->size - stream->offset_remainder;
     if (stream->sent_bytes + available > stream->ori->final_byte) {
       length = stream->ori->final_byte - stream->sent_bytes;
@@ -30,6 +30,7 @@ static void _render_origin_data(readable_off_stream_t* stream, buffer_t* data) {
       length = available;
     }
     start = stream->offset_remainder;
+    stream->offset_applied = 1;
   } else {
     if (stream->sent_bytes + data->size > stream->ori->final_byte) {
       length = stream->ori->final_byte - stream->sent_bytes;
@@ -47,10 +48,6 @@ static void _render_origin_data(readable_off_stream_t* stream, buffer_t* data) {
   stream->sent_bytes += length;
 
   if (stream->sent_bytes >= stream->ori->final_byte) {
-    if (stream->first_tuple != NULL) {
-      DESTROY(stream->first_tuple, tuple);
-      stream->first_tuple = NULL;
-    }
     stream_notify((stream_t*)stream, finished_event, NULL, NULL);
     stream_notify((stream_t*)stream, complete_event, NULL, NULL);
     stream_notify((stream_t*)stream, close_event, NULL, NULL);
@@ -61,10 +58,6 @@ static void _render_origin_data(readable_off_stream_t* stream, buffer_t* data) {
 static void _check_cache_and_decode(readable_off_stream_t* stream, tuple_t* tuple) {
   buffer_t* cached = tuple_cache_apply(stream->tc, tuple);
   if (cached != NULL) {
-    if (stream->first_tuple != NULL && tuple_equals(stream->first_tuple, tuple)) {
-      DESTROY(stream->first_tuple, tuple);
-      stream->first_tuple = NULL;
-    }
     _render_origin_data(stream, cached);
     DESTROY(cached, buffer);
     return;
@@ -101,11 +94,6 @@ static void _check_cache_and_decode(readable_off_stream_t* stream, tuple_t* tupl
 
   tuple_cache_update(stream->tc, tuple, origin_data);
 
-  if (stream->first_tuple != NULL && tuple_equals(stream->first_tuple, tuple)) {
-    DESTROY(stream->first_tuple, tuple);
-    stream->first_tuple = NULL;
-  }
-
   _render_origin_data(stream, origin_data);
   DESTROY(origin_data, buffer);
 
@@ -123,9 +111,6 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
         DESTROY(tuple, tuple);
         msg->payload = NULL;
         break;
-      }
-      if (stream->first_tuple == NULL) {
-        stream->first_tuple = REFERENCE(tuple, tuple_t);
       }
       _check_cache_and_decode(stream, tuple);
       if (stream->stream.is_deactivated) {
@@ -160,10 +145,10 @@ readable_off_stream_t* readable_off_stream_create(
   stream->tc = tc;
   stream->ori = ori;
   stream->descriptor_pad = descriptor_pad;
-  stream->first_tuple = NULL;
+  stream->offset_applied = 0;
 
   size_t block_size = _block_size_for_type(ori->block_type);
-  stream->sent_bytes = (ori->file_offset / block_size) * block_size;
+  stream->sent_bytes = ori->file_offset;
   stream->offset_remainder = ori->file_offset % block_size;
 
   stream_init((stream_t*)stream, push, readable_stream, 1, pool,
@@ -179,9 +164,6 @@ readable_off_stream_t* readable_off_stream_create(
 void readable_off_stream_destroy(readable_off_stream_t* stream) {
   refcounter_dereference((refcounter_t*)stream);
   if (refcounter_count((refcounter_t*)stream) == 0) {
-    if (stream->first_tuple != NULL) {
-      DESTROY(stream->first_tuple, tuple);
-    }
     stream_deinit((stream_t*)stream);
     free(stream);
   }

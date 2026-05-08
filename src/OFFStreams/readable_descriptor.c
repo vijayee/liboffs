@@ -204,8 +204,7 @@ readable_descriptor_t* readable_descriptor_create(
   desc->tuple_count = (ori->final_byte / desc->block_size) +
                       ((ori->final_byte % desc->block_size) > 0 ? 1 : 0);
   desc->cut_point = (desc->block_size / descriptor_pad) * descriptor_pad;
-  desc->offset_tuple = (ori->file_offset / desc->block_size) +
-                       ((ori->file_offset % desc->block_size) > 0 ? 1 : 0);
+  desc->offset_tuple = ori->file_offset / desc->block_size;
   desc->descriptor_pad = descriptor_pad;
   desc->tuple_counter = 0;
   desc->current_descriptor = NULL;

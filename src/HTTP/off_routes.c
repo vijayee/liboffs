@@ -22,9 +22,79 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
+#include <limits.h>
 
 // OFF URL regex matching /offsystem/v3/{type}/{length}/{hash1}/{hash2}/{name}
 #define OFF_GET_PATTERN "/offsystem/v3/([-+._a-zA-Z0-9]+/[-+._a-zA-Z0-9-]+)/([0-9]+)/([123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+)/([123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+)/([^ !$`&*()+]*|\\\\[ !$`&*()+]*)+"
+
+typedef struct {
+    size_t start;
+    size_t end;
+    int valid;
+} range_request_t;
+
+static range_request_t parse_range_header(const char* range_header, size_t file_size) {
+    range_request_t range = {0, 0, 0};
+    if (!range_header || strncmp(range_header, "bytes=", 6) != 0) {
+        return range;
+    }
+    const char* spec = range_header + 6;
+    while (*spec == ' ') spec++;
+
+    // Reject multi-range requests (contain commas)
+    if (strchr(spec, ',')) {
+        return range;
+    }
+
+    const char* dash = strchr(spec, '-');
+    if (!dash) {
+        return range;
+    }
+
+    // Parse start
+    if (dash == spec) {
+        // Suffix range: bytes=-N (last N bytes)
+        size_t suffix = (size_t)atol(dash + 1);
+        if (suffix == 0 || suffix > file_size) {
+            if (suffix > file_size) suffix = file_size;
+            // suffix > 0 and suffix <= file_size is valid
+        }
+        if (suffix == 0) return range;
+        range.start = file_size - suffix;
+        range.end = file_size - 1;
+        range.valid = 1;
+        return range;
+    }
+
+    char* endptr = NULL;
+    size_t start = (size_t)strtoull(spec, &endptr, 10);
+    if (endptr != dash) {
+        return range;
+    }
+
+    if (*(dash + 1) == '\0' || *(dash + 1) == '\r' || *(dash + 1) == '\n') {
+        // Open-ended range: bytes=start-
+        range.start = start;
+        range.end = file_size - 1;
+        range.valid = 1;
+    } else {
+        // Explicit range: bytes=start-end
+        size_t end = (size_t)strtoull(dash + 1, &endptr, 10);
+        range.start = start;
+        range.end = end;
+        range.valid = 1;
+    }
+
+    // Validate range
+    if (range.start >= file_size || range.start > range.end) {
+        range.valid = 0;
+    } else if (range.end >= file_size) {
+        range.end = file_size - 1;
+    }
+
+    return range;
+}
 
 off_routes_context_t* off_routes_context_create(scheduler_pool_t* pool,
                                                   block_cache_t* bc,
@@ -70,6 +140,29 @@ static void _pipeline_on_rs_close(void* ctx, void* unused) {
     free(pipeline);
 }
 
+static void _setup_stream_pipeline(http_response_t* response, scheduler_pool_t* pool,
+                                   block_cache_t* bc, ori_t* stream_ori,
+                                   size_t descriptor_pad) {
+    tuple_cache_t* tc = tuple_cache_create(100);
+    readable_off_stream_t* rs = readable_off_stream_create(pool, bc, tc, stream_ori, descriptor_pad);
+    readable_descriptor_t* desc = readable_descriptor_create(pool, bc, stream_ori, descriptor_pad);
+
+    get_pipeline_t* pipeline = get_clear_memory(sizeof(get_pipeline_t));
+    pipeline->desc = desc;
+    pipeline->rs = rs;
+    pipeline->tc = tc;
+
+    stream_subscribe((stream_t*)desc, data_event, pipeline,
+                     (void (*)(void*, void*))_pipeline_on_tuple, NULL);
+    stream_once((stream_t*)desc, close_event, pipeline,
+                (void (*)(void*, void*))_pipeline_on_desc_close, NULL);
+    stream_once((stream_t*)rs, close_event, pipeline,
+                (void (*)(void*, void*))_pipeline_on_rs_close, NULL);
+    http_response_pipe(response, (stream_t*)rs);
+
+    readable_descriptor_push(desc);
+}
+
 static void _off_get_handler(http_request_t* request, http_response_t* response, void* user_data) {
     off_routes_context_t* ctx = (off_routes_context_t*)user_data;
     off_url_t* url = off_url_parse(request->path);
@@ -107,37 +200,49 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
             // Try index.html first
             ori_t* index_ori = ofd_cache_resolve(ctx->ofd_cache, url->file_hash, "index.html");
             if (index_ori) {
-                http_response_set_header(response, "Content-Type", "text/html");
-                char index_len_str[32];
-                snprintf(index_len_str, sizeof(index_len_str), "%zu", index_ori->final_byte);
-                http_response_set_header(response, "Content-Length", index_len_str);
+                size_t file_size = index_ori->final_byte;
+                const char* range_header = http_request_header(request, "Range");
+                range_request_t range = parse_range_header(range_header, file_size);
+                http_response_set_header(response, "Accept-Ranges", "bytes");
 
-                ori_t* stream_ori = ori_create(index_ori->final_byte);
+                if (range_header && !range.valid) {
+                    // Invalid range request
+                    http_response_set_status(response, HTTP_STATUS_RANGE_NOT_SATISFIABLE);
+                    char cr_str[64];
+                    snprintf(cr_str, sizeof(cr_str), "bytes */%zu", file_size);
+                    http_response_set_header(response, "Content-Range", cr_str);
+                    http_response_end(response);
+                    off_url_destroy(url);
+                    return;
+                }
+
+                http_response_set_header(response, "Content-Type", "text/html");
+
+                ori_t* stream_ori = ori_create(file_size);
                 stream_ori->descriptor_hash = buffer_copy(index_ori->descriptor_hash);
                 stream_ori->file_hash = buffer_copy(index_ori->file_hash);
                 stream_ori->file_name = strdup(index_ori->file_name);
                 stream_ori->block_type = index_ori->block_type;
                 stream_ori->tuple_size = index_ori->tuple_size;
 
-                tuple_cache_t* tc = tuple_cache_create(100);
-                readable_off_stream_t* rs = readable_off_stream_create(ctx->pool, ctx->bc, tc, stream_ori, 0);
+                if (range.valid) {
+                    http_response_set_status(response, HTTP_STATUS_PARTIAL_CONTENT);
+                    char cr_str[128];
+                    snprintf(cr_str, sizeof(cr_str), "bytes %zu-%zu/%zu",
+                             range.start, range.end, file_size);
+                    http_response_set_header(response, "Content-Range", cr_str);
+                    char len_str[32];
+                    snprintf(len_str, sizeof(len_str), "%zu", range.end - range.start + 1);
+                    http_response_set_header(response, "Content-Length", len_str);
+                    stream_ori->file_offset = range.start;
+                    stream_ori->final_byte = range.end + 1;
+                } else {
+                    char len_str[32];
+                    snprintf(len_str, sizeof(len_str), "%zu", file_size);
+                    http_response_set_header(response, "Content-Length", len_str);
+                }
 
-                readable_descriptor_t* desc = readable_descriptor_create(ctx->pool, ctx->bc, stream_ori, 32);
-
-                get_pipeline_t* pipeline = get_clear_memory(sizeof(get_pipeline_t));
-                pipeline->desc = desc;
-                pipeline->rs = rs;
-                pipeline->tc = tc;
-
-                stream_subscribe((stream_t*)desc, data_event, pipeline,
-                                 (void (*)(void*, void*))_pipeline_on_tuple, NULL);
-                stream_once((stream_t*)desc, close_event, pipeline,
-                            (void (*)(void*, void*))_pipeline_on_desc_close, NULL);
-                stream_once((stream_t*)rs, close_event, pipeline,
-                            (void (*)(void*, void*))_pipeline_on_rs_close, NULL);
-                http_response_pipe(response, (stream_t*)rs);
-
-                readable_descriptor_push(desc);
+                _setup_stream_pipeline(response, ctx->pool, ctx->bc, stream_ori, 32);
                 off_url_destroy(url);
                 return;
             }
@@ -153,76 +258,97 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
         }
 
         // Stream the file
+        size_t file_size = file_ori->final_byte;
+        const char* range_header = http_request_header(request, "Range");
+        range_request_t range = parse_range_header(range_header, file_size);
         const char* mime = mime_type_from_extension(resolve_path);
         http_response_set_header(response, "Content-Type", mime);
-        char file_len_str[32];
-        snprintf(file_len_str, sizeof(file_len_str), "%zu", file_ori->final_byte);
-        http_response_set_header(response, "Content-Length", file_len_str);
+        http_response_set_header(response, "Accept-Ranges", "bytes");
 
-        ori_t* stream_ori = ori_create(file_ori->final_byte);
+        if (range_header && !range.valid) {
+            http_response_set_status(response, HTTP_STATUS_RANGE_NOT_SATISFIABLE);
+            char cr_str[64];
+            snprintf(cr_str, sizeof(cr_str), "bytes */%zu", file_size);
+            http_response_set_header(response, "Content-Range", cr_str);
+            http_response_end(response);
+            off_url_destroy(url);
+            return;
+        }
+
+        ori_t* stream_ori = ori_create(file_size);
         stream_ori->descriptor_hash = buffer_copy(file_ori->descriptor_hash);
         stream_ori->file_hash = buffer_copy(file_ori->file_hash);
         stream_ori->file_name = strdup(file_ori->file_name);
         stream_ori->block_type = file_ori->block_type;
         stream_ori->tuple_size = file_ori->tuple_size;
 
-        tuple_cache_t* tc = tuple_cache_create(100);
-        readable_off_stream_t* rs = readable_off_stream_create(ctx->pool, ctx->bc, tc, stream_ori, 0);
-        readable_descriptor_t* desc = readable_descriptor_create(ctx->pool, ctx->bc, stream_ori, 32);
+        if (range.valid) {
+            http_response_set_status(response, HTTP_STATUS_PARTIAL_CONTENT);
+            char cr_str[128];
+            snprintf(cr_str, sizeof(cr_str), "bytes %zu-%zu/%zu",
+                     range.start, range.end, file_size);
+            http_response_set_header(response, "Content-Range", cr_str);
+            char len_str[32];
+            snprintf(len_str, sizeof(len_str), "%zu", range.end - range.start + 1);
+            http_response_set_header(response, "Content-Length", len_str);
+            stream_ori->file_offset = range.start;
+            stream_ori->final_byte = range.end + 1;
+        } else {
+            char len_str[32];
+            snprintf(len_str, sizeof(len_str), "%zu", file_size);
+            http_response_set_header(response, "Content-Length", len_str);
+        }
 
-        get_pipeline_t* pipeline = get_clear_memory(sizeof(get_pipeline_t));
-        pipeline->desc = desc;
-        pipeline->rs = rs;
-        pipeline->tc = tc;
-
-        stream_subscribe((stream_t*)desc, data_event, pipeline,
-                         (void (*)(void*, void*))_pipeline_on_tuple, NULL);
-        stream_once((stream_t*)desc, close_event, pipeline,
-                    (void (*)(void*, void*))_pipeline_on_desc_close, NULL);
-        stream_once((stream_t*)rs, close_event, pipeline,
-                    (void (*)(void*, void*))_pipeline_on_rs_close, NULL);
-        http_response_pipe(response, (stream_t*)rs);
-
-        readable_descriptor_push(desc);
+        _setup_stream_pipeline(response, ctx->pool, ctx->bc, stream_ori, 32);
         off_url_destroy(url);
         return;
     }
 
     // Regular file stream — use the content type from the OFF URL if available,
     // otherwise fall back to extension-based detection
+    size_t file_size = url->stream_length;
+    const char* range_header = http_request_header(request, "Range");
+    range_request_t range = parse_range_header(range_header, file_size);
     const char* mime = (url->content_type && url->content_type[0]) ?
                        url->content_type : mime_type_from_extension(url->file_name);
     http_response_set_header(response, "Content-Type", mime);
+    http_response_set_header(response, "Accept-Ranges", "bytes");
 
-    char content_length_str[32];
-    snprintf(content_length_str, sizeof(content_length_str), "%zu", url->stream_length);
-    http_response_set_header(response, "Content-Length", content_length_str);
+    if (range_header && !range.valid) {
+        http_response_set_status(response, HTTP_STATUS_RANGE_NOT_SATISFIABLE);
+        char cr_str[64];
+        snprintf(cr_str, sizeof(cr_str), "bytes */%zu", file_size);
+        http_response_set_header(response, "Content-Range", cr_str);
+        http_response_end(response);
+        off_url_destroy(url);
+        return;
+    }
 
-    ori_t* stream_ori = ori_create(url->stream_length);
+    ori_t* stream_ori = ori_create(file_size);
     stream_ori->descriptor_hash = buffer_copy(url->descriptor_hash);
     stream_ori->file_hash = buffer_copy(url->file_hash);
     stream_ori->file_name = strdup(url->file_name);
     stream_ori->block_type = standard;
     stream_ori->tuple_size = 3;
 
-    tuple_cache_t* tc = tuple_cache_create(100);
-    readable_off_stream_t* rs = readable_off_stream_create(ctx->pool, ctx->bc, tc, stream_ori, 0);
-    readable_descriptor_t* desc = readable_descriptor_create(ctx->pool, ctx->bc, stream_ori, 32);
+    if (range.valid) {
+        http_response_set_status(response, HTTP_STATUS_PARTIAL_CONTENT);
+        char cr_str[128];
+        snprintf(cr_str, sizeof(cr_str), "bytes %zu-%zu/%zu",
+                 range.start, range.end, file_size);
+        http_response_set_header(response, "Content-Range", cr_str);
+        char len_str[32];
+        snprintf(len_str, sizeof(len_str), "%zu", range.end - range.start + 1);
+        http_response_set_header(response, "Content-Length", len_str);
+        stream_ori->file_offset = range.start;
+        stream_ori->final_byte = range.end + 1;
+    } else {
+        char content_length_str[32];
+        snprintf(content_length_str, sizeof(content_length_str), "%zu", file_size);
+        http_response_set_header(response, "Content-Length", content_length_str);
+    }
 
-    get_pipeline_t* pipeline = get_clear_memory(sizeof(get_pipeline_t));
-    pipeline->desc = desc;
-    pipeline->rs = rs;
-    pipeline->tc = tc;
-
-    stream_subscribe((stream_t*)desc, data_event, pipeline,
-                     (void (*)(void*, void*))_pipeline_on_tuple, NULL);
-    stream_once((stream_t*)desc, close_event, pipeline,
-                (void (*)(void*, void*))_pipeline_on_desc_close, NULL);
-    stream_once((stream_t*)rs, close_event, pipeline,
-                (void (*)(void*, void*))_pipeline_on_rs_close, NULL);
-    http_response_pipe(response, (stream_t*)rs);
-
-    readable_descriptor_push(desc);
+    _setup_stream_pipeline(response, ctx->pool, ctx->bc, stream_ori, 32);
     off_url_destroy(url);
 }
 
