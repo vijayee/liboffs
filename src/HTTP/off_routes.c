@@ -188,8 +188,10 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
         return;
     }
 
-    // Regular file stream
-    const char* mime = mime_type_from_extension(url->file_name);
+    // Regular file stream — use the content type from the OFF URL if available,
+    // otherwise fall back to extension-based detection
+    const char* mime = (url->content_type && url->content_type[0]) ?
+                       url->content_type : mime_type_from_extension(url->file_name);
     http_response_set_header(response, "Content-Type", mime);
 
     char content_length_str[32];

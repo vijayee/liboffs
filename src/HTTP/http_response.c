@@ -7,6 +7,8 @@
 #include "../Buffer/buffer.h"
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
 
 void _http_response_dispatch(void* state, message_t* msg);
 
@@ -113,8 +115,15 @@ static void _pipe_on_data(void* ctx, void* chunk) {
 static void _pipe_on_close(void* ctx, void* unused) {
     (void)unused;
     http_response_t* response = (http_response_t*)ctx;
+    http_connection_t* conn = response->connection;
     http_response_end(response);
     http_response_destroy(response);
+    // Fully close the connection for piped responses with Connection: close.
+    // http_response_end only half-closes (SHUT_WR), but the client expects
+    // the server to close the socket entirely after the response.
+    if (conn && conn->fd >= 0) {
+        shutdown(conn->fd, SHUT_RDWR);
+    }
 }
 
 static void _pipe_on_error(void* ctx, async_error_t* error) {
