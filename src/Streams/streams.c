@@ -2,6 +2,7 @@
 // Created by victor on 10/12/25.
 //
 #include "stream.h"
+#include "../Buffer/buffer.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include "../Workers/error.h"
@@ -203,28 +204,12 @@ void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, uin
 void stream_deinit(stream_t* stream) {
   if (refcounter_count((refcounter_t*) stream) == 0) {
     platform_lock_destroy(&stream->lock);
-    if (stream->pipe_notifiers != NULL) {
-      size_t count = 0;
-      switch (stream->type) {
-        case readable_stream:
-          count = 3;
-          break;
-        case writeable_stream:
-          count = stream->force == push ? 4 : 5;
-          break;
-        case duplex_stream:
-        case transform_stream:
-          count = 7;
-          break;
-        default:
-          log_error("stream_deinit: unknown stream type");
-          count = 0;
-          break;
-      }
-    }
     _stream_purge_handlers(stream);
     if (stream->pullable_stream != NULL) {
-      stream_deferred_deref(stream->pullable_stream);
+      refcounter_dereference((refcounter_t*) stream->pullable_stream);
+      if (refcounter_count((refcounter_t*) stream->pullable_stream) == 0) {
+        stream_destroy(stream->pullable_stream);
+      }
       stream->pullable_stream = NULL;
     }
     actor_destroy(&stream->actor);
@@ -256,7 +241,7 @@ void stream_dispatch(void* state, message_t* msg) {
       if (stream->on_push != NULL) {
         stream->on_push(stream);
       } else {
-        stream_notify(stream, error_event, ERROR("No Push Handler Defined"));
+        stream_notify(stream, error_event, ERROR("No Push Handler Defined"), (void (*)(void*))error_destroy);
       }
       break;
     case READABLE_READ: {
@@ -264,7 +249,7 @@ void stream_dispatch(void* state, message_t* msg) {
       if (stream->on_read != NULL) {
         stream->on_read(stream, p->size, p->ctx, p->cb);
       } else {
-        stream_notify(stream, error_event, ERROR("No Read Handler Defined"));
+        stream_notify(stream, error_event, ERROR("No Read Handler Defined"), (void (*)(void*))error_destroy);
       }
       break;
     }
@@ -273,7 +258,7 @@ void stream_dispatch(void* state, message_t* msg) {
       if (stream->on_write != NULL) {
         stream->on_write(stream, p->data);
       } else {
-        stream_notify(stream, error_event, ERROR("No Write Handler Defined"));
+        stream_notify(stream, error_event, ERROR("No Write Handler Defined"), (void (*)(void*))error_destroy);
       }
       break;
     }
@@ -281,14 +266,14 @@ void stream_dispatch(void* state, message_t* msg) {
       if (stream->on_close != NULL) {
         stream->on_close(stream);
       } else {
-        stream_notify(stream, error_event, ERROR("No Close Handler Defined"));
+        stream_notify(stream, error_event, ERROR("No Close Handler Defined"), (void (*)(void*))error_destroy);
       }
       break;
     case READABLE_PULL:
       if (stream->on_pull != NULL) {
         stream->on_pull(stream);
       } else {
-        stream_notify(stream, error_event, ERROR("No Readable Pull Handler Defined"));
+        stream_notify(stream, error_event, ERROR("No Readable Pull Handler Defined"), (void (*)(void*))error_destroy);
       }
       break;
     case DEFERRED_DEREF:
@@ -301,7 +286,7 @@ void stream_dispatch(void* state, message_t* msg) {
 
 /* ---- stream notify (replaces VLA with heap alloc) ---- */
 
-void stream_notify(stream_t* stream, stream_event_e event, void* payload) {
+void stream_notify(stream_t* stream, stream_event_e event, void* payload, void (*payload_destroy)(void*)) {
   stream_event_handler_list_t* list = stream->handlers[event];
   platform_lock(&list->lock);
   size_t count = list->count;
@@ -311,7 +296,13 @@ void stream_notify(stream_t* stream, stream_event_e event, void* payload) {
       log_error("No error event handler defined");
       async_error_t* error = (async_error_t*) payload;
       log_error(error->message);
+      if (payload_destroy != NULL) {
+        payload_destroy(payload);
+      }
       abort();
+    }
+    if (payload_destroy != NULL) {
+      payload_destroy(payload);
     }
     return;
   }
@@ -323,7 +314,14 @@ void stream_notify(stream_t* stream, stream_event_e event, void* payload) {
     log_error("No error event handler defined");
     async_error_t* error = (async_error_t*) payload;
     log_error(error->message);
+    if (payload_destroy != NULL) {
+      payload_destroy(payload);
+    }
     abort();
+  }
+  /* Hold a reference to the payload so no handler can free it mid-dispatch */
+  if (payload != NULL) {
+    refcounter_reference((refcounter_t*) payload);
   }
   size_t i = 0;
   uint8_t has_onces = 0;
@@ -343,6 +341,10 @@ void stream_notify(stream_t* stream, stream_event_e event, void* payload) {
   if (has_onces == 1) {
     stream_event_list_remove_onces(list);
   }
+  /* Release our hold on the payload */
+  if (payload_destroy != NULL) {
+    payload_destroy(payload);
+  }
 }
 
 /* ---- stream operations ---- */
@@ -351,7 +353,7 @@ void stream_deactivate(stream_t* stream, async_error_t* error) {
   platform_lock(&stream->lock);
   stream->is_deactivated = 1;
   platform_unlock(&stream->lock);
-  stream_notify(stream, error_event, (void*) error);
+  stream_notify(stream, error_event, (void*) error, (void (*)(void*))error_destroy);
 }
 
 void stream_deferred_deref(stream_t* stream) {
@@ -421,7 +423,7 @@ void readable_stream_pull_handler(stream_t* stream, void (*on_pull)(stream_t*)) 
 
 void writeable_stream_write_handler(stream_t* stream, void (*handler)(stream_t*, void*)) {
   if (stream->type == readable_stream) {
-    stream_notify(stream, error_event, ERROR("Read Stream cannot set write handlers"));
+    stream_notify(stream, error_event, ERROR("Read Stream cannot set write handlers"), (void (*)(void*))error_destroy);
   } else {
     stream->on_write = handler;
   }
@@ -486,7 +488,7 @@ void readable_pull_stream_pull(stream_t* stream) {
   platform_lock(&stream->lock);
   if (stream->type == writeable_stream || stream->force == push) {
     platform_unlock(&stream->lock);
-    stream_notify(stream, error_event, ERROR("Invalid Readable Pull Stream"));
+    stream_notify(stream, error_event, ERROR("Invalid Readable Pull Stream"), (void (*)(void*))error_destroy);
     return;
   }
   platform_unlock(&stream->lock);
@@ -560,9 +562,9 @@ size_t stream_once(stream_t* stream, stream_event_e event, void* ctx, void (* ha
 
 void readable_push_stream_pipe(stream_t* rs, stream_t* ws) {
   if (rs->type == writeable_stream || rs->force == pull) {
-    stream_notify(rs, error_event, ERROR("Invalid read stream being piped"));
+    stream_notify(rs, error_event, ERROR("Invalid read stream being piped"), (void (*)(void*))error_destroy);
   } if (ws->type == readable_stream || ws->force == pull) {
-    stream_notify(rs, error_event, ERROR("Invalid write stream being piped to"));
+    stream_notify(rs, error_event, ERROR("Invalid write stream being piped to"), (void (*)(void*))error_destroy);
   } else {
     rs->on_pipe(rs, ws);
   }
@@ -572,7 +574,7 @@ void _readable_push_stream_on_pipe(stream_t* rs, stream_t* ws) {
   platform_lock(&rs->lock);
   if (rs->is_deactivated == 1) {
     platform_unlock(&rs->lock);
-    stream_notify(rs, error_event, ERROR("Stream has been destroyed"));
+    stream_notify(rs, error_event, ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (rs->pipe_notifiers == NULL) {
       size_t size = 0;
@@ -624,7 +626,7 @@ void _writeable_push_stream_on_piped(stream_t* ws, stream_t* rs) {
   }
   if (ws->is_deactivated == 1) {
     platform_unlock(&ws->lock);
-    stream_notify(ws, error_event, ERROR("Stream has been destroyed"));
+    stream_notify(ws, error_event, ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (ws->pipe_notifiers == NULL) {
       size_t size = 0;
@@ -674,6 +676,7 @@ void _writeable_push_stream_on_piped(stream_t* ws, stream_t* rs) {
 }
 
 void _writeable_push_stream_data_notify(stream_t* stream, void* data) {
+  REFERENCE((buffer_t*)data, buffer_t);
   writeable_stream_write(stream, data);
 }
 
@@ -695,9 +698,9 @@ void _writeable_push_stream_complete_notify(stream_t* stream, void* payload) {
 
 void writeable_pull_stream_pipe(stream_t* ws, stream_t* rs) {
   if (rs->type == writeable_stream || rs->force == push) {
-    stream_notify(rs, error_event, ERROR("Invalid write stream being piped"));
+    stream_notify(rs, error_event, ERROR("Invalid write stream being piped"), (void (*)(void*))error_destroy);
   } if (ws->type == readable_stream || ws->force == push) {
-    stream_notify(rs, error_event, ERROR("Invalid read stream being piped to"));
+    stream_notify(rs, error_event, ERROR("Invalid read stream being piped to"), (void (*)(void*))error_destroy);
   } else {
     ws->on_pipe(ws, rs);
   }
@@ -711,7 +714,7 @@ void _writeable_pull_stream_on_pipe(stream_t* ws, stream_t* rs) {
   }
   if (ws->is_deactivated == 1) {
     platform_unlock(&ws->lock);
-    stream_notify(ws, error_event, ERROR("Stream has been destroyed"));
+    stream_notify(ws, error_event, ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (ws->pipe_notifiers == NULL) {
       size_t size = 0;
@@ -759,7 +762,7 @@ void _readable_pull_stream_on_piped(stream_t* rs, stream_t* ws) {
   }
   if (rs->is_deactivated == 1) {
     platform_unlock(&rs->lock);
-    stream_notify(rs, error_event, ERROR("Stream has been destroyed"));
+    stream_notify(rs, error_event, ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (rs->pipe_notifiers == NULL) {
       size_t size = 0;
@@ -800,7 +803,7 @@ void _readable_pull_stream_on_piped(stream_t* rs, stream_t* ws) {
     }
     rs->is_piped = 1;
     platform_unlock(&rs->lock);
-    stream_notify(rs, piped_event, NULL);
+    stream_notify(rs, piped_event, NULL, NULL);
   }
 }
 
@@ -821,9 +824,7 @@ void _writeable_pull_stream_error_notify(stream_t* stream, void* payload) {
 }
 
 void _writeable_pull_stream_piped_notify(stream_t* stream, void* payload) {
-  platform_lock(&stream->lock);
   stream->is_pulling = 1;
-  platform_unlock(&stream->lock);
   readable_pull_stream_pull(stream->pullable_stream);
 }
 
@@ -832,17 +833,13 @@ void _writeable_pull_stream_close_notify(stream_t* stream, void* payload) {
 }
 
 void _writeable_pull_stream_complete_notify(stream_t* stream, void* payload) {
-  platform_lock(&stream->lock);
   stream->is_pulling = 0;
-  platform_unlock(&stream->lock);
 }
 
 void _writeable_pull_stream_data_notify(stream_t* stream, void* data) {
+  REFERENCE((buffer_t*)data, buffer_t);
   writeable_stream_write(stream, data);
-  platform_lock(&stream->lock);
-  uint8_t is_pulling = stream->is_pulling;
-  platform_unlock(&stream->lock);
-  if (is_pulling) {
+  if (stream->is_pulling) {
     readable_pull_stream_pull(stream->pullable_stream);
   }
 }

@@ -47,10 +47,14 @@ static void _render_origin_data(readable_off_stream_t* stream, buffer_t* data) {
   stream->sent_bytes += length;
 
   if (stream->sent_bytes >= stream->ori->final_byte) {
-    stream->first_tuple = NULL;
+    if (stream->first_tuple != NULL) {
+      DESTROY(stream->first_tuple, tuple);
+      stream->first_tuple = NULL;
+    }
     stream_notify((stream_t*)stream, finished_event, NULL, NULL);
     stream_notify((stream_t*)stream, complete_event, NULL, NULL);
-    stream_close((stream_t*)stream);
+    stream_notify((stream_t*)stream, close_event, NULL, NULL);
+    stream->stream.is_deactivated = 1;
   }
 }
 
@@ -58,6 +62,7 @@ static void _check_cache_and_decode(readable_off_stream_t* stream, tuple_t* tupl
   buffer_t* cached = tuple_cache_apply(stream->tc, tuple);
   if (cached != NULL) {
     if (stream->first_tuple != NULL && tuple_equals(stream->first_tuple, tuple)) {
+      DESTROY(stream->first_tuple, tuple);
       stream->first_tuple = NULL;
     }
     _render_origin_data(stream, cached);
@@ -97,11 +102,16 @@ static void _check_cache_and_decode(readable_off_stream_t* stream, tuple_t* tupl
   tuple_cache_update(stream->tc, tuple, origin_data);
 
   if (stream->first_tuple != NULL && tuple_equals(stream->first_tuple, tuple)) {
+    DESTROY(stream->first_tuple, tuple);
     stream->first_tuple = NULL;
   }
 
   _render_origin_data(stream, origin_data);
   DESTROY(origin_data, buffer);
+
+  if (stream->stream.is_deactivated) {
+    return;
+  }
 }
 
 void readable_off_stream_dispatch(void* state, message_t* msg) {
@@ -111,13 +121,25 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
       tuple_t* tuple = (tuple_t*)msg->payload;
       if (stream->stream.is_deactivated) {
         DESTROY(tuple, tuple);
+        msg->payload = NULL;
         break;
       }
       if (stream->first_tuple == NULL) {
         stream->first_tuple = REFERENCE(tuple, tuple_t);
       }
       _check_cache_and_decode(stream, tuple);
+      if (stream->stream.is_deactivated) {
+        DESTROY(tuple, tuple);
+        msg->payload = NULL;
+        break;
+      }
       DESTROY(tuple, tuple);
+      msg->payload = NULL;
+      break;
+    }
+    case CLOSE_STREAM: {
+      stream_notify((stream_t*)stream, close_event, NULL, NULL);
+      stream->stream.is_deactivated = 1;
       break;
     }
     default:
@@ -125,8 +147,8 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
   }
 }
 
-static void _readable_off_stream_on_write(stream_t* s, void* data) {
-  (void)s;
+static void _readable_off_stream_on_write(stream_t* stream, void* data) {
+  (void)stream;
   (void)data;
 }
 
@@ -148,7 +170,8 @@ readable_off_stream_t* readable_off_stream_create(
               (void (*)(stream_t*))readable_off_stream_destroy);
   stream->stream.on_write = _readable_off_stream_on_write;
 
-  actor_init(&stream->stream.actor, stream, readable_off_stream_dispatch);
+  stream->stream.actor.state = stream;
+  stream->stream.actor.dispatch = readable_off_stream_dispatch;
 
   return stream;
 }

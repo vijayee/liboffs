@@ -13,8 +13,8 @@ static size_t tuple_hash_func(const tuple_t* key) {
   return (size_t)tuple_hash((tuple_t*)key);
 }
 
-static int tuple_compare_func(const tuple_t* a, const tuple_t* b) {
-  return !tuple_equals((tuple_t*)a, (tuple_t*)b);
+static int tuple_compare_func(const tuple_t* left, const tuple_t* right) {
+  return !tuple_equals((tuple_t*)left, (tuple_t*)right);
 }
 
 static tuple_t* tuple_dup_func(const tuple_t* key) {
@@ -210,28 +210,28 @@ void tuple_cache_dispatch(void* state, message_t* msg) {
   tuple_cache_t* tc = (tuple_cache_t*)state;
   switch (msg->type) {
     case TUPLE_CACHE_GET: {
-      tuple_cache_get_payload_t* p = (tuple_cache_get_payload_t*)msg->payload;
-      p->result = tuple_cache_lru_get(tc->lru, p->key);
+      tuple_cache_get_payload_t* payload = (tuple_cache_get_payload_t*)msg->payload;
+      payload->result = tuple_cache_lru_get(tc->lru, payload->key);
       break;
     }
     case TUPLE_CACHE_PUT: {
-      tuple_cache_put_payload_t* p = (tuple_cache_put_payload_t*)msg->payload;
-      tuple_cache_lru_put(tc->lru, p->key, p->value);
+      tuple_cache_put_payload_t* payload = (tuple_cache_put_payload_t*)msg->payload;
+      tuple_cache_lru_put(tc->lru, payload->key, payload->value);
       break;
     }
     case TUPLE_CACHE_REMOVE: {
-      tuple_cache_remove_payload_t* p = (tuple_cache_remove_payload_t*)msg->payload;
-      tuple_cache_lru_remove(tc->lru, p->key);
+      tuple_cache_remove_payload_t* payload = (tuple_cache_remove_payload_t*)msg->payload;
+      tuple_cache_lru_remove(tc->lru, payload->key);
       break;
     }
     case TUPLE_CACHE_CONTAINS: {
-      tuple_cache_contains_payload_t* p = (tuple_cache_contains_payload_t*)msg->payload;
-      p->result = tuple_cache_lru_contains(tc->lru, p->key);
+      tuple_cache_contains_payload_t* payload = (tuple_cache_contains_payload_t*)msg->payload;
+      payload->result = tuple_cache_lru_contains(tc->lru, payload->key);
       break;
     }
     case TUPLE_CACHE_SIZE: {
-      tuple_cache_size_payload_t* p = (tuple_cache_size_payload_t*)msg->payload;
-      p->result = tuple_cache_lru_size(tc->lru);
+      tuple_cache_size_payload_t* payload = (tuple_cache_size_payload_t*)msg->payload;
+      payload->result = tuple_cache_lru_size(tc->lru);
       break;
     }
     default:

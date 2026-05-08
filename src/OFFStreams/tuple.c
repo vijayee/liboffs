@@ -87,21 +87,21 @@ uint64_t tuple_hash(tuple_t* tuple) {
   return hash;
 }
 
-uint8_t tuple_equals(tuple_t* a, tuple_t* b) {
-  if (a->count != b->count) {
+uint8_t tuple_equals(tuple_t* left, tuple_t* right) {
+  if (left->count != right->count) {
     return 0;
   }
-  for (size_t i = 0; i < a->count; i++) {
-    if (a->hashes[i] == NULL || b->hashes[i] == NULL) {
-      if (a->hashes[i] != b->hashes[i]) {
+  for (size_t i = 0; i < left->count; i++) {
+    if (left->hashes[i] == NULL || right->hashes[i] == NULL) {
+      if (left->hashes[i] != right->hashes[i]) {
         return 0;
       }
       continue;
     }
-    if (a->hashes[i]->size != b->hashes[i]->size) {
+    if (left->hashes[i]->size != right->hashes[i]->size) {
       return 0;
     }
-    if (memcmp(a->hashes[i]->data, b->hashes[i]->data, a->hashes[i]->size) != 0) {
+    if (memcmp(left->hashes[i]->data, right->hashes[i]->data, left->hashes[i]->size) != 0) {
       return 0;
     }
   }

@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 extern "C" {
 #include "../src/OFFStreams/writeable_off_stream.h"
+#include "../src/OFFStreams/block_recipe.h"
 #include "../src/OFFStreams/tuple_cache.h"
-#include "../src/OFFStreams/ori.h"
 #include "../src/Buffer/buffer.h"
 #include "../src/BlockCache/block.h"
 #include "../src/Scheduler/scheduler.h"
@@ -20,8 +20,13 @@ TEST(WriteableOffStream, TestCreateDestroy) {
       "/tmp/test_offs_wstream_bc", standard, NULL);
   tuple_cache_t* tc = tuple_cache_create(100);
 
+  new_blocks_recipe_t* recipe = new_blocks_recipe_create(pool, bc, standard);
+  vec_block_recipe_t recipes;
+  vec_init(&recipes);
+  vec_push(&recipes, (block_recipe_t*)recipe);
+
   writeable_off_stream_t* stream = writeable_off_stream_create(
-      pool, bc, tc, standard, 3, 32);
+      pool, bc, tc, standard, 3, 32, recipes);
   ASSERT_NE(stream, nullptr);
   EXPECT_EQ(stream->block_size, 128000u);
   EXPECT_EQ(stream->tuple_size, 3u);
@@ -30,7 +35,7 @@ TEST(WriteableOffStream, TestCreateDestroy) {
   tuple_cache_destroy(tc);
   block_cache_destroy(bc);
 
-  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
+  new_blocks_recipe_destroy(recipe);
   scheduler_pool_destroy(pool);
 }

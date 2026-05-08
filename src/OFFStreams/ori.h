@@ -5,12 +5,14 @@
 #ifndef OFFS_ORI_H
 #define OFFS_ORI_H
 
+#include "../RefCounter/refcounter.h"
 #include "../Buffer/buffer.h"
 #include "../BlockCache/block.h"
 #include <stddef.h>
 #include <stdint.h>
 
 typedef struct {
+  refcounter_t refcounter;
   buffer_t* descriptor_hash;
   size_t descriptor_offset;
   block_size_e block_type;

@@ -250,11 +250,6 @@ namespace indexTest {
     }
     DESTROY(index, index);
 
-    index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
-    EXPECT_TRUE(error_code == 0);
-    cbor_item_t *cbor = index_to_cbor(index);
-    DESTROY(index, index);
-
     for (size_t i = 0; i < 4; i++) {
       index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
       EXPECT_TRUE(error_code == 0);
@@ -268,6 +263,10 @@ namespace indexTest {
     }
     DESTROY(index, index);
 
+    index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
+    EXPECT_TRUE(error_code == 0);
+    cbor_item_t *cbor = index_to_cbor(index);
+    DESTROY(index, index);
 
     CorruptCRC(5);
 

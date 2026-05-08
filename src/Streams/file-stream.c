@@ -46,41 +46,41 @@ void readable_push_file_stream_destroy(readable_push_file_stream_t* stream) {
 
 void readable_push_file_stream_push(readable_push_file_stream_t* stream) {
   if (stream->stream.is_deactivated == 1) {
-    stream_notify((stream_t*)stream, error_event, ERROR("Stream is already destroyed"));
+    return;
+  }
+  int32_t diff = stream->file_size - stream->cursor;
+  if (diff <= 0) {
+    return;
+  }
+  size_t size;
+  if (stream->chunk_size > (size_t)diff) {
+    size = diff;
   } else {
-    int32_t diff = stream->file_size - stream->cursor;
-    size_t size;
-    if (stream->chunk_size > diff) {
-      size = diff;
-    } else {
-      size = stream->chunk_size;
-    }
-    uint8_t* buf = get_memory(size);
-    size_t bytes = read(stream->fd, buf, size);
-    if (bytes != size) {
-      free(buf);
-      stream_notify((stream_t*)stream, error_event, ERROR("Invalid Read Size"));
-      return;
-    }
+    size = stream->chunk_size;
+  }
+  uint8_t* buf = get_memory(size);
+  size_t bytes = read(stream->fd, buf, size);
+  if (bytes != size) {
+    free(buf);
+    stream_notify((stream_t*)stream, error_event, ERROR("Invalid Read Size"), (void (*)(void*))error_destroy);
+    return;
+  }
 
-    buffer_t* buffer = buffer_create_from_existing_memory(buf, size);
+  buffer_t* buffer = buffer_create_from_existing_memory(buf, size);
 
-    stream->cursor += size;
-    stream_notify((stream_t*)stream, data_event, CONSUME(buffer, buffer_t));
-    if (stream->file_size == stream->cursor) {
-      stream_notify((stream_t*) stream, complete_event, NULL);
-      stream_close((stream_t*) stream);
-    } else {
-      readable_push_stream_push((stream_t*) stream);
-    }
+  stream->cursor += size;
+  stream_notify((stream_t*)stream, data_event, CONSUME(buffer, buffer_t), (void (*)(void*))buffer_destroy);
+  if (stream->file_size == stream->cursor) {
+    stream_notify((stream_t*) stream, complete_event, NULL, NULL);
+    stream_close((stream_t*) stream);
+  } else {
+    readable_push_stream_push((stream_t*) stream);
   }
 }
 
 void readable_push_file_stream_read(readable_push_file_stream_t* stream, size_t size, void* ctx, void (*cb)(void*, void*)) {
-  platform_lock(&stream->stream.lock);
   if (stream->stream.is_deactivated == 1) {
-    platform_unlock(&stream->stream.lock);
-    stream_notify((stream_t*)stream, error_event, ERROR("Stream is already destroyed"));
+    stream_notify((stream_t*)stream, error_event, ERROR("Stream is already destroyed"), (void (*)(void*))error_destroy);
   } else {
     int32_t diff = stream->file_size - stream->cursor;
     if (size < diff) {
@@ -90,30 +90,24 @@ void readable_push_file_stream_read(readable_push_file_stream_t* stream, size_t 
     size_t bytes = read(stream->fd, buf, size);
     if (bytes != size) {
       free(buf);
-      platform_unlock(&stream->stream.lock);
-      stream_notify((stream_t*)stream, error_event, ERROR("Invalid Read Size"));
+      stream_notify((stream_t*)stream, error_event, ERROR("Invalid Read Size"), (void (*)(void*))error_destroy);
       return;
     }
 
     buffer_t* buffer = buffer_create_from_existing_memory(buf, size);
 
     stream->cursor += size;
-    platform_unlock(&stream->stream.lock);
     cb(ctx, CONSUME(buffer, buffer_t));
   }
 }
 
 void readable_push_file_stream_close(readable_push_file_stream_t* stream) {
-  platform_lock(&stream->stream.lock);
   uint8_t deactivated = stream->stream.is_deactivated;
   if (deactivated == 0) {
     stream->stream.is_deactivated = 1;
     stream->stream.is_piped = 0;
-  }
-  platform_unlock(&stream->stream.lock);
-  if (deactivated == 0) {
     stream_unsubscribe_pipe_notifiers((stream_t*) stream);
-    stream_notify((stream_t*) stream, close_event, NULL);
+    stream_notify((stream_t*) stream, close_event, NULL, NULL);
   }
 }
 
@@ -132,7 +126,6 @@ writeable_push_file_stream_t* writeable_push_file_stream_create(scheduler_pool_t
 }
 
 void writeable_push_file_stream_write(writeable_push_file_stream_t* stream, buffer_t* data) {
-  REFERENCE(data, buffer_t);
   write(stream->fd, data->data, data->size);
   DESTROY(data, buffer);
 }
@@ -150,16 +143,12 @@ void writeable_push_file_stream_destroy(writeable_push_file_stream_t* stream) {
   }
 }
 void writeable_push_file_stream_close(writeable_push_file_stream_t* stream) {
-  platform_lock(&stream->stream.lock);
   uint8_t deactivated = stream->stream.is_deactivated;
   if (deactivated == 0) {
     stream->stream.is_deactivated = 1;
     stream->stream.is_piped = 0;
-    platform_unlock(&stream->stream.lock);
     stream_unsubscribe_pipe_notifiers((stream_t*) stream);
-    stream_notify((stream_t *) stream, close_event, NULL);
-  } else {
-    platform_unlock(&stream->stream.lock);
+    stream_notify((stream_t*) stream, close_event, NULL, NULL);
   }
 }
 
@@ -201,14 +190,15 @@ void readable_pull_file_stream_destroy(readable_pull_file_stream_t* stream) {
 }
 
 void _readable_pull_file_stream_on_pull(readable_pull_file_stream_t* stream) {
-  platform_lock(&stream->stream.lock);
   if (stream->stream.is_deactivated == 1) {
-    platform_unlock(&stream->stream.lock);
-    stream_notify((stream_t*)stream, error_event, ERROR("Stream is already destroyed"));
-  } else {
-    int32_t diff = stream->file_size - stream->cursor;
+    return;
+  }
+  int32_t diff = stream->file_size - stream->cursor;
+  if (diff <= 0) {
+    return;
+  }
     size_t size;
-    if (stream->chunk_size > diff) {
+    if (stream->chunk_size > (size_t)diff) {
       size = diff;
     } else {
       size = stream->chunk_size;
@@ -217,34 +207,27 @@ void _readable_pull_file_stream_on_pull(readable_pull_file_stream_t* stream) {
     size_t bytes = read(stream->fd, buf, size);
     if (bytes != size) {
       free(buf);
-      platform_unlock(&stream->stream.lock);
-      stream_notify((stream_t*)stream, error_event, ERROR("Invalid Read Size"));
+      stream_notify((stream_t*)stream, error_event, ERROR("Invalid Read Size"), (void (*)(void*))error_destroy);
       return;
     }
 
     buffer_t* buffer = buffer_create_from_existing_memory(buf, size);
 
     stream->cursor += size;
-    platform_unlock(&stream->stream.lock);
-    stream_notify((stream_t*)stream, data_event, CONSUME(buffer, buffer_t));
+    stream_notify((stream_t*)stream, data_event, CONSUME(buffer, buffer_t), (void (*)(void*))buffer_destroy);
     if (stream->file_size == stream->cursor) {
-      stream_notify((stream_t*) stream, complete_event, NULL);
+      stream_notify((stream_t*) stream, complete_event, NULL, NULL);
       stream_close((stream_t*) stream);
     }
-  }
 }
 
 void readable_pull_file_stream_close(readable_pull_file_stream_t* stream) {
-  platform_lock(&stream->stream.lock);
   uint8_t deactivated = stream->stream.is_deactivated;
   if (deactivated == 0) {
     stream->stream.is_deactivated = 1;
     stream->stream.is_piped = 0;
-  }
-  platform_unlock(&stream->stream.lock);
-  if (deactivated == 0) {
     stream_unsubscribe_pipe_notifiers((stream_t*) stream);
-    stream_notify((stream_t*) stream, close_event, NULL);
+    stream_notify((stream_t*) stream, close_event, NULL, NULL);
   }
 }
 
@@ -263,7 +246,6 @@ writeable_pull_file_stream_t* writeable_pull_file_stream_create(scheduler_pool_t
 }
 
 void writeable_pull_file_stream_write(writeable_pull_file_stream_t* stream, buffer_t* data) {
-  REFERENCE(data, buffer_t);
   write(stream->fd, data->data, data->size);
   DESTROY(data, buffer);
 }
@@ -281,15 +263,11 @@ void writeable_pull_file_stream_destroy(writeable_pull_file_stream_t* stream) {
   }
 }
 void writeable_pull_file_stream_close(writeable_pull_file_stream_t* stream) {
-  platform_lock(&stream->stream.lock);
   uint8_t deactivated = stream->stream.is_deactivated;
   if (deactivated == 0) {
     stream->stream.is_deactivated = 1;
     stream->stream.is_piped = 0;
-    platform_unlock(&stream->stream.lock);
     stream_unsubscribe_pipe_notifiers((stream_t*) stream);
-    stream_notify((stream_t *) stream, close_event, NULL);
-  } else {
-    platform_unlock(&stream->stream.lock);
+    stream_notify((stream_t*) stream, close_event, NULL, NULL);
   }
 }

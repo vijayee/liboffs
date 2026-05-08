@@ -22,7 +22,11 @@ if (BUILD_TESTING)
             test_tuple_ori.cpp
             test_tuple_cache.cpp
             test_readable_off_stream.cpp
-            test_writeable_off_stream.cpp)
+            test_writeable_off_stream.cpp
+            test_readable_descriptor.cpp
+            test_writeable_descriptor.cpp
+            test_off_stream_integration.cpp
+            test_block_recipe.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
