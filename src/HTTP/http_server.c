@@ -27,6 +27,8 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
   server->loop = pd_loop_create(NULL);
   server->ssl_ctx = NULL;
   vec_init(&server->routes);
+  vec_init(&server->middlewares);
+  vec_init(&server->connections);
   server->running = 0;
   server->listen_fd = -1;
   server->listen_watcher = NULL;
@@ -124,6 +126,19 @@ void http_server_destroy(http_server_t* server) {
   if (server->listen_fd >= 0) {
     close(server->listen_fd);
   }
+  for (int i = server->connections.length - 1; i >= 0; i--) {
+    http_connection_t* conn = server->connections.data[i];
+    conn->server = NULL;
+    DESTROY(conn, http_connection);
+  }
+  vec_deinit(&server->connections);
+  for (int i = 0; i < server->middlewares.length; i++) {
+    http_middleware_entry_t* entry = &server->middlewares.data[i];
+    if (entry->user_data_destroy != NULL && entry->user_data != NULL) {
+      entry->user_data_destroy(entry->user_data);
+    }
+  }
+  vec_deinit(&server->middlewares);
   for (int i = 0; i < server->routes.length; i++) {
     http_route_deinit(&server->routes.data[i]);
   }
@@ -180,6 +195,12 @@ void http_server_delete_with_data(http_server_t* server, const char* pattern, ht
 }
 
 void http_server_dispatch(http_server_t* server, http_request_t* request, http_response_t* response) {
+  for (int i = 0; i < server->middlewares.length; i++) {
+    http_middleware_entry_t* entry = &server->middlewares.data[i];
+    int result = entry->handler(request, response, entry->user_data);
+    if (result != 0) return;
+  }
+
   const char* path = request->path != NULL ? request->path : request->url;
   if (path == NULL) {
     http_response_set_status(response, HTTP_STATUS_BAD_REQUEST);
@@ -201,6 +222,14 @@ void http_server_dispatch(http_server_t* server, http_request_t* request, http_r
 
   http_response_set_status(response, HTTP_STATUS_NOT_FOUND);
   http_response_end(response);
+}
+
+void http_server_use(http_server_t* server, http_middleware_t middleware, void* user_data, void (*user_data_destroy)(void*)) {
+  http_middleware_entry_t entry;
+  entry.handler = middleware;
+  entry.user_data = user_data;
+  entry.user_data_destroy = user_data_destroy;
+  vec_push(&server->middlewares, entry);
 }
 
 static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
@@ -227,6 +256,7 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
       close(client_fd);
       return;
     }
+    vec_push(&server->connections, connection);
     atomic_fetch_add(&server->active_connections, 1);
 
     if (server->ssl_ctx != NULL) {

@@ -5,6 +5,7 @@
 #include "off_routes.h"
 #include "http_response.h"
 #include "http_request.h"
+#include "cors.h"
 #include "../OFFStreams/off_url.h"
 #include "../OFFStreams/readable_off_stream.h"
 #include "../OFFStreams/writeable_off_stream.h"
@@ -306,6 +307,10 @@ static void _off_post_handler(http_request_t* request, http_response_t* response
 void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
                          block_cache_t* bc, ofd_cache_t* ofd_cache) {
     off_routes_context_t* ctx = off_routes_context_create(pool, bc, ofd_cache);
+
+    cors_config_t* cors_config = cors_config_offsystem();
+    http_server_use(server, cors_middleware, cors_config,
+                    (void (*)(void*))cors_config_destroy);
 
     http_server_get_with_data(server, OFF_GET_PATTERN,
                                _off_get_handler, ctx,

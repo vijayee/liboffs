@@ -308,6 +308,7 @@ void http_connection_destroy(http_connection_t* connection) {
   if (refcounter_count((refcounter_t*)connection) == 0) {
     if (connection->server != NULL) {
       atomic_fetch_sub(&connection->server->active_connections, 1);
+      vec_remove(&connection->server->connections, connection);
     }
     if (connection->watcher != NULL) {
       pd_watcher_stop(connection->watcher);

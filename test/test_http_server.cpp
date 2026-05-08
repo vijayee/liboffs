@@ -9,6 +9,7 @@ extern "C" {
 #include "../src/HTTP/http_connection.h"
 #include "../src/HTTP/http_route.h"
 #include "../src/HTTP/http_headers.h"
+#include "../src/HTTP/cors.h"
 #include "../src/Scheduler/scheduler.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -386,6 +387,162 @@ TEST_F(TestHttpServer, TestNotFoundRoute) {
   EXPECT_NE(strstr(response, "404"), nullptr);
 
   close(fd);
+}
+
+// --- Middleware Tests ---
+
+static int _test_middleware_stop(http_request_t* request, http_response_t* response, void* user_data) {
+  http_response_set_status(response, HTTP_STATUS_OK);
+  http_response_set_header(response, "X-Middleware", "stopped");
+  http_response_end(response);
+  return 1;
+}
+
+static int _test_middleware_continue(http_request_t* request, http_response_t* response, void* user_data) {
+  http_response_set_header(response, "X-Middleware", "passed");
+  return 0;
+}
+
+TEST_F(TestHttpServer, TestMiddlewareStopsChain) {
+  server = http_server_create(pool, "127.0.0.1", port);
+  ASSERT_TRUE(server != NULL);
+
+  http_server_use(server, _test_middleware_stop, NULL, NULL);
+  http_server_get(server, "^/hello$", _test_get_handler, NULL);
+  http_server_listen(server);
+
+  int fd = -1;
+  for (int attempts = 0; attempts < 50; attempts++) {
+    platform_usleep(10000);
+    fd = _connect_to_server(port);
+    if (fd >= 0) break;
+  }
+  ASSERT_GE(fd, 0);
+
+  char response[4096];
+  const char* request = "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
+  int result = _send_and_recv(fd, request, response, sizeof(response));
+  EXPECT_EQ(result, 0);
+
+  EXPECT_NE(strstr(response, "200"), nullptr);
+  EXPECT_NE(strstr(response, "X-Middleware: stopped"), nullptr);
+  EXPECT_EQ(strstr(response, "Hello, World!"), nullptr);
+
+  close(fd);
+}
+
+TEST_F(TestHttpServer, TestMiddlewareContinuesChain) {
+  server = http_server_create(pool, "127.0.0.1", port);
+  ASSERT_TRUE(server != NULL);
+
+  http_server_use(server, _test_middleware_continue, NULL, NULL);
+  http_server_get(server, "^/hello$", _test_get_handler, NULL);
+  http_server_listen(server);
+
+  int fd = -1;
+  for (int attempts = 0; attempts < 50; attempts++) {
+    platform_usleep(10000);
+    fd = _connect_to_server(port);
+    if (fd >= 0) break;
+  }
+  ASSERT_GE(fd, 0);
+
+  char response[4096];
+  const char* request = "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
+  int result = _send_and_recv(fd, request, response, sizeof(response));
+  EXPECT_EQ(result, 0);
+
+  EXPECT_NE(strstr(response, "200"), nullptr);
+  EXPECT_NE(strstr(response, "X-Middleware: passed"), nullptr);
+  EXPECT_NE(strstr(response, "Hello, World!"), nullptr);
+
+  close(fd);
+}
+
+// --- CORS Tests ---
+
+TEST_F(TestHttpServer, TestCorsPreflight) {
+  server = http_server_create(pool, "127.0.0.1", port);
+  ASSERT_TRUE(server != NULL);
+
+  cors_config_t* cors_config = cors_config_offsystem();
+  http_server_use(server, cors_middleware, cors_config,
+                  (void (*)(void*))cors_config_destroy);
+  http_server_get(server, "^/hello$", _test_get_handler, NULL);
+  http_server_listen(server);
+
+  int fd = -1;
+  for (int attempts = 0; attempts < 50; attempts++) {
+    platform_usleep(10000);
+    fd = _connect_to_server(port);
+    if (fd >= 0) break;
+  }
+  ASSERT_GE(fd, 0);
+
+  char response[4096];
+  const char* request = "OPTIONS /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
+  int result = _send_and_recv(fd, request, response, sizeof(response));
+  EXPECT_EQ(result, 0);
+
+  EXPECT_NE(strstr(response, "204"), nullptr);
+  EXPECT_NE(strstr(response, "Access-Control-Allow-Origin: *"), nullptr);
+  EXPECT_NE(strstr(response, "Access-Control-Allow-Methods:"), nullptr);
+  EXPECT_NE(strstr(response, "Access-Control-Allow-Headers:"), nullptr);
+  EXPECT_NE(strstr(response, "Access-Control-Max-Age:"), nullptr);
+
+  close(fd);
+}
+
+TEST_F(TestHttpServer, TestCorsOnGetRequest) {
+  server = http_server_create(pool, "127.0.0.1", port);
+  ASSERT_TRUE(server != NULL);
+
+  cors_config_t* cors_config = cors_config_offsystem();
+  http_server_use(server, cors_middleware, cors_config,
+                  (void (*)(void*))cors_config_destroy);
+  http_server_get(server, "^/hello$", _test_get_handler, NULL);
+  http_server_listen(server);
+
+  int fd = -1;
+  for (int attempts = 0; attempts < 50; attempts++) {
+    platform_usleep(10000);
+    fd = _connect_to_server(port);
+    if (fd >= 0) break;
+  }
+  ASSERT_GE(fd, 0);
+
+  char response[4096];
+  const char* request = "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
+  int result = _send_and_recv(fd, request, response, sizeof(response));
+  EXPECT_EQ(result, 0);
+
+  EXPECT_NE(strstr(response, "200"), nullptr);
+  EXPECT_NE(strstr(response, "Access-Control-Allow-Origin: *"), nullptr);
+  EXPECT_NE(strstr(response, "Hello, World!"), nullptr);
+
+  close(fd);
+}
+
+TEST(TestCorsConfig, TestDefaultConfig) {
+  cors_config_t* config = cors_config_default();
+  ASSERT_TRUE(config != NULL);
+  EXPECT_STREQ(config->allow_origin, "*");
+  EXPECT_STREQ(config->allow_methods, "GET, PUT, POST, DELETE, OPTIONS");
+  EXPECT_STREQ(config->allow_headers, "Content-Type");
+  EXPECT_STREQ(config->max_age, "86400");
+  EXPECT_EQ(config->allow_credentials, 0);
+  cors_config_destroy(config);
+}
+
+TEST(TestCorsConfig, TestOffsystemConfig) {
+  cors_config_t* config = cors_config_offsystem();
+  ASSERT_TRUE(config != NULL);
+  EXPECT_STREQ(config->allow_origin, "*");
+  EXPECT_NE(strstr(config->allow_headers, "type"), nullptr);
+  EXPECT_NE(strstr(config->allow_headers, "file-name"), nullptr);
+  EXPECT_NE(strstr(config->allow_headers, "stream-length"), nullptr);
+  EXPECT_NE(strstr(config->allow_headers, "server-address"), nullptr);
+  cors_config_destroy(config);
 }
 
 } // namespace http_test
