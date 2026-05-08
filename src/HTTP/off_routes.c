@@ -8,6 +8,7 @@
 #include "cors.h"
 #include "../OFFStreams/off_url.h"
 #include "../OFFStreams/readable_off_stream.h"
+#include "../OFFStreams/readable_descriptor.h"
 #include "../OFFStreams/writeable_off_stream.h"
 #include "../OFFStreams/writeable_descriptor.h"
 #include "../OFFStreams/block_recipe.h"
@@ -36,6 +37,33 @@ off_routes_context_t* off_routes_context_create(scheduler_pool_t* pool,
 
 void off_routes_context_destroy(off_routes_context_t* ctx) {
     free(ctx);
+}
+
+typedef struct {
+    readable_descriptor_t* desc;
+    readable_off_stream_t* rs;
+    tuple_cache_t* tc;
+} get_pipeline_t;
+
+static void _pipeline_on_tuple(void* ctx, void* data) {
+    get_pipeline_t* pipeline = (get_pipeline_t*)ctx;
+    tuple_t* tuple = (tuple_t*)data;
+    readable_off_stream_write(pipeline->rs, tuple);
+}
+
+static void _pipeline_on_desc_close(void* ctx, void* unused) {
+    (void)unused;
+    get_pipeline_t* pipeline = (get_pipeline_t*)ctx;
+    readable_descriptor_destroy(pipeline->desc);
+    pipeline->desc = NULL;
+}
+
+static void _pipeline_on_rs_close(void* ctx, void* unused) {
+    (void)unused;
+    get_pipeline_t* pipeline = (get_pipeline_t*)ctx;
+    readable_off_stream_destroy(pipeline->rs);
+    tuple_cache_destroy(pipeline->tc);
+    free(pipeline);
 }
 
 static void _off_get_handler(http_request_t* request, http_response_t* response, void* user_data) {
@@ -71,14 +99,13 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
 
         // Try to find index.html for root requests, or resolve path
         const char* resolve_path = url->file_name;
-        // If file_name ends with .ofd, try index.html first
         size_t name_len = strlen(url->file_name);
         if (name_len > 4 && strcmp(url->file_name + name_len - 4, ".ofd") == 0) {
             // Try index.html first
             ori_t* index_ori = ofd_cache_resolve(ctx->ofd_cache, url->file_hash, "index.html");
             if (index_ori) {
-                // Stream index.html
                 http_response_set_header(response, "Content-Type", "text/html");
+
                 ori_t* stream_ori = ori_create(index_ori->final_byte);
                 stream_ori->descriptor_hash = buffer_copy(index_ori->descriptor_hash);
                 stream_ori->file_hash = buffer_copy(index_ori->file_hash);
@@ -88,7 +115,23 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
 
                 tuple_cache_t* tc = tuple_cache_create(100);
                 readable_off_stream_t* rs = readable_off_stream_create(ctx->pool, ctx->bc, tc, stream_ori, 0);
+
+                readable_descriptor_t* desc = readable_descriptor_create(ctx->pool, ctx->bc, stream_ori, 32);
+
+                get_pipeline_t* pipeline = get_clear_memory(sizeof(get_pipeline_t));
+                pipeline->desc = desc;
+                pipeline->rs = rs;
+                pipeline->tc = tc;
+
+                stream_subscribe((stream_t*)desc, data_event, pipeline,
+                                 (void (*)(void*, void*))_pipeline_on_tuple, NULL);
+                stream_once((stream_t*)desc, close_event, pipeline,
+                            (void (*)(void*, void*))_pipeline_on_desc_close, NULL);
+                stream_once((stream_t*)rs, close_event, pipeline,
+                            (void (*)(void*, void*))_pipeline_on_rs_close, NULL);
                 http_response_pipe(response, (stream_t*)rs);
+
+                readable_descriptor_push(desc);
                 off_url_destroy(url);
                 return;
             }
@@ -106,6 +149,7 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
         // Stream the file
         const char* mime = mime_type_from_extension(resolve_path);
         http_response_set_header(response, "Content-Type", mime);
+
         ori_t* stream_ori = ori_create(file_ori->final_byte);
         stream_ori->descriptor_hash = buffer_copy(file_ori->descriptor_hash);
         stream_ori->file_hash = buffer_copy(file_ori->file_hash);
@@ -115,7 +159,22 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
 
         tuple_cache_t* tc = tuple_cache_create(100);
         readable_off_stream_t* rs = readable_off_stream_create(ctx->pool, ctx->bc, tc, stream_ori, 0);
+        readable_descriptor_t* desc = readable_descriptor_create(ctx->pool, ctx->bc, stream_ori, 32);
+
+        get_pipeline_t* pipeline = get_clear_memory(sizeof(get_pipeline_t));
+        pipeline->desc = desc;
+        pipeline->rs = rs;
+        pipeline->tc = tc;
+
+        stream_subscribe((stream_t*)desc, data_event, pipeline,
+                         (void (*)(void*, void*))_pipeline_on_tuple, NULL);
+        stream_once((stream_t*)desc, close_event, pipeline,
+                    (void (*)(void*, void*))_pipeline_on_desc_close, NULL);
+        stream_once((stream_t*)rs, close_event, pipeline,
+                    (void (*)(void*, void*))_pipeline_on_rs_close, NULL);
         http_response_pipe(response, (stream_t*)rs);
+
+        readable_descriptor_push(desc);
         off_url_destroy(url);
         return;
     }
@@ -124,15 +183,31 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
     const char* mime = mime_type_from_extension(url->file_name);
     http_response_set_header(response, "Content-Type", mime);
 
-    ori_t* stream_ori = ori_create(0);
+    ori_t* stream_ori = ori_create(url->stream_length);
     stream_ori->descriptor_hash = buffer_copy(url->descriptor_hash);
     stream_ori->file_hash = buffer_copy(url->file_hash);
     stream_ori->file_name = strdup(url->file_name);
-    stream_ori->final_byte = url->stream_length;
+    stream_ori->block_type = standard;
+    stream_ori->tuple_size = 3;
 
     tuple_cache_t* tc = tuple_cache_create(100);
     readable_off_stream_t* rs = readable_off_stream_create(ctx->pool, ctx->bc, tc, stream_ori, 0);
+    readable_descriptor_t* desc = readable_descriptor_create(ctx->pool, ctx->bc, stream_ori, 32);
+
+    get_pipeline_t* pipeline = get_clear_memory(sizeof(get_pipeline_t));
+    pipeline->desc = desc;
+    pipeline->rs = rs;
+    pipeline->tc = tc;
+
+    stream_subscribe((stream_t*)desc, data_event, pipeline,
+                     (void (*)(void*, void*))_pipeline_on_tuple, NULL);
+    stream_once((stream_t*)desc, close_event, pipeline,
+                (void (*)(void*, void*))_pipeline_on_desc_close, NULL);
+    stream_once((stream_t*)rs, close_event, pipeline,
+                (void (*)(void*, void*))_pipeline_on_rs_close, NULL);
     http_response_pipe(response, (stream_t*)rs);
+
+    readable_descriptor_push(desc);
     off_url_destroy(url);
 }
 
