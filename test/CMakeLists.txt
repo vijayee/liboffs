@@ -26,7 +26,8 @@ if (BUILD_TESTING)
             test_writeable_descriptor.cpp
             test_off_stream_integration.cpp
             test_block_recipe.cpp
-            test_http_server.cpp)
+            test_http_server.cpp
+            test_off_url.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
