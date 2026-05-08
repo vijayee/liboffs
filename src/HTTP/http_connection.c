@@ -132,6 +132,9 @@ static int _on_url(http_parser* parser, const char* at, size_t length) {
 
 static int _on_header_field(http_parser* parser, const char* at, size_t length) {
   http_connection_t* connection = (http_connection_t*)parser->data;
+  if (connection->header_field_len > 0 && connection->header_value_len > 0) {
+    _flush_header(connection);
+  }
   _accumulate_field(connection, at, length);
   return 0;
 }

@@ -45,8 +45,16 @@ static void _build_descriptor_blocks(writeable_descriptor_t* desc) {
       chunks = realloc(chunks, sizeof(buffer_t*) * cap);
     }
     size_t offset = chunk_count * chunk_size;
-    chunks[chunk_count] = buffer_slice(desc->descriptor, offset,
-                                        desc->descriptor->size);
+    buffer_t* last_chunk = buffer_slice(desc->descriptor, offset,
+                                          desc->descriptor->size);
+    if (last_chunk->size < desc->block_size) {
+      buffer_t* padded = buffer_create(desc->block_size);
+      memcpy(padded->data, last_chunk->data, last_chunk->size);
+      padded->size = desc->block_size;
+      DESTROY(last_chunk, buffer);
+      last_chunk = padded;
+    }
+    chunks[chunk_count] = last_chunk;
     chunk_count++;
   }
 
@@ -100,8 +108,8 @@ static void _build_descriptor_blocks(writeable_descriptor_t* desc) {
 
   stream_notify((stream_t*)desc, finished_event, NULL, NULL);
   stream_notify((stream_t*)desc, complete_event, NULL, NULL);
-  stream_notify((stream_t*)desc, close_event, NULL, NULL);
   desc->stream.is_deactivated = 1;
+  stream_notify((stream_t*)desc, close_event, NULL, NULL);
 }
 
 void writeable_descriptor_dispatch(void* state, message_t* msg) {

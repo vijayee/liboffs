@@ -29,7 +29,8 @@ if (BUILD_TESTING)
             test_http_server.cpp
             test_off_url.cpp
             test_ofd.cpp
-            test_ofd_cache.cpp)
+            test_ofd_cache.cpp
+            test_off_routes.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
