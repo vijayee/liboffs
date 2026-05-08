@@ -21,6 +21,7 @@
 #include "../Util/allocator.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 // OFF URL regex matching /offsystem/v3/{type}/{length}/{hash1}/{hash2}/{name}
 #define OFF_GET_PATTERN "/offsystem/v3/([-+._a-zA-Z0-9]+/[-+._a-zA-Z0-9-]+)/([0-9]+)/([123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+)/([123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+)/([^ !$`&*()+]*|\\\\[ !$`&*()+]*)+"
@@ -54,21 +55,23 @@ static void _pipeline_on_tuple(void* ctx, void* data) {
 static void _pipeline_on_desc_close(void* ctx, void* unused) {
     (void)unused;
     get_pipeline_t* pipeline = (get_pipeline_t*)ctx;
-    readable_descriptor_destroy(pipeline->desc);
+    // Can't destroy the descriptor here — stream_notify still holds its handler
+    // list lock. Use deferred deref to clean up after the dispatch completes.
+    stream_deferred_deref((stream_t*)pipeline->desc);
     pipeline->desc = NULL;
 }
 
 static void _pipeline_on_rs_close(void* ctx, void* unused) {
     (void)unused;
     get_pipeline_t* pipeline = (get_pipeline_t*)ctx;
-    readable_off_stream_destroy(pipeline->rs);
+    // Off stream cleanup must also be deferred for the same reason
+    stream_deferred_deref((stream_t*)pipeline->rs);
     tuple_cache_destroy(pipeline->tc);
     free(pipeline);
 }
 
 static void _off_get_handler(http_request_t* request, http_response_t* response, void* user_data) {
     off_routes_context_t* ctx = (off_routes_context_t*)user_data;
-
     off_url_t* url = off_url_parse(request->path);
     if (!url) {
         http_response_set_status(response, 400);
@@ -105,6 +108,9 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
             ori_t* index_ori = ofd_cache_resolve(ctx->ofd_cache, url->file_hash, "index.html");
             if (index_ori) {
                 http_response_set_header(response, "Content-Type", "text/html");
+                char index_len_str[32];
+                snprintf(index_len_str, sizeof(index_len_str), "%zu", index_ori->final_byte);
+                http_response_set_header(response, "Content-Length", index_len_str);
 
                 ori_t* stream_ori = ori_create(index_ori->final_byte);
                 stream_ori->descriptor_hash = buffer_copy(index_ori->descriptor_hash);
@@ -149,6 +155,9 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
         // Stream the file
         const char* mime = mime_type_from_extension(resolve_path);
         http_response_set_header(response, "Content-Type", mime);
+        char file_len_str[32];
+        snprintf(file_len_str, sizeof(file_len_str), "%zu", file_ori->final_byte);
+        http_response_set_header(response, "Content-Length", file_len_str);
 
         ori_t* stream_ori = ori_create(file_ori->final_byte);
         stream_ori->descriptor_hash = buffer_copy(file_ori->descriptor_hash);
@@ -182,6 +191,10 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
     // Regular file stream
     const char* mime = mime_type_from_extension(url->file_name);
     http_response_set_header(response, "Content-Type", mime);
+
+    char content_length_str[32];
+    snprintf(content_length_str, sizeof(content_length_str), "%zu", url->stream_length);
+    http_response_set_header(response, "Content-Length", content_length_str);
 
     ori_t* stream_ori = ori_create(url->stream_length);
     stream_ori->descriptor_hash = buffer_copy(url->descriptor_hash);

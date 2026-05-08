@@ -9,7 +9,6 @@
 #include "../RefCounter/refcounter.h"
 #include <string.h>
 
-void stream_deferred_deref(stream_t* stream);
 void _readable_push_stream_piped_notify(stream_t* stream, void* payload);
 void _readable_push_stream_error_notify(stream_t* stream, void* payload);
 void _readable_push_stream_close_notify(stream_t* stream, void* payload);

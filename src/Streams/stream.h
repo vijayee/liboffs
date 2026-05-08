@@ -191,4 +191,5 @@ void stream_unsubscribe_pipe_notifiers(stream_t* stream);
 void readable_stream_pull_handler(stream_t* stream, void (*on_pull)(stream_t*));
 void writeable_pull_stream_pipe(stream_t* ws, stream_t* rs);
 void readable_pull_stream_pull(stream_t* stream);
+void stream_deferred_deref(stream_t* stream);
 #endif //OFFS_STREAM_H
