@@ -114,6 +114,7 @@ static void _pipe_on_close(void* ctx, void* unused) {
     (void)unused;
     http_response_t* response = (http_response_t*)ctx;
     http_response_end(response);
+    http_response_destroy(response);
 }
 
 static void _pipe_on_error(void* ctx, async_error_t* error) {
@@ -121,10 +122,13 @@ static void _pipe_on_error(void* ctx, async_error_t* error) {
     http_response_t* response = (http_response_t*)ctx;
     http_response_set_status(response, 500);
     http_response_end(response);
+    http_response_destroy(response);
 }
 
 void http_response_pipe(http_response_t* response, stream_t* source) {
     if (!response || !source) return;
+    response->is_piped = 1;
+    refcounter_reference((refcounter_t*)response);
     stream_subscribe(source, data_event, response,
                      (void(*)(void*, void*))_pipe_on_data, NULL);
     stream_once(source, close_event, response,

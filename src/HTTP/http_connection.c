@@ -194,10 +194,17 @@ static int _on_message_complete(http_parser* parser) {
 
   http_server_dispatch(connection->server, connection->request, response);
 
-  DESTROY(response, http_response);
+  if (response->is_piped) {
+    // Piped responses are async — the pipeline will call http_response_end
+    // and http_response_destroy when the stream closes. Skip cleanup here.
+    // Still release the initial ref from create; the pipe holds its own ref.
+    http_response_destroy(response);
+  } else {
+    DESTROY(response, http_response);
 
-  if (!connection->request->keep_alive) {
-    shutdown(connection->fd, SHUT_WR);
+    if (!connection->request->keep_alive) {
+      shutdown(connection->fd, SHUT_WR);
+    }
   }
 
   DESTROY(connection->request, http_request);
