@@ -186,7 +186,7 @@ writeable_descriptor_t* writeable_descriptor_create(
   desc->cut_point = (desc->block_size / descriptor_pad) * descriptor_pad;
   desc->data_length = data_length;
   desc->block_count = data_length / desc->block_size;
-  desc->descriptor = buffer_create(descriptor_pad * tuple_size);
+  desc->descriptor = buffer_create(0);
   desc->sent_descriptor = 0;
 
   stream_init((stream_t*)desc, push, writeable_stream, 1, pool,

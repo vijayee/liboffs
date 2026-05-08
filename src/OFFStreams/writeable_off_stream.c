@@ -224,7 +224,7 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
       stream_notify((stream_t*)stream, data_event, CONSUME(file_hash, buffer_t), (void (*)(void*))buffer_destroy);
 
       if (stream->accumulator->size > 0) {
-        block_t* origin = block_create_existing_data_by_type(stream->accumulator, stream->block_type);
+        block_t* origin = block_create_by_type(stream->accumulator, stream->block_type);
         if (origin != NULL) {
           stream->final_block = (block_t*)refcounter_reference((refcounter_t*)origin);
           off_stream_tuple_entry_t* entry = _entry_create(origin, stream->tuple_size);
@@ -323,6 +323,7 @@ writeable_off_stream_t* writeable_off_stream_create(
   vec_init(&stream->entries);
 
   stream->accumulator = buffer_create(stream->block_size);
+  stream->accumulator->size = 0;
   stream->hash_state = get_clear_memory(sizeof(blake3_hasher));
   blake3_hasher hasher;
   blake3_hasher_init(&hasher);
