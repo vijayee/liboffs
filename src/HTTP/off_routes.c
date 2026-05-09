@@ -114,6 +114,7 @@ typedef struct {
     readable_descriptor_t* desc;
     readable_off_stream_t* rs;
     tuple_cache_t* tc;
+    http_response_t* response;
 } get_pipeline_t;
 
 static void _pipeline_on_tuple(void* ctx, void* data) {
@@ -125,10 +126,25 @@ static void _pipeline_on_tuple(void* ctx, void* data) {
 static void _pipeline_on_desc_close(void* ctx, void* unused) {
     (void)unused;
     get_pipeline_t* pipeline = (get_pipeline_t*)ctx;
+    // When the descriptor closes, close the off stream so the HTTP response
+    // gets terminated. The off stream will emit close_event, which triggers
+    // _pipe_on_close to send the response.
+    if (pipeline->rs != NULL) {
+        stream_close((stream_t*)pipeline->rs);
+    }
     // Can't destroy the descriptor here — stream_notify still holds its handler
     // list lock. Use deferred deref to clean up after the dispatch completes.
     stream_deferred_deref((stream_t*)pipeline->desc);
     pipeline->desc = NULL;
+}
+
+static void _pipeline_on_desc_error(void* ctx, void* error) {
+    (void)error;
+    get_pipeline_t* pipeline = (get_pipeline_t*)ctx;
+    if (!pipeline->response->headers_sent) {
+        http_response_set_status(pipeline->response, 404);
+        http_response_set_header(pipeline->response, "Content-Length", "0");
+    }
 }
 
 static void _pipeline_on_rs_close(void* ctx, void* unused) {
@@ -151,11 +167,14 @@ static void _setup_stream_pipeline(http_response_t* response, scheduler_pool_t* 
     pipeline->desc = desc;
     pipeline->rs = rs;
     pipeline->tc = tc;
+    pipeline->response = response;
 
     stream_subscribe((stream_t*)desc, data_event, pipeline,
                      (void (*)(void*, void*))_pipeline_on_tuple, NULL);
     stream_once((stream_t*)desc, close_event, pipeline,
                 (void (*)(void*, void*))_pipeline_on_desc_close, NULL);
+    stream_once((stream_t*)desc, error_event, pipeline,
+                (void (*)(void*, void*))_pipeline_on_desc_error, NULL);
     stream_once((stream_t*)rs, close_event, pipeline,
                 (void (*)(void*, void*))_pipeline_on_rs_close, NULL);
     http_response_pipe(response, (stream_t*)rs);
@@ -304,8 +323,6 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
         return;
     }
 
-    // Regular file stream — use the content type from the OFF URL if available,
-    // otherwise fall back to extension-based detection
     size_t file_size = url->stream_length;
     const char* range_header = http_request_header(request, "Range");
     range_request_t range = parse_range_header(range_header, file_size);
@@ -387,6 +404,7 @@ static void _put_on_descriptor_close(void* ctx, void* unused) {
         free(result_url);
     }
     http_response_end(put_ctx->response);
+    http_response_destroy(put_ctx->response);
 
     off_url_destroy(url);
     buffer_destroy(put_ctx->file_hash);
@@ -461,6 +479,8 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
 
     put_context_t* put_ctx = get_clear_memory(sizeof(put_context_t));
     put_ctx->response = response;
+    response->is_piped = 1;
+    refcounter_reference((refcounter_t*)response);
     put_ctx->content_type = strdup(type);
     put_ctx->file_name = strdup(file_name);
     put_ctx->stream_length = stream_length;

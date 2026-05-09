@@ -4,6 +4,7 @@
 
 #include "readable_off_stream.h"
 #include "../Util/allocator.h"
+#include "../Util/error.h"
 #include "../Actor/actor.h"
 #include "../Actor/message.h"
 #include "../Buffer/buffer.h"
@@ -76,6 +77,9 @@ static void _check_cache_and_decode(readable_off_stream_t* stream, tuple_t* tupl
       if (origin_data != NULL) {
         DESTROY(origin_data, buffer);
       }
+      stream_notify((stream_t*)stream, error_event, ERROR("Block not found in cache"), (void (*)(void*))error_destroy);
+      stream_notify((stream_t*)stream, close_event, NULL, NULL);
+      stream->stream.is_deactivated = 1;
       return;
     }
     if (i == 0) {

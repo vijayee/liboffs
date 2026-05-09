@@ -4,6 +4,7 @@
 
 #include "readable_descriptor.h"
 #include "../Util/allocator.h"
+#include "../Util/error.h"
 #include "../Actor/actor.h"
 #include "../Actor/message.h"
 #include "../Buffer/buffer.h"
@@ -115,6 +116,18 @@ static void _process_descriptor(readable_descriptor_t* desc, buffer_t* block_dat
             current_descriptor = next_remaining;
             key = next_key;
             continue;
+          } else {
+            stream_notify((stream_t*)desc, error_event, ERROR("Descriptor block not found"), (void (*)(void*))error_destroy);
+            stream_notify((stream_t*)desc, close_event, NULL, NULL);
+            desc->stream.is_deactivated = 1;
+            if (current_descriptor != NULL) {
+              DESTROY(current_descriptor, buffer);
+            }
+            if (desc->current_tuple != NULL) {
+              tuple_destroy(desc->current_tuple);
+              desc->current_tuple = NULL;
+            }
+            return;
           }
         }
         desc->current_descriptor = NULL;
@@ -181,6 +194,10 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
         if (block != NULL) {
           _process_descriptor(desc, block->data);
           block_destroy(block);
+        } else {
+          stream_notify((stream_t*)desc, error_event, ERROR("Descriptor block not found"), (void (*)(void*))error_destroy);
+          stream_notify((stream_t*)desc, close_event, NULL, NULL);
+          desc->stream.is_deactivated = 1;
         }
       }
       break;

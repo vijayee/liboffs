@@ -129,7 +129,8 @@ static void _pipe_on_close(void* ctx, void* unused) {
 static void _pipe_on_error(void* ctx, async_error_t* error) {
     (void)error;
     http_response_t* response = (http_response_t*)ctx;
-    http_response_set_status(response, 500);
+    http_response_set_status(response, 404);
+    http_response_set_header(response, "Content-Length", "0");
     http_response_end(response);
     http_response_destroy(response);
 }
@@ -159,12 +160,40 @@ static const char* _mime_map[][2] = {
     {"svg", "image/svg+xml"},
     {"ico", "image/x-icon"},
     {"webp", "image/webp"},
+    {"bmp", "image/bmp"},
+    {"tiff", "image/tiff"},
+    {"tif", "image/tiff"},
+    {"mp4", "video/mp4"},
+    {"webm", "video/webm"},
+    {"mkv", "video/x-matroska"},
+    {"avi", "video/x-msvideo"},
+    {"mov", "video/quicktime"},
+    {"wmv", "video/x-ms-wmv"},
+    {"flv", "video/x-flv"},
+    {"mp3", "audio/mpeg"},
+    {"ogg", "audio/ogg"},
+    {"wav", "audio/wav"},
+    {"flac", "audio/flac"},
+    {"aac", "audio/aac"},
+    {"m4a", "audio/mp4"},
     {"woff", "font/woff"},
     {"woff2", "font/woff2"},
     {"ttf", "font/ttf"},
     {"otf", "font/otf"},
     {"pdf", "application/pdf"},
+    {"zip", "application/zip"},
+    {"gz", "application/gzip"},
+    {"tar", "application/x-tar"},
+    {"rar", "application/vnd.rar"},
+    {"7z", "application/x-7z-compressed"},
+    {"doc", "application/msword"},
+    {"docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+    {"xls", "application/vnd.ms-excel"},
+    {"xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    {"ppt", "application/vnd.ms-powerpoint"},
+    {"pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
     {"txt", "text/plain"},
+    {"csv", "text/csv"},
     {"xml", "application/xml"},
     {"md", "text/markdown"},
     {"ofd", "application/cbor"},
