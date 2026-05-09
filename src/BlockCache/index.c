@@ -194,7 +194,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
   if (files->length > 0) {
     vec_sort(files, _sort_indexes);
     char id[20];
-    for (size_t i = files->length - 1; i >= 0; i--) { //loop through index files to find first valid file
+    for (int i = files->length - 1; i >= 0; i--) { //loop through index files to find first valid file
       //Get index's crc
       char* last = files->data[i];
       uint64_t last_id = 0;
@@ -529,6 +529,9 @@ int index_check_integrity(index_t* index, wal_t* wal) {
 
 }*/
 size_t index_node_count(index_node_t* node) {
+  if (node == NULL) {
+    return 0;
+  }
   if (node->bucket == NULL) {
     return index_node_count(node->left) + index_node_count(node->right);
   } else {
@@ -537,6 +540,9 @@ size_t index_node_count(index_node_t* node) {
 }
 
 void index_node_to_array(index_node_t* node, index_entry_vec_t* entries) {
+  if (node == NULL) {
+    return;
+  }
   if(node->bucket == NULL) {
     index_node_to_array(node->left, entries);
     index_node_to_array(node->right, entries);
@@ -549,6 +555,9 @@ void index_node_to_array(index_node_t* node, index_entry_vec_t* entries) {
 }
 
 cbor_item_t* index_node_to_cbor(index_node_t* node) {
+  if (node == NULL) {
+    return NULL;
+  }
   if (node->bucket == NULL) {
     cbor_item_t* cbor_left = index_node_to_cbor(node->left);
     if (cbor_left == NULL) {
@@ -623,6 +632,9 @@ index_node_t* cbor_to_index_node(cbor_item_t* cbor, size_t bucket_size) {
 }
 
 int _index_node_to_crc(index_node_t* node, XXH64_state_t* const state) {
+  if (node == NULL) {
+    return 0;
+  }
   if (node->bucket == NULL) {
     int result = _index_node_to_crc(node->left, state);
     if (result != 0) {
@@ -678,6 +690,9 @@ void index_add(index_t* index, index_entry_t* entry) {
 }
 
 void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node, size_t current) {
+   if (node == NULL) {
+     return;
+   }
    if (node->bucket == NULL) {
      if (get_bit(entry->hash, current + 1)) {
        index_add_to_node(index, entry, node->right, current + 1);
@@ -825,6 +840,9 @@ index_entry_t* index_peek(index_t* index, buffer_t* hash) {
 }
 
 index_entry_t* index_get_from_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current) {
+  if (node == NULL) {
+    return NULL;
+  }
   if (node->bucket == NULL) {
     if (get_bit(hash, current + 1)) {
       return index_get_from_node(index, hash, node->right, current + 1);
@@ -844,6 +862,9 @@ index_entry_t* index_get_from_node(index_t* index, buffer_t* hash, index_node_t*
 }
 
 index_entry_t* index_find_in_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current) {
+  if (node == NULL) {
+    return NULL;
+  }
   if (node->bucket == NULL) {
     if (get_bit(hash, current + 1)) {
       return index_find_in_node(index, hash, node->right, current + 1);
