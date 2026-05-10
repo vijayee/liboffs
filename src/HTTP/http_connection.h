@@ -36,6 +36,7 @@ typedef struct http_connection_t {
   uint8_t headers_complete;
   uint8_t request_complete;
   uint8_t is_ssl;
+  uint8_t piped_pending;
 } http_connection_t;
 
 http_connection_t* http_connection_create(http_server_t* server, int fd);

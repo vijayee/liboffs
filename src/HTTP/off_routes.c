@@ -2,6 +2,7 @@
 // Created by victor on 5/8/25.
 //
 
+#define _GNU_SOURCE
 #include "off_routes.h"
 #include "http_response.h"
 #include "http_request.h"
@@ -24,6 +25,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <limits.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <poll-dancer/poll-dancer.h>
 
 // OFF URL regex matching /offsystem/v3/{type}/{length}/{hash1}/{hash2}/{name}
 #define OFF_GET_PATTERN "/offsystem/v3/([-+._a-zA-Z0-9]+/[-+._a-zA-Z0-9-]+)/([0-9]+)/([123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+)/([123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+)/([^ !$`&*()+]*|\\\\[ !$`&*()+]*)+"
@@ -371,6 +375,7 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
 
 typedef struct {
     http_response_t* response;
+    http_connection_t* connection;
     buffer_t* file_hash;
     buffer_t* descriptor_hash;
     char* content_type;
@@ -403,8 +408,12 @@ static void _put_on_descriptor_close(void* ctx, void* unused) {
         http_response_write(put_ctx->response, result_url, strlen(result_url));
         free(result_url);
     }
+    http_connection_t* conn = put_ctx->connection;
     http_response_end(put_ctx->response);
     http_response_destroy(put_ctx->response);
+    if (conn) {
+        http_connection_destroy(conn);
+    }
 
     off_url_destroy(url);
     buffer_destroy(put_ctx->file_hash);
@@ -412,9 +421,6 @@ static void _put_on_descriptor_close(void* ctx, void* unused) {
     free(put_ctx->content_type);
     free(put_ctx->file_name);
     free(put_ctx->server_address);
-    // Streams are cleaned up when their refcount drops to zero after deactivation.
-    // Destroying them here would cause use-after-free since stream_notify may still
-    // be iterating the handler list.
     free(put_ctx);
 }
 
@@ -442,6 +448,72 @@ static void _put_on_stream_data(void* ctx, void* data) {
     }
 }
 
+static buffer_t* _extract_multipart_file(buffer_t* body, const char* content_type) {
+    const char* boundary_prefix = "boundary=";
+    const char* boundary_start = strstr(content_type, boundary_prefix);
+    if (!boundary_start) return NULL;
+    boundary_start += strlen(boundary_prefix);
+    while (*boundary_start == ' ' || *boundary_start == '"') boundary_start++;
+
+    size_t boundary_len = 0;
+    while (boundary_start[boundary_len] && boundary_start[boundary_len] != ';' && boundary_start[boundary_len] != ' ' && boundary_start[boundary_len] != '"' && boundary_start[boundary_len] != '\r' && boundary_start[boundary_len] != '\n') {
+        boundary_len++;
+    }
+
+    char boundary[512];
+    snprintf(boundary, sizeof(boundary), "--%.*s", (int)boundary_len, boundary_start);
+    size_t boundary_str_len = strlen(boundary);
+
+    uint8_t* data = body->data;
+    size_t size = body->size;
+
+    uint8_t* pos = (uint8_t*)memmem(data, size, boundary, boundary_str_len);
+    if (!pos) return NULL;
+    pos += boundary_str_len;
+
+    while (pos < data + size && *pos == '\r') pos++;
+    if (pos < data + size && *pos == '\n') pos++;
+
+    uint8_t* headers_end = (uint8_t*)memmem(pos, (size_t)((data + size) - pos), "\r\n\r\n", 4);
+    if (headers_end) {
+        pos = headers_end + 4;
+    } else {
+        headers_end = (uint8_t*)memmem(pos, (size_t)((data + size) - pos), "\n\n", 2);
+        if (headers_end) {
+            pos = headers_end + 2;
+        } else {
+            return NULL;
+        }
+    }
+
+    char end_boundary[520];
+    snprintf(end_boundary, sizeof(end_boundary), "\r\n--%.*s--", (int)boundary_len, boundary_start);
+    size_t end_len = strlen(end_boundary);
+    uint8_t* end_pos = (uint8_t*)memmem(pos, (size_t)((data + size) - pos), end_boundary, end_len);
+    if (!end_pos) {
+        snprintf(end_boundary, sizeof(end_boundary), "\n--%.*s--", (int)boundary_len, boundary_start);
+        end_len = strlen(end_boundary);
+        end_pos = (uint8_t*)memmem(pos, (size_t)((data + size) - pos), end_boundary, end_len);
+    }
+    if (!end_pos) {
+        snprintf(end_boundary, sizeof(end_boundary), "\r\n--%.*s", (int)boundary_len, boundary_start);
+        end_len = strlen(end_boundary);
+        end_pos = (uint8_t*)memmem(pos, (size_t)((data + size) - pos), end_boundary, end_len);
+    }
+    if (!end_pos) {
+        snprintf(end_boundary, sizeof(end_boundary), "\n--%.*s", (int)boundary_len, boundary_start);
+        end_len = strlen(end_boundary);
+        end_pos = (uint8_t*)memmem(pos, (size_t)((data + size) - pos), end_boundary, end_len);
+    }
+    if (!end_pos) return NULL;
+
+    size_t file_size = end_pos - pos;
+    buffer_t* result = buffer_create(file_size);
+    memcpy(result->data, pos, file_size);
+    result->size = file_size;
+    return result;
+}
+
 static void _off_put_handler(http_request_t* request, http_response_t* response, void* user_data) {
     off_routes_context_t* ctx = (off_routes_context_t*)user_data;
 
@@ -449,6 +521,7 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
     const char* file_name = http_request_header(request, "file-name");
     const char* stream_length_str = http_request_header(request, "stream-length");
     const char* server_address = http_request_header(request, "server-address");
+    const char* content_type_header = http_request_header(request, "Content-Type");
 
     if (!type || !file_name || !stream_length_str) {
         http_response_set_status(response, 400);
@@ -465,6 +538,19 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
         return;
     }
 
+    buffer_t* upload_data = NULL;
+    if (content_type_header && strncmp(content_type_header, "multipart/form-data", 19) == 0) {
+        upload_data = _extract_multipart_file(request->body, content_type_header);
+        if (!upload_data) {
+            http_response_set_status(response, 400);
+            http_response_write(response, "Failed to parse multipart data", 30);
+            http_response_end(response);
+            return;
+        }
+    } else if (request->body && request->body->data && request->body->size > 0) {
+        upload_data = (buffer_t*)refcounter_reference((refcounter_t*)request->body);
+    }
+
     tuple_cache_t* tc = tuple_cache_create(100);
     new_blocks_recipe_t* recipe = new_blocks_recipe_create(ctx->pool, ctx->bc, standard);
     vec_block_recipe_t recipes;
@@ -479,8 +565,11 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
 
     put_context_t* put_ctx = get_clear_memory(sizeof(put_context_t));
     put_ctx->response = response;
+    put_ctx->connection = response->connection;
     response->is_piped = 1;
+    response->connection->piped_pending = 1;
     refcounter_reference((refcounter_t*)response);
+    refcounter_reference((refcounter_t*)response->connection);
     put_ctx->content_type = strdup(type);
     put_ctx->file_name = strdup(file_name);
     put_ctx->stream_length = stream_length;
@@ -499,8 +588,9 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
     stream_once((stream_t*)desc, close_event, put_ctx,
                 (void (*)(void*, void*))_put_on_descriptor_close, NULL);
 
-    if (request->body && request->body->data && request->body->size > 0) {
-        writeable_off_stream_write(ws, request->body);
+    if (upload_data != NULL) {
+        writeable_off_stream_write(ws, upload_data);
+        buffer_destroy(upload_data);
     }
 
     writeable_off_stream_finalize(ws);

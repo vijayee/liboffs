@@ -31,8 +31,7 @@ readable_push_file_stream_t* readable_push_file_stream_create(scheduler_pool_t* 
   return rs;
 }
 void readable_push_file_stream_destroy(readable_push_file_stream_t* stream) {
-  refcounter_dereference((refcounter_t*) stream);
-  if (refcounter_count((refcounter_t*) stream) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*) stream)) {
 #ifdef _WIN32
     _close(stream->fd);
 #else
@@ -130,8 +129,7 @@ void writeable_push_file_stream_write(writeable_push_file_stream_t* stream, buff
   DESTROY(data, buffer);
 }
 void writeable_push_file_stream_destroy(writeable_push_file_stream_t* stream) {
-  refcounter_dereference((refcounter_t*) stream);
-  if (refcounter_count((refcounter_t*) stream) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*) stream)) {
 #ifdef _WIN32
     _close(stream->fd);
 #else
@@ -176,8 +174,7 @@ readable_pull_file_stream_t* readable_pull_file_stream_create(scheduler_pool_t* 
 }
 
 void readable_pull_file_stream_destroy(readable_pull_file_stream_t* stream) {
-  refcounter_dereference((refcounter_t*) stream);
-  if (refcounter_count((refcounter_t*) stream) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*) stream)) {
 #ifdef _WIN32
     _close(stream->fd);
 #else
@@ -250,8 +247,7 @@ void writeable_pull_file_stream_write(writeable_pull_file_stream_t* stream, buff
   DESTROY(data, buffer);
 }
 void writeable_pull_file_stream_destroy(writeable_pull_file_stream_t* stream) {
-  refcounter_dereference((refcounter_t*) stream);
-  if (refcounter_count((refcounter_t*) stream) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*) stream)) {
 #ifdef _WIN32
     _close(stream->fd);
 #else

@@ -65,8 +65,7 @@ new_blocks_recipe_t* new_blocks_recipe_create(
 }
 
 void new_blocks_recipe_destroy(new_blocks_recipe_t* recipe) {
-  refcounter_dereference((refcounter_t*)recipe);
-  if (refcounter_count((refcounter_t*)recipe) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*)recipe)) {
     stream_deinit((stream_t*)recipe);
     free(recipe);
   }
@@ -307,8 +306,7 @@ recycler_recipe_t* recycler_recipe_create(
 }
 
 void recycler_recipe_destroy(recycler_recipe_t* recipe) {
-  refcounter_dereference((refcounter_t*)recipe);
-  if (refcounter_count((refcounter_t*)recipe) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*)recipe)) {
     for (int i = 0; i < recipe->oris.length; i++) {
       DESTROY(recipe->oris.data[i], ori);
     }

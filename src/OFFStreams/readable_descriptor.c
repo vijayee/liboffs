@@ -240,8 +240,7 @@ readable_descriptor_t* readable_descriptor_create(
 }
 
 void readable_descriptor_destroy(readable_descriptor_t* desc) {
-  refcounter_dereference((refcounter_t*)desc);
-  if (refcounter_count((refcounter_t*)desc) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*)desc)) {
     if (desc->current_descriptor != NULL) {
       DESTROY(desc->current_descriptor, buffer);
     }

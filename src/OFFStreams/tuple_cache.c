@@ -265,15 +265,14 @@ static void _tuple_cache_run_until_done(tuple_cache_t* tc) {
 
 tuple_cache_t* tuple_cache_create(size_t capacity) {
   tuple_cache_t* tc = get_clear_memory(sizeof(tuple_cache_t));
-  refcounter_init_actor((refcounter_t*)tc);
+  refcounter_init((refcounter_t*)tc);
   tc->lru = tuple_cache_lru_create(capacity);
   actor_init(&tc->actor, tc, tuple_cache_dispatch);
   return tc;
 }
 
 void tuple_cache_destroy(tuple_cache_t* tc) {
-  refcounter_dereference((refcounter_t*)tc);
-  if (refcounter_count((refcounter_t*)tc) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*)tc)) {
     tuple_cache_lru_destroy(tc->lru);
     actor_destroy(&tc->actor);
     refcounter_destroy_lock((refcounter_t*)tc);

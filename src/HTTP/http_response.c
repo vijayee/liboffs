@@ -5,6 +5,7 @@
 #include "http_connection.h"
 #include "../Util/allocator.h"
 #include "../Buffer/buffer.h"
+#include <poll-dancer/poll-dancer.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -65,8 +66,7 @@ void http_response_destroy(http_response_t* response) {
   if (response == NULL) {
     return;
   }
-  refcounter_dereference((refcounter_t*)response);
-  if (refcounter_count((refcounter_t*)response) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*)response)) {
     http_headers_deinit(&response->headers);
     stream_deinit((stream_t*)response);
     free(response);
@@ -118,26 +118,29 @@ static void _pipe_on_close(void* ctx, void* unused) {
     http_connection_t* conn = response->connection;
     http_response_end(response);
     http_response_destroy(response);
-    // Fully close the connection for piped responses with Connection: close.
-    // http_response_end only half-closes (SHUT_WR), but the client expects
-    // the server to close the socket entirely after the response.
-    if (conn && conn->fd >= 0) {
-        shutdown(conn->fd, SHUT_RDWR);
+    if (conn) {
+        http_connection_destroy(conn);
     }
 }
 
 static void _pipe_on_error(void* ctx, async_error_t* error) {
     (void)error;
     http_response_t* response = (http_response_t*)ctx;
+    http_connection_t* conn = response->connection;
     http_response_set_status(response, 404);
     http_response_set_header(response, "Content-Length", "0");
     http_response_end(response);
     http_response_destroy(response);
+    if (conn) {
+        http_connection_destroy(conn);
+    }
 }
 
 void http_response_pipe(http_response_t* response, stream_t* source) {
     if (!response || !source) return;
     response->is_piped = 1;
+    response->connection->piped_pending = 1;
+    refcounter_reference((refcounter_t*)response->connection);
     refcounter_reference((refcounter_t*)response);
     stream_subscribe(source, data_event, response,
                      (void(*)(void*, void*))_pipe_on_data, NULL);

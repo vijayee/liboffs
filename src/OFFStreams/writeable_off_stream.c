@@ -352,8 +352,7 @@ writeable_off_stream_t* writeable_off_stream_create(
 }
 
 void writeable_off_stream_destroy(writeable_off_stream_t* stream) {
-  refcounter_dereference((refcounter_t*)stream);
-  if (refcounter_count((refcounter_t*)stream) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*)stream)) {
     for (int i = 0; i < stream->entries.length; i++) {
       _entry_destroy(stream->entries.data[i]);
     }

@@ -16,8 +16,7 @@ tuple_t* tuple_create(size_t capacity) {
 }
 
 void tuple_destroy(tuple_t* tuple) {
-  refcounter_dereference((refcounter_t*) tuple);
-  if (refcounter_count((refcounter_t*) tuple) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*) tuple)) {
     for (size_t i = 0; i < tuple->count; i++) {
       if (tuple->hashes[i] != NULL) {
         DESTROY(tuple->hashes[i], buffer);

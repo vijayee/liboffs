@@ -22,8 +22,7 @@ void ori_destroy(ori_t* ori) {
   if (ori == NULL) {
     return;
   }
-  refcounter_dereference((refcounter_t*)ori);
-  if (refcounter_count((refcounter_t*)ori) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*)ori)) {
     if (ori->descriptor_hash != NULL) {
       DESTROY(ori->descriptor_hash, buffer);
     }

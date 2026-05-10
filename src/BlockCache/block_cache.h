@@ -71,6 +71,7 @@ typedef struct {
   sections_t* sections;
   index_t* index;
   block_size_e type;
+  uint32_t canary;
   actor_t actor;
 } block_cache_t;
 
@@ -81,4 +82,8 @@ block_t* block_cache_get(block_cache_t* block_cache, buffer_t* hash);
 int block_cache_remove(block_cache_t* block_cache, buffer_t* hash);
 size_t block_cache_count(block_cache_t* block_cache);
 void block_cache_dispatch(void* state, message_t* msg);
+
+#define BLOCK_CACHE_CANARY 0x424B4348u
+void block_cache_validate(block_cache_t* block_cache, const char* func, int line);
+
 #endif //OFFS_BLOCK_CACHE_H

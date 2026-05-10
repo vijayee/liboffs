@@ -44,8 +44,7 @@ stream_event_handler_t* stream_event_handler_create(size_t id, void* ctx, void (
 }
 
 void stream_event_handler_destroy(stream_event_handler_t* handler) {
-  refcounter_dereference((refcounter_t*) handler);
-  if (refcounter_count((refcounter_t*) handler) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*) handler)) {
     refcounter_destroy_lock((refcounter_t*) handler);
     if (handler->ctx_destroy != NULL) {
       handler->ctx_destroy(handler->ctx);
@@ -205,8 +204,7 @@ void stream_deinit(stream_t* stream) {
     platform_lock_destroy(&stream->lock);
     _stream_purge_handlers(stream);
     if (stream->pullable_stream != NULL) {
-      refcounter_dereference((refcounter_t*) stream->pullable_stream);
-      if (refcounter_count((refcounter_t*) stream->pullable_stream) == 0) {
+      if (refcounter_dereference_is_zero((refcounter_t*) stream->pullable_stream)) {
         stream_destroy(stream->pullable_stream);
       }
       stream->pullable_stream = NULL;

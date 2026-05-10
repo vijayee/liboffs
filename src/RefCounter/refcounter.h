@@ -5,6 +5,7 @@
 #ifndef LIBOFFS_REFCOUNTER_H
 #define LIBOFFS_REFCOUNTER_H
 #include <stdint.h>
+#include <stdbool.h>
 #include "../Util/threadding.h"
 #define REFERENCE(N,T) (T*) refcounter_reference((refcounter_t*) N)
 #define YIELD(N) refcounter_yield((refcounter_t*) N)
@@ -30,6 +31,7 @@ void refcounter_init_actor(refcounter_t* refcounter);
 void refcounter_yield(refcounter_t* refcounter);
 void* refcounter_reference(refcounter_t* refcounter);
 void refcounter_dereference(refcounter_t* refcounter);
+bool refcounter_dereference_is_zero(refcounter_t* refcounter);
 refcounter_t* refcounter_consume(refcounter_t** refcounter);
 uint16_t refcounter_count(refcounter_t* refcounter);
 uint8_t refcounter_pending_derefs(refcounter_t* refcounter);

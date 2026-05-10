@@ -284,7 +284,7 @@ void section_dispatch(void* state, message_t* msg) {
 
 section_t* section_create(char* path, char* meta_path, size_t size, size_t id, block_size_e type) {
   section_t* section = get_clear_memory(sizeof(section_t));
-  refcounter_init_actor((refcounter_t*) section);
+  refcounter_init((refcounter_t*) section);
   actor_init(&section->actor, section, section_dispatch);
   char section_id[20];
   sprintf(section_id, "%lu", id);
@@ -344,8 +344,7 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id, b
 }
 
 void section_destroy(section_t* section) {
-  refcounter_dereference((refcounter_t*) section);
-  if (refcounter_count((refcounter_t*) section) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*) section)) {
     /* Flush dirty metadata before destroying */
     if (atomic_load(&section->dirty)) {
       section_save_meta(section);

@@ -199,8 +199,7 @@ writeable_descriptor_t* writeable_descriptor_create(
 }
 
 void writeable_descriptor_destroy(writeable_descriptor_t* desc) {
-  refcounter_dereference((refcounter_t*)desc);
-  if (refcounter_count((refcounter_t*)desc) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*)desc)) {
     if (desc->descriptor != NULL) {
       DESTROY(desc->descriptor, buffer);
     }

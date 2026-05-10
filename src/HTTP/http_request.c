@@ -32,8 +32,7 @@ void http_request_destroy(http_request_t* request) {
   if (request == NULL) {
     return;
   }
-  refcounter_dereference((refcounter_t*)request);
-  if (refcounter_count((refcounter_t*)request) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*)request)) {
     if (request->url != NULL) {
       free(request->url);
     }

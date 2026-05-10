@@ -9,6 +9,9 @@
 #else
 #include <pthread.h>
 #include <unistd.h>
+#include <string.h>
+#include <stdio.h>
+#include <execinfo.h>
 #endif
 #if _WIN32
 void platform_lock(CRITICAL_SECTION* lock) {
@@ -99,7 +102,14 @@ int platform_self() {
 void platform_lock(pthread_mutex_t* lock) {
   int result = pthread_mutex_lock(lock);
   if (result) {
-    log_trace("Failed to acquire lock");
+    fprintf(stderr, "FATAL: pthread_mutex_lock failed: error=%d (%s) lock=%p "
+            "__kind=%d __lock=%d __owner=%d __nusers=%u\n",
+            result, strerror(result), (void*)lock,
+            lock->__data.__kind, lock->__data.__lock,
+            lock->__data.__owner, lock->__data.__nusers);
+    void* bt[32];
+    int bt_size = backtrace(bt, 32);
+    backtrace_symbols_fd(bt, bt_size, STDERR_FILENO);
     abort();
   }
 }

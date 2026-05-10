@@ -166,8 +166,7 @@ readable_off_stream_t* readable_off_stream_create(
 }
 
 void readable_off_stream_destroy(readable_off_stream_t* stream) {
-  refcounter_dereference((refcounter_t*)stream);
-  if (refcounter_count((refcounter_t*)stream) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*)stream)) {
     stream_deinit((stream_t*)stream);
     free(stream);
   }

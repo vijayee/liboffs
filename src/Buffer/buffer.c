@@ -55,8 +55,7 @@ void buffer_copy_from_pointer(buffer_t* buf, uint8_t* data, size_t size) {
 }
 
 void buffer_destroy(buffer_t* buf) {
-  refcounter_dereference((refcounter_t*)buf);
-  if (refcounter_count((refcounter_t*)buf) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*)buf)) {
     free(buf->data);
     refcounter_destroy_lock(&buf->refcounter);
     free(buf);

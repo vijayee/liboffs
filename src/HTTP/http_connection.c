@@ -264,6 +264,18 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   return;
 
 close:
+  if (connection->piped_pending) {
+    // A piped response is still in progress on a worker thread.
+    // Stop and destroy the read watcher on the event loop thread
+    // (safe here) and release our reference to the connection.
+    // The worker thread holds the other reference and will close
+    // the fd and free the connection when it finishes.
+    pd_watcher_stop(watcher);
+    pd_watcher_destroy(watcher);
+    connection->watcher = NULL;
+    http_connection_destroy(connection);
+    return;
+  }
   pd_watcher_stop(watcher);
   pd_watcher_destroy(watcher);
   connection->watcher = NULL;
@@ -311,8 +323,7 @@ void http_connection_destroy(http_connection_t* connection) {
   if (connection == NULL) {
     return;
   }
-  refcounter_dereference((refcounter_t*)connection);
-  if (refcounter_count((refcounter_t*)connection) == 0) {
+  if (refcounter_dereference_is_zero((refcounter_t*)connection)) {
     if (connection->server != NULL) {
       atomic_fetch_sub(&connection->server->active_connections, 1);
       vec_remove(&connection->server->connections, connection);

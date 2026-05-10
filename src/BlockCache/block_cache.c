@@ -8,9 +8,25 @@
 #include "../Util/path_join.h"
 #include "../Actor/actor.h"
 #include "../Actor/message.h"
+#include "../Util/log.h"
 #include <stdatomic.h>
 #include <time.h>
 #include <sched.h>
+
+void block_cache_validate(block_cache_t* block_cache, const char* func, int line) {
+  if (block_cache == NULL) {
+    log_error("block_cache_validate: block_cache is NULL at %s:%d", func, line);
+    abort();
+  }
+  if (block_cache->canary != BLOCK_CACHE_CANARY) {
+    log_error("block_cache_validate: CANARY CORRUPTED at %s:%d! Expected 0x%X, got 0x%X, block_cache=%p lru=%p index=%p",
+              func, line, BLOCK_CACHE_CANARY, block_cache->canary, (void*)block_cache, (void*)block_cache->lru, (void*)block_cache->index);
+    abort();
+  }
+  if (block_cache->index != NULL) {
+    index_validate_lock(block_cache->index, func, line);
+  }
+}
 
 void block_lru_cache_move(block_lru_cache_t* lru, block_lru_node_t* node);
 void block_cache_dispatch(void* state, message_t* msg);
@@ -295,6 +311,7 @@ static void _block_cache_run_until_done(block_cache_t* block_cache) {
 block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, timer_actor_t* timer_actor) {
   block_cache_t* block_cache = get_clear_memory(sizeof(block_cache_t));
   refcounter_init_actor((refcounter_t*) block_cache);
+  block_cache->canary = BLOCK_CACHE_CANARY;
   block_cache->type = type;
   char* folder;
   switch (type) {
@@ -308,7 +325,7 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
       folder = path_join(location, "nano");
       break;
     case mega:
-      folder = path_join(location, "nano");
+      folder = path_join(location, "mega");
       break;
   }
   block_cache->lru = block_lru_cache_create(config.lru_size);
@@ -321,13 +338,17 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
 }
 
 void block_cache_destroy(block_cache_t* block_cache) {
-  refcounter_dereference((refcounter_t*) block_cache);
-  if (refcounter_count((refcounter_t*) block_cache) == 0) {
+  if (block_cache == NULL) {
+    return;
+  }
+  if (refcounter_dereference_is_zero((refcounter_t*) block_cache)) {
     refcounter_destroy_lock((refcounter_t*) block_cache);
     index_destroy(block_cache->index);
     sections_destroy(block_cache->sections);
     block_lru_cache_destroy(block_cache->lru);
     actor_destroy(&block_cache->actor);
+    /* Fill freed memory with poison pattern to detect use-after-free */
+    memset(block_cache, 0xDD, sizeof(block_cache_t));
     free(block_cache);
   }
 }
