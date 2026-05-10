@@ -69,7 +69,6 @@ typedef struct {
   wal_t* wal;
   uint8_t is_rebuilding;
   timer_actor_t* timer_actor;
-  uint64_t timer_id;
   uint64_t wait;
   uint64_t max_wait;
   actor_t actor;

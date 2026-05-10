@@ -349,7 +349,7 @@ static void section_on_dirty(void* context, section_t* section) {
   (void)section;
   sections_t* sections = (sections_t*)context;
   if (sections->timer_actor != NULL) {
-    timer_actor_debounce(sections->timer_actor, 0,
+    timer_actor_debounce(sections->timer_actor,
                          sections->wait, sections->max_wait,
                          &sections->actor, SECTION_WRITE_META);
   } else {
@@ -363,7 +363,6 @@ static void section_on_dirty(void* context, section_t* section) {
 round_robin_t* round_robin_create(char* robin_path, timer_actor_t* timer_actor, actor_t* save_target, uint64_t wait, uint64_t max_wait) {
   round_robin_t* robin = get_clear_memory(sizeof(round_robin_t));
   robin->timer_actor = timer_actor;
-  robin->timer_id = 0;
   robin->save_target = save_target;
   robin->wait = wait;
   robin->max_wait = max_wait;
@@ -397,7 +396,7 @@ void round_robin_add(round_robin_t* robin, size_t id) {
     robin->last = node;
   }
   if (robin->timer_actor != NULL && robin->save_target != NULL) {
-    timer_actor_debounce(robin->timer_actor, robin->timer_id, robin->wait, robin->max_wait, robin->save_target, SECTION_SAVE_META);
+    timer_actor_debounce(robin->timer_actor, robin->wait, robin->max_wait, robin->save_target, SECTION_SAVE_META);
   }
   robin->size++;
 }
@@ -445,7 +444,7 @@ void round_robin_remove(round_robin_t* robin, size_t id) {
       }
       free(current);
       if (robin->timer_actor != NULL && robin->save_target != NULL) {
-        timer_actor_debounce(robin->timer_actor, robin->timer_id, robin->wait, robin->max_wait, robin->save_target, SECTION_SAVE_META);
+        timer_actor_debounce(robin->timer_actor, robin->wait, robin->max_wait, robin->save_target, SECTION_SAVE_META);
       }
       robin->size--;
       return;

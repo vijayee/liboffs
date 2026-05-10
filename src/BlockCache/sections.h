@@ -42,7 +42,6 @@ struct round_robin_node_t {
 
 typedef struct {
   timer_actor_t* timer_actor;
-  uint64_t timer_id;
   actor_t* save_target;
   uint64_t wait;
   uint64_t max_wait;

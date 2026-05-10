@@ -33,6 +33,35 @@ static void _timer_actor_untrack(timer_actor_t* ta, pd_timer_t* timer) {
   }
 }
 
+static debounce_entry_t* _timer_actor_find_debounce(timer_actor_t* ta,
+                                                      actor_t* target,
+                                                      uint32_t completion_type) {
+  for (size_t i = 0; i < MAX_DEBOUNCE_KEYS; i++) {
+    if (ta->debounce_map[i].target == target &&
+        ta->debounce_map[i].completion_type == completion_type) {
+      return &ta->debounce_map[i];
+    }
+  }
+  return NULL;
+}
+
+static debounce_entry_t* _timer_actor_alloc_debounce(timer_actor_t* ta,
+                                                       actor_t* target,
+                                                       uint32_t completion_type) {
+  /* Check for an existing entry first. */
+  debounce_entry_t* existing = _timer_actor_find_debounce(ta, target, completion_type);
+  if (existing != NULL) {
+    return existing;
+  }
+  /* Find an empty slot. */
+  for (size_t i = 0; i < MAX_DEBOUNCE_KEYS; i++) {
+    if (ta->debounce_map[i].target == NULL) {
+      return &ta->debounce_map[i];
+    }
+  }
+  return NULL;
+}
+
 static void _timer_completion_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                        pd_event_t events, void* user_data) {
   (void)loop;
@@ -97,14 +126,22 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
     }
     case TIMER_DEBOUNCE: {
       timer_debounce_payload_t* payload = (timer_debounce_payload_t*)msg->payload;
-      if (payload->timer_id != 0) {
-        pd_timer_t* existing = (pd_timer_t*)(uintptr_t)payload->timer_id;
-        pd_timer_stop(existing);
-        /* Free the old completion payload associated with the old timer. */
-        void* old_user_data = existing->user_data;
-        _timer_actor_untrack(timer_actor, existing);
-        pd_timer_destroy(existing);
+      debounce_entry_t* entry = _timer_actor_find_debounce(
+          timer_actor, payload->target, payload->completion_type);
+      if (entry != NULL && entry->timer != NULL) {
+        /* Cancel the existing debounce timer for this (target, type) pair. */
+        pd_timer_stop(entry->timer);
+        void* old_user_data = entry->timer->user_data;
+        _timer_actor_untrack(timer_actor, entry->timer);
+        pd_timer_destroy(entry->timer);
         free(old_user_data);
+        entry->timer = NULL;
+        entry->completion_payload = NULL;
+      }
+      /* Allocate a slot for this debounce key. */
+      if (entry == NULL) {
+        entry = _timer_actor_alloc_debounce(timer_actor, payload->target,
+                                             payload->completion_type);
       }
       timer_completion_payload_t* completion = get_clear_memory(sizeof(timer_completion_payload_t));
       completion->timer_id = 0;
@@ -113,10 +150,14 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
       pd_timer_t* timer = pd_timer_create(
           timer_actor->loop, payload->timeout_ms, payload->interval_ms,
           _timer_completion_callback, completion);
-      if (timer != NULL) {
+      if (timer != NULL && entry != NULL) {
         pd_timer_start(timer);
         completion->timer_id = (uint64_t)(uintptr_t)timer;
         _timer_actor_track(timer_actor, timer);
+        entry->target = payload->target;
+        entry->completion_type = payload->completion_type;
+        entry->timer = timer;
+        entry->completion_payload = completion;
       }
       if (msg->payload_destroy != NULL) {
         msg->payload_destroy(msg->payload);
@@ -172,7 +213,7 @@ void timer_actor_destroy(timer_actor_t* timer_actor) {
   }
   atomic_store(&timer_actor->running, 0);
   /* Wake the loop so it notices the stop flag */
-  pd_loop_async_send(timer_actor->loop, NULL);
+  pd_loop_async_send(timer_actor->loop, timer_actor);
   pd_loop_stop(timer_actor->loop);
 #ifdef _WIN32
   WaitForSingleObject(timer_actor->thread, INFINITE);
@@ -215,7 +256,7 @@ uint64_t timer_actor_set(timer_actor_t* timer_actor, uint64_t timeout_ms,
 
   /* The timer_id is filled in by the dispatch on the timer thread.
      Since actor_send is async, we return 0 here. Callers should use
-     TIMER_DEBOUNCE with an existing_timer_id for tracking timer IDs. */
+     TIMER_DEBOUNCE for auto-cancelling repeating timers. */
   return 0;
 }
 
@@ -233,11 +274,9 @@ void timer_actor_cancel(timer_actor_t* timer_actor, uint64_t timer_id) {
 }
 
 uint64_t timer_actor_debounce(timer_actor_t* timer_actor,
-                              uint64_t existing_timer_id,
                               uint64_t timeout_ms, uint64_t interval_ms,
                               actor_t* target, uint32_t completion_type) {
   timer_debounce_payload_t* payload = get_clear_memory(sizeof(timer_debounce_payload_t));
-  payload->timer_id = existing_timer_id;
   payload->timeout_ms = timeout_ms;
   payload->interval_ms = interval_ms;
   payload->target = target;

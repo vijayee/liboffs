@@ -236,7 +236,6 @@ index_t* _index_new_empty(size_t bucket_size, char* location, timer_actor_t* tim
 
   index->wal = wal_create(index->parent_location, current_id);
   index->timer_actor = timer_actor;
-  index->timer_id = 0;
   index->wait = wait;
   index->max_wait = max_wait;
   actor_init(&index->actor, index, index_dispatch);
@@ -507,7 +506,6 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root, char* locatio
   index->root = (index_node_t*) refcounter_reference((refcounter_t*) root);
   index->wal = wal_create(index->parent_location, last_id + 1);
   index->timer_actor = timer_actor;
-  index->timer_id = 0;
   index->wait = wait;
   index->max_wait = max_wait;
   actor_init(&index->actor, index, index_dispatch);
@@ -808,7 +806,7 @@ void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node,
        }
        vec_push(node->bucket, (index_entry_t*) refcounter_reference((refcounter_t*) entry));
        if(!index->is_rebuilding) {
-         timer_actor_debounce(index->timer_actor, index->timer_id, index->wait, 0, &index->actor, INDEX_SAVE);
+         timer_actor_debounce(index->timer_actor, index->wait, 0, &index->actor, INDEX_SAVE);
        }
      } else {
        index_split_node(index, node, current);
@@ -858,7 +856,7 @@ void _index_increment(index_t* index, index_entry_t* entry) {
        vec_push(rank, (index_entry_t*) refcounter_reference((refcounter_t*) entry));
      }
     if (!index->is_rebuilding) {
-       timer_actor_debounce(index->timer_actor, index->timer_id, index->wait, 0, &index->actor, INDEX_SAVE);
+       timer_actor_debounce(index->timer_actor, index->wait, 0, &index->actor, INDEX_SAVE);
     }
   }
 }
