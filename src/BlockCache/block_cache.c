@@ -198,6 +198,14 @@ void block_lru_cache_move(block_lru_cache_t* lru, block_lru_node_t* node) {
 
 void block_cache_dispatch(void* state, message_t* msg) {
   block_cache_t* block_cache = (block_cache_t*)state;
+  if (block_cache == NULL) {
+    log_error("block_cache_dispatch: block_cache is NULL");
+    abort();
+  }
+  if (block_cache->index == NULL) {
+    log_error("block_cache_dispatch: index is NULL for msg type %d", msg->type);
+    abort();
+  }
   switch (msg->type) {
     case CACHE_PUT: {
       cache_put_payload_t* p = (cache_put_payload_t*)msg->payload;
@@ -321,6 +329,9 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
   block_cache->sections = sections_create(folder, config.section_size, config.cache_size, config.max_tuple_size, type, timer_actor, config.section_wait, config.section_max_wait);
   int error_code;
   block_cache->index = index_create(config.index_bucket_size, folder, timer_actor, config.index_wait, config.index_max_wait, &error_code);
+  if (block_cache->index == NULL) {
+    log_error("block_cache_create: index_create returned NULL (error_code=%d)", error_code);
+  }
   actor_init(&block_cache->actor, block_cache, block_cache_dispatch);
   free(folder);
   return block_cache;

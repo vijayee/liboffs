@@ -173,11 +173,11 @@ cbor_item_t* index_entry_to_cbor(index_entry_t* entry) {
 index_entry_t* cbor_to_index_entry(cbor_item_t* cbor) {
  fibonacci_hit_counter_t counter = cbor_to_fibonacci_hit_counter(cbor_move(cbor_array_get(cbor, 0)));
  buffer_t* hash= cbor_to_buffer(cbor_move(cbor_array_get(cbor, 1)));
- size_t sectionId = (size_t) cbor_get_uint64(cbor_move(cbor_array_get(cbor, 2)));
- size_t section_index = (size_t) cbor_get_uint64(cbor_move(cbor_array_get(cbor, 3)));
+ size_t section_index = (size_t) cbor_get_uint64(cbor_move(cbor_array_get(cbor, 2)));
+ size_t section_id = (size_t) cbor_get_uint64(cbor_move(cbor_array_get(cbor, 3)));
  uint64_t ejection_date = (size_t) cbor_get_uint64(cbor_move(cbor_array_get(cbor,4)));
  refcounter_yield((refcounter_t*) hash);
- return index_entry_from(hash, sectionId, section_index, ejection_date, counter);
+ return index_entry_from(hash, section_id, section_index, ejection_date, counter);
 }
 
 index_node_t* index_node_create(size_t bucket_size) {
@@ -263,7 +263,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
       uint64_t last_id = 0;
       uint64_t last_crc = 0;
       if (_index_get_id_crc(last, &last_id, &last_crc) == 1) {
-        log_error("index file %lu invalid", i);
+        log_error("index_create: index file %d (%s) has invalid name", i, last);
         continue;
       }
       char* index_file_location = path_join(index_location, last);
@@ -299,20 +299,30 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
 
       if (result.error.code != CBOR_ERR_NONE) {
         *error_code= -4;
-        log_error("index file %lu failed to load CBOR", i);
+        log_error("index_create: index file %d (%s) failed to load CBOR: %d", i, last, result.error.code);
         continue;
       }
       if(!cbor_isa_array(cbor)) {
         cbor_decref(&cbor);
         *error_code= -5;
-        log_error("index file %lu CBOR is invalid", i);
+        log_error("index_create: index file %d (%s) CBOR is not an array", i, last);
         continue;
       }
       index = cbor_to_index(cbor, location, timer_actor, wait, max_wait);
       cbor_decref(&cbor);
+      if (index == NULL) {
+        log_error("index_create: cbor_to_index returned NULL for file %d (%s)", i, last);
+        continue;
+      }
       uint64_t crc;
-      _index_to_crc(index, &crc);
+      int crc_result = _index_to_crc(index, &crc);
+      if (crc_result != 0) {
+        log_error("index_create: _index_to_crc failed for file %d (%s): %d", i, last, crc_result);
+        DESTROY(index, index);
+        continue;
+      }
       if (crc != last_crc) { //Index is invalid, continue to iterate backward until we have a valid index
+        log_error("index_create: CRC mismatch for file %d (%s): computed=%lu, expected=%lu", i, last, crc, last_crc);
         DESTROY(index, index);
         continue;
       } else { // Index is valid rebuild if it is not the most recent index
@@ -466,12 +476,16 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
         }
       }
     }
-  } else {
+    log_warn("index_create: all %d index files were invalid, creating empty index", files->length);
     destroy_files(files);
     free(index_location);
     free(parent_location);
     return _index_new_empty(bucket_size, location, timer_actor, wait, max_wait, most_recent_id);
   }
+  destroy_files(files);
+  free(index_location);
+  free(parent_location);
+  return _index_new_empty(bucket_size, location, timer_actor, wait, max_wait, most_recent_id);
 }
 index_t* index_create_from(size_t bucket_size, index_node_t* root, char* location, timer_actor_t* timer_actor, uint64_t wait, uint64_t max_wait) {
   index_t* index = get_clear_memory(sizeof(index_t));
