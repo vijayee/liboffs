@@ -112,7 +112,7 @@ namespace indexTest {
         blocks[i] = block_create_by_type(CONSUME(buf, buffer_t), nano);
         entries[i] = index_entry_create(blocks[i]->hash);
       }
-      location = path_join(".", "block_index");
+      location = path_join("/tmp", "block_index");
       rm_rf(location);
       mkdir_p(location);
       timer_actor_inst = timer_actor_create();

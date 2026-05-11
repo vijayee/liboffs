@@ -83,7 +83,7 @@ public:
   block_t* blocks[BLOCK_COUNT];
   config_t config;
   void SetUp() override {
-    location = path_join(".", "BlockCacheTest");
+    location = path_join("/tmp", "BlockCacheTest");
     rm_rf(location);
     timer_actor = timer_actor_create();
     mkdir_p(location);
@@ -221,7 +221,7 @@ public:
   block_t* blocks[LRU_COUNT];
   config_t config;
   void SetUp() override {
-    location = path_join(".", "BlockCacheIntegrationTest");
+    location = path_join("/tmp", "BlockCacheIntegrationTest");
     rm_rf(location);
     timer_actor = timer_actor_create();
     mkdir_p(location);

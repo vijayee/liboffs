@@ -26,8 +26,8 @@ public:
   char* section_location;
   char* meta_location;
   void SetUp() override {
-    section_location = path_join(".", "sections");
-    meta_location = path_join(".", "meta");
+    section_location = path_join("/tmp", "sections");
+    meta_location = path_join("/tmp", "meta");
     rm_rf(section_location);
     rm_rf(meta_location);
   }
@@ -275,8 +275,8 @@ public:
   char* section_location;
   char* meta_location;
   void SetUp() override {
-    section_location = path_join(".", "sections");
-    meta_location = path_join(".", "meta");
+    section_location = path_join("/tmp", "sections");
+    meta_location = path_join("/tmp", "meta");
     rm_rf(section_location);
     rm_rf(meta_location);
     mkdir_p(section_location);
@@ -377,7 +377,7 @@ public:
   timer_actor_t* timer_actor_inst;
   round_robin_t* robin;
   void SetUp() override {
-    robin_location = path_join(".", "robin");
+    robin_location = path_join("/tmp", "robin");
     rm_rf(robin_location);
     timer_actor_inst = timer_actor_create();
     mkdir_p(robin_location);
@@ -424,7 +424,7 @@ public:
   timer_actor_t* timer_actor_inst;
   sections_t* sections = NULL;
   void SetUp() override {
-    path = path_join(".", "sections");
+    path = path_join("/tmp", "sections");
     rm_rf(path);
     timer_actor_inst = timer_actor_create();
     mkdir_p(path);
