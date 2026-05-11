@@ -273,10 +273,12 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
     }
     case RECIPE_ROTATE: {
       _unregister_recipe(stream);
+      if (stream->current_recipe != NULL) {
+        refcounter_dereference((refcounter_t*)stream->current_recipe);
+      }
       stream->current_recipe_index++;
       if (stream->current_recipe_index >= stream->recipes.length) {
-        stream_notify((stream_t*)stream, error_event, NULL, NULL);
-        stream_notify((stream_t*)stream, close_event, NULL, NULL);
+        stream_deactivate((stream_t*)stream, ERROR("Write error"));
         stream->stream.is_deactivated = 1;
         break;
       }
@@ -335,6 +337,9 @@ writeable_off_stream_t* writeable_off_stream_create(
   }
   stream->current_recipe_index = 0;
   stream->current_recipe = stream->recipes.length > 0 ? stream->recipes.data[0] : NULL;
+  if (stream->current_recipe != NULL) {
+    refcounter_reference((refcounter_t*)stream->current_recipe);
+  }
   stream->has_pulled = 0;
 
   stream_init((stream_t*)stream, push, writeable_stream, 1, pool,

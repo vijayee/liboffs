@@ -21,15 +21,15 @@ protected:
 
     void SetUp() override {
         config_t config = {
-            .lru_size = 50,
-            .section_size = 128000,
-            .cache_size = 50,
-            .max_tuple_size = 30,
             .index_bucket_size = 10,
             .index_wait = 0,
             .index_max_wait = 0,
+            .section_size = 128000,
             .section_wait = 0,
-            .section_max_wait = 0
+            .section_max_wait = 0,
+            .cache_size = 50,
+            .max_tuple_size = 30,
+            .lru_size = 50
         };
         pool = scheduler_pool_create(4);
         timer = timer_actor_create();

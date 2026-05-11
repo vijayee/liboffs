@@ -6,6 +6,8 @@
 #include "off_routes.h"
 #include "http_response.h"
 #include "http_request.h"
+#include "http_connection.h"
+#include "http_server.h"
 #include "cors.h"
 #include "../OFFStreams/off_url.h"
 #include "../OFFStreams/readable_off_stream.h"
@@ -30,7 +32,8 @@
 #include <poll-dancer/poll-dancer.h>
 
 // OFF URL regex matching /offsystem/v3/{type}/{length}/{hash1}/{hash2}/{name}
-#define OFF_GET_PATTERN "/offsystem/v3/([-+._a-zA-Z0-9]+/[-+._a-zA-Z0-9-]+)/([0-9]+)/([123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+)/([123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+)/([^ !$`&*()+]*|\\\\[ !$`&*()+]*)+"
+// Filename group accepts spaces (decoded from %20) and most printable chars
+#define OFF_GET_PATTERN "/offsystem/v3/([-+._a-zA-Z0-9]+/[-+._a-zA-Z0-9-]+)/([0-9]+)/([123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+)/([123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+)/([^!`&*()+]+|\\\\[ !$`&*()+]+)+"
 
 typedef struct {
     size_t start;
@@ -107,10 +110,14 @@ off_routes_context_t* off_routes_context_create(scheduler_pool_t* pool,
     ctx->pool = pool;
     ctx->bc = bc;
     ctx->ofd_cache = ofd_cache;
+    ctx->tc = tuple_cache_create(100);
     return ctx;
 }
 
 void off_routes_context_destroy(off_routes_context_t* ctx) {
+    if (ctx->tc != NULL) {
+        tuple_cache_destroy(ctx->tc);
+    }
     free(ctx);
 }
 
@@ -156,14 +163,12 @@ static void _pipeline_on_rs_close(void* ctx, void* unused) {
     get_pipeline_t* pipeline = (get_pipeline_t*)ctx;
     // Off stream cleanup must also be deferred for the same reason
     stream_deferred_deref((stream_t*)pipeline->rs);
-    tuple_cache_destroy(pipeline->tc);
     free(pipeline);
 }
 
 static void _setup_stream_pipeline(http_response_t* response, scheduler_pool_t* pool,
-                                   block_cache_t* bc, ori_t* stream_ori,
+                                   block_cache_t* bc, tuple_cache_t* tc, ori_t* stream_ori,
                                    size_t descriptor_pad) {
-    tuple_cache_t* tc = tuple_cache_create(100);
     readable_off_stream_t* rs = readable_off_stream_create(pool, bc, tc, stream_ori, descriptor_pad);
     readable_descriptor_t* desc = readable_descriptor_create(pool, bc, stream_ori, descriptor_pad);
 
@@ -265,7 +270,7 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
                     http_response_set_header(response, "Content-Length", len_str);
                 }
 
-                _setup_stream_pipeline(response, ctx->pool, ctx->bc, stream_ori, 32);
+                _setup_stream_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32);
                 off_url_destroy(url);
                 return;
             }
@@ -322,7 +327,7 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
             http_response_set_header(response, "Content-Length", len_str);
         }
 
-        _setup_stream_pipeline(response, ctx->pool, ctx->bc, stream_ori, 32);
+        _setup_stream_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32);
         off_url_destroy(url);
         return;
     }
@@ -369,7 +374,7 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
         http_response_set_header(response, "Content-Length", content_length_str);
     }
 
-    _setup_stream_pipeline(response, ctx->pool, ctx->bc, stream_ori, 32);
+    _setup_stream_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32);
     off_url_destroy(url);
 }
 
@@ -414,6 +419,9 @@ static void _put_on_descriptor_close(void* ctx, void* unused) {
     if (conn) {
         http_connection_destroy(conn);
     }
+
+    stream_deferred_deref((stream_t*)put_ctx->desc);
+    stream_deferred_deref((stream_t*)put_ctx->ws);
 
     off_url_destroy(url);
     buffer_destroy(put_ctx->file_hash);
@@ -551,14 +559,13 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
         upload_data = (buffer_t*)refcounter_reference((refcounter_t*)request->body);
     }
 
-    tuple_cache_t* tc = tuple_cache_create(100);
     new_blocks_recipe_t* recipe = new_blocks_recipe_create(ctx->pool, ctx->bc, standard);
     vec_block_recipe_t recipes;
     vec_init(&recipes);
     vec_push(&recipes, (block_recipe_t*)recipe);
 
     writeable_off_stream_t* ws = writeable_off_stream_create(
-        ctx->pool, ctx->bc, tc, standard, 3, 32, recipes);
+        ctx->pool, ctx->bc, ctx->tc, standard, 3, 32, recipes);
 
     writeable_descriptor_t* desc = writeable_descriptor_create(
         ctx->pool, ctx->bc, standard, 32, 3, stream_length);
@@ -577,7 +584,7 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
     put_ctx->desc = desc;
     put_ctx->ws = ws;
     put_ctx->recipe = recipe;
-    put_ctx->tc = tc;
+    put_ctx->tc = ctx->tc;
 
     stream_subscribe((stream_t*)ws, data_event, put_ctx,
                      (void (*)(void*, void*))_put_on_stream_data, NULL);
@@ -594,6 +601,89 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
     }
 
     writeable_off_stream_finalize(ws);
+}
+
+static void _put_on_request_data(void* ctx, void* data) {
+    put_context_t* put_ctx = (put_context_t*)ctx;
+    buffer_t* chunk = (buffer_t*)data;
+    writeable_off_stream_write(put_ctx->ws, chunk);
+}
+
+static void _put_on_request_close(void* ctx, void* unused) {
+    (void)unused;
+    put_context_t* put_ctx = (put_context_t*)ctx;
+    writeable_off_stream_finalize(put_ctx->ws);
+}
+
+static int _off_put_headers_complete(http_connection_t* connection,
+                                      http_request_t* request,
+                                      http_response_t* response) {
+    // Fall back to buffered path for multipart uploads
+    const char* content_type_header = http_request_header(request, "Content-Type");
+    if (content_type_header && strncmp(content_type_header, "multipart/form-data", 19) == 0) {
+        return 0;
+    }
+
+    const char* type = http_request_header(request, "type");
+    const char* file_name = http_request_header(request, "file-name");
+    const char* stream_length_str = http_request_header(request, "stream-length");
+    const char* server_address = http_request_header(request, "server-address");
+
+    if (!type || !file_name || !stream_length_str) {
+        return 0;
+    }
+
+    size_t stream_length = (size_t)atol(stream_length_str);
+    if (stream_length == 0) {
+        return 0;
+    }
+
+    // Get the off_routes_context from the matched route
+    off_routes_context_t* routes_ctx = (off_routes_context_t*)connection->streaming_route->user_data;
+
+    new_blocks_recipe_t* recipe = new_blocks_recipe_create(routes_ctx->pool, routes_ctx->bc, standard);
+    vec_block_recipe_t recipes;
+    vec_init(&recipes);
+    vec_push(&recipes, (block_recipe_t*)recipe);
+
+    writeable_off_stream_t* ws = writeable_off_stream_create(
+        routes_ctx->pool, routes_ctx->bc, routes_ctx->tc, standard, 3, 32, recipes);
+
+    writeable_descriptor_t* desc = writeable_descriptor_create(
+        routes_ctx->pool, routes_ctx->bc, standard, 32, 3, stream_length);
+
+    put_context_t* put_ctx = get_clear_memory(sizeof(put_context_t));
+    put_ctx->response = response;
+    put_ctx->connection = connection;
+    response->is_piped = 1;
+    connection->piped_pending = 1;
+    refcounter_reference((refcounter_t*)response);
+    refcounter_reference((refcounter_t*)connection);
+    put_ctx->content_type = strdup(type);
+    put_ctx->file_name = strdup(file_name);
+    put_ctx->stream_length = stream_length;
+    put_ctx->server_address = server_address ? strdup(server_address) : NULL;
+    put_ctx->desc = desc;
+    put_ctx->ws = ws;
+    put_ctx->recipe = recipe;
+    put_ctx->tc = routes_ctx->tc;
+
+    stream_subscribe((stream_t*)ws, data_event, put_ctx,
+                     (void (*)(void*, void*))_put_on_stream_data, NULL);
+    stream_subscribe((stream_t*)ws, close_event, put_ctx,
+                     (void (*)(void*, void*))_put_on_stream_close, NULL);
+    stream_subscribe((stream_t*)desc, data_event, put_ctx,
+                     (void (*)(void*, void*))_put_on_descriptor_data, NULL);
+    stream_once((stream_t*)desc, close_event, put_ctx,
+                (void (*)(void*, void*))_put_on_descriptor_close, NULL);
+
+    // Pipe request stream data directly into the writeable_off_stream
+    stream_subscribe((stream_t*)request, data_event, put_ctx,
+                     (void (*)(void*, void*))_put_on_request_data, NULL);
+    stream_once((stream_t*)request, close_event, put_ctx,
+                (void (*)(void*, void*))_put_on_request_close, NULL);
+
+    return 1;
 }
 
 static void _off_delete_handler(http_request_t* request, http_response_t* response, void* user_data) {
@@ -643,6 +733,8 @@ void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
                                (void(*)(void*))off_routes_context_destroy);
     http_server_put_with_data(server, "/offsystem",
                                _off_put_handler, ctx, NULL);
+    http_route_t* put_route = &server->routes.data[server->routes.length - 1];
+    put_route->headers_complete_handler = _off_put_headers_complete;
     http_server_delete_with_data(server, OFF_GET_PATTERN,
                                   _off_delete_handler, ctx, NULL);
     http_server_post_with_data(server, OFF_GET_PATTERN,

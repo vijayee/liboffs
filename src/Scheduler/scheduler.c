@@ -6,6 +6,7 @@
 #include "../Actor/actor.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
+#include "../Util/threadding.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -101,6 +102,7 @@ static actor_t* _scheduler_find_work(scheduler_pool_t* pool, scheduler_t* self) 
 static DWORD WINAPI _scheduler_worker_loop(LPVOID arg) {
 #else
 static void* _scheduler_worker_loop(void* arg) {
+  platform_setup_thread_stack();
 #endif
   scheduler_pool_t* pool = (scheduler_pool_t*)arg;
   // Each worker thread atomically claims its index via fetch_add
@@ -127,7 +129,7 @@ static void* _scheduler_worker_loop(void* arg) {
         continue;
       }
       bool has_more = actor_run(actor, ACTOR_BATCH_SIZE);
-      atomic_fetch_and(&actor->flags, ~ACTOR_FLAG_RUNNING);
+      actor_release_running(actor);
       self->current = NULL;
       if (has_more) {
         deque_push(&self->local_queue, (void*)actor);

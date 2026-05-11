@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include "../Actor/actor.h"
 #include "../RefCounter/refcounter.h"
+#include "../Util/atomic_compat.h"
 #include "block.h"
 
 /* Bitmap-based free block tracking.
@@ -76,7 +77,7 @@ typedef struct section_t {
   free_map_t free_map;
   size_t size;
   block_size_e block_size;
-  _Atomic uint8_t dirty;
+  ATOMIC(uint8_t) dirty;
   /* Callback invoked when section metadata changes (write/deallocate).
      The context is typically a sections_t pointer. Used for debounced saves. */
   void (*on_dirty)(void* context, struct section_t* section);

@@ -12,6 +12,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <execinfo.h>
+#include <signal.h>
+#include <sys/mman.h>
 #endif
 #if _WIN32
 void platform_lock(CRITICAL_SECTION* lock) {
@@ -97,6 +99,9 @@ int platform_core_count() {
 }
 int platform_self() {
   return GetCurrentThreadId();
+}
+void platform_setup_thread_stack(void) {
+  /* Windows default stack size is 1MB, no sigaltstack needed */
 }
 #else
 void platform_lock(pthread_mutex_t* lock) {
@@ -249,5 +254,28 @@ int platform_core_count() {
 }
 uint64_t platform_self() {
   return pthread_self();
+}
+
+void platform_setup_thread_stack(void) {
+  /* Set up a generous alternate signal stack for this thread.
+     This prevents stack overflow in signal handlers when deep call
+     chains occur (e.g., cascading stream_notify calls).
+     Use mmap() instead of malloc() so ASan does not add redzones
+     around the stack allocation.  We always install our own stack;
+     if ASan has already installed one we replace it with a larger region.
+     On Linux, MAP_GROWSDOWN + mprotect guard page gives a larger
+     effective stack with overflow detection. */
+  size_t stack_size = (size_t)sysconf(_SC_PAGESIZE) * 128; /* 512 KiB */
+  void* stack = mmap(NULL, stack_size,
+                     PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (stack == MAP_FAILED) {
+    return;
+  }
+  stack_t new_ss;
+  new_ss.ss_sp = stack;
+  new_ss.ss_size = stack_size;
+  new_ss.ss_flags = 0;
+  sigaltstack(&new_ss, NULL);
 }
 #endif

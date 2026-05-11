@@ -224,6 +224,17 @@ void http_server_dispatch(http_server_t* server, http_request_t* request, http_r
   http_response_end(response);
 }
 
+http_route_t* http_server_match_route(http_server_t* server, int method, const char* path) {
+  for (int i = 0; i < server->routes.length; i++) {
+    vec_capture_t captures;
+    if (http_route_match(&server->routes.data[i], method, path, &captures)) {
+      vec_capture_deinit(&captures);
+      return &server->routes.data[i];
+    }
+  }
+  return NULL;
+}
+
 void http_server_use(http_server_t* server, http_middleware_t middleware, void* user_data, void (*user_data_destroy)(void*)) {
   http_middleware_entry_t entry;
   entry.handler = middleware;
@@ -270,6 +281,7 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
 
 static void* _server_thread(void* arg) {
   http_server_t* server = (http_server_t*)arg;
+  platform_setup_thread_stack();
 
   server->listen_watcher = pd_watcher_create(server->loop, server->listen_fd,
     PD_EVENT_READ, _accept_callback, server);

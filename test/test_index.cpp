@@ -55,6 +55,7 @@ namespace indexTest {
       EXPECT_EQ(get_bit(buf, 6), 0);
       EXPECT_EQ(get_bit(buf, 7), 1);
     }
+    free(buf);
   }
 
   TEST(TestIndexEntry, TestIndexEntry) {

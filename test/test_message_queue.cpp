@@ -13,7 +13,7 @@ static message_node_t* make_node(uint32_t type, void* payload) {
   node->msg.type = type;
   node->msg.payload = payload;
   node->msg.payload_destroy = NULL;
-  atomic_store(&node->next, NULL);
+  ATOMIC_STORE(&node->next, (message_node_t*)NULL);
   return node;
 }
 
@@ -132,9 +132,9 @@ TEST(TestMessageQueue, TestBatchPush) {
   message_node_t* second = make_node(2, NULL);
   message_node_t* third = make_node(3, NULL);
 
-  atomic_store(&first->next, second);
-  atomic_store(&second->next, third);
-  atomic_store(&third->next, NULL);
+  ATOMIC_STORE(&first->next, second);
+  ATOMIC_STORE(&second->next, third);
+  ATOMIC_STORE(&third->next, (message_node_t*)NULL);
 
   bool was_empty = message_queue_push(&queue, first, third);
   EXPECT_TRUE(was_empty);

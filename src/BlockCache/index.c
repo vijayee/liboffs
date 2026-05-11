@@ -254,7 +254,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
   vec_str_t* files = get_dir(index_location);
   uint64_t most_recent_id = 0;
 
-  if (files->length > 0) {
+  if (files != NULL && files->length > 0) {
     vec_sort(files, _sort_indexes);
     char id[20];
     for (int i = files->length - 1; i >= 0; i--) { //loop through index files to find first valid file
@@ -482,8 +482,8 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root, char* locatio
   index->location = path_join(location,"index");
   index->parent_location = strdup(location);
   vec_str_t* files = get_dir(index->location);
-  uint64_t last_id = 0 ;
-  if (files->length > 0) {
+  uint64_t last_id = 0;
+  if (files != NULL && files->length > 0) {
     char id[20];
     vec_sort(files, _sort_indexes);
     char* last = vec_last(files);

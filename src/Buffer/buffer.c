@@ -14,13 +14,36 @@ buffer_t* buffer_create(size_t size) {
   buffer_t* buf = get_clear_memory(sizeof(buffer_t));
   buf->data = get_clear_memory(size);
   buf->size = size;
+  buf->capacity = size;
   refcounter_init((refcounter_t*) buf);
   return buf;
+}
+
+buffer_t* buffer_create_with_capacity(size_t size, size_t capacity) {
+  buffer_t* buf = get_clear_memory(sizeof(buffer_t));
+  buf->data = get_clear_memory(capacity);
+  buf->size = size;
+  buf->capacity = capacity;
+  refcounter_init((refcounter_t*) buf);
+  return buf;
+}
+
+void buffer_ensure_capacity(buffer_t* buf, size_t needed) {
+  if (buf->capacity >= needed) {
+    return;
+  }
+  size_t new_capacity = buf->capacity == 0 ? needed : buf->capacity;
+  while (new_capacity < needed) {
+    new_capacity *= 2;
+  }
+  buf->data = realloc(buf->data, new_capacity);
+  buf->capacity = new_capacity;
 }
 
 buffer_t* buffer_create_from_pointer_copy(uint8_t* data, size_t size) {
   buffer_t* buf = get_clear_memory(sizeof(buffer_t));
   buf->size = size;
+  buf->capacity = size;
   buf->data = get_memory(size);
   buffer_copy_from_pointer(buf, data, size);
   refcounter_init((refcounter_t*) buf);
@@ -31,6 +54,7 @@ buffer_t* buffer_create_from_existing_memory(uint8_t* data, size_t size) {
   buffer_t* buf = get_clear_memory(sizeof(buffer_t));
   buf->data = data;
   buf->size = size;
+  buf->capacity = size;
   refcounter_init((refcounter_t*) buf);
   return buf;
 }

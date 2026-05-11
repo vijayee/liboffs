@@ -84,8 +84,7 @@ static void _build_descriptor_blocks(writeable_descriptor_t* desc) {
       if (prior_hash != NULL) {
         DESTROY(prior_hash, buffer);
       }
-      stream_notify((stream_t*)desc, error_event, NULL, NULL);
-      stream_notify((stream_t*)desc, close_event, NULL, NULL);
+      stream_deactivate((stream_t*)desc, ERROR("Write descriptor error"));
       desc->stream.is_deactivated = 1;
       return;
     }
@@ -142,11 +141,7 @@ void writeable_descriptor_dispatch(void* state, message_t* msg) {
       }
       size_t append_size = desc->tuple_size * desc->descriptor_pad;
       size_t needed = desc->descriptor->size + append_size;
-      buffer_t* grown = buffer_create(needed);
-      memcpy(grown->data, desc->descriptor->data, desc->descriptor->size);
-      grown->size = desc->descriptor->size;
-      DESTROY(desc->descriptor, buffer);
-      desc->descriptor = grown;
+      buffer_ensure_capacity(desc->descriptor, needed);
       for (size_t i = 0; i < tuple_size(tuple); i++) {
         buffer_t* hash = tuple_get(tuple, i);
         memcpy(desc->descriptor->data + desc->descriptor->size, hash->data,

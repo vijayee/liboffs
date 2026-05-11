@@ -5,8 +5,8 @@
 #ifndef OFFS_DEQUE_H
 #define OFFS_DEQUE_H
 
+#include "../Util/atomic_compat.h"
 #include <stddef.h>
-#include <stdatomic.h>
 #include <stdbool.h>
 
 #define DEQUE_INITIAL_CAPACITY 1024
@@ -17,13 +17,13 @@
 typedef struct _deque_array_t {
   size_t size;
   struct _deque_array_t* next;
-  _Atomic(void*) buffer[];
+  ATOMIC(void*) buffer[];
 } _deque_array_t;
 
 typedef struct deque_t {
-  _Atomic size_t bottom;
-  _Atomic size_t top;
-  _Atomic(struct _deque_array_t*) array;
+  ATOMIC(size_t) bottom;
+  ATOMIC(size_t) top;
+  ATOMIC(struct _deque_array_t*) array;
 } deque_t;
 
 void deque_init(deque_t* deque);

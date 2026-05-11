@@ -49,7 +49,8 @@ typedef enum message_type_e {
   RECIPE_ROTATE,
   SECTION_WRITE_COMPLETE,
   SECTION_READ_COMPLETE,
-  SECTION_DEALLOCATE_COMPLETE
+  SECTION_DEALLOCATE_COMPLETE,
+  STREAM_NOTIFY
 } message_type_e;
 
 typedef struct message_t {

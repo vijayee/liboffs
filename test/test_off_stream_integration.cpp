@@ -76,10 +76,7 @@ TEST(OffStreamIntegration, WriteableOffStreamEncodesData) {
 
   timer_actor_t* timer = timer_actor_create();
   block_cache_t* bc = block_cache_create(
-      (config_t){.lru_size = 50, .section_size = 128000, .cache_size = 50,
-                 .max_tuple_size = 30, .index_bucket_size = 10,
-                 .section_wait = 1000, .section_max_wait = 5000,
-                 .index_wait = 1000, .index_max_wait = 5000},
+      (config_t){.index_bucket_size = 10, .index_wait = 1000, .index_max_wait = 5000, .section_size = 128000, .section_wait = 1000, .section_max_wait = 5000, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
       wstream_path, standard, timer);
   tuple_cache_t* tc = tuple_cache_create(100);
 
@@ -138,10 +135,7 @@ TEST(OffStreamIntegration, ReadableOffStreamDecodesBlock) {
 
   timer_actor_t* timer = timer_actor_create();
   block_cache_t* bc = block_cache_create(
-      (config_t){.lru_size = 50, .section_size = 128000, .cache_size = 50,
-                 .max_tuple_size = 30, .index_bucket_size = 10,
-                 .section_wait = 1000, .section_max_wait = 5000,
-                 .index_wait = 1000, .index_max_wait = 5000},
+      (config_t){.index_bucket_size = 10, .index_wait = 1000, .index_max_wait = 5000, .section_size = 128000, .section_wait = 1000, .section_max_wait = 5000, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
       rstream_path, standard, timer);
   tuple_cache_t* tc = tuple_cache_create(100);
 

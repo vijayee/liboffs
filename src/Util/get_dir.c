@@ -39,6 +39,9 @@ vec_str_t* get_dir(const char* directory) {
   }
 }
 void destroy_files(vec_str_t* files) {
+  if (files == NULL) {
+    return;
+  }
   size_t i; char* file;
   vec_foreach(files, file, i) {
       free(file);

@@ -160,11 +160,9 @@ TEST(TestTimerActor, TestDebounceResetsTimer) {
   actor_init(&target, &state, completion_dispatch);
 
   /* First debounce: create a timer with 100ms timeout.
-     Since timer_actor_debounce returns 0 (async), we can't get the
-     timer_id from the return value. Instead, we use the completion
-     callback to obtain the timer_id and cancel it with a new debounce
-     call, which resets the timeout. */
-  timer_actor_debounce(ta, 0, 100, 0, &target, COMPLETION_FIRE);
+     timer_actor_debounce now tracks timers internally by (target, completion_type)
+     so calling it again with the same target/type will cancel the old timer. */
+  timer_actor_debounce(ta, 100, 0, &target, COMPLETION_FIRE);
 
   /* Wait for the first timer to fire and capture its timer_id */
   for (int i = 0; i < 300; i++) {
@@ -174,12 +172,9 @@ TEST(TestTimerActor, TestDebounceResetsTimer) {
   }
   EXPECT_GE(state.fire_count.load(), 1);
 
-  /* Now debounce using the timer_id we received — this cancels the old
-     timer and creates a new one, demonstrating the debounce pattern. */
-  uint64_t first_id = state.last_timer_id.load();
-  if (first_id != 0) {
-    timer_actor_debounce(ta, first_id, 200, 0, &target, COMPLETION_FIRE);
-  }
+  /* Now debounce again — this cancels the old timer and creates a new one,
+     demonstrating the internal debounce pattern. */
+  timer_actor_debounce(ta, 200, 0, &target, COMPLETION_FIRE);
 
   /* Wait for the second timer to fire */
   int count_before = state.fire_count.load();
@@ -268,8 +263,8 @@ TEST(TestTimerActor, TestDebounceWithZeroExistingId) {
   actor_t target;
   actor_init(&target, &state, completion_dispatch);
 
-  /* Debounce with existing_timer_id=0 should create a new timer */
-  timer_actor_debounce(ta, 0, 50, 0, &target, COMPLETION_FIRE);
+  /* Debounce should create a new timer */
+  timer_actor_debounce(ta, 50, 0, &target, COMPLETION_FIRE);
 
   for (int i = 0; i < 300; i++) {
     if (state.fire_count.load() >= 1) break;

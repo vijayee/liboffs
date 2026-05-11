@@ -11,7 +11,6 @@
 #include "../Util/log.h"
 #include <stdatomic.h>
 #include <time.h>
-#include <sched.h>
 
 void block_cache_validate(block_cache_t* block_cache, const char* func, int line) {
   if (block_cache == NULL) {
@@ -284,26 +283,16 @@ void block_cache_dispatch(void* state, message_t* msg) {
   }
 }
 
-/* Sync helper: run the block_cache actor until our message is processed. */
+/* Sync helper: run the block_cache actor until our message is processed.
+   Uses condition variable wait instead of spin-yield, mirroring Pony's
+   approach of OS-level thread suspension for idle waits. */
 static void _block_cache_run_until_done(block_cache_t* block_cache) {
-  while (true) {
-    uint8_t flags = atomic_load(&block_cache->actor.flags);
-    if (flags & ACTOR_FLAG_RUNNING) {
-      sched_yield();
-      continue;
-    }
-    if (!atomic_compare_exchange_strong(&block_cache->actor.flags, &flags,
-                                        flags | ACTOR_FLAG_RUNNING)) {
-      sched_yield();
-      continue;
-    }
-    bool has_more = true;
-    while (has_more) {
-      has_more = actor_run(&block_cache->actor, ACTOR_BATCH_SIZE);
-    }
-    atomic_fetch_and(&block_cache->actor.flags, ~ACTOR_FLAG_RUNNING);
-    break;
+  actor_claim_running(&block_cache->actor);
+  bool has_more = true;
+  while (has_more) {
+    has_more = actor_run(&block_cache->actor, ACTOR_BATCH_SIZE);
   }
+  actor_release_running(&block_cache->actor);
 }
 
 /* ---- block_cache implementation ---- */

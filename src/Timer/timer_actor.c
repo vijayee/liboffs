@@ -172,6 +172,7 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
 }
 
 static void* _timer_actor_thread(void* arg) {
+  platform_setup_thread_stack();
   timer_actor_t* timer_actor = (timer_actor_t*)arg;
 
   while (atomic_load(&timer_actor->running)) {

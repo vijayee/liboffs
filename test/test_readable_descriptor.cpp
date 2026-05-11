@@ -12,10 +12,7 @@ TEST(ReadableDescriptor, TestCreateDestroy) {
   scheduler_pool_start(pool);
 
   block_cache_t* bc = block_cache_create(
-      (config_t){.lru_size = 10, .section_size = 128000, .cache_size = 10,
-                 .max_tuple_size = 30, .index_bucket_size = 10,
-                 .section_wait = 0, .section_max_wait = 0,
-                 .index_wait = 0, .index_max_wait = 0},
+      (config_t){.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0, .section_size = 128000, .section_wait = 0, .section_max_wait = 0, .cache_size = 10, .max_tuple_size = 30, .lru_size = 10},
       "/tmp/test_desc_bc", standard, NULL);
 
   ori_t* ori = ori_create(256000);
@@ -50,10 +47,7 @@ TEST(ReadableDescriptor, TestOffsetCalculation) {
   scheduler_pool_start(pool);
 
   block_cache_t* bc = block_cache_create(
-      (config_t){.lru_size = 10, .section_size = 128000, .cache_size = 10,
-                 .max_tuple_size = 30, .index_bucket_size = 10,
-                 .section_wait = 0, .section_max_wait = 0,
-                 .index_wait = 0, .index_max_wait = 0},
+      (config_t){.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0, .section_size = 128000, .section_wait = 0, .section_max_wait = 0, .cache_size = 10, .max_tuple_size = 30, .lru_size = 10},
       "/tmp/test_desc_offset_bc", standard, NULL);
 
   ori_t* ori = ori_create(256000);

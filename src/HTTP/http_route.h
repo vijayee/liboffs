@@ -9,8 +9,12 @@
 
 typedef struct http_request_t http_request_t;
 typedef struct http_response_t http_response_t;
+typedef struct http_connection_t http_connection_t;
 
 typedef void (*http_handler_t)(http_request_t* request, http_response_t* response, void* user_data);
+typedef int (*http_headers_complete_handler_t)(http_connection_t* connection,
+                                                http_request_t* request,
+                                                http_response_t* response);
 
 typedef struct {
   int method;
@@ -18,6 +22,7 @@ typedef struct {
   http_handler_t handler;
   void* user_data;
   void (*user_data_destroy)(void*);
+  http_headers_complete_handler_t headers_complete_handler;
 } http_route_t;
 
 typedef vec_t(http_route_t) vec_route_t;

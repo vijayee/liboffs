@@ -30,8 +30,7 @@ void new_blocks_recipe_dispatch(void* state, message_t* msg) {
       }
       block_t* block = block_create_random_block_by_type(recipe->recipe.block_type);
       if (block == NULL) {
-        stream_notify((stream_t*)recipe, error_event, NULL, NULL);
-        stream_notify((stream_t*)recipe, close_event, NULL, NULL);
+        stream_deactivate((stream_t*)recipe, ERROR("Block creation failed"));
         recipe->recipe.stream.is_deactivated = 1;
         break;
       }
@@ -262,8 +261,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
           stream_notify((stream_t*)recipe, data_event,
                         CONSUME(block, block_t), (void (*)(void*))block_destroy);
         } else {
-          stream_notify((stream_t*)recipe, error_event, NULL, NULL);
-          stream_notify((stream_t*)recipe, close_event, NULL, NULL);
+          stream_deactivate((stream_t*)recipe, ERROR("Descriptor block not found"));
           recipe->recipe.stream.is_deactivated = 1;
         }
       }

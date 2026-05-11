@@ -7,6 +7,7 @@
 
 #include "../Actor/actor.h"
 #include "../Util/threadding.h"
+#include "../Util/atomic_compat.h"
 #include <poll-dancer/types.h>
 #include <stdint.h>
 
@@ -23,7 +24,7 @@ typedef struct timer_actor_t {
   actor_t actor;
   pd_loop_t* loop;
   PLATFORMTHREADTYPE thread;
-  _Atomic uint8_t running;
+  ATOMIC(uint8_t) running;
   /* Active timers tracked for cleanup on destroy. */
   pd_timer_t** active_timers;
   size_t active_timer_count;

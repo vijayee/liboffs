@@ -12,6 +12,7 @@
 #include "../RefCounter/refcounter.h"
 #include "../Buffer/buffer.h"
 #include "../Util/vec.h"
+#include "http_route.h"
 #include <poll-dancer/poll-dancer.h>
 
 typedef struct http_server_t http_server_t;
@@ -37,6 +38,7 @@ typedef struct http_connection_t {
   uint8_t request_complete;
   uint8_t is_ssl;
   uint8_t piped_pending;
+  http_route_t* streaming_route;
 } http_connection_t;
 
 http_connection_t* http_connection_create(http_server_t* server, int fd);

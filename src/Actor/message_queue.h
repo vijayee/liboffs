@@ -6,17 +6,17 @@
 #define OFFS_MESSAGE_QUEUE_H
 
 #include "message.h"
+#include "../Util/atomic_compat.h"
 #include <stdbool.h>
-#include <stdatomic.h>
 
 typedef struct message_node_t message_node_t;
 struct message_node_t {
   message_t msg;
-  _Atomic(message_node_t*) next;
+  ATOMIC(message_node_t*) next;
 };
 
 typedef struct message_queue_t {
-  _Atomic(message_node_t*) head;
+  ATOMIC(message_node_t*) head;
   message_node_t* tail;
 } message_queue_t;
 

@@ -94,6 +94,12 @@ typedef struct {
 } stream_write_payload_t;
 
 typedef struct {
+  stream_event_e event;
+  void* payload;
+  void (*payload_destroy)(void*);
+} stream_notify_payload_t;
+
+typedef struct {
   stream_t* stream;
   size_t size;
   void* ctx;

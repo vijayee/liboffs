@@ -11,6 +11,7 @@ extern "C" {
 #include "../src/Util/mkdir_p.h"
 #include "../src/Util/rm_rf.h"
 #include "../src/Util/threadding.h"
+#include "../src/Util/atomic_compat.h"
 #include <time.h>
 #include "../src/Timer/timer_actor.h"
 #include "../src/Actor/actor.h"
@@ -145,7 +146,7 @@ TEST_F(TestSection, TestSectionFunction) {
 
 /* Completion actor state: stores the last completion result and a done flag */
 typedef struct {
-  _Atomic uint8_t done;
+  ATOMIC(uint8_t) done;
   section_write_result_t write_result;
   buffer_t* read_buffer;
   int deallocate_result;
@@ -177,7 +178,7 @@ static void section_completion_dispatch(void* state, message_t* msg) {
     default:
       break;
   }
-  atomic_store(&cs->done, 1);
+  ATOMIC_STORE(&cs->done, 1);
 }
 
 TEST_F(TestSection, TestSectionAsyncWrite) {
@@ -205,7 +206,7 @@ TEST_F(TestSection, TestSectionAsyncWrite) {
   actor_send(&section->actor, &msg);
 
   /* Process both actors until completion */
-  while (!atomic_load(&completion_state.done)) {
+  while (!ATOMIC_LOAD(&completion_state.done)) {
     actor_run(&section->actor, ACTOR_BATCH_SIZE);
     actor_run(&completion_actor, ACTOR_BATCH_SIZE);
   }
@@ -215,7 +216,7 @@ TEST_F(TestSection, TestSectionAsyncWrite) {
   size_t written_index = completion_state.write_result.index;
 
   /* Read back the block asynchronously */
-  atomic_store(&completion_state.done, 0);
+  ATOMIC_STORE(&completion_state.done, 0);
   completion_state.read_buffer = NULL;
   section_read_payload_t* read_payload = (section_read_payload_t*)get_clear_memory(sizeof(section_read_payload_t));
   read_payload->index = written_index;
@@ -228,7 +229,7 @@ TEST_F(TestSection, TestSectionAsyncWrite) {
 
   actor_send(&section->actor, &read_msg);
 
-  while (!atomic_load(&completion_state.done)) {
+  while (!ATOMIC_LOAD(&completion_state.done)) {
     actor_run(&section->actor, ACTOR_BATCH_SIZE);
     actor_run(&completion_actor, ACTOR_BATCH_SIZE);
   }
@@ -237,7 +238,7 @@ TEST_F(TestSection, TestSectionAsyncWrite) {
   EXPECT_EQ(buffer_compare(completion_state.read_buffer, block->data), 0);
 
   /* Deallocate the block asynchronously */
-  atomic_store(&completion_state.done, 0);
+  ATOMIC_STORE(&completion_state.done, 0);
   section_deallocate_payload_t* dealloc_payload = (section_deallocate_payload_t*)get_clear_memory(sizeof(section_deallocate_payload_t));
   dealloc_payload->index = written_index;
   dealloc_payload->reply_to = &completion_actor;
@@ -249,7 +250,7 @@ TEST_F(TestSection, TestSectionAsyncWrite) {
 
   actor_send(&section->actor, &dealloc_msg);
 
-  while (!atomic_load(&completion_state.done)) {
+  while (!ATOMIC_LOAD(&completion_state.done)) {
     actor_run(&section->actor, ACTOR_BATCH_SIZE);
     actor_run(&completion_actor, ACTOR_BATCH_SIZE);
   }

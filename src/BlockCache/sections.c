@@ -18,7 +18,6 @@
 #define access _access
 #else
 #include <unistd.h>
-#include <sched.h>
 #endif
 
 void sections_lru_cache_move(sections_lru_cache_t* lru, sections_lru_node_t* node);
@@ -98,32 +97,28 @@ void sections_lru_cache_put(sections_lru_cache_t* lru, section_t* section) {
   }
   sections_lru_node_t* node = hashmap_get(&lru->cache, &section->id);
   if (node == NULL) {
+    if (hashmap_size(&lru->cache) == lru->size) {
+      if (lru->last != NULL) {
+        sections_lru_node_t* last_node = lru->last;
+        if (last_node->previous == NULL) {
+          lru->last = NULL;
+          lru->first = NULL;
+        } else {
+          sections_lru_node_t* new_last_node = last_node->previous;
+          new_last_node->next = NULL;
+          lru->last = new_last_node;
+        }
+        hashmap_remove(&lru->cache, &last_node->value->id);
+        section_destroy(last_node->value);
+        free(last_node);
+      }
+    }
     node = get_clear_memory(sizeof(sections_lru_node_t));
     node->previous = NULL;
     node->next = NULL;
     node->value = refcounter_reference((refcounter_t*) section);
+    hashmap_put(&lru->cache, &section->id, node);
   }
-  if (hashmap_size(&lru->cache) == lru->size) {
-    if (lru->last != NULL) {
-      sections_lru_node_t* last_node = lru->last;
-      if(last_node->previous == NULL) {
-        lru->last = NULL;
-        if (lru->first != NULL) {
-          lru->first = NULL;
-        }
-      } else {
-        sections_lru_node_t* new_last_node = last_node->previous;
-        if (new_last_node->next != NULL) {
-          new_last_node->next = NULL;
-        }
-        lru->last = last_node->previous;
-      }
-      hashmap_remove(&lru->cache, &last_node->value->id);
-      section_destroy(last_node->value);
-      free(last_node);
-    }
-  }
-  hashmap_put(&lru->cache, &section->id, node);
   sections_lru_cache_move(lru, node);
 }
 
@@ -323,26 +318,15 @@ void sections_dispatch(void* state, message_t* msg) {
 }
 
 /* Sync helper: run the sections actor until our message is processed.
-   Uses ACTOR_FLAG_RUNNING to prevent concurrent actor_run calls. */
+   Uses condition variable wait instead of spin-yield, mirroring Pony's
+   approach of OS-level thread suspension for idle waits. */
 static void _sections_run_until_done(sections_t* sections) {
-  while (true) {
-    uint8_t flags = atomic_load(&sections->actor.flags);
-    if (flags & ACTOR_FLAG_RUNNING) {
-      sched_yield();
-      continue;
-    }
-    if (!atomic_compare_exchange_strong(&sections->actor.flags, &flags,
-                                        flags | ACTOR_FLAG_RUNNING)) {
-      sched_yield();
-      continue;
-    }
-    bool has_more = true;
-    while (has_more) {
-      has_more = actor_run(&sections->actor, ACTOR_BATCH_SIZE);
-    }
-    atomic_fetch_and(&sections->actor.flags, ~ACTOR_FLAG_RUNNING);
-    break;
+  actor_claim_running(&sections->actor);
+  bool has_more = true;
+  while (has_more) {
+    has_more = actor_run(&sections->actor, ACTOR_BATCH_SIZE);
   }
+  actor_release_running(&sections->actor);
 }
 
 static void section_on_dirty(void* context, section_t* section) {
@@ -537,33 +521,40 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
   actor_init(&sections->actor, sections, sections_dispatch);
   if (access(robin_path, F_OK) == 0) {
     FILE* robin_file = fopen(robin_path, "rb");
-    if(fseek(robin_file, 0, SEEK_END)) {
-      log_error("Failed to Read Round Robin File Size");
-      abort();
-    }
-    long file_size = ftell(robin_file);
-    rewind(robin_file);
-    uint8_t* buffer = get_memory((size_t)file_size);
-    size_t read_size = fread(buffer, sizeof(uint8_t), (size_t)file_size, robin_file);
-    fclose(robin_file);
-    if ((size_t)file_size != read_size) {
-      log_error("Failed to Read Round Robin File");
+    if (robin_file == NULL || fseek(robin_file, 0, SEEK_END)) {
+      log_error("Failed to read round robin file size; recreating");
+      if (robin_file != NULL) fclose(robin_file);
+      unlink(robin_path);
+      sections->robin = round_robin_create(robin_path, timer_actor, &sections->actor, wait, max_wait);
+    } else {
+      long file_size = ftell(robin_file);
+      rewind(robin_file);
+      uint8_t* buffer = get_memory((size_t)file_size);
+      size_t read_size = fread(buffer, sizeof(uint8_t), (size_t)file_size, robin_file);
+      fclose(robin_file);
+      int valid = 1;
+      cbor_item_t* cbor = NULL;
+      if ((size_t)file_size != read_size) {
+        log_error("Failed to read round robin file; recreating");
+        valid = 0;
+      } else {
+        struct cbor_load_result result;
+        cbor = cbor_load(buffer, (size_t)file_size, &result);
+        if (result.error.code != CBOR_ERR_NONE || !cbor_isa_array(cbor)) {
+          log_error("Failed to parse round robin file; recreating");
+          valid = 0;
+        }
+      }
       free(buffer);
-      abort();
+      if (valid) {
+        sections->robin = cbor_to_round_robin(cbor, robin_path, timer_actor, &sections->actor, wait, max_wait);
+        cbor_decref(&cbor);
+      } else {
+        if (cbor != NULL) cbor_decref(&cbor);
+        unlink(robin_path);
+        sections->robin = round_robin_create(robin_path, timer_actor, &sections->actor, wait, max_wait);
+      }
     }
-    struct cbor_load_result result;
-    cbor_item_t* cbor = cbor_load(buffer, (size_t)file_size, &result);
-    free(buffer);
-    if (result.error.code != CBOR_ERR_NONE) {
-      log_error("Failed to Parse Round Robin File");
-      abort();
-    }
-    if(!cbor_isa_array(cbor)) {
-      log_error("Failed to Parse Round Robin File: Malformed Data");
-      abort();
-    }
-    sections->robin = cbor_to_round_robin(cbor, robin_path, timer_actor, &sections->actor, wait, max_wait);
-    cbor_decref(&cbor);
   } else {
     sections->robin = round_robin_create(robin_path, timer_actor, &sections->actor, wait, max_wait);
   }
@@ -574,15 +565,17 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
   mkdir_p(sections->meta_path);
 
   vec_str_t* files = get_dir(sections->meta_path);
-  if (files->length) {
+  if (files != NULL && files->length > 0) {
     char* last = vec_last(files);
     uint64_t last_id = strtoull(last, NULL, 10);
     sections->next_id = last_id + 1;
   } else {
     sections->next_id = 0;
   }
-  vec_deinit(files);
-  free(files);
+  if (files != NULL) {
+    vec_deinit(files);
+    free(files);
+  }
   while (sections->robin->size < sections->max_tuple_size) {
     section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type);
     section->on_dirty = section_on_dirty;

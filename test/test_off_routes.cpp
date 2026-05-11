@@ -107,15 +107,15 @@ protected:
 
         timer = timer_actor_create();
         config_t config = {
-            .lru_size = 50,
-            .section_size = 128000,
-            .cache_size = 50,
-            .max_tuple_size = 30,
             .index_bucket_size = 10,
             .index_wait = 1000,
             .index_max_wait = 5000,
+            .section_size = 128000,
             .section_wait = 1000,
-            .section_max_wait = 5000
+            .section_max_wait = 5000,
+            .cache_size = 50,
+            .max_tuple_size = 30,
+            .lru_size = 50
         };
         bc = block_cache_create(config, cache_dir, standard, timer);
         ofd_cache = ofd_cache_create(pool, bc, 300000);

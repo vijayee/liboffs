@@ -239,26 +239,16 @@ void tuple_cache_dispatch(void* state, message_t* msg) {
   }
 }
 
-/* Sync helper: run the actor until message is processed */
+/* Sync helper: run the actor until message is processed.
+   Uses condition variable wait instead of spin-yield, mirroring Pony's
+   approach of OS-level thread suspension for idle waits. */
 static void _tuple_cache_run_until_done(tuple_cache_t* tc) {
-  while (true) {
-    uint8_t flags = atomic_load(&tc->actor.flags);
-    if (flags & ACTOR_FLAG_RUNNING) {
-      sched_yield();
-      continue;
-    }
-    if (!atomic_compare_exchange_strong(&tc->actor.flags, &flags,
-                                        flags | ACTOR_FLAG_RUNNING)) {
-      sched_yield();
-      continue;
-    }
-    bool has_more = true;
-    while (has_more) {
-      has_more = actor_run(&tc->actor, ACTOR_BATCH_SIZE);
-    }
-    atomic_fetch_and(&tc->actor.flags, ~ACTOR_FLAG_RUNNING);
-    break;
+  actor_claim_running(&tc->actor);
+  bool has_more = true;
+  while (has_more) {
+    has_more = actor_run(&tc->actor, ACTOR_BATCH_SIZE);
   }
+  actor_release_running(&tc->actor);
 }
 
 /* ---- Public API (sync wrappers) ---- */

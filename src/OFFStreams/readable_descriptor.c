@@ -40,8 +40,8 @@ static void _move_to_offset(readable_descriptor_t* desc, buffer_t* descriptor,
   size_t entry_size = desc->descriptor_pad * desc->ori->tuple_size;
 
   if (desc->offset_tuple > 0 && desc->tuple_counter < desc->offset_tuple) {
-    if (desc->offset_tuple > ((buf->size % entry_size) + desc->tuple_counter)) {
-      desc->tuple_counter = (buf->size - desc->descriptor_pad) / entry_size;
+    if (desc->offset_tuple > (((buf->size - desc->descriptor_pad) / entry_size) + desc->tuple_counter)) {
+      desc->tuple_counter += (buf->size - desc->descriptor_pad) / entry_size;
       size_t cut = (buf->size - desc->descriptor_pad) -
                    ((buf->size - desc->descriptor_pad) % entry_size);
       desc->offset_remainder = buffer_slice(buf, cut, buf->size - desc->descriptor_pad);
@@ -117,8 +117,7 @@ static void _process_descriptor(readable_descriptor_t* desc, buffer_t* block_dat
             key = next_key;
             continue;
           } else {
-            stream_notify((stream_t*)desc, error_event, ERROR("Descriptor block not found"), (void (*)(void*))error_destroy);
-            stream_notify((stream_t*)desc, close_event, NULL, NULL);
+            stream_deactivate((stream_t*)desc, ERROR("Descriptor block not found"));
             desc->stream.is_deactivated = 1;
             if (current_descriptor != NULL) {
               DESTROY(current_descriptor, buffer);
@@ -195,8 +194,7 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
           _process_descriptor(desc, block->data);
           block_destroy(block);
         } else {
-          stream_notify((stream_t*)desc, error_event, ERROR("Descriptor block not found"), (void (*)(void*))error_destroy);
-          stream_notify((stream_t*)desc, close_event, NULL, NULL);
+          stream_deactivate((stream_t*)desc, ERROR("Descriptor block not found"));
           desc->stream.is_deactivated = 1;
         }
       }

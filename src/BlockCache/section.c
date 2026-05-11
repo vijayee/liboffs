@@ -18,7 +18,6 @@
 #define access _access
 #else
 #include <unistd.h>
-#include <sched.h>
 #endif
 
 /* ---- free_map helpers ---- */
@@ -363,40 +362,21 @@ void section_destroy(section_t* section) {
 }
 
 /* Helper: run the section actor until our message is processed.
-   Uses ACTOR_FLAG_RUNNING to prevent concurrent actor_run calls on the
-   same actor (message_queue_pop is single-consumer only).
-   Spins until our message has been processed by either this thread or
-   another thread that claimed the running flag first. */
-static void _section_run_until_done(section_t* section, int* done) {
-  while (!*done) {
-    uint8_t flags = atomic_load(&section->actor.flags);
-    if (flags & ACTOR_FLAG_RUNNING) {
-      /* Another thread is running the actor. Yield and check again. */
-      sched_yield();
-      continue;
-    }
-    if (!atomic_compare_exchange_strong(&section->actor.flags, &flags,
-                                         flags | ACTOR_FLAG_RUNNING)) {
-      /* CAS failed, retry. */
-      sched_yield();
-      continue;
-    }
-    /* We claimed the running flag. Process messages until the queue is empty. */
-    bool has_more = true;
-    while (has_more) {
-      has_more = actor_run(&section->actor, ACTOR_BATCH_SIZE);
-    }
-    atomic_fetch_and(&section->actor.flags, ~ACTOR_FLAG_RUNNING);
-    /* After processing all messages, our message is done. */
-    break;
+   Uses condition variable wait instead of spin-yield, mirroring Pony's
+   approach of OS-level thread suspension for idle waits. */
+static void _section_run_until_done(section_t* section) {
+  actor_claim_running(&section->actor);
+  bool has_more = true;
+  while (has_more) {
+    has_more = actor_run(&section->actor, ACTOR_BATCH_SIZE);
   }
+  actor_release_running(&section->actor);
 }
 
 /* Sync wrapper: sends SECTION_WRITE message to the section actor and
    processes it inline. Returns the result through the output parameters. */
 int section_write(section_t* section, buffer_t* data, size_t* index, uint8_t* full) {
   section_write_payload_t payload;
-  int done = 0;
   payload.data = data;
   payload.reply_to = NULL;
   payload.result = -1;
@@ -409,7 +389,7 @@ int section_write(section_t* section, buffer_t* data, size_t* index, uint8_t* fu
   msg.payload_destroy = NULL;
 
   actor_send(&section->actor, &msg);
-  _section_run_until_done(section, &done);
+  _section_run_until_done(section);
 
   *index = payload.index;
   *full = payload.full;
@@ -420,7 +400,6 @@ int section_write(section_t* section, buffer_t* data, size_t* index, uint8_t* fu
    processes it inline. Returns the read buffer or NULL on failure. */
 buffer_t* section_read(section_t* section, size_t index) {
   section_read_payload_t payload;
-  int done = 0;
   payload.index = index;
   payload.reply_to = NULL;
   payload.result = NULL;
@@ -431,7 +410,7 @@ buffer_t* section_read(section_t* section, size_t index) {
   msg.payload_destroy = NULL;
 
   actor_send(&section->actor, &msg);
-  _section_run_until_done(section, &done);
+  _section_run_until_done(section);
 
   return payload.result;
 }
@@ -440,7 +419,6 @@ buffer_t* section_read(section_t* section, size_t index) {
    processes it inline. Returns 0 on success, non-zero on failure. */
 int section_deallocate(section_t* section, size_t index) {
   section_deallocate_payload_t payload;
-  int done = 0;
   payload.index = index;
   payload.reply_to = NULL;
   payload.result = -1;
@@ -451,7 +429,7 @@ int section_deallocate(section_t* section, size_t index) {
   msg.payload_destroy = NULL;
 
   actor_send(&section->actor, &msg);
-  _section_run_until_done(section, &done);
+  _section_run_until_done(section);
 
   return payload.result;
 }

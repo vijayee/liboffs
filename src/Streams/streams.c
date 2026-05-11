@@ -276,6 +276,15 @@ void stream_dispatch(void* state, message_t* msg) {
     case DEFERRED_DEREF:
       stream->destructor(stream);
       break;
+    case STREAM_NOTIFY: {
+      stream_notify_payload_t* notify_payload = (stream_notify_payload_t*) msg->payload;
+      stream_event_e event = notify_payload->event;
+      void* payload = notify_payload->payload;
+      void (*payload_destroy)(void*) = notify_payload->payload_destroy;
+      free(notify_payload);
+      stream_notify(stream, event, payload, payload_destroy);
+      break;
+    }
     default:
       break;
   }
@@ -350,7 +359,26 @@ void stream_deactivate(stream_t* stream, async_error_t* error) {
   platform_lock(&stream->lock);
   stream->is_deactivated = 1;
   platform_unlock(&stream->lock);
-  stream_notify(stream, error_event, (void*) error, (void (*)(void*))error_destroy);
+  stream_notify_payload_t* error_payload = get_clear_memory(sizeof(stream_notify_payload_t));
+  error_payload->event = error_event;
+  error_payload->payload = (void*) error;
+  error_payload->payload_destroy = (void (*)(void*)) error_destroy;
+  message_t error_msg;
+  error_msg.type = STREAM_NOTIFY;
+  error_msg.payload = error_payload;
+  error_msg.payload_destroy = (void (*)(void*)) free;
+  actor_send(&stream->actor, &error_msg);
+
+  stream_notify_payload_t* close_payload = get_clear_memory(sizeof(stream_notify_payload_t));
+  close_payload->event = close_event;
+  close_payload->payload = NULL;
+  close_payload->payload_destroy = NULL;
+  message_t close_msg;
+  close_msg.type = STREAM_NOTIFY;
+  close_msg.payload = close_payload;
+  close_msg.payload_destroy = (void (*)(void*)) free;
+  actor_send(&stream->actor, &close_msg);
+  _stream_schedule(stream);
 }
 
 void stream_deferred_deref(stream_t* stream) {

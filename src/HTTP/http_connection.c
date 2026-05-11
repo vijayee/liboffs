@@ -8,6 +8,7 @@
 #include "http_route.h"
 #include "../Util/allocator.h"
 #include "../Buffer/buffer.h"
+#include "../Streams/stream.h"
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -168,19 +169,55 @@ static int _on_headers_complete(http_parser* parser) {
       connection->request->path = _url_decode(url, strlen(url));
     }
   }
+
+  // Try early route match for streaming PUT
+  if (connection->request->path != NULL && connection->request->method == HTTP_PUT) {
+    http_route_t* route = http_server_match_route(connection->server,
+                                                   connection->request->method,
+                                                   connection->request->path);
+    if (route != NULL && route->headers_complete_handler != NULL) {
+      connection->streaming_route = route;
+      http_response_t* response = http_response_create(connection->server->pool, connection);
+      int streaming = route->headers_complete_handler(connection, connection->request, response);
+      if (streaming) {
+        // The headers_complete_handler has set up the pipeline.
+        // Body chunks will be emitted as data_event on request->stream.
+        // We skip normal body buffering — _on_body will stream instead.
+      } else {
+        // Handler declined streaming (e.g., multipart). Fall through to normal path.
+        connection->streaming_route = NULL;
+        DESTROY(response, http_response);
+      }
+    }
+  }
+
   return 0;
 }
 
 static int _on_body(http_parser* parser, const char* at, size_t length) {
   http_connection_t* connection = (http_connection_t*)parser->data;
+
+  // Streaming mode: pipe body chunks directly into the request stream
+  if (connection->streaming_route != NULL) {
+    buffer_t* chunk = buffer_create_from_pointer_copy((uint8_t*)at, length);
+    stream_notify((stream_t*)connection->request, data_event,
+                  CONSUME(chunk, buffer_t), (void (*)(void*))buffer_destroy);
+    return 0;
+  }
+
   if (connection->request->body == NULL) {
-    connection->request->body = buffer_create(length);
+    size_t initial_capacity = connection->request->content_length > 0
+      ? (size_t)connection->request->content_length
+      : (length < 8192 ? 8192 : length * 2);
+    connection->request->body = buffer_create_with_capacity(0, initial_capacity);
+    buffer_ensure_capacity(connection->request->body, length);
     memcpy(connection->request->body->data, at, length);
+    connection->request->body->size = length;
   } else {
-    size_t new_size = connection->request->body->size + length;
-    connection->request->body->data = realloc(connection->request->body->data, new_size);
+    size_t needed = connection->request->body->size + length;
+    buffer_ensure_capacity(connection->request->body, needed);
     memcpy(connection->request->body->data + connection->request->body->size, at, length);
-    connection->request->body->size = new_size;
+    connection->request->body->size = needed;
   }
   return 0;
 }
@@ -188,6 +225,18 @@ static int _on_body(http_parser* parser, const char* at, size_t length) {
 static int _on_message_complete(http_parser* parser) {
   http_connection_t* connection = (http_connection_t*)parser->data;
   connection->request_complete = 1;
+
+  // Streaming mode: signal end of body data and skip normal dispatch
+  if (connection->streaming_route != NULL) {
+    stream_notify((stream_t*)connection->request, close_event, NULL, NULL);
+    connection->streaming_route = NULL;
+    DESTROY(connection->request, http_request);
+    connection->request = NULL;
+    http_parser_init(&connection->parser, HTTP_REQUEST);
+    connection->headers_complete = 0;
+    connection->request_complete = 0;
+    return 0;
+  }
 
   http_response_t* response = http_response_create(
     connection->server->pool, connection);
@@ -265,7 +314,13 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
 
 close:
   if (connection->piped_pending) {
-    // A piped response is still in progress on a worker thread.
+    // A piped response or streaming upload is still in progress.
+    // Emit error on request stream so the pipeline can clean up.
+    if (connection->streaming_route != NULL && connection->request != NULL) {
+      stream_deactivate((stream_t*)connection->request,
+                        ERROR("Connection closed during streaming upload"));
+      connection->streaming_route = NULL;
+    }
     // Stop and destroy the read watcher on the event loop thread
     // (safe here) and release our reference to the connection.
     // The worker thread holds the other reference and will close
@@ -303,6 +358,7 @@ http_connection_t* http_connection_create(http_server_t* server, int fd) {
   connection->header_value = NULL;
   connection->header_value_len = 0;
   connection->header_value_cap = 0;
+  connection->streaming_route = NULL;
 
   int flags = fcntl(fd, F_GETFL, 0);
   fcntl(fd, F_SETFL, flags | O_NONBLOCK);

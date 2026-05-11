@@ -7,7 +7,7 @@
 
 #include "deque.h"
 #include "../Util/threadding.h"
-#include <stdatomic.h>
+#include "../Util/atomic_compat.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -31,8 +31,8 @@ typedef struct scheduler_t {
   size_t index;
   PLATFORMTHREADTYPE thread;
   deque_t local_queue;
-  _Atomic uint32_t last_victim;
-  char _pad[CACHE_LINE_SIZE - sizeof(size_t) - sizeof(PLATFORMTHREADTYPE) - sizeof(deque_t) - sizeof(_Atomic uint32_t)];
+  ATOMIC(uint32_t) last_victim;
+  char _pad[CACHE_LINE_SIZE - sizeof(size_t) - sizeof(PLATFORMTHREADTYPE) - sizeof(deque_t) - sizeof(ATOMIC(uint32_t))];
   actor_t* current;
 } scheduler_t;
 
@@ -43,9 +43,9 @@ typedef struct scheduler_pool_t {
   PLATFORMBARRIERTYPE(barrier);
   PLATFORMLOCKTYPE(idle_lock);
   PLATFORMCONDITIONTYPE(idle);
-  _Atomic size_t idle_count;
-  _Atomic uint32_t active_count;
-  _Atomic uint8_t terminate;
+  ATOMIC(size_t) idle_count;
+  ATOMIC(uint32_t) active_count;
+  ATOMIC(uint8_t) terminate;
 } scheduler_pool_t;
 
 scheduler_pool_t* scheduler_pool_create(size_t worker_count);

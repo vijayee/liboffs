@@ -52,7 +52,6 @@ static void _render_origin_data(readable_off_stream_t* stream, buffer_t* data) {
     stream_notify((stream_t*)stream, finished_event, NULL, NULL);
     stream_notify((stream_t*)stream, complete_event, NULL, NULL);
     stream_notify((stream_t*)stream, close_event, NULL, NULL);
-    stream->stream.is_deactivated = 1;
   }
 }
 
@@ -77,9 +76,8 @@ static void _check_cache_and_decode(readable_off_stream_t* stream, tuple_t* tupl
       if (origin_data != NULL) {
         DESTROY(origin_data, buffer);
       }
-      stream_notify((stream_t*)stream, error_event, ERROR("Block not found in cache"), (void (*)(void*))error_destroy);
-      stream_notify((stream_t*)stream, close_event, NULL, NULL);
-      stream->stream.is_deactivated = 1;
+      stream_deactivate((stream_t*)stream, ERROR("Block not found in cache"));
+      return;
       return;
     }
     if (i == 0) {

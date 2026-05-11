@@ -34,6 +34,7 @@ void platform_barrier_destroy(SYNCHRONIZATION_BARRIER* barrier);
 int platform_join(HANDLE thread);
 int platform_core_count();
 uint64_t platform_self();
+void platform_setup_thread_stack(void);
 #else
 #include <pthread.h>
 #define PLATFORMLOCKTYPE(N) pthread_mutex_t N
@@ -63,5 +64,6 @@ void platform_barrier_destroy(pthread_barrier_t* barrier);
 int platform_join(pthread_t thread);
 int platform_core_count();
 uint64_t platform_self();
+void platform_setup_thread_stack(void);
 #endif
 #endif //LIBOFFS_THREADDONG_H
