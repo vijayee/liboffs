@@ -14,6 +14,7 @@ int http_route_init(http_route_t* route, int method, const char* pattern,
   route->handler = handler;
   route->user_data = user_data;
   route->user_data_destroy = user_data_destroy;
+  route->headers_complete_handler = NULL;
   int result = regcomp(&route->pattern, pattern, REG_EXTENDED);
   if (result != 0) {
     char error_buffer[256];
