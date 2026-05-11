@@ -2,3 +2,15 @@
 /.idea
 /build*
 .env
+
+# Test data directories
+BlockCache*/
+block_index/
+
+# Test outputs
+browser_video_*.png
+test_*.pdf
+
+# Tool artifacts
+.playwright-mcp/
+robin/
