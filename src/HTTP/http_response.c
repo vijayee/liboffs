@@ -127,14 +127,9 @@ static void _pipe_on_close(void* ctx, void* unused) {
 static void _pipe_on_error(void* ctx, async_error_t* error) {
     (void)error;
     http_response_t* response = (http_response_t*)ctx;
-    http_response_set_status(response, 404);
-    http_response_set_header(response, "Content-Length", "0");
-    http_response_end(response);
-    http_connection_t* conn = response->connection;
-    response->connection = NULL;
-    http_response_destroy(response);
-    if (conn) {
-        http_connection_destroy(conn);
+    if (!response->headers_sent) {
+        http_response_set_status(response, 404);
+        http_response_set_header(response, "Content-Length", "0");
     }
 }
 

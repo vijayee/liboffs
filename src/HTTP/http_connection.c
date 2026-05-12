@@ -14,6 +14,7 @@
 #include <sys/socket.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <poll.h>
 #include <ctype.h>
 #include <stdio.h>
 
@@ -322,10 +323,16 @@ close:
                         ERROR("Connection closed during streaming upload"));
       connection->streaming_route = NULL;
     }
+    // Close the fd so the piped write path detects the broken connection.
+    // The worker thread will get EPIPE on send() and stop writing.
+    if (connection->fd >= 0) {
+      close(connection->fd);
+      connection->fd = -1;
+    }
     // Stop and destroy the read watcher on the event loop thread
     // (safe here) and release our reference to the connection.
-    // The worker thread holds the other reference and will close
-    // the fd and free the connection when it finishes.
+    // The worker thread holds the other reference and will free
+    // the connection when it finishes.
     pd_watcher_stop(watcher);
     pd_watcher_destroy(watcher);
     connection->watcher = NULL;
@@ -430,8 +437,18 @@ void http_connection_write(http_connection_t* connection, const char* data, size
       }
     } else {
       result = send(connection->fd, data + written, length - written, MSG_NOSIGNAL);
-      if (result < 0) {
+      if (result <= 0) {
+        if (result == 0) {
+          break;
+        }
         if (errno == EINTR) {
+          continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          struct pollfd poll_fd;
+          poll_fd.fd = connection->fd;
+          poll_fd.events = POLLOUT;
+          poll(&poll_fd, 1, 1000);
           continue;
         }
         break;

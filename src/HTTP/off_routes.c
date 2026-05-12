@@ -123,10 +123,12 @@ void off_routes_context_destroy(off_routes_context_t* ctx) {
 }
 
 typedef struct {
+    refcounter_t refcounter;
     readable_descriptor_t* desc;
     readable_off_stream_t* rs;
     tuple_cache_t* tc;
     http_response_t* response;
+    ori_t* ori;
 } get_pipeline_t;
 
 static void _pipeline_on_tuple(void* ctx, void* data) {
@@ -138,16 +140,18 @@ static void _pipeline_on_tuple(void* ctx, void* data) {
 static void _pipeline_on_desc_close(void* ctx, void* unused) {
     (void)unused;
     get_pipeline_t* pipeline = (get_pipeline_t*)ctx;
-    // When the descriptor closes, close the off stream so the HTTP response
-    // gets terminated. The off stream will emit close_event, which triggers
-    // _pipe_on_close to send the response.
-    if (pipeline->rs != NULL) {
-        stream_close((stream_t*)pipeline->rs);
+    readable_off_stream_t* rs = pipeline->rs;
+    readable_descriptor_t* desc = pipeline->desc;
+    ori_t* ori = pipeline->ori;
+    int is_zero = refcounter_dereference_is_zero((refcounter_t*)pipeline);
+    if (rs != NULL) {
+        stream_close((stream_t*)rs);
     }
-    // Can't destroy the descriptor here — stream_notify still holds its handler
-    // list lock. Use deferred deref to clean up after the dispatch completes.
-    stream_deferred_deref((stream_t*)pipeline->desc);
-    pipeline->desc = NULL;
+    stream_deferred_deref((stream_t*)desc);
+    DESTROY(ori, ori);
+    if (is_zero) {
+        free(pipeline);
+    }
 }
 
 static void _pipeline_on_desc_error(void* ctx, void* error) {
@@ -162,9 +166,12 @@ static void _pipeline_on_desc_error(void* ctx, void* error) {
 static void _pipeline_on_rs_close(void* ctx, void* unused) {
     (void)unused;
     get_pipeline_t* pipeline = (get_pipeline_t*)ctx;
-    // Off stream cleanup must also be deferred for the same reason
-    stream_deferred_deref((stream_t*)pipeline->rs);
-    free(pipeline);
+    readable_off_stream_t* rs = pipeline->rs;
+    int is_zero = refcounter_dereference_is_zero((refcounter_t*)pipeline);
+    stream_deferred_deref((stream_t*)rs);
+    if (is_zero) {
+        free(pipeline);
+    }
 }
 
 static void _setup_stream_pipeline(http_response_t* response, scheduler_pool_t* pool,
@@ -178,6 +185,9 @@ static void _setup_stream_pipeline(http_response_t* response, scheduler_pool_t* 
     pipeline->rs = rs;
     pipeline->tc = tc;
     pipeline->response = response;
+    pipeline->ori = stream_ori;
+    refcounter_init((refcounter_t*)pipeline);
+    refcounter_reference((refcounter_t*)pipeline);
 
     stream_subscribe((stream_t*)desc, data_event, pipeline,
                      (void (*)(void*, void*))_pipeline_on_tuple, NULL);
@@ -241,6 +251,7 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
                     snprintf(cr_str, sizeof(cr_str), "bytes */%zu", file_size);
                     http_response_set_header(response, "Content-Range", cr_str);
                     http_response_end(response);
+                    DESTROY(index_ori, ori);
                     off_url_destroy(url);
                     return;
                 }
@@ -253,6 +264,7 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
                 stream_ori->file_name = strdup(index_ori->file_name);
                 stream_ori->block_type = index_ori->block_type;
                 stream_ori->tuple_size = index_ori->tuple_size;
+                DESTROY(index_ori, ori);
 
                 if (range.valid) {
                     http_response_set_status(response, HTTP_STATUS_PARTIAL_CONTENT);
@@ -300,6 +312,7 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
             snprintf(cr_str, sizeof(cr_str), "bytes */%zu", file_size);
             http_response_set_header(response, "Content-Range", cr_str);
             http_response_end(response);
+            DESTROY(file_ori, ori);
             off_url_destroy(url);
             return;
         }
@@ -310,6 +323,7 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
         stream_ori->file_name = strdup(file_ori->file_name);
         stream_ori->block_type = file_ori->block_type;
         stream_ori->tuple_size = file_ori->tuple_size;
+        DESTROY(file_ori, ori);
 
         if (range.valid) {
             http_response_set_status(response, HTTP_STATUS_PARTIAL_CONTENT);

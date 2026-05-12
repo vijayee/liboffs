@@ -78,7 +78,6 @@ static void _check_cache_and_decode(readable_off_stream_t* stream, tuple_t* tupl
       }
       stream_deactivate((stream_t*)stream, ERROR("Block not found in cache"));
       return;
-      return;
     }
     if (i == 0) {
       origin_data = buffer_copy(block->data);
