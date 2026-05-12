@@ -14,3 +14,16 @@ test_*.pdf
 # Tool artifacts
 .playwright-mcp/
 robin/
+
+# Flutter off_client generated/binary artifacts
+examples/off_client/android/
+examples/off_client/ios/
+examples/off_client/macos/
+examples/off_client/linux/
+examples/off_client/windows/
+examples/off_client/web/
+examples/off_client/.dart_tool/
+examples/off_client/.flutter-plugins-dependencies
+examples/off_client/pubspec.lock
+examples/off_client/test/
+examples/off_client/.metadata
