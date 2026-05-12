@@ -27,6 +27,22 @@ static void on_close_set_promise(void* ctx, void*) {
   prom->set_value();
 }
 
+/* Tracks number of data events and resolves a promise when the expected count is reached. */
+struct DataAwaiter {
+  std::atomic<int> count{0};
+  int target;
+  std::promise<void> promise;
+  explicit DataAwaiter(int target_) : target(target_) {}
+};
+
+static void on_block_data_count(void* ctx, void* data) {
+  auto* awaiter = static_cast<DataAwaiter*>(ctx);
+  (void)data;  /* Don't modify the data — stream_notify owns the payload lifecycle */
+  if (++awaiter->count >= awaiter->target) {
+    awaiter->promise.set_value();
+  }
+}
+
 // --- NewBlocksRecipe Tests ---
 
 TEST(NewBlocksRecipe, CreateDestroy) {
@@ -223,30 +239,20 @@ TEST(RecyclerRecipe, PullFromDescriptor) {
 
   recycler_recipe_t* recipe = recycler_recipe_create(pool, bc, standard, oris);
 
+  // Use DataAwaiter to wait for 2 blocks (async — can't use CLOSE_STREAM immediately)
+  DataAwaiter awaiter(2);
   std::vector<block_t*> blocks;
-  stream_subscribe((stream_t*)recipe, data_event, &blocks, on_block_data, NULL);
   std::promise<void> close_promise;
+  stream_subscribe((stream_t*)recipe, data_event, &blocks, on_block_data, NULL);
+  stream_subscribe((stream_t*)recipe, data_event, &awaiter, on_block_data_count, NULL);
   stream_subscribe((stream_t*)recipe, close_event, &close_promise, on_close_set_promise, NULL);
 
-  // Pull blocks: front (random1, random2) then back (off_block) = 3 blocks total
-  // But the endcap (last back hash) is saved separately and not served
-  // So we should get: random1, random2 (front), and off_block is NOT the endcap here
-  // Wait - for tuple_size=3, position 0,1 are front, position 2 is back
-  // Only 1 tuple, so back has 1 hash = off_block. Last back hash = off_block = endcap
-  // So front = [random1, random2], back (minus endcap) = []
-  // Result: random1, random2 served, off_block saved as endcap
+  // Pull blocks: expect 2 front hashes (random1, random2)
   recycler_recipe_pull(recipe);
   recycler_recipe_pull(recipe);
 
-  // Close recipe for sync
-  message_t close_msg;
-  close_msg.type = CLOSE_STREAM;
-  close_msg.payload = NULL;
-  close_msg.payload_destroy = NULL;
-  actor_send(&recipe->recipe.stream.actor, &close_msg);
-  scheduler_inject(pool, &recipe->recipe.stream.actor);
-
-  auto future = close_promise.get_future();
+  // Wait for 2 data blocks to arrive (async delivery via scheduler pool)
+  auto future = awaiter.promise.get_future();
   EXPECT_EQ(future.wait_for(std::chrono::seconds(5)),
             std::future_status::ready);
 
@@ -259,6 +265,21 @@ TEST(RecyclerRecipe, PullFromDescriptor) {
     EXPECT_EQ(memcmp(blocks[1]->hash->data, random2->hash->data, descriptor_pad), 0);
   }
 
+  // Close the recipe now that data has been received
+  message_t close_msg;
+  close_msg.type = CLOSE_STREAM;
+  close_msg.payload = NULL;
+  close_msg.payload_destroy = NULL;
+  actor_send(&recipe->recipe.stream.actor, &close_msg);
+
+  // Wait for close event before destroying (ensures scheduler finishes processing)
+  auto close_future = close_promise.get_future();
+  EXPECT_EQ(close_future.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+
+  // Stop scheduler before destroying anything to prevent race conditions
+  scheduler_pool_stop(pool);
+
   for (auto* b : blocks) {
     block_destroy(b);
   }
@@ -268,7 +289,6 @@ TEST(RecyclerRecipe, PullFromDescriptor) {
   block_destroy(random1);
   ori_destroy(ori);
 
-  scheduler_pool_stop(pool);
   recycler_recipe_destroy(recipe);
   block_cache_destroy(bc);
   timer_actor_destroy(timer);

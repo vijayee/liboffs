@@ -34,6 +34,15 @@ typedef struct {
   int descriptor_index;
   buffer_t* endcap;
   uint8_t descriptor_loaded;
+  uint8_t loading_descriptor;
+  int pending_pull;
+  size_t descriptor_offset;
+  buffer_t* next_descriptor_hash;
+  vec_buffer_t front_hashes;
+  vec_buffer_t back_hashes;
+  size_t block_size;
+  size_t descriptor_pad;
+  size_t cut_point;
 } recycler_recipe_t;
 
 new_blocks_recipe_t* new_blocks_recipe_create(

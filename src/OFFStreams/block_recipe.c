@@ -7,6 +7,7 @@
 #include "../Actor/actor.h"
 #include "../Actor/message.h"
 #include "../Scheduler/scheduler.h"
+#include <string.h>
 
 // --- Generic recipe pull ---
 
@@ -85,12 +86,17 @@ static size_t _block_size_for_type(block_size_e type) {
   return 128000;
 }
 
-static void _load_descriptor(recycler_recipe_t* recipe) {
-  if (recipe->endcap != NULL) {
-    DESTROY(recipe->endcap, buffer);
-    recipe->endcap = NULL;
+static int _is_zero_buffer(buffer_t* buf) {
+  for (size_t i = 0; i < buf->size; i++) {
+    if (buf->data[i] != 0) {
+      return 0;
+    }
   }
+  return 1;
+}
 
+/* Start loading the descriptor for the current ori via async block_cache_get. */
+static void _start_descriptor_load(recycler_recipe_t* recipe) {
   if (recipe->ori_index >= recipe->oris.length) {
     stream_notify((stream_t*)recipe, complete_event, NULL, NULL);
     stream_notify((stream_t*)recipe, close_event, NULL, NULL);
@@ -101,112 +107,145 @@ static void _load_descriptor(recycler_recipe_t* recipe) {
   ori_t* current_ori = recipe->oris.data[recipe->ori_index];
   if (current_ori->descriptor_hash == NULL) {
     recipe->ori_index++;
-    _load_descriptor(recipe);
+    _start_descriptor_load(recipe);
     return;
   }
 
-  block_t* descriptor_block = block_cache_get(recipe->recipe.bc, current_ori->descriptor_hash);
-  if (descriptor_block == NULL) {
-    recipe->ori_index++;
-    _load_descriptor(recipe);
-    return;
-  }
+  recipe->loading_descriptor = 1;
+  recipe->descriptor_offset = 0;
+  recipe->block_size = _block_size_for_type(current_ori->block_type);
+  recipe->descriptor_pad = current_ori->file_hash != NULL ? current_ori->file_hash->size : 32;
+  recipe->cut_point = (recipe->block_size / recipe->descriptor_pad) * recipe->descriptor_pad;
+  vec_init(&recipe->front_hashes);
+  vec_init(&recipe->back_hashes);
 
-  size_t block_size = _block_size_for_type(current_ori->block_type);
-  size_t descriptor_pad = current_ori->file_hash != NULL ? current_ori->file_hash->size : 32;
-  size_t cut_point = (block_size / descriptor_pad) * descriptor_pad;
+  block_cache_get_async(recipe->recipe.bc, current_ori->descriptor_hash,
+                        &recipe->recipe.stream.actor);
+}
 
-  vec_buffer_t front_hashes;
-  vec_buffer_t back_hashes;
-  vec_init(&front_hashes);
-  vec_init(&back_hashes);
-
-  buffer_t* current_data = descriptor_block->data;
+/* Process a descriptor block, extracting front/back hashes and the next hash.
+   Returns 1 if we need another descriptor block (stored in recipe->next_descriptor_hash),
+   or 0 if processing is complete for this ori. */
+static int _process_descriptor_block(recycler_recipe_t* recipe, buffer_t* block_data) {
+  ori_t* current_ori = recipe->oris.data[recipe->ori_index];
   size_t offset = 0;
 
-  if (current_ori->descriptor_offset > 0 && recipe->descriptor_index == 0) {
-    size_t skip_hashes = current_ori->descriptor_offset / descriptor_pad;
-    offset = skip_hashes * descriptor_pad;
-    recipe->descriptor_index = skip_hashes;
+  /* Skip hashes based on descriptor_offset (first time only) */
+  if (current_ori->descriptor_offset > 0 && recipe->descriptor_offset == 0) {
+    size_t skip_hashes = current_ori->descriptor_offset / recipe->descriptor_pad;
+    offset = skip_hashes * recipe->descriptor_pad;
+    recipe->descriptor_offset = offset;
   }
 
-  while (offset + descriptor_pad <= current_data->size) {
-    buffer_t* hash = buffer_slice(current_data, offset, offset + descriptor_pad);
+  /* Extract hashes up to the cut_point boundary (data area only).
+     The last descriptor_pad bytes of the block are the next-block pointer. */
+  size_t data_end = block_data->size - recipe->descriptor_pad;
+  if (recipe->cut_point < block_data->size) {
+    data_end = recipe->cut_point - recipe->descriptor_pad;
+  }
+
+  while (offset + recipe->descriptor_pad <= data_end) {
+    buffer_t* hash = buffer_slice(block_data, offset, offset + recipe->descriptor_pad);
     if (hash == NULL) {
-      offset += descriptor_pad;
+      offset += recipe->descriptor_pad;
       continue;
     }
 
-    size_t tuple_position = (offset / descriptor_pad) % current_ori->tuple_size;
-    if (tuple_position < current_ori->tuple_size - 1) {
-      vec_push(&front_hashes, hash);
-    } else {
-      vec_push(&back_hashes, hash);
+    /* Skip zero-filled hashes (padding) */
+    if (_is_zero_buffer(hash)) {
+      DESTROY(hash, buffer);
+      offset += recipe->descriptor_pad;
+      continue;
     }
 
-    offset += descriptor_pad;
+    size_t tuple_position = (offset / recipe->descriptor_pad) % current_ori->tuple_size;
+    if (tuple_position < current_ori->tuple_size - 1) {
+      vec_push(&recipe->front_hashes, hash);
+    } else {
+      vec_push(&recipe->back_hashes, hash);
+    }
+
+    offset += recipe->descriptor_pad;
   }
 
-  size_t remaining_start = current_data->size - descriptor_pad;
-  buffer_t* next_hash = NULL;
-  if (remaining_start > offset - descriptor_pad) {
-    next_hash = buffer_slice(current_data, remaining_start, current_data->size);
+  /* Extract the next descriptor hash from the last descriptor_pad bytes */
+  size_t next_hash_start = block_data->size - recipe->descriptor_pad;
+  if (next_hash_start >= data_end) {
+    buffer_t* next_hash = buffer_slice(block_data, next_hash_start, block_data->size);
+    if (next_hash != NULL && !_is_zero_buffer(next_hash)) {
+      recipe->next_descriptor_hash = next_hash;
+    } else {
+      if (next_hash != NULL) {
+        DESTROY(next_hash, buffer);
+      }
+    }
   }
 
-  block_destroy(descriptor_block);
+  return recipe->next_descriptor_hash != NULL ? 1 : 0;
+}
 
-  while (next_hash != NULL) {
-    block_t* next_block = block_cache_get(recipe->recipe.bc, next_hash);
-    DESTROY(next_hash, buffer);
-    if (next_block == NULL) {
+/* Combine front and back hashes into the descriptor vector, set descriptor_loaded. */
+static void _finish_descriptor_load(recycler_recipe_t* recipe) {
+  /* The endcap is the last back hash */
+  if (recipe->back_hashes.length > 0) {
+    recipe->endcap = recipe->back_hashes.data[recipe->back_hashes.length - 1];
+    recipe->back_hashes.length--;
+  }
+
+  /* Append remaining back hashes to front hashes */
+  for (int i = 0; i < recipe->back_hashes.length; i++) {
+    vec_push(&recipe->front_hashes, recipe->back_hashes.data[i]);
+  }
+  vec_deinit(&recipe->back_hashes);
+
+  /* Transfer front_hashes to descriptor and zero out front_hashes
+     to prevent double-free (they share the same underlying array) */
+  recipe->descriptor = recipe->front_hashes;
+  recipe->front_hashes.data = NULL;
+  recipe->front_hashes.length = 0;
+  recipe->front_hashes.capacity = 0;
+  recipe->descriptor_index = 0;
+  recipe->descriptor_loaded = 1;
+  recipe->loading_descriptor = 0;
+}
+
+/* Fetch the next data block from the descriptor. */
+static void _try_fetch_next(recycler_recipe_t* recipe) {
+  if (recipe->recipe.stream.is_deactivated) {
+    return;
+  }
+
+  /* Skip zero hashes in the descriptor */
+  while (recipe->descriptor_index < recipe->descriptor.length) {
+    buffer_t* hash = recipe->descriptor.data[recipe->descriptor_index];
+    if (!_is_zero_buffer(hash)) {
       break;
     }
+    recipe->descriptor_index++;
+  }
 
-    current_data = next_block->data;
-    offset = 0;
-
-    while (offset + descriptor_pad <= current_data->size) {
-      buffer_t* hash = buffer_slice(current_data, offset, offset + descriptor_pad);
-      if (hash == NULL) {
-        offset += descriptor_pad;
-        continue;
-      }
-
-      size_t tuple_position = (offset / descriptor_pad) % current_ori->tuple_size;
-      if (tuple_position < current_ori->tuple_size - 1) {
-        vec_push(&front_hashes, hash);
-      } else {
-        vec_push(&back_hashes, hash);
-      }
-
-      offset += descriptor_pad;
+  if (recipe->descriptor_index >= recipe->descriptor.length) {
+    /* Current ori exhausted, try next ori */
+    for (int i = 0; i < recipe->descriptor.length; i++) {
+      DESTROY(recipe->descriptor.data[i], buffer);
     }
-
-    remaining_start = current_data->size - descriptor_pad;
-    next_hash = NULL;
-    if (remaining_start > offset - descriptor_pad) {
-      next_hash = buffer_slice(current_data, remaining_start, current_data->size);
+    vec_deinit(&recipe->descriptor);
+    vec_init(&recipe->descriptor);
+    if (recipe->endcap != NULL) {
+      DESTROY(recipe->endcap, buffer);
+      recipe->endcap = NULL;
     }
+    recipe->descriptor_index = 0;
+    recipe->descriptor_loaded = 0;
+    recipe->ori_index++;
 
-    block_destroy(next_block);
+    _start_descriptor_load(recipe);
+    return;
   }
 
-  if (next_hash != NULL) {
-    DESTROY(next_hash, buffer);
-  }
-
-  if (back_hashes.length > 0) {
-    recipe->endcap = back_hashes.data[back_hashes.length - 1];
-    back_hashes.length--;
-  }
-
-  for (int i = 0; i < back_hashes.length; i++) {
-    vec_push(&front_hashes, back_hashes.data[i]);
-  }
-  vec_deinit(&back_hashes);
-
-  recipe->descriptor = front_hashes;
-  recipe->descriptor_loaded = 1;
+  buffer_t* hash = recipe->descriptor.data[recipe->descriptor_index];
+  recipe->descriptor_index++;
+  block_cache_get_async(recipe->recipe.bc, hash, &recipe->recipe.stream.actor);
 }
 
 void recycler_recipe_dispatch(void* state, message_t* msg) {
@@ -216,53 +255,97 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
       if (recipe->recipe.stream.is_deactivated) {
         break;
       }
+      if (!recipe->descriptor_loaded && !recipe->loading_descriptor) {
+        _start_descriptor_load(recipe);
+      }
+      recipe->pending_pull++;
+      if (recipe->descriptor_loaded) {
+        _try_fetch_next(recipe);
+      }
+      break;
+    }
+    case CACHE_GET_RESULT: {
+      cache_get_result_payload_t* result = (cache_get_result_payload_t*)msg->payload;
 
-      if (!recipe->descriptor_loaded) {
-        _load_descriptor(recipe);
-        if (recipe->recipe.stream.is_deactivated) {
-          break;
+      if (recipe->recipe.stream.is_deactivated) {
+        if (result->block != NULL) {
+          DESTROY(result->block, block);
         }
+        if (result->hash != NULL) {
+          DESTROY(result->hash, buffer);
+        }
+        break;
       }
 
-      if (recipe->descriptor_index >= recipe->descriptor.length) {
-        recipe->ori_index++;
-        for (int i = 0; i < recipe->descriptor.length; i++) {
-          DESTROY(recipe->descriptor.data[i], buffer);
-        }
-        vec_deinit(&recipe->descriptor);
-        vec_init(&recipe->descriptor);
-        if (recipe->endcap != NULL) {
-          DESTROY(recipe->endcap, buffer);
-          recipe->endcap = NULL;
-        }
-        recipe->descriptor_index = 0;
-        recipe->descriptor_loaded = 0;
-
-        if (recipe->ori_index >= recipe->oris.length) {
-          stream_notify((stream_t*)recipe, complete_event, NULL, NULL);
-          stream_notify((stream_t*)recipe, close_event, NULL, NULL);
-          recipe->recipe.stream.is_deactivated = 1;
+      if (recipe->loading_descriptor) {
+        /* Processing a descriptor block */
+        if (result->block == NULL) {
+          /* Descriptor block not found — skip this ori */
+          if (result->hash != NULL) {
+            DESTROY(result->hash, buffer);
+          }
+          /* Clean up any partial front/back hashes */
+          for (int i = 0; i < recipe->front_hashes.length; i++) {
+            DESTROY(recipe->front_hashes.data[i], buffer);
+          }
+          vec_deinit(&recipe->front_hashes);
+          for (int i = 0; i < recipe->back_hashes.length; i++) {
+            DESTROY(recipe->back_hashes.data[i], buffer);
+          }
+          vec_deinit(&recipe->back_hashes);
+          if (recipe->next_descriptor_hash != NULL) {
+            DESTROY(recipe->next_descriptor_hash, buffer);
+            recipe->next_descriptor_hash = NULL;
+          }
+          recipe->ori_index++;
+          recipe->loading_descriptor = 0;
+          _start_descriptor_load(recipe);
           break;
         }
 
-        _load_descriptor(recipe);
-        if (recipe->recipe.stream.is_deactivated) {
-          break;
+        buffer_t* block_data = result->block->data;
+        int need_more = _process_descriptor_block(recipe, block_data);
+        DESTROY(result->block, block);
+        if (result->hash != NULL) {
+          DESTROY(result->hash, buffer);
         }
-      }
 
-      if (recipe->descriptor_index < recipe->descriptor.length) {
-        buffer_t* hash = recipe->descriptor.data[recipe->descriptor_index];
-        recipe->descriptor_index++;
-
-        block_t* block = block_cache_get(recipe->recipe.bc, hash);
-        if (block != NULL) {
-          stream_notify((stream_t*)recipe, data_event,
-                        CONSUME(block, block_t), (void (*)(void*))block_destroy);
+        if (need_more && recipe->next_descriptor_hash != NULL) {
+          /* Fetch next descriptor block */
+          buffer_t* hash = recipe->next_descriptor_hash;
+          recipe->next_descriptor_hash = NULL;
+          block_cache_get_async(recipe->recipe.bc, hash, &recipe->recipe.stream.actor);
         } else {
-          stream_deactivate((stream_t*)recipe, ERROR("Descriptor block not found"));
-          recipe->recipe.stream.is_deactivated = 1;
+          /* All descriptor blocks loaded — finalize */
+          _finish_descriptor_load(recipe);
+          if (recipe->pending_pull > 0 && !recipe->recipe.stream.is_deactivated) {
+            _try_fetch_next(recipe);
+          }
         }
+        break;
+      }
+
+      /* Data block result — transfer ownership of result->block to stream_notify */
+      if (result->block != NULL) {
+        stream_notify((stream_t*)recipe, data_event,
+                      result->block, (void (*)(void*))block_destroy);
+        result->block = NULL;
+        recipe->pending_pull--;
+      } else {
+        if (result->hash != NULL) {
+          DESTROY(result->hash, buffer);
+        }
+        stream_deactivate((stream_t*)recipe, ERROR("Block not found"));
+        recipe->recipe.stream.is_deactivated = 1;
+        break;
+      }
+      if (result->hash != NULL) {
+        DESTROY(result->hash, buffer);
+      }
+
+      /* Try to serve next pending pull */
+      if (recipe->pending_pull > 0 && !recipe->recipe.stream.is_deactivated) {
+        _try_fetch_next(recipe);
       }
       break;
     }
@@ -293,6 +376,8 @@ recycler_recipe_t* recycler_recipe_create(
   recipe->descriptor_index = 0;
   recipe->endcap = NULL;
   recipe->descriptor_loaded = 0;
+  recipe->loading_descriptor = 0;
+  recipe->pending_pull = 0;
 
   stream_init((stream_t*)recipe, pull, readable_stream, 0, pool,
               (void (*)(stream_t*))recycler_recipe_destroy);
@@ -314,8 +399,21 @@ void recycler_recipe_destroy(recycler_recipe_t* recipe) {
     }
     vec_deinit(&recipe->descriptor);
 
+    for (int i = 0; i < recipe->front_hashes.length; i++) {
+      DESTROY(recipe->front_hashes.data[i], buffer);
+    }
+    vec_deinit(&recipe->front_hashes);
+
+    for (int i = 0; i < recipe->back_hashes.length; i++) {
+      DESTROY(recipe->back_hashes.data[i], buffer);
+    }
+    vec_deinit(&recipe->back_hashes);
+
     if (recipe->endcap != NULL) {
       DESTROY(recipe->endcap, buffer);
+    }
+    if (recipe->next_descriptor_hash != NULL) {
+      DESTROY(recipe->next_descriptor_hash, buffer);
     }
 
     stream_deinit((stream_t*)recipe);
