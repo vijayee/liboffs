@@ -382,12 +382,7 @@ void stream_deactivate(stream_t* stream, async_error_t* error) {
 }
 
 void stream_deferred_deref(stream_t* stream) {
-  message_t msg;
-  msg.type = DEFERRED_DEREF;
-  msg.payload = NULL;
-  msg.payload_destroy = NULL;
-  actor_send(&stream->actor, &msg);
-  _stream_schedule(stream);
+  scheduler_pool_defer_cleanup(stream->pool, stream, (void (*)(void*))stream->destructor);
 }
 
 void stream_unsubscribe_pipe_notifiers(stream_t* stream) {

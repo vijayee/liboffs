@@ -177,6 +177,8 @@ scheduler_pool_t* scheduler_pool_create(size_t worker_count) {
   platform_barrier_init(&pool->barrier, worker_count + 1);
   platform_lock_init(&pool->idle_lock);
   platform_condition_init(&pool->idle);
+  platform_lock_init(&pool->deref_lock);
+  pool->pending_derefs = NULL;
   atomic_store_explicit(&pool->idle_count, 0, memory_order_relaxed);
   atomic_store_explicit(&pool->active_count, 0, memory_order_relaxed);
   atomic_store_explicit(&pool->terminate, 0, memory_order_relaxed);
@@ -184,6 +186,9 @@ scheduler_pool_t* scheduler_pool_create(size_t worker_count) {
 }
 
 void scheduler_pool_destroy(scheduler_pool_t* pool) {
+  /* Drain any remaining pending derefs */
+  scheduler_pool_drain_pending_derefs(pool);
+  platform_lock_destroy(&pool->deref_lock);
   for (size_t index = 0; index < pool->worker_count; index++) {
     deque_destroy(&pool->workers[index].local_queue);
   }
@@ -230,12 +235,41 @@ void scheduler_inject(scheduler_pool_t* pool, actor_t* actor) {
   _inject_queue_push(&pool->inject, actor);
 }
 
+void scheduler_pool_defer_cleanup(scheduler_pool_t* pool, void* object, void (*destructor)(void*)) {
+  pending_deref_node_t* node = get_clear_memory(sizeof(pending_deref_node_t));
+  node->object = object;
+  node->destructor = destructor;
+  platform_lock(&pool->deref_lock);
+  node->next = pool->pending_derefs;
+  pool->pending_derefs = node;
+  platform_unlock(&pool->deref_lock);
+}
+
+void scheduler_pool_drain_pending_derefs(scheduler_pool_t* pool) {
+  pending_deref_node_t* node;
+
+  platform_lock(&pool->deref_lock);
+  node = pool->pending_derefs;
+  pool->pending_derefs = NULL;
+  platform_unlock(&pool->deref_lock);
+
+  while (node != NULL) {
+    pending_deref_node_t* next = node->next;
+    node->destructor(node->object);
+    free(node);
+    node = next;
+  }
+}
+
 void scheduler_pool_wait_for_idle(scheduler_pool_t* pool) {
   platform_lock(&pool->idle_lock);
   while (atomic_load(&pool->idle_count) != pool->worker_count) {
     platform_condition_wait(&pool->idle_lock, &pool->idle);
   }
   platform_unlock(&pool->idle_lock);
+
+  /* Drain pending deferred derefs — no actors running, safe to destroy */
+  scheduler_pool_drain_pending_derefs(pool);
 }
 
 scheduler_t* scheduler_get_current(void) {

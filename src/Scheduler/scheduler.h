@@ -15,6 +15,12 @@
 
 typedef struct actor_t actor_t;
 
+typedef struct pending_deref_node_t {
+  struct pending_deref_node_t* next;
+  void* object;
+  void (*destructor)(void*);
+} pending_deref_node_t;
+
 typedef struct inject_node_t {
   actor_t* actor;
   struct inject_node_t* next;
@@ -46,6 +52,8 @@ typedef struct scheduler_pool_t {
   ATOMIC(size_t) idle_count;
   ATOMIC(uint32_t) active_count;
   ATOMIC(uint8_t) terminate;
+  PLATFORMLOCKTYPE(deref_lock);
+  pending_deref_node_t* pending_derefs;
 } scheduler_pool_t;
 
 scheduler_pool_t* scheduler_pool_create(size_t worker_count);
@@ -53,8 +61,10 @@ void scheduler_pool_destroy(scheduler_pool_t* pool);
 void scheduler_pool_start(scheduler_pool_t* pool);
 void scheduler_pool_stop(scheduler_pool_t* pool);
 void scheduler_pool_wait_for_idle(scheduler_pool_t* pool);
+void scheduler_pool_drain_pending_derefs(scheduler_pool_t* pool);
 
 void scheduler_inject(scheduler_pool_t* pool, actor_t* actor);
+void scheduler_pool_defer_cleanup(scheduler_pool_t* pool, void* object, void (*destructor)(void*));
 
 scheduler_t* scheduler_get_current(void);
 

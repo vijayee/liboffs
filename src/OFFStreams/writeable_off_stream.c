@@ -105,7 +105,9 @@ static void _create_tuple(writeable_off_stream_t* stream, off_stream_tuple_entry
   tuple_destroy(tuple);
   _entry_destroy(entry);
 
+
   if (is_final) {
+    block_destroy(stream->final_block);
     stream->final_block = NULL;
     stream_notify((stream_t*)stream, finished_event, NULL, NULL);
     stream_notify((stream_t*)stream, complete_event, NULL, NULL);

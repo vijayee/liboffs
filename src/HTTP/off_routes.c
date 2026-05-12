@@ -15,6 +15,7 @@
 #include "../OFFStreams/writeable_off_stream.h"
 #include "../OFFStreams/writeable_descriptor.h"
 #include "../OFFStreams/block_recipe.h"
+#include "../Scheduler/scheduler.h"
 #include "../OFFStreams/ori.h"
 #include "../OFFStreams/tuple_cache.h"
 #include "../OFFStreams/tuple.h"
@@ -398,10 +399,12 @@ static void _put_on_descriptor_close(void* ctx, void* unused) {
     put_context_t* put_ctx = (put_context_t*)ctx;
 
     off_url_t* url = off_url_create();
+    free(url->content_type);
     url->content_type = strdup(put_ctx->content_type);
     url->file_name = strdup(put_ctx->file_name);
     url->stream_length = put_ctx->stream_length;
     if (put_ctx->server_address) {
+        free(url->server_address);
         url->server_address = strdup(put_ctx->server_address);
     }
     url->file_hash = buffer_copy(put_ctx->file_hash);
@@ -420,6 +423,10 @@ static void _put_on_descriptor_close(void* ctx, void* unused) {
         http_connection_destroy(conn);
     }
 
+    /* Order matters: pending list is LIFO. Add recipe first so its destructor
+       runs LAST — after ws's destructor drops its recipe ref. */
+    scheduler_pool_defer_cleanup(((stream_t*)put_ctx->ws)->pool, put_ctx->recipe,
+                                 (void (*)(void*))new_blocks_recipe_destroy);
     stream_deferred_deref((stream_t*)put_ctx->desc);
     stream_deferred_deref((stream_t*)put_ctx->ws);
 

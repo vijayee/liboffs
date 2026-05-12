@@ -130,6 +130,7 @@ protected:
         ofd_cache_destroy(ofd_cache);
         block_cache_destroy(bc);
         timer_actor_destroy(timer);
+        scheduler_pool_wait_for_idle(pool);
         scheduler_pool_stop(pool);
         scheduler_pool_destroy(pool);
         rm_rf(cache_dir);

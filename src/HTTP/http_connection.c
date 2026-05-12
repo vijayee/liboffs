@@ -180,9 +180,10 @@ static int _on_headers_complete(http_parser* parser) {
       http_response_t* response = http_response_create(connection->server->pool, connection);
       int streaming = route->headers_complete_handler(connection, connection->request, response);
       if (streaming) {
-        // The headers_complete_handler has set up the pipeline.
-        // Body chunks will be emitted as data_event on request->stream.
-        // We skip normal body buffering — _on_body will stream instead.
+        // Pipeline owns the response via its extra ref.
+        // Release the create-ref — pipeline's cleanup in
+        // _put_on_descriptor_close will drop its ref, freeing the response.
+        http_response_destroy(response);
       } else {
         // Handler declined streaming (e.g., multipart). Fall through to normal path.
         connection->streaming_route = NULL;
