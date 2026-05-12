@@ -185,31 +185,18 @@ buffer_t* buffer_not(buffer_t* buf) {
 }
 
 int8_t buffer_compare(buffer_t* buf1, buffer_t* buf2) {
-  size_t length;
-  if(buf2->size > buf1->size) {
-    length = buf1->size;
-  } else {
-    length = buf2->size;
-  }
-  size_t a = buf1->size;
-  size_t b = buf2->size;
+  size_t min_length = buf1->size < buf2->size ? buf1->size : buf2->size;
 
-  for(size_t i = 0; i < length; i++) {
-    uint8_t val1 = buffer_get_index(buf1, i);
-    uint8_t val2 = buffer_get_index(buf2, i);
-    if (val1 != val2) {
-      a = val1;
-      b = val2;
-    }
+  for (size_t i = 0; i < min_length; i++) {
+    uint8_t val1 = buf1->data[i];
+    uint8_t val2 = buf2->data[i];
+    if (val1 < val2) return -1;
+    if (val1 > val2) return 1;
   }
 
-  if (a > b) {
-    return 1;
-  } else if (b > a) {
-    return -1;
-  } else {
-    return 0;
-  }
+  if (buf1->size < buf2->size) return -1;
+  if (buf1->size > buf2->size) return 1;
+  return 0;
 }
 
 cbor_item_t* buffer_to_cbor(buffer_t* buf) {

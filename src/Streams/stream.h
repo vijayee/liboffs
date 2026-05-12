@@ -33,10 +33,10 @@ typedef enum {
   unpipe_event = 8,
   close_event = 9,
   finished_event = 10,
-  unpiped_event = 12,
-  piped_event = 13,
-  drain_event = 14,
-  error_event = 15
+  unpiped_event = 11,
+  piped_event = 12,
+  drain_event = 13,
+  error_event = 14
 } stream_event_e;
 
 typedef struct {
@@ -106,7 +106,7 @@ typedef struct {
   void (*cb)(void*, void*);
 } stream_read_message_payload_t;
 
-#define STREAM_HANDLER_COUNT 16
+#define STREAM_HANDLER_COUNT 15
 struct stream_t {
   refcounter_t refcounter;
   PLATFORMLOCKTYPE(lock);

@@ -442,6 +442,9 @@ static void _put_on_descriptor_close(void* ctx, void* unused) {
 static void _put_on_descriptor_data(void* ctx, void* data) {
     put_context_t* put_ctx = (put_context_t*)ctx;
     buffer_t* payload = (buffer_t*)data;
+    if (put_ctx->descriptor_hash != NULL) {
+        buffer_destroy(put_ctx->descriptor_hash);
+    }
     put_ctx->descriptor_hash = (buffer_t*)refcounter_reference((refcounter_t*)payload);
 }
 
