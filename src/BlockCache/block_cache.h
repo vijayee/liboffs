@@ -11,6 +11,7 @@
 #include "../Timer/timer_actor.h"
 #include "../Configuration/config.h"
 #include "../Actor/actor.h"
+#include "../Scheduler/scheduler.h"
 #include <hashmap.h>
 
 typedef struct block_lru_node_t block_lru_node_t;
@@ -65,6 +66,14 @@ typedef struct {
   int result;
 } cache_remove_payload_t;
 
+/* Pending get request — tracks CACHE_GET requests awaiting SECTIONS_READ_RESULT */
+typedef struct pending_get_t {
+  buffer_t* hash;
+  index_entry_t* entry;
+  actor_t* reply_to;
+  struct pending_get_t* next;
+} pending_get_t;
+
 typedef struct {
   refcounter_t refcounter;
   block_lru_cache_t* lru;
@@ -72,16 +81,45 @@ typedef struct {
   index_t* index;
   block_size_e type;
   uint32_t canary;
+  struct scheduler_pool_t* pool;
   actor_t actor;
+  pending_get_t* pending_gets;
 } block_cache_t;
 
-block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, timer_actor_t* timer_actor);
+/* Async result payload for CACHE_GET_RESULT */
+typedef struct {
+  buffer_t* hash;
+  block_t* block;
+  actor_t* reply_to;
+} cache_get_result_payload_t;
+
+/* Async result payload for CACHE_PUT_RESULT */
+typedef struct {
+  int result;
+  actor_t* reply_to;
+} cache_put_result_payload_t;
+
+/* Async result payload for CACHE_REMOVE_RESULT */
+typedef struct {
+  int result;
+  actor_t* reply_to;
+} cache_remove_result_payload_t;
+
+block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool);
 void block_cache_destroy(block_cache_t* block_cache);
-int block_cache_put(block_cache_t* block_cache, block_t* block);
-block_t* block_cache_get(block_cache_t* block_cache, buffer_t* hash);
-int block_cache_remove(block_cache_t* block_cache, buffer_t* hash);
 size_t block_cache_count(block_cache_t* block_cache);
 void block_cache_dispatch(void* state, message_t* msg);
+
+/* Async API — send message and inject actor into scheduler */
+void block_cache_get_async(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
+void block_cache_put_async(block_cache_t* block_cache, block_t* block, actor_t* reply_to);
+void block_cache_remove_async(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
+
+/* Sync API — direct dispatch, caller must not be inside block_cache actor.
+   These are temporary and will be removed as callers convert to async. */
+block_t* block_cache_get(block_cache_t* block_cache, buffer_t* hash);
+int block_cache_put(block_cache_t* block_cache, block_t* block);
+int block_cache_remove(block_cache_t* block_cache, buffer_t* hash);
 
 #define BLOCK_CACHE_CANARY 0x424B4348u
 void block_cache_validate(block_cache_t* block_cache, const char* func, int line);

@@ -72,7 +72,10 @@ static void _move_to_offset(readable_descriptor_t* desc, buffer_t* descriptor,
   }
 }
 
-static void _process_descriptor(readable_descriptor_t* desc, buffer_t* block_data) {
+/* Process descriptor data that we already have in memory.
+   Returns 1 if we need another block (stored in desc->next_descriptor_hash),
+   or 0 if processing is complete or we emitted all tuples. */
+static int _process_descriptor(readable_descriptor_t* desc, buffer_t* block_data) {
   buffer_t* current_descriptor;
 
   if (desc->current_descriptor == NULL) {
@@ -103,38 +106,15 @@ static void _process_descriptor(readable_descriptor_t* desc, buffer_t* block_dat
     while (tuple_size(desc->current_tuple) < desc->ori->tuple_size) {
       if (current_descriptor == NULL || current_descriptor->size <= 0) {
         if (key != NULL) {
-          block_t* next_block = block_cache_get(desc->bc, key);
-          DESTROY(key, buffer);
-          key = NULL;
-          if (next_block != NULL) {
-            current_descriptor = buffer_slice(next_block->data, 0, desc->cut_point);
-            block_destroy(next_block);
-            buffer_t* next_key = NULL;
-            buffer_t* next_remaining = NULL;
-            _move_to_offset(desc, current_descriptor, &next_key, &next_remaining);
+          /* Need to fetch another descriptor block — request async */
+          desc->next_descriptor_hash = key;
+          if (current_descriptor != NULL) {
             DESTROY(current_descriptor, buffer);
-            current_descriptor = next_remaining;
-            key = next_key;
-            continue;
-          } else {
-            stream_deactivate((stream_t*)desc, ERROR("Descriptor block not found"));
-            desc->stream.is_deactivated = 1;
-            if (current_descriptor != NULL) {
-              DESTROY(current_descriptor, buffer);
-            }
-            if (desc->current_tuple != NULL) {
-              tuple_destroy(desc->current_tuple);
-              desc->current_tuple = NULL;
-            }
-            return;
           }
+          return 1; /* need another block */
         }
         desc->current_descriptor = NULL;
-        if (key != NULL) {
-          desc->next_descriptor_hash = key;
-          key = NULL;
-        }
-        return;
+        return 0;
       }
 
       tuple_push(desc->current_tuple, key);
@@ -167,7 +147,7 @@ static void _process_descriptor(readable_descriptor_t* desc, buffer_t* block_dat
         if (current_descriptor != NULL) {
           DESTROY(current_descriptor, buffer);
         }
-        return;
+        return 0;
       }
     }
   }
@@ -175,6 +155,12 @@ static void _process_descriptor(readable_descriptor_t* desc, buffer_t* block_dat
   if (current_descriptor != NULL) {
     DESTROY(current_descriptor, buffer);
   }
+  return 0;
+}
+
+/* Request a descriptor block from block_cache. Result arrives as CACHE_GET_RESULT. */
+static void _fetch_descriptor_block(readable_descriptor_t* desc, buffer_t* hash) {
+  block_cache_get_async(desc->bc, hash, &desc->stream.actor);
 }
 
 void readable_descriptor_dispatch(void* state, message_t* msg) {
@@ -187,16 +173,46 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
       if (desc->current_descriptor == NULL) {
         buffer_t* hash = desc->next_descriptor_hash != NULL
                              ? desc->next_descriptor_hash
-                             : desc->ori->descriptor_hash;
+                             : (buffer_t*)refcounter_reference((refcounter_t*)desc->ori->descriptor_hash);
         desc->next_descriptor_hash = NULL;
-        block_t* block = block_cache_get(desc->bc, hash);
-        if (block != NULL) {
-          _process_descriptor(desc, block->data);
-          block_destroy(block);
-        } else {
-          stream_deactivate((stream_t*)desc, ERROR("Descriptor block not found"));
-          desc->stream.is_deactivated = 1;
+        _fetch_descriptor_block(desc, hash);
+      }
+      break;
+    }
+    case CACHE_GET_RESULT: {
+      cache_get_result_payload_t* result = (cache_get_result_payload_t*)msg->payload;
+      if (desc->stream.is_deactivated) {
+        if (result->block != NULL) {
+          DESTROY(result->block, block);
         }
+        if (result->hash != NULL) {
+          DESTROY(result->hash, buffer);
+        }
+        break;
+      }
+      if (result->block == NULL) {
+        /* Block not found */
+        if (result->hash != NULL) {
+          DESTROY(result->hash, buffer);
+        }
+        stream_deactivate((stream_t*)desc, ERROR("Descriptor block not found"));
+        desc->stream.is_deactivated = 1;
+        break;
+      }
+
+      buffer_t* block_data = result->block->data;
+      int need_more = _process_descriptor(desc, block_data);
+      DESTROY(result->block, block);
+      if (result->hash != NULL) {
+        DESTROY(result->hash, buffer);
+      }
+
+      if (need_more && desc->next_descriptor_hash != NULL && !desc->stream.is_deactivated) {
+        /* Need another descriptor block — fetch it */
+        buffer_t* hash = desc->next_descriptor_hash;
+        desc->next_descriptor_hash = NULL;
+        _fetch_descriptor_block(desc, hash);
+        /* hash reference is consumed by _fetch_descriptor_block */
       }
       break;
     }
@@ -263,5 +279,4 @@ void readable_descriptor_push(readable_descriptor_t* desc) {
   msg.payload_destroy = NULL;
 
   actor_send(&desc->stream.actor, &msg);
-  scheduler_inject(desc->stream.pool, &desc->stream.actor);
 }

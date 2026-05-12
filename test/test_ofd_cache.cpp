@@ -33,7 +33,7 @@ protected:
         };
         pool = scheduler_pool_create(4);
         timer = timer_actor_create();
-        bc = block_cache_create(config, (char*)"/tmp/test_ofd_cache_basic", standard, timer);
+        bc = block_cache_create(config, (char*)"/tmp/test_ofd_cache_basic", standard, timer, NULL);
         cache = ofd_cache_create(pool, bc, 300000);
     }
 

@@ -164,13 +164,13 @@ TEST(TupleCacheLRU, TestContains) {
 }
 
 TEST(TupleCacheActor, TestCreateDestroy) {
-  tuple_cache_t* tc = tuple_cache_create(10);
+  tuple_cache_t* tc = tuple_cache_create(10, NULL);
   ASSERT_NE(tc, nullptr);
   tuple_cache_destroy(tc);
 }
 
 TEST(TupleCacheActor, TestApplyAndUpdate) {
-  tuple_cache_t* tc = tuple_cache_create(10);
+  tuple_cache_t* tc = tuple_cache_create(10, NULL);
 
   uint8_t d1[] = {0x01};
   buffer_t* h1 = buffer_create_from_pointer_copy(d1, 1);
@@ -198,7 +198,7 @@ TEST(TupleCacheActor, TestApplyAndUpdate) {
 }
 
 TEST(TupleCacheActor, TestRemove) {
-  tuple_cache_t* tc = tuple_cache_create(10);
+  tuple_cache_t* tc = tuple_cache_create(10, NULL);
 
   uint8_t d1[] = {0x01};
   buffer_t* h1 = buffer_create_from_pointer_copy(d1, 1);

@@ -53,7 +53,7 @@ TEST(TestTimerActor, TestOneShotTimer) {
   state.last_timer_id.store(0);
 
   actor_t target;
-  actor_init(&target, &state, completion_dispatch);
+  actor_init(&target, &state, completion_dispatch, NULL);
 
   /* Set a one-shot timer (interval=0) with 50ms timeout */
   timer_actor_set(ta, 50, 0, &target, COMPLETION_FIRE);
@@ -80,7 +80,7 @@ TEST(TestTimerActor, TestRepeatingTimer) {
   state.last_timer_id.store(0);
 
   actor_t target;
-  actor_init(&target, &state, completion_dispatch);
+  actor_init(&target, &state, completion_dispatch, NULL);
 
   /* Set a repeating timer: 30ms initial, 30ms interval */
   timer_actor_set(ta, 30, 30, &target, COMPLETION_FIRE);
@@ -107,7 +107,7 @@ TEST(TestTimerActor, TestCancelTimer) {
   state.last_timer_id.store(0);
 
   actor_t target;
-  actor_init(&target, &state, completion_dispatch);
+  actor_init(&target, &state, completion_dispatch, NULL);
 
   /* Set a one-shot timer with 500ms timeout */
   uint64_t timer_id = timer_actor_set(ta, 500, 0, &target, COMPLETION_FIRE);
@@ -157,7 +157,7 @@ TEST(TestTimerActor, TestDebounceResetsTimer) {
   state.last_timer_id.store(0);
 
   actor_t target;
-  actor_init(&target, &state, completion_dispatch);
+  actor_init(&target, &state, completion_dispatch, NULL);
 
   /* First debounce: create a timer with 100ms timeout.
      timer_actor_debounce now tracks timers internally by (target, completion_type)
@@ -198,7 +198,7 @@ TEST(TestTimerActor, TestMultipleConcurrentTimers) {
   state.last_timer_id.store(0);
 
   actor_t target;
-  actor_init(&target, &state, completion_dispatch);
+  actor_init(&target, &state, completion_dispatch, NULL);
 
   /* Set 3 one-shot timers with different timeouts */
   timer_actor_set(ta, 30, 0, &target, COMPLETION_FIRE);
@@ -227,7 +227,7 @@ TEST(TestTimerActor, TestDestroyCleansUpTimers) {
   state.last_timer_id.store(0);
 
   actor_t target;
-  actor_init(&target, &state, completion_dispatch);
+  actor_init(&target, &state, completion_dispatch, NULL);
 
   /* Set a long timer then immediately destroy — should not crash */
   timer_actor_set(ta, 5000, 0, &target, COMPLETION_FIRE);
@@ -261,7 +261,7 @@ TEST(TestTimerActor, TestDebounceWithZeroExistingId) {
   state.last_timer_id.store(0);
 
   actor_t target;
-  actor_init(&target, &state, completion_dispatch);
+  actor_init(&target, &state, completion_dispatch, NULL);
 
   /* Debounce should create a new timer */
   timer_actor_debounce(ta, 50, 0, &target, COMPLETION_FIRE);

@@ -9,6 +9,7 @@
 #include "../Buffer/buffer.h"
 #include "section.h"
 #include "../Timer/timer_actor.h"
+#include "../Scheduler/scheduler.h"
 #include <cbor.h>
 typedef struct sections_lru_node_t sections_lru_node_t;
 struct sections_lru_node_t {
@@ -109,6 +110,28 @@ typedef struct {
   int result;
 } sections_deallocate_result_t;
 
+/* Async result payload for SECTIONS_READ_RESULT */
+typedef struct {
+  size_t section_id;
+  size_t section_index;
+  buffer_t* data;
+  actor_t* reply_to;
+} sections_read_result_payload_t;
+
+/* Async result payload for SECTIONS_WRITE_RESULT */
+typedef struct {
+  int result;
+  size_t section_id;
+  size_t section_index;
+  actor_t* reply_to;
+} sections_write_result_payload_t;
+
+/* Async result payload for SECTIONS_DEALLOCATE_RESULT */
+typedef struct {
+  int result;
+  actor_t* reply_to;
+} sections_deallocate_result_payload_t;
+
 typedef struct {
   sections_lru_cache_t* lru;
   round_robin_t* robin;
@@ -119,16 +142,25 @@ typedef struct {
   size_t wait;
   size_t max_wait;
   timer_actor_t* timer_actor;
+  struct scheduler_pool_t* pool;
   actor_t actor;
   char* data_path;
   char* meta_path;
   char* robin_path;
 } sections_t;
 
-sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t max_tuple_size, block_size_e type, timer_actor_t* timer_actor, size_t wait, size_t max_wait);
+sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t max_tuple_size, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool, size_t wait, size_t max_wait);
 void sections_destroy(sections_t* sections);
-int sections_write(sections_t* sections, buffer_t* data, size_t* section_id, size_t* section_index);
-buffer_t* sections_read(sections_t* sections, size_t section_id, size_t section_index);
-int sections_deallocate(sections_t* sections, size_t section_id, size_t section_index);
 void sections_dispatch(void* state, message_t* msg);
+
+/* Async API — send message and inject actor into scheduler */
+void sections_read_async(sections_t* sections, size_t section_id, size_t section_index, actor_t* reply_to);
+void sections_write_async(sections_t* sections, buffer_t* data, actor_t* reply_to);
+void sections_deallocate_async(sections_t* sections, size_t section_id, size_t section_index, actor_t* reply_to);
+
+/* Sync API — direct dispatch. Temporary, will be removed as callers convert. */
+buffer_t* sections_read(sections_t* sections, size_t section_id, size_t section_index);
+int sections_write(sections_t* sections, buffer_t* data, size_t* out_section_id, size_t* out_section_index);
+int sections_deallocate(sections_t* sections, size_t section_id, size_t section_index);
+
 #endif //OFFS_SECTIONS_H

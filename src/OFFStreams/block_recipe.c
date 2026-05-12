@@ -16,7 +16,6 @@ void block_recipe_pull(block_recipe_t* recipe) {
   msg.payload = NULL;
   msg.payload_destroy = NULL;
   actor_send(&recipe->stream.actor, &msg);
-  scheduler_inject(recipe->stream.pool, &recipe->stream.actor);
 }
 
 // --- NewBlocksRecipe ---

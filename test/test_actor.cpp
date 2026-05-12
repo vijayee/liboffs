@@ -29,7 +29,7 @@ static void test_payload_destroy(void* payload) {
 TEST(TestActor, TestInitDestroy) {
   int count = 0;
   actor_t actor;
-  actor_init(&actor, &count, test_dispatch);
+  actor_init(&actor, &count, test_dispatch, NULL);
   EXPECT_TRUE(message_queue_isempty(&actor.queue));
   actor_destroy(&actor);
 }
@@ -37,7 +37,7 @@ TEST(TestActor, TestInitDestroy) {
 TEST(TestActor, TestSendReturnsEmpty) {
   int count = 0;
   actor_t actor;
-  actor_init(&actor, &count, test_dispatch);
+  actor_init(&actor, &count, test_dispatch, NULL);
 
   message_t msg;
   msg.type = 1;
@@ -53,7 +53,7 @@ TEST(TestActor, TestSendReturnsEmpty) {
 TEST(TestActor, TestSendReturnsNotEmpty) {
   int count = 0;
   actor_t actor;
-  actor_init(&actor, &count, test_dispatch);
+  actor_init(&actor, &count, test_dispatch, NULL);
 
   message_t msg1;
   msg1.type = 1;
@@ -77,7 +77,7 @@ TEST(TestActor, TestSendReturnsNotEmpty) {
 TEST(TestActor, TestRunDispatchesMessages) {
   std::vector<uint32_t> received;
   actor_t actor;
-  actor_init(&actor, &received, record_dispatch);
+  actor_init(&actor, &received, record_dispatch, NULL);
 
   message_t msg1;
   msg1.type = 10;
@@ -111,7 +111,7 @@ TEST(TestActor, TestRunDispatchesMessages) {
 TEST(TestActor, TestRunBatchSize) {
   int count = 0;
   actor_t actor;
-  actor_init(&actor, &count, test_dispatch);
+  actor_init(&actor, &count, test_dispatch, NULL);
 
   for (int i = 0; i < 5; i++) {
     message_t msg;
@@ -130,7 +130,7 @@ TEST(TestActor, TestRunBatchSize) {
 TEST(TestActor, TestRunReturnsTrueWhenMoreRemain) {
   int count = 0;
   actor_t actor;
-  actor_init(&actor, &count, test_dispatch);
+  actor_init(&actor, &count, test_dispatch, NULL);
 
   for (int i = 0; i < 5; i++) {
     message_t msg;
@@ -149,7 +149,7 @@ TEST(TestActor, TestRunReturnsTrueWhenMoreRemain) {
 TEST(TestActor, TestRunReturnsFalseWhenEmpty) {
   int count = 0;
   actor_t actor;
-  actor_init(&actor, &count, test_dispatch);
+  actor_init(&actor, &count, test_dispatch, NULL);
 
   message_t msg;
   msg.type = 1;
@@ -168,7 +168,7 @@ TEST(TestActor, TestPayloadDestroy) {
   payload_destroy_count = 0;
   int count = 0;
   actor_t actor;
-  actor_init(&actor, &count, test_dispatch);
+  actor_init(&actor, &count, test_dispatch, NULL);
 
   message_t msg;
   msg.type = 1;

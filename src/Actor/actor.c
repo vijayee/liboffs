@@ -3,45 +3,21 @@
 //
 
 #include "actor.h"
+#include "../Scheduler/scheduler.h"
 #include "../Util/allocator.h"
 #include <stdbool.h>
 #include <stdlib.h>
 
-void actor_init(actor_t* actor, void* state, void (*dispatch)(void* state, message_t* msg)) {
+void actor_init(actor_t* actor, void* state, void (*dispatch)(void* state, message_t* msg), scheduler_pool_t* pool) {
   message_queue_init(&actor->queue);
   atomic_store(&actor->flags, 0);
+  actor->pool = pool;
   actor->state = state;
   actor->dispatch = dispatch;
-  platform_lock_init(&actor->run_lock);
-  platform_condition_init(&actor->run_cond);
 }
 
 void actor_destroy(actor_t* actor) {
   message_queue_destroy(&actor->queue);
-  platform_lock_destroy(&actor->run_lock);
-  platform_condition_destroy(&actor->run_cond);
-}
-
-void actor_claim_running(actor_t* actor) {
-  platform_lock(&actor->run_lock);
-  while (true) {
-    uint8_t flags = atomic_load(&actor->flags);
-    if (flags & ACTOR_FLAG_RUNNING) {
-      platform_condition_wait(&actor->run_lock, &actor->run_cond);
-      continue;
-    }
-    if (atomic_compare_exchange_strong(&actor->flags, &flags, flags | ACTOR_FLAG_RUNNING)) {
-      break;
-    }
-  }
-  platform_unlock(&actor->run_lock);
-}
-
-void actor_release_running(actor_t* actor) {
-  atomic_fetch_and(&actor->flags, ~ACTOR_FLAG_RUNNING);
-  platform_lock(&actor->run_lock);
-  platform_broadcast_condition(&actor->run_cond);
-  platform_unlock(&actor->run_lock);
 }
 
 bool actor_send(actor_t* actor, message_t* msg) {
@@ -50,6 +26,9 @@ bool actor_send(actor_t* actor, message_t* msg) {
   bool was_empty = message_queue_push(&actor->queue, node, node);
   if (was_empty) {
     atomic_fetch_or(&actor->flags, ACTOR_FLAG_SCHEDULED);
+    if (actor->pool != NULL) {
+      scheduler_inject(actor->pool, actor);
+    }
   }
   return was_empty;
 }

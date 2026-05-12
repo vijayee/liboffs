@@ -114,11 +114,19 @@ static int free_map_deserialize(free_map_t* fm, const uint8_t* buf, size_t buf_s
 /* ---- async payload destroy helpers ---- */
 
 static void section_read_result_destroy(void* ptr) {
-  section_read_result_t* result = (section_read_result_t*)ptr;
+  section_read_result_payload_t* result = (section_read_result_payload_t*)ptr;
   if (result->data != NULL) {
     buffer_destroy(result->data);
   }
   free(result);
+}
+
+static void section_write_result_destroy(void* ptr) {
+  free(ptr);
+}
+
+static void section_deallocate_result_destroy(void* ptr) {
+  free(ptr);
 }
 
 /* ---- section dispatch ---- */
@@ -183,14 +191,15 @@ void section_dispatch(void* state, message_t* msg) {
       p->full = free_map_is_full(&section->free_map);
       /* Send completion message if async (reply_to is set) */
       if (p->reply_to != NULL) {
-        section_write_result_t* result = get_clear_memory(sizeof(section_write_result_t));
+        section_write_result_payload_t* result = get_clear_memory(sizeof(section_write_result_payload_t));
         result->result = p->result;
         result->index = p->index;
         result->full = p->full;
+        result->reply_to = NULL;
         message_t reply;
-        reply.type = SECTION_WRITE_COMPLETE;
+        reply.type = SECTION_WRITE_RESULT;
         reply.payload = result;
-        reply.payload_destroy = free;
+        reply.payload_destroy = section_write_result_destroy;
         actor_send(p->reply_to, &reply);
       }
       break;
@@ -228,11 +237,13 @@ void section_dispatch(void* state, message_t* msg) {
         break;
       }
       if (p->reply_to != NULL) {
-        /* Async: transfer buffer ownership to completion message */
-        section_read_result_t* result = get_clear_memory(sizeof(section_read_result_t));
+        /* Async: send result via SECTION_READ_RESULT message */
+        section_read_result_payload_t* result = get_clear_memory(sizeof(section_read_result_payload_t));
+        result->index = p->index;
         result->data = buffer_create_from_existing_memory(data, section->block_size);
+        result->reply_to = NULL;
         message_t reply;
-        reply.type = SECTION_READ_COMPLETE;
+        reply.type = SECTION_READ_RESULT;
         reply.payload = result;
         reply.payload_destroy = section_read_result_destroy;
         actor_send(p->reply_to, &reply);
@@ -253,12 +264,13 @@ void section_dispatch(void* state, message_t* msg) {
       }
       /* Send completion message if async (reply_to is set) */
       if (p->reply_to != NULL) {
-        section_deallocate_result_t* result = get_clear_memory(sizeof(section_deallocate_result_t));
+        section_deallocate_result_payload_t* result = get_clear_memory(sizeof(section_deallocate_result_payload_t));
         result->result = p->result;
+        result->reply_to = NULL;
         message_t reply;
-        reply.type = SECTION_DEALLOCATE_COMPLETE;
+        reply.type = SECTION_DEALLOCATE_RESULT;
         reply.payload = result;
-        reply.payload_destroy = free;
+        reply.payload_destroy = section_deallocate_result_destroy;
         actor_send(p->reply_to, &reply);
       }
       break;
@@ -284,7 +296,7 @@ void section_dispatch(void* state, message_t* msg) {
 section_t* section_create(char* path, char* meta_path, size_t size, size_t id, block_size_e type) {
   section_t* section = get_clear_memory(sizeof(section_t));
   refcounter_init((refcounter_t*) section);
-  actor_init(&section->actor, section, section_dispatch);
+  actor_init(&section->actor, section, section_dispatch, NULL);
   char section_id[20];
   sprintf(section_id, "%lu", id);
   section->fd = -1;
@@ -361,21 +373,80 @@ void section_destroy(section_t* section) {
   }
 }
 
-/* Helper: run the section actor until our message is processed.
-   Uses condition variable wait instead of spin-yield, mirroring Pony's
-   approach of OS-level thread suspension for idle waits. */
-static void _section_run_until_done(section_t* section) {
-  actor_claim_running(&section->actor);
-  bool has_more = true;
-  while (has_more) {
-    has_more = actor_run(&section->actor, ACTOR_BATCH_SIZE);
-  }
-  actor_release_running(&section->actor);
+/* Direct read of free_map state. Safe because the actor serializes all
+   modifications. May return stale data if called from outside the actor
+   context while modifications are pending. */
+uint8_t section_full(section_t* section) {
+  return free_map_is_full(&section->free_map);
 }
 
-/* Sync wrapper: sends SECTION_WRITE message to the section actor and
-   processes it inline. Returns the result through the output parameters. */
-int section_write(section_t* section, buffer_t* data, size_t* index, uint8_t* full) {
+/* Async API — send message to section actor.
+   The caller must also inject the section's actor into the scheduler
+   after calling these functions. Results arrive as
+   SECTION_READ_RESULT / SECTION_WRITE_RESULT / SECTION_DEALLOCATE_RESULT
+   messages on the reply_to actor. */
+void section_read_async(section_t* section, size_t index, actor_t* reply_to) {
+  section_read_payload_t* payload = get_clear_memory(sizeof(section_read_payload_t));
+  payload->index = index;
+  payload->reply_to = reply_to;
+  payload->result = NULL;
+
+  message_t msg;
+  msg.type = SECTION_READ;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+
+  actor_send(&section->actor, &msg);
+}
+
+void section_write_async(section_t* section, buffer_t* data, actor_t* reply_to) {
+  section_write_payload_t* payload = get_clear_memory(sizeof(section_write_payload_t));
+  payload->data = data;
+  payload->reply_to = reply_to;
+  payload->result = -1;
+  payload->index = 0;
+  payload->full = 0;
+
+  message_t msg;
+  msg.type = SECTION_WRITE;
+  msg.payload = payload;
+  msg.payload_destroy = NULL;
+
+  actor_send(&section->actor, &msg);
+}
+
+void section_deallocate_async(section_t* section, size_t index, actor_t* reply_to) {
+  section_deallocate_payload_t* payload = get_clear_memory(sizeof(section_deallocate_payload_t));
+  payload->index = index;
+  payload->reply_to = reply_to;
+  payload->result = -1;
+
+  message_t msg;
+  msg.type = SECTION_DEALLOCATE;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+
+  actor_send(&section->actor, &msg);
+}
+
+/* ---- Sync API (direct dispatch) ---- */
+
+buffer_t* section_read(section_t* section, size_t index) {
+  section_read_payload_t payload;
+  payload.index = index;
+  payload.reply_to = NULL;
+  payload.result = NULL;
+
+  message_t msg;
+  msg.type = SECTION_READ;
+  msg.payload = &payload;
+  msg.payload_destroy = NULL;
+
+  section_dispatch(section, &msg);
+  return payload.result;
+}
+
+int section_write(section_t* section, buffer_t* data, size_t* out_index, uint8_t* out_full) {
   section_write_payload_t payload;
   payload.data = data;
   payload.reply_to = NULL;
@@ -388,35 +459,12 @@ int section_write(section_t* section, buffer_t* data, size_t* index, uint8_t* fu
   msg.payload = &payload;
   msg.payload_destroy = NULL;
 
-  actor_send(&section->actor, &msg);
-  _section_run_until_done(section);
-
-  *index = payload.index;
-  *full = payload.full;
+  section_dispatch(section, &msg);
+  if (out_index) *out_index = payload.index;
+  if (out_full) *out_full = payload.full;
   return payload.result;
 }
 
-/* Sync wrapper: sends SECTION_READ message to the section actor and
-   processes it inline. Returns the read buffer or NULL on failure. */
-buffer_t* section_read(section_t* section, size_t index) {
-  section_read_payload_t payload;
-  payload.index = index;
-  payload.reply_to = NULL;
-  payload.result = NULL;
-
-  message_t msg;
-  msg.type = SECTION_READ;
-  msg.payload = &payload;
-  msg.payload_destroy = NULL;
-
-  actor_send(&section->actor, &msg);
-  _section_run_until_done(section);
-
-  return payload.result;
-}
-
-/* Sync wrapper: sends SECTION_DEALLOCATE message to the section actor and
-   processes it inline. Returns 0 on success, non-zero on failure. */
 int section_deallocate(section_t* section, size_t index) {
   section_deallocate_payload_t payload;
   payload.index = index;
@@ -428,17 +476,8 @@ int section_deallocate(section_t* section, size_t index) {
   msg.payload = &payload;
   msg.payload_destroy = NULL;
 
-  actor_send(&section->actor, &msg);
-  _section_run_until_done(section);
-
+  section_dispatch(section, &msg);
   return payload.result;
-}
-
-/* Direct read of free_map state. Safe because the actor serializes all
-   modifications. May return stale data if called from outside the actor
-   context while modifications are pending. */
-uint8_t section_full(section_t* section) {
-  return free_map_is_full(&section->free_map);
 }
 
 void section_save_meta(section_t* section) {

@@ -238,7 +238,7 @@ index_t* _index_new_empty(size_t bucket_size, char* location, timer_actor_t* tim
   index->timer_actor = timer_actor;
   index->wait = wait;
   index->max_wait = max_wait;
-  actor_init(&index->actor, index, index_dispatch);
+  actor_init(&index->actor, index, index_dispatch, NULL);
   hashmap_init(&index->ranks, (void*)hash_uint32, (void*)compare_uint32);
   hashmap_set_key_alloc_funcs(&index->ranks, duplicate_uint32, (void*)free);
   refcounter_init((refcounter_t*) index);
@@ -522,7 +522,7 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root, char* locatio
   index->timer_actor = timer_actor;
   index->wait = wait;
   index->max_wait = max_wait;
-  actor_init(&index->actor, index, index_dispatch);
+  actor_init(&index->actor, index, index_dispatch, NULL);
   hashmap_init(&index->ranks, (void*)hash_uint32, (void*)compare_uint32);
   hashmap_set_key_alloc_funcs(&index->ranks, duplicate_uint32, (void*)free);
   refcounter_init((refcounter_t*) index);

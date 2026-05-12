@@ -9,6 +9,7 @@
 #include "../Buffer/buffer.h"
 #include "../RefCounter/refcounter.h"
 #include "../Actor/actor.h"
+#include "../Scheduler/scheduler.h"
 #include <hashmap.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -33,6 +34,7 @@ typedef struct {
 typedef struct {
   refcounter_t refcounter;
   tuple_cache_lru_t* lru;
+  struct scheduler_pool_t* pool;
   actor_t actor;
 } tuple_cache_t;
 
@@ -46,13 +48,26 @@ uint8_t tuple_cache_lru_contains(tuple_cache_lru_t* lru, tuple_t* key);
 size_t tuple_cache_lru_size(tuple_cache_lru_t* lru);
 
 /* Actor wrapper */
-tuple_cache_t* tuple_cache_create(size_t capacity);
+tuple_cache_t* tuple_cache_create(size_t capacity, scheduler_pool_t* pool);
 void tuple_cache_destroy(tuple_cache_t* tc);
-buffer_t* tuple_cache_apply(tuple_cache_t* tc, tuple_t* key);
+void tuple_cache_dispatch(void* state, message_t* msg);
+
+/* Async API — send message and inject actor into scheduler */
+void tuple_cache_get_async(tuple_cache_t* tc, tuple_t* key, actor_t* reply_to);
+void tuple_cache_put_async(tuple_cache_t* tc, tuple_t* key, buffer_t* value);
+
+/* Sync API — direct dispatch. Temporary, will be removed as callers convert. */
 void tuple_cache_update(tuple_cache_t* tc, tuple_t* key, buffer_t* value);
-void tuple_cache_remove(tuple_cache_t* tc, tuple_t* key);
+buffer_t* tuple_cache_apply(tuple_cache_t* tc, tuple_t* key);
 uint8_t tuple_cache_contains(tuple_cache_t* tc, tuple_t* key);
 size_t tuple_cache_size(tuple_cache_t* tc);
-void tuple_cache_dispatch(void* state, message_t* msg);
+void tuple_cache_remove(tuple_cache_t* tc, tuple_t* key);
+
+/* Async result payload for TUPLE_CACHE_GET_RESULT */
+typedef struct {
+  tuple_t* key;
+  buffer_t* value;
+  actor_t* reply_to;
+} tuple_cache_get_result_payload_t;
 
 #endif //OFFS_TUPLE_CACHE_H

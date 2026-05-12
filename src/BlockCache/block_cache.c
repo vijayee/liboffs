@@ -3,14 +3,24 @@
 //
 
 #include "block_cache.h"
+#include "sections.h"
 #include "../Util/allocator.h"
 #include "../Util/hash.h"
 #include "../Util/path_join.h"
 #include "../Actor/actor.h"
 #include "../Actor/message.h"
+#include "../Scheduler/scheduler.h"
 #include "../Util/log.h"
 #include <stdatomic.h>
 #include <time.h>
+
+static void cache_get_payload_destroy(void* ptr) {
+  cache_get_payload_t* payload = (cache_get_payload_t*)ptr;
+  if (payload->hash != NULL) {
+    DESTROY(payload->hash, buffer);
+  }
+  free(payload);
+}
 
 void block_cache_validate(block_cache_t* block_cache, const char* func, int line) {
   if (block_cache == NULL) {
@@ -196,6 +206,31 @@ void block_lru_cache_move(block_lru_cache_t* lru, block_lru_node_t* node) {
 
 /* ---- block_cache dispatch ---- */
 
+static void _block_cache_add_pending_get(block_cache_t* block_cache, buffer_t* hash,
+                                          index_entry_t* entry, actor_t* reply_to) {
+  pending_get_t* pending = get_clear_memory(sizeof(pending_get_t));
+  pending->hash = (buffer_t*)refcounter_reference((refcounter_t*)hash);
+  pending->entry = (index_entry_t*)refcounter_reference((refcounter_t*)entry);
+  pending->reply_to = reply_to;
+  pending->next = block_cache->pending_gets;
+  block_cache->pending_gets = pending;
+}
+
+static pending_get_t* _block_cache_find_pending_get(block_cache_t* block_cache,
+                                                      size_t section_id, size_t section_index) {
+  pending_get_t** current = &block_cache->pending_gets;
+  while (*current != NULL) {
+    if ((*current)->entry->section_id == section_id &&
+        (*current)->entry->section_index == section_index) {
+      pending_get_t* found = *current;
+      *current = found->next;
+      return found;
+    }
+    current = &(*current)->next;
+  }
+  return NULL;
+}
+
 void block_cache_dispatch(void* state, message_t* msg) {
   block_cache_t* block_cache = (block_cache_t*)state;
   if (block_cache == NULL) {
@@ -213,12 +248,25 @@ void block_cache_dispatch(void* state, message_t* msg) {
       index_entry_t* entry = index_peek(block_cache->index, p->block->hash);
       if (entry == NULL) {
         entry = index_entry_create(p->block->hash);
-        int result = sections_write(block_cache->sections, p->block->data,
-                                     &entry->section_id, &entry->section_index);
+        /* Write to sections via direct dispatch — sections is owned by block_cache */
+        sections_write_payload_t write_payload;
+        write_payload.data = p->block->data;
+        write_payload.reply_to = NULL;
+        write_payload.result = -1;
+        write_payload.section_id = 0;
+        write_payload.section_index = 0;
+        message_t sections_msg;
+        sections_msg.type = SECTIONS_WRITE;
+        sections_msg.payload = &write_payload;
+        sections_msg.payload_destroy = NULL;
+        sections_dispatch(block_cache->sections, &sections_msg);
+        int result = write_payload.result;
         if (result) {
           index_entry_destroy(entry);
           p->result = result;
         } else {
+          entry->section_id = write_payload.section_id;
+          entry->section_index = write_payload.section_index;
           index_entry_t* ejection = (index_entry_t*)refcounter_reference(
               (refcounter_t*)block_lru_cache_put(block_cache->lru, p->block, entry));
           if (ejection) {
@@ -235,6 +283,17 @@ void block_cache_dispatch(void* state, message_t* msg) {
         block_destroy(p->block);
         p->result = 0;
       }
+      /* Async: send result back if reply_to is set */
+      if (p->reply_to != NULL) {
+        cache_put_result_payload_t* result = get_clear_memory(sizeof(cache_put_result_payload_t));
+        result->result = p->result;
+        result->reply_to = NULL;
+        message_t reply;
+        reply.type = CACHE_PUT_RESULT;
+        reply.payload = result;
+        reply.payload_destroy = free;
+        actor_send(p->reply_to, &reply);
+      }
       break;
     }
     case CACHE_GET: {
@@ -242,27 +301,69 @@ void block_cache_dispatch(void* state, message_t* msg) {
       p->result = NULL;
       index_entry_t* entry = index_peek(block_cache->index, p->hash);
       if (entry == NULL) {
-        /* Block not in index */
+        /* Block not in index — send NULL result if async */
+        if (p->reply_to != NULL) {
+          cache_get_result_payload_t* result = get_clear_memory(sizeof(cache_get_result_payload_t));
+          result->hash = (buffer_t*)refcounter_reference((refcounter_t*)p->hash);
+          result->block = NULL;
+          result->reply_to = NULL;
+          message_t reply;
+          reply.type = CACHE_GET_RESULT;
+          reply.payload = result;
+          reply.payload_destroy = free;
+          actor_send(p->reply_to, &reply);
+        }
       } else {
         block_t* block = block_lru_cache_get(block_cache->lru, p->hash);
         if (block == NULL) {
-          buffer_t* data = sections_read(block_cache->sections,
-                                         entry->section_id, entry->section_index);
-          if (data != NULL) {
-            block = block_create_existing_data_hash(data, entry->hash);
-            buffer_destroy(data);
-            if (block != NULL) {
-              index_entry_t* ejection = (index_entry_t*)refcounter_reference(
-                  (refcounter_t*)block_lru_cache_put(block_cache->lru, block, entry));
-              if (ejection) {
-                index_set_entry_ejection(block_cache->index, ejection, time(NULL));
-                index_entry_destroy(ejection);
+          if (p->reply_to != NULL) {
+            /* Async: need to read from sections — track pending request */
+            _block_cache_add_pending_get(block_cache, p->hash, entry, p->reply_to);
+            sections_read_async(block_cache->sections, entry->section_id,
+                                 entry->section_index, &block_cache->actor);
+          } else {
+            /* Read from sections via direct dispatch */
+            sections_read_payload_t read_payload;
+            read_payload.section_id = entry->section_id;
+            read_payload.section_index = entry->section_index;
+            read_payload.reply_to = NULL;
+            read_payload.result = NULL;
+            message_t sections_msg;
+            sections_msg.type = SECTIONS_READ;
+            sections_msg.payload = &read_payload;
+            sections_msg.payload_destroy = NULL;
+            sections_dispatch(block_cache->sections, &sections_msg);
+            buffer_t* data = read_payload.result;
+            if (data != NULL) {
+              block = block_create_existing_data_hash(data, entry->hash);
+              buffer_destroy(data);
+              if (block != NULL) {
+                index_entry_t* ejection = (index_entry_t*)refcounter_reference(
+                    (refcounter_t*)block_lru_cache_put(block_cache->lru, block, entry));
+                if (ejection) {
+                  index_set_entry_ejection(block_cache->index, ejection, time(NULL));
+                  index_entry_destroy(ejection);
+                }
+                p->result = block;
               }
-              p->result = block;
             }
           }
         } else {
-          p->result = block;
+          /* Cache hit */
+          if (p->reply_to != NULL) {
+            /* Async: send result back directly */
+            cache_get_result_payload_t* result = get_clear_memory(sizeof(cache_get_result_payload_t));
+            result->hash = (buffer_t*)refcounter_reference((refcounter_t*)p->hash);
+            result->block = block;
+            result->reply_to = NULL;
+            message_t reply;
+            reply.type = CACHE_GET_RESULT;
+            reply.payload = result;
+            reply.payload_destroy = free;
+            actor_send(p->reply_to, &reply);
+          } else {
+            p->result = block;
+          }
         }
       }
       break;
@@ -281,8 +382,88 @@ void block_cache_dispatch(void* state, message_t* msg) {
         size_t section_index = entry->section_index;
         index_remove(block_cache->index, p->hash);
         block_lru_cache_delete(block_cache->lru, p->hash);
-        sections_deallocate(block_cache->sections, section_id, section_index);
+        section_deallocate_payload_t dealloc_payload;
+        dealloc_payload.index = section_index;
+        dealloc_payload.reply_to = NULL;
+        dealloc_payload.result = -1;
+        message_t dealloc_msg;
+        dealloc_msg.type = SECTION_DEALLOCATE;
+        dealloc_msg.payload = &dealloc_payload;
+        dealloc_msg.payload_destroy = NULL;
+        sections_dispatch(block_cache->sections, &dealloc_msg);
         p->result = 0;
+      }
+      /* Async: send result back if reply_to is set */
+      if (p->reply_to != NULL) {
+        cache_remove_result_payload_t* result = get_clear_memory(sizeof(cache_remove_result_payload_t));
+        result->result = p->result;
+        result->reply_to = NULL;
+        message_t reply;
+        reply.type = CACHE_REMOVE_RESULT;
+        reply.payload = result;
+        reply.payload_destroy = free;
+        actor_send(p->reply_to, &reply);
+      }
+      break;
+    }
+    case SECTIONS_READ_RESULT: {
+      /* Async: sections read completed — match to pending get request */
+      sections_read_result_payload_t* p = (sections_read_result_payload_t*)msg->payload;
+      pending_get_t* pending = _block_cache_find_pending_get(block_cache,
+                                                              p->section_id, p->section_index);
+      if (pending != NULL) {
+        buffer_t* data = p->data;
+        if (data != NULL) {
+          block_t* block = block_create_existing_data_hash(data, pending->entry->hash);
+          if (block != NULL) {
+            index_entry_t* ejection = (index_entry_t*)refcounter_reference(
+                (refcounter_t*)block_lru_cache_put(block_cache->lru, block, pending->entry));
+            if (ejection) {
+              index_set_entry_ejection(block_cache->index, ejection, time(NULL));
+              index_entry_destroy(ejection);
+            }
+            /* Send result back to original caller */
+            cache_get_result_payload_t* result = get_clear_memory(sizeof(cache_get_result_payload_t));
+            result->hash = pending->hash;
+            result->block = block;
+            result->reply_to = NULL;
+            message_t reply;
+            reply.type = CACHE_GET_RESULT;
+            reply.payload = result;
+            reply.payload_destroy = free;
+            actor_send(pending->reply_to, &reply);
+            /* block_create_existing_data_hash took a reference to data;
+               clear p->data so sections_read_result_destroy doesn't free it */
+            p->data = NULL;
+          } else {
+            /* Failed to create block — destroy data and send NULL result */
+            buffer_destroy(data);
+            p->data = NULL;
+            cache_get_result_payload_t* result = get_clear_memory(sizeof(cache_get_result_payload_t));
+            result->hash = pending->hash;
+            result->block = NULL;
+            result->reply_to = NULL;
+            message_t reply;
+            reply.type = CACHE_GET_RESULT;
+            reply.payload = result;
+            reply.payload_destroy = free;
+            actor_send(pending->reply_to, &reply);
+          }
+        } else {
+          /* Sections read failed — send NULL result */
+          cache_get_result_payload_t* result = get_clear_memory(sizeof(cache_get_result_payload_t));
+          result->hash = pending->hash;
+          result->block = NULL;
+          result->reply_to = NULL;
+          message_t reply;
+          reply.type = CACHE_GET_RESULT;
+          reply.payload = result;
+          reply.payload_destroy = free;
+          actor_send(pending->reply_to, &reply);
+        }
+        /* Clean up pending entry — hash ownership was transferred to result */
+        index_entry_destroy(pending->entry);
+        free(pending);
       }
       break;
     }
@@ -291,25 +472,14 @@ void block_cache_dispatch(void* state, message_t* msg) {
   }
 }
 
-/* Sync helper: run the block_cache actor until our message is processed.
-   Uses condition variable wait instead of spin-yield, mirroring Pony's
-   approach of OS-level thread suspension for idle waits. */
-static void _block_cache_run_until_done(block_cache_t* block_cache) {
-  actor_claim_running(&block_cache->actor);
-  bool has_more = true;
-  while (has_more) {
-    has_more = actor_run(&block_cache->actor, ACTOR_BATCH_SIZE);
-  }
-  actor_release_running(&block_cache->actor);
-}
-
 /* ---- block_cache implementation ---- */
 
-block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, timer_actor_t* timer_actor) {
+block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool) {
   block_cache_t* block_cache = get_clear_memory(sizeof(block_cache_t));
   refcounter_init_actor((refcounter_t*) block_cache);
   block_cache->canary = BLOCK_CACHE_CANARY;
   block_cache->type = type;
+  block_cache->pool = pool;
   char* folder;
   switch (type) {
     case standard:
@@ -326,13 +496,13 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
       break;
   }
   block_cache->lru = block_lru_cache_create(config.lru_size);
-  block_cache->sections = sections_create(folder, config.section_size, config.cache_size, config.max_tuple_size, type, timer_actor, config.section_wait, config.section_max_wait);
+  block_cache->sections = sections_create(folder, config.section_size, config.cache_size, config.max_tuple_size, type, timer_actor, pool, config.section_wait, config.section_max_wait);
   int error_code;
   block_cache->index = index_create(config.index_bucket_size, folder, timer_actor, config.index_wait, config.index_max_wait, &error_code);
   if (block_cache->index == NULL) {
     log_error("block_cache_create: index_create returned NULL (error_code=%d)", error_code);
   }
-  actor_init(&block_cache->actor, block_cache, block_cache_dispatch);
+  actor_init(&block_cache->actor, block_cache, block_cache_dispatch, pool);
   free(folder);
   return block_cache;
 }
@@ -353,29 +523,56 @@ void block_cache_destroy(block_cache_t* block_cache) {
   }
 }
 
-/* Sync wrapper: sends CACHE_PUT message to the block_cache actor and
-   processes it inline. The caller must YIELD the block before calling.
-   Returns 0 on success, non-zero on failure. */
-int block_cache_put(block_cache_t* block_cache, block_t* block) {
-  cache_put_payload_t payload;
-  payload.block = block;
-  payload.reply_to = NULL;
-  payload.result = -1;
+size_t block_cache_count(block_cache_t* block_cache) {
+  return index_count(block_cache->index);
+}
+
+/* ---- Async API ---- */
+
+void block_cache_get_async(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to) {
+  cache_get_payload_t* payload = get_clear_memory(sizeof(cache_get_payload_t));
+  payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)hash);
+  payload->reply_to = reply_to;
+  payload->result = NULL;
+
+  message_t msg;
+  msg.type = CACHE_GET;
+  msg.payload = payload;
+  msg.payload_destroy = cache_get_payload_destroy;
+
+  actor_send(&block_cache->actor, &msg);
+}
+
+void block_cache_put_async(block_cache_t* block_cache, block_t* block, actor_t* reply_to) {
+  cache_put_payload_t* payload = get_clear_memory(sizeof(cache_put_payload_t));
+  payload->block = block;
+  payload->reply_to = reply_to;
+  payload->result = -1;
 
   message_t msg;
   msg.type = CACHE_PUT;
-  msg.payload = &payload;
-  msg.payload_destroy = NULL;
+  msg.payload = payload;
+  msg.payload_destroy = free;
 
   actor_send(&block_cache->actor, &msg);
-  _block_cache_run_until_done(block_cache);
-
-  return payload.result;
 }
 
-/* Sync wrapper: sends CACHE_GET message to the block_cache actor and
-   processes it inline. Returns a new reference to the block, or NULL
-   if not found. The caller must destroy the returned block. */
+void block_cache_remove_async(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to) {
+  cache_remove_payload_t* payload = get_clear_memory(sizeof(cache_remove_payload_t));
+  payload->hash = hash;
+  payload->reply_to = reply_to;
+  payload->result = -1;
+
+  message_t msg;
+  msg.type = CACHE_REMOVE;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+
+  actor_send(&block_cache->actor, &msg);
+}
+
+/* ---- Sync API — direct dispatch, caller must not be inside block_cache actor ---- */
+
 block_t* block_cache_get(block_cache_t* block_cache, buffer_t* hash) {
   cache_get_payload_t payload;
   payload.hash = hash;
@@ -387,14 +584,25 @@ block_t* block_cache_get(block_cache_t* block_cache, buffer_t* hash) {
   msg.payload = &payload;
   msg.payload_destroy = NULL;
 
-  actor_send(&block_cache->actor, &msg);
-  _block_cache_run_until_done(block_cache);
-
+  block_cache_dispatch(block_cache, &msg);
   return payload.result;
 }
 
-/* Sync wrapper: sends CACHE_REMOVE message to the block_cache actor and
-   processes it inline. Returns 0 on success, non-zero on failure. */
+int block_cache_put(block_cache_t* block_cache, block_t* block) {
+  cache_put_payload_t payload;
+  payload.block = block;
+  payload.reply_to = NULL;
+  payload.result = -1;
+
+  message_t msg;
+  msg.type = CACHE_PUT;
+  msg.payload = &payload;
+  msg.payload_destroy = NULL;
+
+  block_cache_dispatch(block_cache, &msg);
+  return payload.result;
+}
+
 int block_cache_remove(block_cache_t* block_cache, buffer_t* hash) {
   cache_remove_payload_t payload;
   payload.hash = hash;
@@ -406,12 +614,6 @@ int block_cache_remove(block_cache_t* block_cache, buffer_t* hash) {
   msg.payload = &payload;
   msg.payload_destroy = NULL;
 
-  actor_send(&block_cache->actor, &msg);
-  _block_cache_run_until_done(block_cache);
-
+  block_cache_dispatch(block_cache, &msg);
   return payload.result;
-}
-
-size_t block_cache_count(block_cache_t* block_cache) {
-  return index_count(block_cache->index);
 }

@@ -6,6 +6,7 @@
 #include "../Util/allocator.h"
 #include "../Actor/actor.h"
 #include "../Actor/message.h"
+#include "../Scheduler/scheduler.h"
 #include <string.h>
 
 /* Hash and compare functions for tuple_t keys in the hashmap */
@@ -212,6 +213,17 @@ void tuple_cache_dispatch(void* state, message_t* msg) {
     case TUPLE_CACHE_GET: {
       tuple_cache_get_payload_t* payload = (tuple_cache_get_payload_t*)msg->payload;
       payload->result = tuple_cache_lru_get(tc->lru, payload->key);
+      if (payload->reply_to != NULL) {
+        tuple_cache_get_result_payload_t* result = get_clear_memory(sizeof(tuple_cache_get_result_payload_t));
+        result->key = payload->key;
+        result->value = payload->result;
+        result->reply_to = NULL;
+        message_t reply;
+        reply.type = TUPLE_CACHE_GET_RESULT;
+        reply.payload = result;
+        reply.payload_destroy = free;
+        actor_send(payload->reply_to, &reply);
+      }
       break;
     }
     case TUPLE_CACHE_PUT: {
@@ -239,25 +251,14 @@ void tuple_cache_dispatch(void* state, message_t* msg) {
   }
 }
 
-/* Sync helper: run the actor until message is processed.
-   Uses condition variable wait instead of spin-yield, mirroring Pony's
-   approach of OS-level thread suspension for idle waits. */
-static void _tuple_cache_run_until_done(tuple_cache_t* tc) {
-  actor_claim_running(&tc->actor);
-  bool has_more = true;
-  while (has_more) {
-    has_more = actor_run(&tc->actor, ACTOR_BATCH_SIZE);
-  }
-  actor_release_running(&tc->actor);
-}
-
 /* ---- Public API (sync wrappers) ---- */
 
-tuple_cache_t* tuple_cache_create(size_t capacity) {
+tuple_cache_t* tuple_cache_create(size_t capacity, scheduler_pool_t* pool) {
   tuple_cache_t* tc = get_clear_memory(sizeof(tuple_cache_t));
   refcounter_init((refcounter_t*)tc);
   tc->lru = tuple_cache_lru_create(capacity);
-  actor_init(&tc->actor, tc, tuple_cache_dispatch);
+  tc->pool = pool;
+  actor_init(&tc->actor, tc, tuple_cache_dispatch, tc->pool);
   return tc;
 }
 
@@ -268,6 +269,52 @@ void tuple_cache_destroy(tuple_cache_t* tc) {
     refcounter_destroy_lock((refcounter_t*)tc);
     free(tc);
   }
+}
+
+
+/* ---- Async API ---- */
+
+void tuple_cache_get_async(tuple_cache_t* tc, tuple_t* key, actor_t* reply_to) {
+  tuple_cache_get_payload_t* payload = get_clear_memory(sizeof(tuple_cache_get_payload_t));
+  payload->key = key;
+  payload->reply_to = reply_to;
+  payload->result = NULL;
+
+  message_t msg;
+  msg.type = TUPLE_CACHE_GET;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+
+  actor_send(&tc->actor, &msg);
+}
+
+void tuple_cache_put_async(tuple_cache_t* tc, tuple_t* key, buffer_t* value) {
+  tuple_cache_put_payload_t* payload = get_clear_memory(sizeof(tuple_cache_put_payload_t));
+  payload->key = key;
+  payload->value = value;
+  payload->reply_to = NULL;
+
+  message_t msg;
+  msg.type = TUPLE_CACHE_PUT;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+
+  actor_send(&tc->actor, &msg);
+}
+
+/* Sync API — direct dispatch */
+void tuple_cache_update(tuple_cache_t* tc, tuple_t* key, buffer_t* value) {
+  tuple_cache_put_payload_t payload;
+  payload.key = key;
+  payload.value = value;
+  payload.reply_to = NULL;
+
+  message_t msg;
+  msg.type = TUPLE_CACHE_PUT;
+  msg.payload = &payload;
+  msg.payload_destroy = NULL;
+
+  tuple_cache_dispatch(tc, &msg);
 }
 
 buffer_t* tuple_cache_apply(tuple_cache_t* tc, tuple_t* key) {
@@ -281,39 +328,8 @@ buffer_t* tuple_cache_apply(tuple_cache_t* tc, tuple_t* key) {
   msg.payload = &payload;
   msg.payload_destroy = NULL;
 
-  actor_send(&tc->actor, &msg);
-  _tuple_cache_run_until_done(tc);
-
+  tuple_cache_dispatch(tc, &msg);
   return payload.result;
-}
-
-void tuple_cache_update(tuple_cache_t* tc, tuple_t* key, buffer_t* value) {
-  tuple_cache_put_payload_t payload;
-  payload.key = key;
-  payload.value = value;
-  payload.reply_to = NULL;
-
-  message_t msg;
-  msg.type = TUPLE_CACHE_PUT;
-  msg.payload = &payload;
-  msg.payload_destroy = NULL;
-
-  actor_send(&tc->actor, &msg);
-  _tuple_cache_run_until_done(tc);
-}
-
-void tuple_cache_remove(tuple_cache_t* tc, tuple_t* key) {
-  tuple_cache_remove_payload_t payload;
-  payload.key = key;
-  payload.reply_to = NULL;
-
-  message_t msg;
-  msg.type = TUPLE_CACHE_REMOVE;
-  msg.payload = &payload;
-  msg.payload_destroy = NULL;
-
-  actor_send(&tc->actor, &msg);
-  _tuple_cache_run_until_done(tc);
 }
 
 uint8_t tuple_cache_contains(tuple_cache_t* tc, tuple_t* key) {
@@ -327,9 +343,7 @@ uint8_t tuple_cache_contains(tuple_cache_t* tc, tuple_t* key) {
   msg.payload = &payload;
   msg.payload_destroy = NULL;
 
-  actor_send(&tc->actor, &msg);
-  _tuple_cache_run_until_done(tc);
-
+  tuple_cache_dispatch(tc, &msg);
   return payload.result;
 }
 
@@ -343,8 +357,19 @@ size_t tuple_cache_size(tuple_cache_t* tc) {
   msg.payload = &payload;
   msg.payload_destroy = NULL;
 
-  actor_send(&tc->actor, &msg);
-  _tuple_cache_run_until_done(tc);
-
+  tuple_cache_dispatch(tc, &msg);
   return payload.result;
+}
+
+void tuple_cache_remove(tuple_cache_t* tc, tuple_t* key) {
+  tuple_cache_remove_payload_t payload;
+  payload.key = key;
+  payload.reply_to = NULL;
+
+  message_t msg;
+  msg.type = TUPLE_CACHE_REMOVE;
+  msg.payload = &payload;
+  msg.payload_destroy = NULL;
+
+  tuple_cache_dispatch(tc, &msg);
 }

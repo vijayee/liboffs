@@ -196,7 +196,7 @@ void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, uin
   for (size_t i = 0; i < STREAM_HANDLER_COUNT; i++) {
     stream->handlers[i] = stream_event_list_create();
   }
-  actor_init(&stream->actor, stream, stream_dispatch);
+  actor_init(&stream->actor, stream, stream_dispatch, pool);
 }
 
 void stream_deinit(stream_t* stream) {
@@ -220,14 +220,6 @@ void stream_destroy(stream_t* stream) {
 void _stream_purge_handlers(stream_t* stream) {
   for (size_t i = 0; i < STREAM_HANDLER_COUNT; i++) {
     stream_event_list_destroy(stream->handlers[i]);
-  }
-}
-
-/* ---- stream actor dispatch ---- */
-
-static void _stream_schedule(stream_t* stream) {
-  if (stream->pool != NULL) {
-    scheduler_inject(stream->pool, &stream->actor);
   }
 }
 
@@ -378,7 +370,6 @@ void stream_deactivate(stream_t* stream, async_error_t* error) {
   close_msg.payload = close_payload;
   close_msg.payload_destroy = (void (*)(void*)) free;
   actor_send(&stream->actor, &close_msg);
-  _stream_schedule(stream);
 }
 
 void stream_deferred_deref(stream_t* stream) {
@@ -461,7 +452,6 @@ void readable_push_stream_push(stream_t* stream) {
   msg.payload = NULL;
   msg.payload_destroy = NULL;
   actor_send(&stream->actor, &msg);
-  _stream_schedule(stream);
 }
 
 void readable_stream_read(stream_t* stream, size_t size, void* ctx, void (*cb)(void*, void*)) {
@@ -477,7 +467,6 @@ void readable_stream_read(stream_t* stream, size_t size, void* ctx, void (*cb)(v
   msg.payload_destroy = (void (*)(void*)) free;
 
   actor_send(&stream->actor, &msg);
-  _stream_schedule(stream);
 }
 
 void stream_close(stream_t* stream) {
@@ -487,7 +476,6 @@ void stream_close(stream_t* stream) {
   msg.payload_destroy = NULL;
 
   actor_send(&stream->actor, &msg);
-  _stream_schedule(stream);
 }
 
 void writeable_stream_write(stream_t* stream, void* data) {
@@ -501,7 +489,6 @@ void writeable_stream_write(stream_t* stream, void* data) {
   msg.payload_destroy = (void (*)(void*)) free;
 
   actor_send(&stream->actor, &msg);
-  _stream_schedule(stream);
 }
 
 void readable_pull_stream_pull(stream_t* stream) {
@@ -519,7 +506,6 @@ void readable_pull_stream_pull(stream_t* stream) {
   msg.payload_destroy = NULL;
 
   actor_send(&stream->actor, &msg);
-  _stream_schedule(stream);
 }
 
 /* ---- subscribe / unsubscribe ---- */

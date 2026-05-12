@@ -10,6 +10,7 @@
 #include "../Util/get_dir.h"
 #include "../Actor/actor.h"
 #include "../Actor/message.h"
+#include "../Scheduler/scheduler.h"
 #include "block.h"
 #include <stdatomic.h>
 #ifdef _WIN32
@@ -177,7 +178,7 @@ void sections_lru_cache_move(sections_lru_cache_t* lru, sections_lru_node_t* nod
 /* ---- section async payload destroy helpers ---- */
 
 static void sections_read_result_destroy(void* ptr) {
-  sections_read_result_t* result = (sections_read_result_t*)ptr;
+  sections_read_result_payload_t* result = (sections_read_result_payload_t*)ptr;
   if (result->data != NULL) {
     buffer_destroy(result->data);
   }
@@ -210,19 +211,33 @@ void sections_dispatch(void* state, message_t* msg) {
           }
         }
         uint8_t full;
-        p->result = section_write(section, p->data, &p->section_index, &full);
+        section_write_payload_t write_payload;
+        write_payload.data = p->data;
+        write_payload.reply_to = NULL;
+        write_payload.result = -1;
+        write_payload.index = 0;
+        write_payload.full = 0;
+        message_t section_msg;
+        section_msg.type = SECTION_WRITE;
+        section_msg.payload = &write_payload;
+        section_msg.payload_destroy = NULL;
+        section_dispatch(section, &section_msg);
+        p->result = write_payload.result;
+        p->section_index = write_payload.index;
+        full = write_payload.full;
         if ((p->result == 2) || full) {
           sections_full(sections, p->section_id);
         }
         tries++;
       } while ((p->result == 2) && (tries < sections->max_tuple_size));
       if (p->reply_to != NULL) {
-        sections_write_result_t* result = get_clear_memory(sizeof(sections_write_result_t));
+        sections_write_result_payload_t* result = get_clear_memory(sizeof(sections_write_result_payload_t));
         result->result = p->result;
         result->section_id = p->section_id;
         result->section_index = p->section_index;
+        result->reply_to = NULL;
         message_t reply;
-        reply.type = SECTIONS_WRITE_COMPLETE;
+        reply.type = SECTIONS_WRITE_RESULT;
         reply.payload = result;
         reply.payload_destroy = free;
         actor_send(p->reply_to, &reply);
@@ -244,12 +259,24 @@ void sections_dispatch(void* state, message_t* msg) {
           round_robin_add(sections->robin, p->section_id);
         }
       }
-      p->result = section_read(section, p->section_index);
+      section_read_payload_t read_payload;
+      read_payload.index = p->section_index;
+      read_payload.reply_to = NULL;
+      read_payload.result = NULL;
+      message_t section_msg;
+      section_msg.type = SECTION_READ;
+      section_msg.payload = &read_payload;
+      section_msg.payload_destroy = NULL;
+      section_dispatch(section, &section_msg);
+      p->result = read_payload.result;
       if (p->reply_to != NULL) {
-        sections_read_result_t* result = get_clear_memory(sizeof(sections_read_result_t));
+        sections_read_result_payload_t* result = get_clear_memory(sizeof(sections_read_result_payload_t));
+        result->section_id = p->section_id;
+        result->section_index = p->section_index;
         result->data = p->result;
+        result->reply_to = NULL;
         message_t reply;
-        reply.type = SECTIONS_READ_COMPLETE;
+        reply.type = SECTIONS_READ_RESULT;
         reply.payload = result;
         reply.payload_destroy = sections_read_result_destroy;
         actor_send(p->reply_to, &reply);
@@ -271,15 +298,25 @@ void sections_dispatch(void* state, message_t* msg) {
           round_robin_add(sections->robin, p->section_id);
         }
       }
-      p->result = section_deallocate(section, p->section_index);
+      section_deallocate_payload_t dealloc_payload;
+      dealloc_payload.index = p->section_index;
+      dealloc_payload.reply_to = NULL;
+      dealloc_payload.result = -1;
+      message_t section_msg;
+      section_msg.type = SECTION_DEALLOCATE;
+      section_msg.payload = &dealloc_payload;
+      section_msg.payload_destroy = NULL;
+      section_dispatch(section, &section_msg);
+      p->result = dealloc_payload.result;
       if (p->result == 0) {
         sections_free(sections, p->section_id);
       }
       if (p->reply_to != NULL) {
-        sections_deallocate_result_t* result = get_clear_memory(sizeof(sections_deallocate_result_t));
+        sections_deallocate_result_payload_t* result = get_clear_memory(sizeof(sections_deallocate_result_payload_t));
         result->result = p->result;
+        result->reply_to = NULL;
         message_t reply;
-        reply.type = SECTIONS_DEALLOCATE_COMPLETE;
+        reply.type = SECTIONS_DEALLOCATE_RESULT;
         reply.payload = result;
         reply.payload_destroy = free;
         actor_send(p->reply_to, &reply);
@@ -307,26 +344,14 @@ void sections_dispatch(void* state, message_t* msg) {
       }
       break;
     }
-    case SECTION_WRITE_COMPLETE:
-    case SECTION_READ_COMPLETE:
-    case SECTION_DEALLOCATE_COMPLETE:
+    case SECTION_WRITE_RESULT:
+    case SECTION_READ_RESULT:
+    case SECTION_DEALLOCATE_RESULT:
       /* Reserved for fully-async block_cache flow. */
       break;
     default:
       break;
   }
-}
-
-/* Sync helper: run the sections actor until our message is processed.
-   Uses condition variable wait instead of spin-yield, mirroring Pony's
-   approach of OS-level thread suspension for idle waits. */
-static void _sections_run_until_done(sections_t* sections) {
-  actor_claim_running(&sections->actor);
-  bool has_more = true;
-  while (has_more) {
-    has_more = actor_run(&sections->actor, ACTOR_BATCH_SIZE);
-  }
-  actor_release_running(&sections->actor);
 }
 
 static void section_on_dirty(void* context, section_t* section) {
@@ -340,6 +365,55 @@ static void section_on_dirty(void* context, section_t* section) {
     section_save_meta(section);
     atomic_store(&section->dirty, 0);
   }
+}
+
+/* Async API — send message to sections actor and inject into scheduler.
+   Results arrive as SECTIONS_READ_RESULT / SECTIONS_WRITE_RESULT /
+   SECTIONS_DEALLOCATE_RESULT messages on the reply_to actor. */
+void sections_read_async(sections_t* sections, size_t section_id, size_t section_index, actor_t* reply_to) {
+  sections_read_payload_t* payload = get_clear_memory(sizeof(sections_read_payload_t));
+  payload->section_id = section_id;
+  payload->section_index = section_index;
+  payload->reply_to = reply_to;
+  payload->result = NULL;
+
+  message_t msg;
+  msg.type = SECTIONS_READ;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+
+  actor_send(&sections->actor, &msg);
+}
+
+void sections_write_async(sections_t* sections, buffer_t* data, actor_t* reply_to) {
+  sections_write_payload_t* payload = get_clear_memory(sizeof(sections_write_payload_t));
+  payload->data = data;
+  payload->reply_to = reply_to;
+  payload->result = -1;
+  payload->section_id = 0;
+  payload->section_index = 0;
+
+  message_t msg;
+  msg.type = SECTIONS_WRITE;
+  msg.payload = payload;
+  msg.payload_destroy = NULL;
+
+  actor_send(&sections->actor, &msg);
+}
+
+void sections_deallocate_async(sections_t* sections, size_t section_id, size_t section_index, actor_t* reply_to) {
+  sections_deallocate_payload_t* payload = get_clear_memory(sizeof(sections_deallocate_payload_t));
+  payload->section_id = section_id;
+  payload->section_index = section_index;
+  payload->reply_to = reply_to;
+  payload->result = -1;
+
+  message_t msg;
+  msg.type = SECTIONS_DEALLOCATE;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+
+  actor_send(&sections->actor, &msg);
 }
 
 /* ---- round_robin (lock-free, only called from sections_dispatch) ---- */
@@ -506,19 +580,20 @@ void round_robin_save(void* ctx) {
 
 /* ---- sections implementation ---- */
 
-sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t max_tuple_size, block_size_e type, timer_actor_t* timer_actor, size_t wait, size_t max_wait) {
+sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t max_tuple_size, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool, size_t wait, size_t max_wait) {
   char* robin_folder = path_join(path, "robin");
   mkdir_p(robin_folder);
   char* robin_path = path_join(robin_folder, ".robin");
   free(robin_folder);
   sections_t* sections = get_clear_memory(sizeof(sections_t));
   sections->timer_actor = timer_actor;
+  sections->pool = pool;
   sections->wait = wait;
   sections->max_wait = max_wait;
   sections->type = type;
   sections->max_tuple_size = max_tuple_size;
   sections->size = size;
-  actor_init(&sections->actor, sections, sections_dispatch);
+  actor_init(&sections->actor, sections, sections_dispatch, pool);
   if (access(robin_path, F_OK) == 0) {
     FILE* robin_file = fopen(robin_path, "rb");
     if (robin_file == NULL || fseek(robin_file, 0, SEEK_END)) {
@@ -597,69 +672,6 @@ void sections_destroy(sections_t* sections) {
   free(sections);
 }
 
-/* Sync wrapper: sends SECTIONS_WRITE message to the sections actor and
-   processes it inline. Returns the result through the output parameters. */
-int sections_write(sections_t* sections, buffer_t* data, size_t* section_id, size_t* section_index) {
-  sections_write_payload_t payload;
-  payload.data = data;
-  payload.reply_to = NULL;
-  payload.result = -1;
-  payload.section_id = 0;
-  payload.section_index = 0;
-
-  message_t msg;
-  msg.type = SECTIONS_WRITE;
-  msg.payload = &payload;
-  msg.payload_destroy = NULL;
-
-  actor_send(&sections->actor, &msg);
-  _sections_run_until_done(sections);
-
-  *section_id = payload.section_id;
-  *section_index = payload.section_index;
-  return payload.result;
-}
-
-/* Sync wrapper: sends SECTIONS_READ message to the sections actor and
-   processes it inline. Returns the read buffer or NULL on failure. */
-buffer_t* sections_read(sections_t* sections, size_t section_id, size_t section_index) {
-  sections_read_payload_t payload;
-  payload.section_id = section_id;
-  payload.section_index = section_index;
-  payload.reply_to = NULL;
-  payload.result = NULL;
-
-  message_t msg;
-  msg.type = SECTIONS_READ;
-  msg.payload = &payload;
-  msg.payload_destroy = NULL;
-
-  actor_send(&sections->actor, &msg);
-  _sections_run_until_done(sections);
-
-  return payload.result;
-}
-
-/* Sync wrapper: sends SECTIONS_DEALLOCATE message to the sections actor and
-   processes it inline. Returns 0 on success, non-zero on failure. */
-int sections_deallocate(sections_t* sections, size_t section_id, size_t section_index) {
-  sections_deallocate_payload_t payload;
-  payload.section_id = section_id;
-  payload.section_index = section_index;
-  payload.reply_to = NULL;
-  payload.result = -1;
-
-  message_t msg;
-  msg.type = SECTIONS_DEALLOCATE;
-  msg.payload = &payload;
-  msg.payload_destroy = NULL;
-
-  actor_send(&sections->actor, &msg);
-  _sections_run_until_done(sections);
-
-  return payload.result;
-}
-
 void sections_full(sections_t* sections, size_t section_id) {
   round_robin_remove(sections->robin, section_id);
   while (sections->robin->size < sections->max_tuple_size) {
@@ -676,4 +688,57 @@ void sections_free(sections_t* sections, size_t section_id) {
   if (round_robin_contains(sections->robin, section_id) == 0) {
     round_robin_add(sections->robin, section_id);
   }
+}
+
+/* ---- Sync API (direct dispatch) ---- */
+
+buffer_t* sections_read(sections_t* sections, size_t section_id, size_t section_index) {
+  sections_read_payload_t payload;
+  payload.section_id = section_id;
+  payload.section_index = section_index;
+  payload.reply_to = NULL;
+  payload.result = NULL;
+
+  message_t msg;
+  msg.type = SECTIONS_READ;
+  msg.payload = &payload;
+  msg.payload_destroy = NULL;
+
+  sections_dispatch(sections, &msg);
+  return payload.result;
+}
+
+int sections_write(sections_t* sections, buffer_t* data, size_t* out_section_id, size_t* out_section_index) {
+  sections_write_payload_t payload;
+  payload.data = data;
+  payload.reply_to = NULL;
+  payload.result = -1;
+  payload.section_id = 0;
+  payload.section_index = 0;
+
+  message_t msg;
+  msg.type = SECTIONS_WRITE;
+  msg.payload = &payload;
+  msg.payload_destroy = NULL;
+
+  sections_dispatch(sections, &msg);
+  if (out_section_id) *out_section_id = payload.section_id;
+  if (out_section_index) *out_section_index = payload.section_index;
+  return payload.result;
+}
+
+int sections_deallocate(sections_t* sections, size_t section_id, size_t section_index) {
+  sections_deallocate_payload_t payload;
+  payload.section_id = section_id;
+  payload.section_index = section_index;
+  payload.reply_to = NULL;
+  payload.result = -1;
+
+  message_t msg;
+  msg.type = SECTIONS_DEALLOCATE;
+  msg.payload = &payload;
+  msg.payload_destroy = NULL;
+
+  sections_dispatch(sections, &msg);
+  return payload.result;
 }

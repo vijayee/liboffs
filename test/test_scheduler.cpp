@@ -51,7 +51,7 @@ TEST(TestScheduler, TestActorScheduling) {
 
   std::atomic<int> counter{0};
   actor_t actor;
-  actor_init(&actor, &counter, test_dispatch);
+  actor_init(&actor, &counter, test_dispatch, NULL);
 
   send_message(&actor, 1);
 
@@ -76,7 +76,7 @@ TEST(TestScheduler, TestActorBatchProcessing) {
 
   std::atomic<int> counter{0};
   actor_t actor;
-  actor_init(&actor, &counter, test_dispatch);
+  actor_init(&actor, &counter, test_dispatch, NULL);
 
   // Send multiple messages
   for (int i = 0; i < 5; i++) {
@@ -102,7 +102,7 @@ TEST(TestScheduler, TestActorRescheduling) {
   // Verify that actor_run processes all messages across multiple batches
   std::atomic<int> counter{0};
   actor_t actor;
-  actor_init(&actor, &counter, test_dispatch);
+  actor_init(&actor, &counter, test_dispatch, NULL);
 
   // Send more messages than ACTOR_BATCH_SIZE
   int total_messages = ACTOR_BATCH_SIZE + 10;
@@ -130,7 +130,7 @@ TEST(TestScheduler, TestActorReschedulingViaPool) {
 
   std::atomic<int> counter{0};
   actor_t actor;
-  actor_init(&actor, &counter, test_dispatch);
+  actor_init(&actor, &counter, test_dispatch, NULL);
 
   // Send more messages than ACTOR_BATCH_SIZE to force rescheduling
   int total_messages = ACTOR_BATCH_SIZE + 10;
@@ -165,7 +165,7 @@ TEST(TestScheduler, TestMultipleActors) {
 
   for (int i = 0; i < NUM_ACTORS; i++) {
     counters[i].store(0);
-    actor_init(&actors[i], &counters[i], test_dispatch);
+    actor_init(&actors[i], &counters[i], test_dispatch, NULL);
   }
 
   scheduler_pool_start(pool);
@@ -207,7 +207,7 @@ TEST(TestScheduler, TestWorkStealing) {
 
   std::atomic<int> counter{0};
   actor_t actor;
-  actor_init(&actor, &counter, test_dispatch);
+  actor_init(&actor, &counter, test_dispatch, NULL);
 
   // Send many messages to create work for stealing
   int total_messages = ACTOR_BATCH_SIZE * 3;
@@ -236,7 +236,7 @@ TEST(TestScheduler, TestInjectFromExternalThread) {
 
   std::atomic<int> counter{0};
   actor_t actor;
-  actor_init(&actor, &counter, test_dispatch);
+  actor_init(&actor, &counter, test_dispatch, NULL);
 
   send_message(&actor, 1);
 

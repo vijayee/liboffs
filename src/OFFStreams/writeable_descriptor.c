@@ -211,7 +211,6 @@ void writeable_descriptor_write(writeable_descriptor_t* desc, tuple_t* tuple) {
   msg.payload_destroy = (void (*)(void*))tuple_destroy;
 
   actor_send(&desc->stream.actor, &msg);
-  scheduler_inject(desc->stream.pool, &desc->stream.actor);
 }
 
 void writeable_descriptor_close(writeable_descriptor_t* desc) {
@@ -221,5 +220,4 @@ void writeable_descriptor_close(writeable_descriptor_t* desc) {
   msg.payload_destroy = NULL;
 
   actor_send(&desc->stream.actor, &msg);
-  scheduler_inject(desc->stream.pool, &desc->stream.actor);
 }

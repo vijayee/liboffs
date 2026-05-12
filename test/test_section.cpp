@@ -147,7 +147,7 @@ TEST_F(TestSection, TestSectionFunction) {
 /* Completion actor state: stores the last completion result and a done flag */
 typedef struct {
   ATOMIC(uint8_t) done;
-  section_write_result_t write_result;
+  section_write_result_payload_t write_result;
   buffer_t* read_buffer;
   int deallocate_result;
 } section_completion_state_t;
@@ -155,24 +155,24 @@ typedef struct {
 static void section_completion_dispatch(void* state, message_t* msg) {
   section_completion_state_t* cs = (section_completion_state_t*)state;
   switch (msg->type) {
-    case SECTION_WRITE_COMPLETE: {
-      section_write_result_t* r = (section_write_result_t*)msg->payload;
+    case SECTION_WRITE_RESULT: {
+      section_write_result_payload_t* r = (section_write_result_payload_t*)msg->payload;
       cs->write_result = *r;
-      /* payload_destroy (free) will free r after dispatch returns */
+      /* payload_destroy will free r after dispatch returns */
       break;
     }
-    case SECTION_READ_COMPLETE: {
-      section_read_result_t* r = (section_read_result_t*)msg->payload;
+    case SECTION_READ_RESULT: {
+      section_read_result_payload_t* r = (section_read_result_payload_t*)msg->payload;
       cs->read_buffer = r->data;
       /* Transfer buffer ownership to cs; payload_destroy (section_read_result_destroy)
          will free the result struct but skip the buffer since we nulled it. */
       r->data = NULL;
       break;
     }
-    case SECTION_DEALLOCATE_COMPLETE: {
-      section_deallocate_result_t* r = (section_deallocate_result_t*)msg->payload;
+    case SECTION_DEALLOCATE_RESULT: {
+      section_deallocate_result_payload_t* r = (section_deallocate_result_payload_t*)msg->payload;
       cs->deallocate_result = r->result;
-      /* payload_destroy (free) will free r after dispatch returns */
+      /* payload_destroy will free r after dispatch returns */
       break;
     }
     default:
@@ -190,7 +190,7 @@ TEST_F(TestSection, TestSectionAsyncWrite) {
   section_completion_state_t completion_state;
   memset(&completion_state, 0, sizeof(completion_state));
   actor_t completion_actor;
-  actor_init(&completion_actor, &completion_state, section_completion_dispatch);
+  actor_init(&completion_actor, &completion_state, section_completion_dispatch, NULL);
 
   /* Write a block asynchronously */
   block_t* block = block_create_random_block_by_type(mini);
@@ -432,7 +432,7 @@ public:
       blocks[i] = block_create_random_block_by_type(block_type);
       entries[i] = index_entry_create(blocks[i]->hash);
     }
-    sections = sections_create(path, size, cache_size, max_tuple_size, block_type, timer_actor_inst, wait, max_wait);
+    sections = sections_create(path, size, cache_size, max_tuple_size, block_type, timer_actor_inst, NULL, wait, max_wait);
   }
   void TearDown() override {
     timer_actor_destroy(timer_actor_inst);

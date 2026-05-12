@@ -129,7 +129,7 @@ static void* _scheduler_worker_loop(void* arg) {
         continue;
       }
       bool has_more = actor_run(actor, ACTOR_BATCH_SIZE);
-      actor_release_running(actor);
+      atomic_fetch_and(&actor->flags, ~ACTOR_FLAG_RUNNING);
       self->current = NULL;
       if (has_more) {
         deque_push(&self->local_queue, (void*)actor);

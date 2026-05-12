@@ -55,52 +55,56 @@ static void _render_origin_data(readable_off_stream_t* stream, buffer_t* data) {
   }
 }
 
-static void _check_cache_and_decode(readable_off_stream_t* stream, tuple_t* tuple) {
-  buffer_t* cached = tuple_cache_apply(stream->tc, tuple);
-  if (cached != NULL) {
-    _render_origin_data(stream, cached);
-    DESTROY(cached, buffer);
+static void _start_tuple_cache_lookup(readable_off_stream_t* stream, tuple_t* tuple);
+
+static void _finish_decode_and_render(readable_off_stream_t* stream) {
+  if (stream->xor_accumulator == NULL) {
+    DESTROY(stream->pending_tuple, tuple);
+    stream->pending_tuple = NULL;
     return;
   }
 
-  size_t count = tuple_size(tuple);
-  if (count == 0) {
-    return;
-  }
+  tuple_cache_update(stream->tc, stream->pending_tuple, stream->xor_accumulator);
+  _render_origin_data(stream, stream->xor_accumulator);
+  DESTROY(stream->xor_accumulator, buffer);
+  stream->xor_accumulator = NULL;
+  DESTROY(stream->pending_tuple, tuple);
+  stream->pending_tuple = NULL;
+  stream->blocks_expected = 0;
+  stream->blocks_received = 0;
 
-  buffer_t* origin_data = NULL;
+  /* Clean up any remaining pending fetches (shouldn't happen normally) */
+  pending_block_fetch_t* fetch = stream->pending_fetches;
+  while (fetch != NULL) {
+    pending_block_fetch_t* next = fetch->next;
+    DESTROY(fetch->hash, buffer);
+    free(fetch);
+    fetch = next;
+  }
+  stream->pending_fetches = NULL;
+}
+
+static void _start_block_fetches(readable_off_stream_t* stream) {
+  size_t count = tuple_size(stream->pending_tuple);
+  stream->blocks_expected = count;
+  stream->blocks_received = 0;
+  stream->xor_accumulator = NULL;
+  stream->pending_fetches = NULL;
+
   for (size_t i = 0; i < count; i++) {
-    buffer_t* hash = tuple_get(tuple, i);
-    block_t* block = block_cache_get(stream->bc, hash);
-    if (block == NULL) {
-      if (origin_data != NULL) {
-        DESTROY(origin_data, buffer);
-      }
-      stream_deactivate((stream_t*)stream, ERROR("Block not found in cache"));
-      return;
-    }
-    if (i == 0) {
-      origin_data = buffer_copy(block->data);
-    } else {
-      buffer_t* xored = buffer_xor(origin_data, block->data);
-      DESTROY(origin_data, buffer);
-      origin_data = xored;
-    }
-    block_destroy(block);
+    buffer_t* hash = tuple_get(stream->pending_tuple, i);
+    pending_block_fetch_t* fetch = get_clear_memory(sizeof(pending_block_fetch_t));
+    fetch->hash = (buffer_t*)refcounter_reference((refcounter_t*)hash);
+    fetch->index = i;
+    fetch->next = stream->pending_fetches;
+    stream->pending_fetches = fetch;
+    block_cache_get_async(stream->bc, hash, &stream->stream.actor);
   }
+}
 
-  if (origin_data == NULL) {
-    return;
-  }
-
-  tuple_cache_update(stream->tc, tuple, origin_data);
-
-  _render_origin_data(stream, origin_data);
-  DESTROY(origin_data, buffer);
-
-  if (stream->stream.is_deactivated) {
-    return;
-  }
+static void _start_tuple_cache_lookup(readable_off_stream_t* stream, tuple_t* tuple) {
+  stream->pending_tuple = (tuple_t*)refcounter_reference((refcounter_t*)tuple);
+  tuple_cache_get_async(stream->tc, tuple, &stream->stream.actor);
 }
 
 void readable_off_stream_dispatch(void* state, message_t* msg) {
@@ -113,17 +117,105 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
         msg->payload = NULL;
         break;
       }
-      _check_cache_and_decode(stream, tuple);
-      if (stream->stream.is_deactivated) {
+      /* If we're already fetching blocks for a previous tuple, queue this one.
+         For now, process inline since the stream is push-based. */
+      if (stream->pending_tuple != NULL) {
+        /* Still processing previous tuple — can't start new one yet.
+           This shouldn't happen in normal flow since tuples come sequentially. */
         DESTROY(tuple, tuple);
         msg->payload = NULL;
         break;
       }
+      _start_tuple_cache_lookup(stream, tuple);
       DESTROY(tuple, tuple);
       msg->payload = NULL;
       break;
     }
+    case TUPLE_CACHE_GET_RESULT: {
+      tuple_cache_get_result_payload_t* result = (tuple_cache_get_result_payload_t*)msg->payload;
+      if (stream->stream.is_deactivated) {
+        if (result->value != NULL) {
+          DESTROY(result->value, buffer);
+        }
+        break;
+      }
+      if (result->value != NULL) {
+        /* Cache hit — render directly */
+        _render_origin_data(stream, result->value);
+        DESTROY(result->value, buffer);
+        DESTROY(stream->pending_tuple, tuple);
+        stream->pending_tuple = NULL;
+      } else {
+        /* Cache miss — start fetching blocks */
+        _start_block_fetches(stream);
+      }
+      break;
+    }
+    case CACHE_GET_RESULT: {
+      cache_get_result_payload_t* result = (cache_get_result_payload_t*)msg->payload;
+      if (stream->stream.is_deactivated) {
+        if (result->block != NULL) {
+          DESTROY(result->block, block);
+        }
+        if (result->hash != NULL) {
+          DESTROY(result->hash, buffer);
+        }
+        break;
+      }
+
+      if (result->block == NULL) {
+        /* Block not found — deactivate with error */
+        if (stream->xor_accumulator != NULL) {
+          DESTROY(stream->xor_accumulator, buffer);
+          stream->xor_accumulator = NULL;
+        }
+        if (result->hash != NULL) {
+          DESTROY(result->hash, buffer);
+        }
+        DESTROY(stream->pending_tuple, tuple);
+        stream->pending_tuple = NULL;
+        stream_deactivate((stream_t*)stream, ERROR("Block not found in cache"));
+        break;
+      }
+
+      /* Accumulate block into XOR result */
+      if (stream->xor_accumulator == NULL) {
+        stream->xor_accumulator = buffer_copy(result->block->data);
+      } else {
+        buffer_t* xored = buffer_xor(stream->xor_accumulator, result->block->data);
+        DESTROY(stream->xor_accumulator, buffer);
+        stream->xor_accumulator = xored;
+      }
+
+      DESTROY(result->block, block);
+      if (result->hash != NULL) {
+        DESTROY(result->hash, buffer);
+      }
+
+      stream->blocks_received++;
+
+      if (stream->blocks_received >= stream->blocks_expected) {
+        _finish_decode_and_render(stream);
+      }
+      break;
+    }
     case CLOSE_STREAM: {
+      if (stream->pending_tuple != NULL) {
+        DESTROY(stream->pending_tuple, tuple);
+        stream->pending_tuple = NULL;
+      }
+      if (stream->xor_accumulator != NULL) {
+        DESTROY(stream->xor_accumulator, buffer);
+        stream->xor_accumulator = NULL;
+      }
+      pending_block_fetch_t* fetch = stream->pending_fetches;
+      while (fetch != NULL) {
+        pending_block_fetch_t* next = fetch->next;
+        DESTROY(fetch->hash, buffer);
+        free(fetch);
+        fetch = next;
+      }
+      stream->pending_fetches = NULL;
       stream_notify((stream_t*)stream, close_event, NULL, NULL);
       stream->stream.is_deactivated = 1;
       break;
@@ -177,5 +269,4 @@ void readable_off_stream_write(readable_off_stream_t* stream, tuple_t* tuple) {
   msg.payload_destroy = (void (*)(void*))tuple_destroy;
 
   actor_send(&stream->stream.actor, &msg);
-  scheduler_inject(stream->stream.pool, &stream->stream.actor);
 }

@@ -67,6 +67,27 @@ typedef struct {
   int result;
 } section_deallocate_result_t;
 
+/* Async result payload for SECTION_READ_RESULT */
+typedef struct {
+  size_t index;
+  buffer_t* data;
+  actor_t* reply_to;
+} section_read_result_payload_t;
+
+/* Async result payload for SECTION_WRITE_RESULT */
+typedef struct {
+  int result;
+  size_t index;
+  uint8_t full;
+  actor_t* reply_to;
+} section_write_result_payload_t;
+
+/* Async result payload for SECTION_DEALLOCATE_RESULT */
+typedef struct {
+  int result;
+  actor_t* reply_to;
+} section_deallocate_result_payload_t;
+
 typedef struct section_t {
   refcounter_t refcounter;
   actor_t actor;
@@ -86,10 +107,18 @@ typedef struct section_t {
 
 section_t* section_create(char* path, char* meta_path, size_t size, size_t id, block_size_e type);
 void section_destroy(section_t* section);
-int section_write(section_t* section, buffer_t* data, size_t* index, uint8_t* full);
-buffer_t* section_read(section_t* section, size_t index);
-int section_deallocate(section_t* section, size_t index);
 uint8_t section_full(section_t* section);
 void section_save_meta(section_t* section);
 void section_dispatch(void* state, message_t* msg);
+
+/* Async API — send message and inject actor into scheduler. */
+void section_read_async(section_t* section, size_t index, actor_t* reply_to);
+void section_write_async(section_t* section, buffer_t* data, actor_t* reply_to);
+void section_deallocate_async(section_t* section, size_t index, actor_t* reply_to);
+
+/* Sync API — direct dispatch. Temporary, will be removed as callers convert. */
+buffer_t* section_read(section_t* section, size_t index);
+int section_write(section_t* section, buffer_t* data, size_t* out_index, uint8_t* out_full);
+int section_deallocate(section_t* section, size_t index);
+
 #endif //OFFS_SECTION_H

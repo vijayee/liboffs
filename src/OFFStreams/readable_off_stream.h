@@ -11,6 +11,13 @@
 #include "ori.h"
 #include "../BlockCache/block_cache.h"
 
+/* Tracks an in-progress block fetch for async decode */
+typedef struct pending_block_fetch_t {
+  buffer_t* hash;
+  size_t index;
+  struct pending_block_fetch_t* next;
+} pending_block_fetch_t;
+
 typedef struct {
   stream_t stream;
   block_cache_t* bc;
@@ -20,6 +27,12 @@ typedef struct {
   size_t sent_bytes;
   size_t offset_remainder;
   uint8_t offset_applied;
+  /* Async decode state */
+  tuple_t* pending_tuple;
+  buffer_t* xor_accumulator;
+  size_t blocks_expected;
+  size_t blocks_received;
+  pending_block_fetch_t* pending_fetches;
 } readable_off_stream_t;
 
 readable_off_stream_t* readable_off_stream_create(

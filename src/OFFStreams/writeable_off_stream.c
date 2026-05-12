@@ -128,7 +128,6 @@ static void _on_recipe_block(void* ctx, void* data) {
   msg.payload = block;
   msg.payload_destroy = (void (*)(void*))block_destroy;
   actor_send(&stream->stream.actor, &msg);
-  scheduler_inject(stream->stream.pool, &stream->stream.actor);
 }
 
 static void _on_recipe_close(void* ctx, void* data) {
@@ -139,7 +138,6 @@ static void _on_recipe_close(void* ctx, void* data) {
   msg.payload = NULL;
   msg.payload_destroy = NULL;
   actor_send(&stream->stream.actor, &msg);
-  scheduler_inject(stream->stream.pool, &stream->stream.actor);
 }
 
 static void _register_recipe(writeable_off_stream_t* stream) {
@@ -392,7 +390,6 @@ void writeable_off_stream_write(writeable_off_stream_t* stream, buffer_t* data) 
   msg.payload_destroy = (void (*)(void*))buffer_destroy;
 
   actor_send(&stream->stream.actor, &msg);
-  scheduler_inject(stream->stream.pool, &stream->stream.actor);
 }
 
 void writeable_off_stream_finalize(writeable_off_stream_t* stream) {
@@ -402,5 +399,4 @@ void writeable_off_stream_finalize(writeable_off_stream_t* stream) {
   msg.payload_destroy = NULL;
 
   actor_send(&stream->stream.actor, &msg);
-  scheduler_inject(stream->stream.pool, &stream->stream.actor);
 }

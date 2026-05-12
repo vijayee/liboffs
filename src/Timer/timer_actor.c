@@ -192,7 +192,7 @@ static void* _timer_actor_thread(void* arg) {
 
 timer_actor_t* timer_actor_create(void) {
   timer_actor_t* timer_actor = get_clear_memory(sizeof(timer_actor_t));
-  actor_init(&timer_actor->actor, timer_actor, _timer_actor_dispatch);
+  actor_init(&timer_actor->actor, timer_actor, _timer_actor_dispatch, NULL);
   timer_actor->loop = pd_loop_create(NULL);
   if (timer_actor->loop == NULL) {
     free(timer_actor);

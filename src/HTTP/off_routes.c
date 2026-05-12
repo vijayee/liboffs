@@ -111,7 +111,7 @@ off_routes_context_t* off_routes_context_create(scheduler_pool_t* pool,
     ctx->pool = pool;
     ctx->bc = bc;
     ctx->ofd_cache = ofd_cache;
-    ctx->tc = tuple_cache_create(100);
+    ctx->tc = tuple_cache_create(100, pool);
     return ctx;
 }
 
