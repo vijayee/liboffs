@@ -167,7 +167,7 @@ static void _resolver_continue_path(ofd_resolver_t* resolver) {
 
             /* Need to fetch from block cache asynchronously */
             buffer_t* hash_ref = (buffer_t*)refcounter_reference((refcounter_t*)entry->dir_hash);
-            block_cache_get_async(resolver->cache->bc, hash_ref, &resolver->actor);
+            block_cache_get(resolver->cache->bc, hash_ref, &resolver->actor);
             DESTROY(hash_ref, buffer);
             resolver->resolving_root = 0;
             return;
@@ -199,7 +199,7 @@ static void _resolver_dispatch(void* state, message_t* msg) {
 
             /* Fetch root OFD from block cache */
             buffer_t* hash_ref = (buffer_t*)refcounter_reference((refcounter_t*)resolver->root_hash);
-            block_cache_get_async(resolver->cache->bc, hash_ref, &resolver->actor);
+            block_cache_get(resolver->cache->bc, hash_ref, &resolver->actor);
             DESTROY(hash_ref, buffer);
             resolver->resolving_root = 1;
             return;
@@ -249,7 +249,7 @@ static void _resolver_dispatch(void* state, message_t* msg) {
     }
 }
 
-void ofd_cache_resolve_async(ofd_cache_t* cache, buffer_t* root_hash, const char* path, actor_t* reply_to) {
+void ofd_cache_resolve(ofd_cache_t* cache, buffer_t* root_hash, const char* path, actor_t* reply_to) {
     if (!cache || !root_hash || !path) {
         if (reply_to) {
             ofd_resolve_result_t* result = get_clear_memory(sizeof(ofd_resolve_result_t));

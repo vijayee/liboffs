@@ -385,7 +385,7 @@ uint8_t section_full(section_t* section) {
    after calling these functions. Results arrive as
    SECTION_READ_RESULT / SECTION_WRITE_RESULT / SECTION_DEALLOCATE_RESULT
    messages on the reply_to actor. */
-void section_read_async(section_t* section, size_t index, actor_t* reply_to) {
+void section_read(section_t* section, size_t index, actor_t* reply_to) {
   section_read_payload_t* payload = get_clear_memory(sizeof(section_read_payload_t));
   payload->index = index;
   payload->reply_to = reply_to;
@@ -399,7 +399,7 @@ void section_read_async(section_t* section, size_t index, actor_t* reply_to) {
   actor_send(&section->actor, &msg);
 }
 
-void section_write_async(section_t* section, buffer_t* data, actor_t* reply_to) {
+void section_write(section_t* section, buffer_t* data, actor_t* reply_to) {
   section_write_payload_t* payload = get_clear_memory(sizeof(section_write_payload_t));
   payload->data = data;
   payload->reply_to = reply_to;
@@ -415,7 +415,7 @@ void section_write_async(section_t* section, buffer_t* data, actor_t* reply_to) 
   actor_send(&section->actor, &msg);
 }
 
-void section_deallocate_async(section_t* section, size_t index, actor_t* reply_to) {
+void section_deallocate(section_t* section, size_t index, actor_t* reply_to) {
   section_deallocate_payload_t* payload = get_clear_memory(sizeof(section_deallocate_payload_t));
   payload->index = index;
   payload->reply_to = reply_to;

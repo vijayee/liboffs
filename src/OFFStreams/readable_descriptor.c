@@ -160,7 +160,7 @@ static int _process_descriptor(readable_descriptor_t* desc, buffer_t* block_data
 
 /* Request a descriptor block from block_cache. Result arrives as CACHE_GET_RESULT. */
 static void _fetch_descriptor_block(readable_descriptor_t* desc, buffer_t* hash) {
-  block_cache_get_async(desc->bc, hash, &desc->stream.actor);
+  block_cache_get(desc->bc, hash, &desc->stream.actor);
 }
 
 void readable_descriptor_dispatch(void* state, message_t* msg) {

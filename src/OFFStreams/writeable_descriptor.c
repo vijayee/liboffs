@@ -89,7 +89,7 @@ static void _build_descriptor_blocks(writeable_descriptor_t* desc) {
       return;
     }
 
-    block_cache_put_async(desc->bc, block, NULL);
+    block_cache_put(desc->bc, block, NULL);
     if (prior_hash != NULL) {
       DESTROY(prior_hash, buffer);
     }

@@ -64,7 +64,7 @@ static void _finish_decode_and_render(readable_off_stream_t* stream) {
     return;
   }
 
-  tuple_cache_put_async(stream->tc, stream->pending_tuple, stream->xor_accumulator);
+  tuple_cache_put(stream->tc, stream->pending_tuple, stream->xor_accumulator);
   _render_origin_data(stream, stream->xor_accumulator);
   DESTROY(stream->xor_accumulator, buffer);
   stream->xor_accumulator = NULL;
@@ -98,13 +98,13 @@ static void _start_block_fetches(readable_off_stream_t* stream) {
     fetch->index = i;
     fetch->next = stream->pending_fetches;
     stream->pending_fetches = fetch;
-    block_cache_get_async(stream->bc, hash, &stream->stream.actor);
+    block_cache_get(stream->bc, hash, &stream->stream.actor);
   }
 }
 
 static void _start_tuple_cache_lookup(readable_off_stream_t* stream, tuple_t* tuple) {
   stream->pending_tuple = (tuple_t*)refcounter_reference((refcounter_t*)tuple);
-  tuple_cache_get_async(stream->tc, tuple, &stream->stream.actor);
+  tuple_cache_get(stream->tc, tuple, &stream->stream.actor);
 }
 
 void readable_off_stream_dispatch(void* state, message_t* msg) {

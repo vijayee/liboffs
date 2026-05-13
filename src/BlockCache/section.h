@@ -67,14 +67,14 @@ typedef struct {
   int result;
 } section_deallocate_result_t;
 
-/* Async result payload for SECTION_READ_RESULT */
+/* Result payload for SECTION_READ_RESULT */
 typedef struct {
   size_t index;
   buffer_t* data;
   actor_t* reply_to;
 } section_read_result_payload_t;
 
-/* Async result payload for SECTION_WRITE_RESULT */
+/* Result payload for SECTION_WRITE_RESULT */
 typedef struct {
   int result;
   size_t index;
@@ -82,7 +82,7 @@ typedef struct {
   actor_t* reply_to;
 } section_write_result_payload_t;
 
-/* Async result payload for SECTION_DEALLOCATE_RESULT */
+/* Result payload for SECTION_DEALLOCATE_RESULT */
 typedef struct {
   int result;
   actor_t* reply_to;
@@ -112,9 +112,9 @@ void section_save_meta(section_t* section);
 void section_dispatch(void* state, message_t* msg);
 
 /* Async API — send message and inject actor into scheduler. */
-void section_read_async(section_t* section, size_t index, actor_t* reply_to);
-void section_write_async(section_t* section, buffer_t* data, actor_t* reply_to);
-void section_deallocate_async(section_t* section, size_t index, actor_t* reply_to);
+void section_read(section_t* section, size_t index, actor_t* reply_to);
+void section_write(section_t* section, buffer_t* data, actor_t* reply_to);
+void section_deallocate(section_t* section, size_t index, actor_t* reply_to);
 
 
 #endif //OFFS_SECTION_H

@@ -53,10 +53,10 @@ void tuple_cache_destroy(tuple_cache_t* tc);
 void tuple_cache_dispatch(void* state, message_t* msg);
 
 /* Async API — send message and inject actor into scheduler */
-void tuple_cache_get_async(tuple_cache_t* tc, tuple_t* key, actor_t* reply_to);
-void tuple_cache_put_async(tuple_cache_t* tc, tuple_t* key, buffer_t* value);
+void tuple_cache_get(tuple_cache_t* tc, tuple_t* key, actor_t* reply_to);
+void tuple_cache_put(tuple_cache_t* tc, tuple_t* key, buffer_t* value);
 
-/* Async result payload for TUPLE_CACHE_GET_RESULT */
+/* Result payload for TUPLE_CACHE_GET_RESULT */
 typedef struct {
   tuple_t* key;
   buffer_t* value;

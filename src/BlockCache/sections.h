@@ -110,7 +110,7 @@ typedef struct {
   int result;
 } sections_deallocate_result_t;
 
-/* Async result payload for SECTIONS_READ_RESULT */
+/* Result payload for SECTIONS_READ_RESULT */
 typedef struct {
   size_t section_id;
   size_t section_index;
@@ -118,7 +118,7 @@ typedef struct {
   actor_t* reply_to;
 } sections_read_result_payload_t;
 
-/* Async result payload for SECTIONS_WRITE_RESULT */
+/* Result payload for SECTIONS_WRITE_RESULT */
 typedef struct {
   int result;
   size_t section_id;
@@ -126,7 +126,7 @@ typedef struct {
   actor_t* reply_to;
 } sections_write_result_payload_t;
 
-/* Async result payload for SECTIONS_DEALLOCATE_RESULT */
+/* Result payload for SECTIONS_DEALLOCATE_RESULT */
 typedef struct {
   int result;
   actor_t* reply_to;
@@ -154,8 +154,8 @@ void sections_destroy(sections_t* sections);
 void sections_dispatch(void* state, message_t* msg);
 
 /* Async API — send message and inject actor into scheduler */
-void sections_read_async(sections_t* sections, size_t section_id, size_t section_index, actor_t* reply_to);
-void sections_write_async(sections_t* sections, buffer_t* data, actor_t* reply_to);
-void sections_deallocate_async(sections_t* sections, size_t section_id, size_t section_index, actor_t* reply_to);
+void sections_read(sections_t* sections, size_t section_id, size_t section_index, actor_t* reply_to);
+void sections_write(sections_t* sections, buffer_t* data, actor_t* reply_to);
+void sections_deallocate(sections_t* sections, size_t section_id, size_t section_index, actor_t* reply_to);
 
 #endif //OFFS_SECTIONS_H

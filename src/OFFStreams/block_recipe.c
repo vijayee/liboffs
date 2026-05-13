@@ -34,7 +34,7 @@ void new_blocks_recipe_dispatch(void* state, message_t* msg) {
         recipe->recipe.stream.is_deactivated = 1;
         break;
       }
-      block_cache_put_async(recipe->recipe.bc, block, NULL);
+      block_cache_put(recipe->recipe.bc, block, NULL);
       stream_notify((stream_t*)recipe, data_event,
                     CONSUME(block, block_t), (void (*)(void*))block_destroy);
       break;
@@ -119,7 +119,7 @@ static void _start_descriptor_load(recycler_recipe_t* recipe) {
   vec_init(&recipe->front_hashes);
   vec_init(&recipe->back_hashes);
 
-  block_cache_get_async(recipe->recipe.bc, current_ori->descriptor_hash,
+  block_cache_get(recipe->recipe.bc, current_ori->descriptor_hash,
                         &recipe->recipe.stream.actor);
 }
 
@@ -245,7 +245,7 @@ static void _try_fetch_next(recycler_recipe_t* recipe) {
 
   buffer_t* hash = recipe->descriptor.data[recipe->descriptor_index];
   recipe->descriptor_index++;
-  block_cache_get_async(recipe->recipe.bc, hash, &recipe->recipe.stream.actor);
+  block_cache_get(recipe->recipe.bc, hash, &recipe->recipe.stream.actor);
 }
 
 void recycler_recipe_dispatch(void* state, message_t* msg) {
@@ -314,7 +314,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
           /* Fetch next descriptor block */
           buffer_t* hash = recipe->next_descriptor_hash;
           recipe->next_descriptor_hash = NULL;
-          block_cache_get_async(recipe->recipe.bc, hash, &recipe->recipe.stream.actor);
+          block_cache_get(recipe->recipe.bc, hash, &recipe->recipe.stream.actor);
         } else {
           /* All descriptor blocks loaded — finalize */
           _finish_descriptor_load(recipe);

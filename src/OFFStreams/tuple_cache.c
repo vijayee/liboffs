@@ -278,7 +278,7 @@ void tuple_cache_destroy(tuple_cache_t* tc) {
 
 /* ---- Async API ---- */
 
-void tuple_cache_get_async(tuple_cache_t* tc, tuple_t* key, actor_t* reply_to) {
+void tuple_cache_get(tuple_cache_t* tc, tuple_t* key, actor_t* reply_to) {
   tuple_cache_get_payload_t* payload = get_clear_memory(sizeof(tuple_cache_get_payload_t));
   payload->key = key;
   payload->reply_to = reply_to;
@@ -292,7 +292,7 @@ void tuple_cache_get_async(tuple_cache_t* tc, tuple_t* key, actor_t* reply_to) {
   actor_send(&tc->actor, &msg);
 }
 
-void tuple_cache_put_async(tuple_cache_t* tc, tuple_t* key, buffer_t* value) {
+void tuple_cache_put(tuple_cache_t* tc, tuple_t* key, buffer_t* value) {
   tuple_cache_put_payload_t* payload = get_clear_memory(sizeof(tuple_cache_put_payload_t));
   payload->key = (tuple_t*)refcounter_reference((refcounter_t*)key);
   payload->value = (buffer_t*)refcounter_reference((refcounter_t*)value);

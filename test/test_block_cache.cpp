@@ -63,7 +63,7 @@ static int bc_put_sync(block_cache_t* bc, block_t* block, scheduler_pool_t* pool
 
   block_t* ref_block = (block_t*)refcounter_reference((refcounter_t*)block);
   refcounter_yield((refcounter_t*)ref_block);
-  block_cache_put_async(bc, ref_block, &comp);
+  block_cache_put(bc, ref_block, &comp);
 
   if (pool) {
     scheduler_inject(pool, &comp);
@@ -86,7 +86,7 @@ static block_t* bc_get_sync(block_cache_t* bc, buffer_t* hash, scheduler_pool_t*
   actor_t comp;
   actor_init(&comp, &cs, bc_completion_dispatch, pool);
 
-  block_cache_get_async(bc, hash, &comp);
+  block_cache_get(bc, hash, &comp);
 
   if (pool) {
     scheduler_inject(pool, &comp);
@@ -113,7 +113,7 @@ static int bc_remove_sync(block_cache_t* bc, buffer_t* hash, scheduler_pool_t* p
   actor_t comp;
   actor_init(&comp, &cs, bc_completion_dispatch, pool);
 
-  block_cache_remove_async(bc, hash, &comp);
+  block_cache_remove(bc, hash, &comp);
 
   if (pool) {
     scheduler_inject(pool, &comp);

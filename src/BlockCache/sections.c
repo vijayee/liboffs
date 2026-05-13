@@ -370,7 +370,7 @@ static void section_on_dirty(void* context, section_t* section) {
 /* Async API — send message to sections actor and inject into scheduler.
    Results arrive as SECTIONS_READ_RESULT / SECTIONS_WRITE_RESULT /
    SECTIONS_DEALLOCATE_RESULT messages on the reply_to actor. */
-void sections_read_async(sections_t* sections, size_t section_id, size_t section_index, actor_t* reply_to) {
+void sections_read(sections_t* sections, size_t section_id, size_t section_index, actor_t* reply_to) {
   sections_read_payload_t* payload = get_clear_memory(sizeof(sections_read_payload_t));
   payload->section_id = section_id;
   payload->section_index = section_index;
@@ -385,7 +385,7 @@ void sections_read_async(sections_t* sections, size_t section_id, size_t section
   actor_send(&sections->actor, &msg);
 }
 
-void sections_write_async(sections_t* sections, buffer_t* data, actor_t* reply_to) {
+void sections_write(sections_t* sections, buffer_t* data, actor_t* reply_to) {
   sections_write_payload_t* payload = get_clear_memory(sizeof(sections_write_payload_t));
   payload->data = data;
   payload->reply_to = reply_to;
@@ -401,7 +401,7 @@ void sections_write_async(sections_t* sections, buffer_t* data, actor_t* reply_t
   actor_send(&sections->actor, &msg);
 }
 
-void sections_deallocate_async(sections_t* sections, size_t section_id, size_t section_index, actor_t* reply_to) {
+void sections_deallocate(sections_t* sections, size_t section_id, size_t section_index, actor_t* reply_to) {
   sections_deallocate_payload_t* payload = get_clear_memory(sizeof(sections_deallocate_payload_t));
   payload->section_id = section_id;
   payload->section_index = section_index;

@@ -211,7 +211,7 @@ TEST(TupleCacheActor, TestApplyAndUpdate) {
   buffer_t* val = buffer_create_from_pointer_copy(val_data, 2);
 
   /* Put value via async API (fire-and-forget) */
-  tuple_cache_put_async(tc, key, val);
+  tuple_cache_put(tc, key, val);
 
   /* Wait for put to complete */
   while (!tuple_cache_lru_contains(tc->lru, key)) {
@@ -224,7 +224,7 @@ TEST(TupleCacheActor, TestApplyAndUpdate) {
   actor_t comp;
   actor_init(&comp, &cs, tuple_cache_completion_dispatch, pool);
 
-  tuple_cache_get_async(tc, key, &comp);
+  tuple_cache_get(tc, key, &comp);
 
   auto future = std::async(std::launch::async, [&cs]() {
     while (!ATOMIC_LOAD(&cs.done)) { usleep(1000); }

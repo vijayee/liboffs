@@ -32,7 +32,7 @@ typedef struct {
     uint64_t ttl_ms;
 } ofd_cache_t;
 
-/* Result payload sent back from ofd_cache_resolve_async */
+/* Result payload sent back from ofd_cache_resolve */
 typedef struct {
     ori_t* ori;       /* NULL if resolution failed */
     buffer_t* hash;   /* root hash that was resolved (referenced for caller) */
@@ -47,7 +47,7 @@ void ofd_cache_put(ofd_cache_t* cache, buffer_t* hash, ofd_t* ofd);
 
 /* Async resolve — creates a transient resolver actor that sends OFD_CACHE_RESOLVE_RESULT
    to reply_to when complete. The resolver self-destructs after sending the result. */
-void ofd_cache_resolve_async(ofd_cache_t* cache, buffer_t* root_hash, const char* path, actor_t* reply_to);
+void ofd_cache_resolve(ofd_cache_t* cache, buffer_t* root_hash, const char* path, actor_t* reply_to);
 
 #ifdef __cplusplus
 }

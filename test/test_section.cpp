@@ -62,7 +62,7 @@ static int section_write_sync(section_t* section, buffer_t* data, size_t* out_in
   actor_t comp;
   actor_init(&comp, &cs, section_completion_dispatch, NULL);
 
-  section_write_async(section, data, &comp);
+  section_write(section, data, &comp);
 
   while (!ATOMIC_LOAD(&cs.done)) {
     actor_run(&section->actor, ACTOR_BATCH_SIZE);
@@ -82,7 +82,7 @@ static buffer_t* section_read_sync(section_t* section, size_t index) {
   actor_t comp;
   actor_init(&comp, &cs, section_completion_dispatch, NULL);
 
-  section_read_async(section, index, &comp);
+  section_read(section, index, &comp);
 
   while (!ATOMIC_LOAD(&cs.done)) {
     actor_run(&section->actor, ACTOR_BATCH_SIZE);
@@ -100,7 +100,7 @@ static int section_deallocate_sync(section_t* section, size_t index) {
   actor_t comp;
   actor_init(&comp, &cs, section_completion_dispatch, NULL);
 
-  section_deallocate_async(section, index, &comp);
+  section_deallocate(section, index, &comp);
 
   while (!ATOMIC_LOAD(&cs.done)) {
     actor_run(&section->actor, ACTOR_BATCH_SIZE);
@@ -156,7 +156,7 @@ static int sections_write_sync(sections_t* sections, buffer_t* data, size_t* out
   actor_t comp;
   actor_init(&comp, &cs, sections_completion_dispatch, NULL);
 
-  sections_write_async(sections, data, &comp);
+  sections_write(sections, data, &comp);
 
   while (!ATOMIC_LOAD(&cs.done)) {
     actor_run(&sections->actor, ACTOR_BATCH_SIZE);
@@ -176,7 +176,7 @@ static buffer_t* sections_read_sync(sections_t* sections, size_t section_id, siz
   actor_t comp;
   actor_init(&comp, &cs, sections_completion_dispatch, NULL);
 
-  sections_read_async(sections, section_id, section_index, &comp);
+  sections_read(sections, section_id, section_index, &comp);
 
   while (!ATOMIC_LOAD(&cs.done)) {
     actor_run(&sections->actor, ACTOR_BATCH_SIZE);
@@ -195,7 +195,7 @@ static int sections_deallocate_sync(sections_t* sections, size_t section_id, siz
   actor_t comp;
   actor_init(&comp, &cs, sections_completion_dispatch, NULL);
 
-  sections_deallocate_async(sections, section_id, section_index, &comp);
+  sections_deallocate(sections, section_id, section_index, &comp);
 
   while (!ATOMIC_LOAD(&cs.done)) {
     actor_run(&sections->actor, ACTOR_BATCH_SIZE);

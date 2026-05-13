@@ -322,7 +322,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
           if (p->reply_to != NULL) {
             /* Async: need to read from sections — track pending request */
             _block_cache_add_pending_get(block_cache, p->hash, entry, p->reply_to);
-            sections_read_async(block_cache->sections, entry->section_id,
+            sections_read(block_cache->sections, entry->section_id,
                                  entry->section_index, &block_cache->actor);
           } else {
             /* Read from sections via direct dispatch */
@@ -533,7 +533,7 @@ size_t block_cache_count(block_cache_t* block_cache) {
 
 /* ---- Async API ---- */
 
-void block_cache_get_async(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to) {
+void block_cache_get(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to) {
   cache_get_payload_t* payload = get_clear_memory(sizeof(cache_get_payload_t));
   payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)hash);
   payload->reply_to = reply_to;
@@ -547,7 +547,7 @@ void block_cache_get_async(block_cache_t* block_cache, buffer_t* hash, actor_t* 
   actor_send(&block_cache->actor, &msg);
 }
 
-void block_cache_put_async(block_cache_t* block_cache, block_t* block, actor_t* reply_to) {
+void block_cache_put(block_cache_t* block_cache, block_t* block, actor_t* reply_to) {
   cache_put_payload_t* payload = get_clear_memory(sizeof(cache_put_payload_t));
   payload->block = (block_t*)refcounter_reference((refcounter_t*)block);
   payload->reply_to = reply_to;
@@ -561,7 +561,7 @@ void block_cache_put_async(block_cache_t* block_cache, block_t* block, actor_t* 
   actor_send(&block_cache->actor, &msg);
 }
 
-void block_cache_remove_async(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to) {
+void block_cache_remove(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to) {
   cache_remove_payload_t* payload = get_clear_memory(sizeof(cache_remove_payload_t));
   payload->hash = hash;
   payload->reply_to = reply_to;

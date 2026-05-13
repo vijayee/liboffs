@@ -305,7 +305,7 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
         if (request->query_string && strstr(request->query_string, "ofd=raw") != NULL) {
             state->phase = OFF_GET_FETCH_RAW_OFD;
             buffer_t* hash_ref = (buffer_t*)refcounter_reference((refcounter_t*)url->file_hash);
-            block_cache_get_async(ctx->bc, hash_ref, &state->actor);
+            block_cache_get(ctx->bc, hash_ref, &state->actor);
             DESTROY(hash_ref, buffer);
             return;
         }
@@ -317,14 +317,14 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
         if (name_len > 4 && strcmp(url->file_name + name_len - 4, ".ofd") == 0) {
             /* Try index.html first */
             state->phase = OFF_GET_RESOLVE_INDEX;
-            ofd_cache_resolve_async(ctx->ofd_cache, url->file_hash, "index.html", &state->actor);
+            ofd_cache_resolve(ctx->ofd_cache, url->file_hash, "index.html", &state->actor);
             return;
         }
 
         /* Resolve the path within the OFD */
         state->phase = OFF_GET_RESOLVE_DIR;
         state->resolve_path = strdup(resolve_path);
-        ofd_cache_resolve_async(ctx->ofd_cache, url->file_hash, resolve_path, &state->actor);
+        ofd_cache_resolve(ctx->ofd_cache, url->file_hash, resolve_path, &state->actor);
         return;
     }
 
@@ -423,7 +423,7 @@ static void _off_get_dispatch(void* state, message_t* msg) {
 
                 ctx->phase = OFF_GET_RESOLVE_DIR;
                 ctx->resolve_path = strdup(ctx->url->file_name);
-                ofd_cache_resolve_async(ctx->ctx->ofd_cache, ctx->url->file_hash,
+                ofd_cache_resolve(ctx->ctx->ofd_cache, ctx->url->file_hash,
                                         ctx->resolve_path, &ctx->actor);
                 return;
             }
@@ -776,7 +776,7 @@ static void _off_delete_handler(http_request_t* request, http_response_t* respon
         return;
     }
 
-    block_cache_remove_async(ctx->bc, url->file_hash, NULL);
+    block_cache_remove(ctx->bc, url->file_hash, NULL);
     http_response_set_status(response, 200);
     http_response_end(response);
     off_url_destroy(url);
