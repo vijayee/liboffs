@@ -234,6 +234,7 @@ TEST(TupleCacheActor, TestApplyAndUpdate) {
   ASSERT_NE(cs.value, nullptr);
   EXPECT_EQ(memcmp(cs.value->data, val_data, 2), 0);
   DESTROY(cs.value, buffer);
+  DESTROY(cs.key, tuple);
 
   tuple_cache_destroy(tc);
   actor_destroy(&comp);

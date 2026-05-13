@@ -475,11 +475,11 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
     msg.payload = NULL;
     msg.payload_destroy = NULL;
     actor_send(&connection->actor, &msg);
-    /* Stop the watcher on the I/O thread (safe here) and mark it NULL
-     * so the dispatch won't try to stop it again via server actor. */
+    /* NULL the watcher pointer BEFORE destroying to prevent double-free
+     * with http_connection_destroy on the worker thread. */
+    connection->watcher = NULL;
     pd_watcher_stop(watcher);
     pd_watcher_destroy(watcher);
-    connection->watcher = NULL;
     return;
   }
 
@@ -581,8 +581,9 @@ void http_connection_destroy(http_connection_t* connection) {
     }
     actor_destroy(&connection->actor);
     if (connection->watcher != NULL) {
-      pd_watcher_stop(connection->watcher);
-      pd_watcher_destroy(connection->watcher);
+      /* Use _connection_stop_watcher to safely stop/destroy the watcher
+       * on the I/O thread, avoiding a race with _connection_read_callback. */
+      _connection_stop_watcher(connection);
     }
     if (connection->fd >= 0) {
       close(connection->fd);
