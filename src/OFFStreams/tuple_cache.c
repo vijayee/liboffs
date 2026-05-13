@@ -215,7 +215,7 @@ void tuple_cache_dispatch(void* state, message_t* msg) {
       payload->result = tuple_cache_lru_get(tc->lru, payload->key);
       if (payload->reply_to != NULL) {
         tuple_cache_get_result_payload_t* result = get_clear_memory(sizeof(tuple_cache_get_result_payload_t));
-        result->key = payload->key;
+        result->key = (tuple_t*)refcounter_reference((refcounter_t*)payload->key);
         result->value = payload->result;
         result->reply_to = NULL;
         message_t reply;

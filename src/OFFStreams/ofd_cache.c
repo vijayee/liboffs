@@ -94,6 +94,12 @@ typedef struct {
 } ofd_resolver_t;
 
 static void _resolver_send_result(ofd_resolver_t* resolver, ori_t* ori) {
+    if (!resolver->reply_to) {
+        /* No reply target — destroy the referenced ori if any */
+        if (ori) DESTROY(ori, ori);
+        return;
+    }
+
     ofd_resolve_result_t* result = get_clear_memory(sizeof(ofd_resolve_result_t));
     result->ori = ori ? (ori_t*)refcounter_reference((refcounter_t*)ori) : NULL;
     result->hash = (buffer_t*)refcounter_reference((refcounter_t*)resolver->root_hash);
@@ -104,9 +110,7 @@ static void _resolver_send_result(ofd_resolver_t* resolver, ori_t* ori) {
     msg.payload = result;
     msg.payload_destroy = free;
 
-    if (resolver->reply_to) {
-        actor_send(resolver->reply_to, &msg);
-    }
+    actor_send(resolver->reply_to, &msg);
 }
 
 static void _resolver_cleanup(ofd_resolver_t* resolver) {
@@ -222,16 +226,18 @@ static void _resolver_dispatch(void* state, message_t* msg) {
 
             ofd_t* ofd = ofd_decode(block->data);
             block_destroy(block);
-            DESTROY(hash, buffer);
 
             if (!ofd) {
+                DESTROY(hash, buffer);
                 _resolver_send_result(resolver, NULL);
                 _resolver_cleanup(resolver);
                 return;
             }
 
-            /* Cache the decoded OFD */
-            ofd_cache_put(resolver->cache, resolver->resolving_root ? resolver->root_hash : ofd->hash, ofd);
+            /* Cache the decoded OFD. For non-root OFDs, ofd_decode doesn't set
+               ofd->hash, so we use the block hash as the cache key. */
+            ofd_cache_put(resolver->cache, resolver->resolving_root ? resolver->root_hash : hash, ofd);
+            DESTROY(hash, buffer);
 
             if (resolver->resolving_root) {
                 /* We just fetched the root OFD */
