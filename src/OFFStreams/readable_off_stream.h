@@ -18,6 +18,12 @@ typedef struct pending_block_fetch_t {
   struct pending_block_fetch_t* next;
 } pending_block_fetch_t;
 
+/* Queued tuple waiting to be processed */
+typedef struct pending_tuple_t {
+  tuple_t* tuple;
+  struct pending_tuple_t* next;
+} pending_tuple_t;
+
 typedef struct {
   stream_t stream;
   block_cache_t* bc;
@@ -33,6 +39,8 @@ typedef struct {
   size_t blocks_expected;
   size_t blocks_received;
   pending_block_fetch_t* pending_fetches;
+  /* Queue of tuples waiting to be processed */
+  pending_tuple_t* tuple_queue;
 } readable_off_stream_t;
 
 readable_off_stream_t* readable_off_stream_create(

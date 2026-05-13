@@ -143,12 +143,8 @@ static void _pipeline_on_tuple(void* ctx, void* data) {
 static void _pipeline_on_desc_close(void* ctx, void* unused) {
     (void)unused;
     get_pipeline_t* pipeline = (get_pipeline_t*)ctx;
-    readable_off_stream_t* rs = pipeline->rs;
     readable_descriptor_t* desc = pipeline->desc;
     int is_zero = refcounter_dereference_is_zero((refcounter_t*)pipeline);
-    if (rs != NULL) {
-        stream_close((stream_t*)rs);
-    }
     stream_deferred_deref((stream_t*)desc);
     if (is_zero) {
         DESTROY(pipeline->ori, ori);

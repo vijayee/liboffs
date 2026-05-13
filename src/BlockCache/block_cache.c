@@ -265,6 +265,9 @@ void block_cache_dispatch(void* state, message_t* msg) {
         sections_dispatch(block_cache->sections, &sections_msg);
         int result = write_payload.result;
         if (result) {
+          log_error("CACHE_PUT: sections_write FAILED result=%d hash=%02x%02x%02x%02x...",
+                    result, p->block->hash->data[0], p->block->hash->data[1],
+                    p->block->hash->data[2], p->block->hash->data[3]);
           index_entry_destroy(entry);
           if (is_async) block_destroy(p->block);
           p->result = result;
@@ -283,6 +286,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
           p->result = 0;
         }
       } else {
+        /* Block already exists */
         /* Block already exists — release the async reference if taken */
         if (is_async) block_destroy(p->block);
         p->result = 0;

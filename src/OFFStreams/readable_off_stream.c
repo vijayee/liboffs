@@ -9,6 +9,7 @@
 #include "../Actor/message.h"
 #include "../Buffer/buffer.h"
 #include "../Scheduler/scheduler.h"
+#include "../Util/log.h"
 
 static size_t _block_size_for_type(block_size_e type) {
   switch (type) {
@@ -23,6 +24,9 @@ static size_t _block_size_for_type(block_size_e type) {
 static void _render_origin_data(readable_off_stream_t* stream, buffer_t* data) {
   size_t start;
   size_t length;
+  log_debug("RENDER: data_size=%zu sent=%zu final=%zu offset_applied=%d offset_remainder=%zu",
+            data->size, stream->sent_bytes, stream->ori->final_byte,
+            stream->offset_applied, stream->offset_remainder);
   if (!stream->offset_applied && stream->offset_remainder > 0) {
     size_t available = data->size - stream->offset_remainder;
     if (stream->sent_bytes + available > stream->ori->final_byte) {
@@ -56,8 +60,11 @@ static void _render_origin_data(readable_off_stream_t* stream, buffer_t* data) {
 }
 
 static void _start_tuple_cache_lookup(readable_off_stream_t* stream, tuple_t* tuple);
+static void _drain_tuple_queue(readable_off_stream_t* stream);
 
 static void _finish_decode_and_render(readable_off_stream_t* stream) {
+  log_debug("FINISH_DECODE: xor_acc=%p sent=%zu final=%zu",
+            (void*)stream->xor_accumulator, stream->sent_bytes, stream->ori->final_byte);
   if (stream->xor_accumulator == NULL) {
     DESTROY(stream->pending_tuple, tuple);
     stream->pending_tuple = NULL;
@@ -82,6 +89,9 @@ static void _finish_decode_and_render(readable_off_stream_t* stream) {
     fetch = next;
   }
   stream->pending_fetches = NULL;
+
+  /* Process next queued tuple if available */
+  _drain_tuple_queue(stream);
 }
 
 static void _start_block_fetches(readable_off_stream_t* stream) {
@@ -107,6 +117,23 @@ static void _start_tuple_cache_lookup(readable_off_stream_t* stream, tuple_t* tu
   tuple_cache_get(stream->tc, tuple, &stream->stream.actor);
 }
 
+/* Process next tuple from the queue if available. Called after a tuple finishes processing. */
+static void _drain_tuple_queue(readable_off_stream_t* stream) {
+  if (stream->stream.is_deactivated || stream->pending_tuple != NULL) {
+    return;
+  }
+  if (stream->tuple_queue != NULL) {
+    /* Dequeue from front (FIFO) */
+    pending_tuple_t* head = stream->tuple_queue;
+    stream->tuple_queue = head->next;
+    tuple_t* tuple = head->tuple;
+    free(head);
+    log_debug("DRAIN_QUEUE: processing queued tuple size=%zu", tuple_size(tuple));
+    _start_tuple_cache_lookup(stream, tuple);
+    DESTROY(tuple, tuple);
+  }
+}
+
 void readable_off_stream_dispatch(void* state, message_t* msg) {
   readable_off_stream_t* stream = (readable_off_stream_t*)state;
   switch (msg->type) {
@@ -117,15 +144,29 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
         msg->payload = NULL;
         break;
       }
-      /* If we're already fetching blocks for a previous tuple, queue this one.
-         For now, process inline since the stream is push-based. */
+      /* If we're already fetching blocks for a previous tuple, queue this one. */
       if (stream->pending_tuple != NULL) {
-        /* Still processing previous tuple — can't start new one yet.
-           This shouldn't happen in normal flow since tuples come sequentially. */
+        pending_tuple_t* queued = get_clear_memory(sizeof(pending_tuple_t));
+        queued->tuple = (tuple_t*)refcounter_reference((refcounter_t*)tuple);
+        queued->next = NULL;
+        /* Append to tail (FIFO) */
+        if (stream->tuple_queue == NULL) {
+          stream->tuple_queue = queued;
+        } else {
+          pending_tuple_t* tail = stream->tuple_queue;
+          while (tail->next != NULL) {
+            tail = tail->next;
+          }
+          tail->next = queued;
+        }
+        log_debug("OFF_STREAM_WRITE: queued tuple size=%zu pending=%p",
+                  tuple ? tuple_size(tuple) : 0, (void*)stream->pending_tuple);
         DESTROY(tuple, tuple);
         msg->payload = NULL;
         break;
       }
+      log_debug("OFF_STREAM_WRITE: processing tuple size=%zu sent=%zu final=%zu",
+                tuple ? tuple_size(tuple) : 0, stream->sent_bytes, stream->ori->final_byte);
       _start_tuple_cache_lookup(stream, tuple);
       DESTROY(tuple, tuple);
       msg->payload = NULL;
@@ -145,8 +186,10 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
         DESTROY(result->value, buffer);
         DESTROY(stream->pending_tuple, tuple);
         stream->pending_tuple = NULL;
+        _drain_tuple_queue(stream);
       } else {
         /* Cache miss — start fetching blocks */
+        log_debug("TUPLE_CACHE_MISS: fetching %zu blocks", stream->blocks_expected);
         _start_block_fetches(stream);
       }
       break;
@@ -165,6 +208,7 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
 
       if (result->block == NULL) {
         /* Block not found — deactivate with error */
+        log_debug("CACHE_GET_RESULT: block NOT FOUND, deactivating stream");
         if (stream->xor_accumulator != NULL) {
           DESTROY(stream->xor_accumulator, buffer);
           stream->xor_accumulator = NULL;
@@ -193,6 +237,9 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
       }
 
       stream->blocks_received++;
+      log_debug("CACHE_GET_RESULT: received block %zu/%zu, sent=%zu final=%zu",
+                stream->blocks_received, stream->blocks_expected,
+                stream->sent_bytes, stream->ori->final_byte);
 
       if (stream->blocks_received >= stream->blocks_expected) {
         _finish_decode_and_render(stream);
@@ -208,6 +255,14 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
         DESTROY(stream->xor_accumulator, buffer);
         stream->xor_accumulator = NULL;
       }
+      pending_tuple_t* queued = stream->tuple_queue;
+      while (queued != NULL) {
+        pending_tuple_t* next = queued->next;
+        DESTROY(queued->tuple, tuple);
+        free(queued);
+        queued = next;
+      }
+      stream->tuple_queue = NULL;
       pending_block_fetch_t* fetch = stream->pending_fetches;
       while (fetch != NULL) {
         pending_block_fetch_t* next = fetch->next;
@@ -256,6 +311,13 @@ readable_off_stream_t* readable_off_stream_create(
 
 void readable_off_stream_destroy(readable_off_stream_t* stream) {
   if (refcounter_dereference_is_zero((refcounter_t*)stream)) {
+    pending_tuple_t* queued = stream->tuple_queue;
+    while (queued != NULL) {
+      pending_tuple_t* next = queued->next;
+      DESTROY(queued->tuple, tuple);
+      free(queued);
+      queued = next;
+    }
     stream_deinit((stream_t*)stream);
     free(stream);
   }
