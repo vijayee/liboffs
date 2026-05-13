@@ -159,9 +159,24 @@ static void _pipeline_on_desc_close(void* ctx, void* unused) {
 static void _pipeline_on_desc_error(void* ctx, void* error) {
     (void)error;
     get_pipeline_t* pipeline = (get_pipeline_t*)ctx;
-    if (!pipeline->response->headers_sent) {
-        http_response_set_status(pipeline->response, 404);
-        http_response_set_header(pipeline->response, "Content-Length", "0");
+    http_response_t* response = pipeline->response;
+    http_connection_t* conn = response->connection;
+    if (!response->headers_sent) {
+        http_response_set_status(response, 404);
+        http_response_set_header(response, "Content-Length", "0");
+    }
+    http_response_end(response);
+    response->connection = NULL;
+    http_response_destroy(response);
+    if (conn) {
+        http_connection_destroy(conn);
+    }
+    stream_deactivate((stream_t*)pipeline->rs, NULL);
+    stream_deferred_deref((stream_t*)pipeline->rs);
+    stream_deferred_deref((stream_t*)pipeline->desc);
+    if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
+        DESTROY(pipeline->ori, ori);
+        free(pipeline);
     }
 }
 
