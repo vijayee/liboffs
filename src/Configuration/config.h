@@ -18,6 +18,8 @@ typedef struct {
   size_t min_tuple_size;
   size_t lru_size;
   size_t descriptor_pad;
+  size_t max_snapshots;
+  size_t max_wals;
 } config_t;
 config_t config_default();
 #endif //OFFS_CONFIG_H

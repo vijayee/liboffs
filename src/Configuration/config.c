@@ -17,5 +17,7 @@ config_t config_default() {
   config.min_tuple_size  = 2;
   config.lru_size = 30;
   config.descriptor_pad = 32;
+  config.max_snapshots = 3;
+  config.max_wals = 3;
   return config;
 }

@@ -71,11 +71,13 @@ typedef struct {
   timer_actor_t* timer_actor;
   uint64_t wait;
   uint64_t max_wait;
+  size_t max_snapshots;
+  size_t max_wals;
   actor_t actor;
 } index_t;
 
-index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_actor, uint64_t wait, uint64_t max_wait, int* error_code);
-index_t* index_create_from(size_t bucket_size, index_node_t* root, char* location, timer_actor_t* timer_actor, uint64_t wait, uint64_t max_wait);
+index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_actor, uint64_t wait, uint64_t max_wait, size_t max_snapshots, size_t max_wals, int* error_code);
+index_t* index_create_from(size_t bucket_size, index_node_t* root, char* location, timer_actor_t* timer_actor, uint64_t wait, uint64_t max_wait, size_t max_snapshots, size_t max_wals);
 size_t index_count(index_t* index);
 void index_add(index_t* index, index_entry_t* entry);
 index_entry_t* index_get(index_t* index, buffer_t* hash);
@@ -86,7 +88,7 @@ void index_remove(index_t* index, buffer_t* hash);
 void index_destroy(index_t* index);
 index_entry_vec_t* index_to_array(index_t* index);
 cbor_item_t* index_to_cbor(index_t* index);
-index_t* cbor_to_index(cbor_item_t* cbor, char* location, timer_actor_t* timer_actor, uint64_t wait, uint64_t max_wait);
+index_t* cbor_to_index(cbor_item_t* cbor, char* location, timer_actor_t* timer_actor, uint64_t wait, uint64_t max_wait, size_t max_snapshots, size_t max_wals);
 void index_set_entry_ejection(index_t* index, index_entry_t* entry, uint64_t date);
 int _sort_indexes(const void *str1, const void *str2);
 #define INDEX_LOCK_CANARY 0x494E4458u

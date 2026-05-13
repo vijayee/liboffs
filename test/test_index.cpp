@@ -165,7 +165,7 @@ namespace indexTest {
 
   TEST_F(TestIndex, TestIndexFunctions) {
     int error_code;
-    index_t* index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
+    index_t* index = index_create(25, location, timer_actor_inst, wait, max_wait, 3, 3, &error_code);
     EXPECT_TRUE(error_code == 0);
     for (size_t i = 0; i < 8; i++) {
       index_add(index, entries[i]);
@@ -194,7 +194,7 @@ namespace indexTest {
     EXPECT_EQ(result.error.code == CBOR_ERR_NONE, true);
     EXPECT_EQ(cbor_isa_array(cbor2), true);
     index_destroy(index);
-    index_t* from_cbor = cbor_to_index(cbor2, location, timer_actor_inst, wait, max_wait);
+    index_t* from_cbor = cbor_to_index(cbor2, location, timer_actor_inst, wait, max_wait, 3, 3);
     EXPECT_FALSE(from_cbor == NULL);
 
     for (size_t i = 0; i < 8; i++) {
@@ -215,7 +215,7 @@ namespace indexTest {
     free(cbor_data);
     DESTROY(from_cbor, index);
 
-    index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
+    index = index_create(25, location, timer_actor_inst, wait, max_wait, 3, 3, &error_code);
     EXPECT_TRUE(error_code == 0);
     DESTROY(index, index);
 
@@ -224,12 +224,12 @@ namespace indexTest {
     int error_code;
     index_t* index;
     for (size_t i = 0; i < 4; i++) {
-      index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
+      index = index_create(25, location, timer_actor_inst, wait, max_wait, 0, 0, &error_code);
       EXPECT_TRUE(error_code == 0);
       index_add(index, entries[i]);
       DESTROY(index, index);
     }
-    index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
+    index = index_create(25, location, timer_actor_inst, wait, max_wait, 0, 0, &error_code);
     EXPECT_TRUE(error_code == 0);
     for (size_t i = 4; i < 8; i++) {
       index_add(index, entries[i]);
@@ -237,13 +237,13 @@ namespace indexTest {
     DESTROY(index, index);
 
     for (size_t i = 0; i < 4; i++) {
-      index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
+      index = index_create(25, location, timer_actor_inst, wait, max_wait, 0, 0, &error_code);
       EXPECT_TRUE(error_code == 0);
       index_entry_t* entry = REFERENCE(index_get(index, blocks[i]->hash), index_entry_t);
       DESTROY(entry, index_entry);
       DESTROY(index, index);
     }
-    index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
+    index = index_create(25, location, timer_actor_inst, wait, max_wait, 0, 0, &error_code);
     EXPECT_TRUE(error_code == 0);
     for (size_t i = 4; i < 8; i++) {
       index_entry_t* entry = REFERENCE(index_get(index, blocks[i]->hash), index_entry_t);
@@ -252,30 +252,30 @@ namespace indexTest {
     DESTROY(index, index);
 
     for (size_t i = 0; i < 4; i++) {
-      index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
+      index = index_create(25, location, timer_actor_inst, wait, max_wait, 0, 0, &error_code);
       EXPECT_TRUE(error_code == 0);
       index_remove(index, entries[i]->hash);
       DESTROY(index, index);
     }
-    index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
+    index = index_create(25, location, timer_actor_inst, wait, max_wait, 0, 0, &error_code);
     EXPECT_TRUE(error_code == 0);
     for (size_t i = 4; i < 8; i++) {
       index_remove(index, entries[i]->hash);
     }
     DESTROY(index, index);
 
-    index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
+    index = index_create(25, location, timer_actor_inst, wait, max_wait, 0, 0, &error_code);
     EXPECT_TRUE(error_code == 0);
     cbor_item_t *cbor = index_to_cbor(index);
     DESTROY(index, index);
 
     CorruptCRC(5);
 
-    index = index_create(25, location, timer_actor_inst, wait, max_wait, &error_code);
+    index = index_create(25, location, timer_actor_inst, wait, max_wait, 0, 0, &error_code);
     uint64_t index_crc;
     EXPECT_EQ(index_to_crc(index, &index_crc), 0);
     DESTROY(index, index);
-    index_t* from_cbor = cbor_to_index(cbor, location, timer_actor_inst, wait, max_wait);
+    index_t* from_cbor = cbor_to_index(cbor, location, timer_actor_inst, wait, max_wait, 0, 0);
     cbor_decref(&cbor);
     uint64_t cbor_crc;
     EXPECT_EQ(index_to_crc(from_cbor, &cbor_crc), 0);
