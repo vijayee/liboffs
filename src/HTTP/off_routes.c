@@ -19,10 +19,13 @@
 #include "../OFFStreams/ori.h"
 #include "../OFFStreams/tuple_cache.h"
 #include "../OFFStreams/tuple.h"
+#include "../OFFStreams/ofd.h"
 #include "../BlockCache/block_cache.h"
 #include "../BlockCache/block.h"
 #include "../Buffer/buffer.h"
 #include "../Util/allocator.h"
+#include "../Actor/actor.h"
+#include "../Actor/message.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -202,6 +205,82 @@ static void _setup_stream_pipeline(http_response_t* response, scheduler_pool_t* 
     readable_descriptor_push(desc);
 }
 
+/* ---- Async GET handler state ---- */
+
+typedef enum {
+    OFF_GET_RESOLVE_DIR,      /* Resolving directory path */
+    OFF_GET_RESOLVE_INDEX,    /* Resolving index.html in .ofd directory */
+    OFF_GET_FETCH_RAW_OFD     /* Fetching raw OFD block (?ofd=raw) */
+} off_get_phase_t;
+
+typedef struct {
+    actor_t actor;
+    off_routes_context_t* ctx;
+    http_response_t* response;
+    http_connection_t* connection;
+    off_url_t* url;
+    char* resolve_path;
+    off_get_phase_t phase;
+} off_get_state_t;
+
+static void _off_get_state_destroy(off_get_state_t* state) {
+    if (state->url) off_url_destroy(state->url);
+    if (state->resolve_path) free(state->resolve_path);
+    http_connection_t* conn = state->connection;
+    http_response_destroy(state->response);
+    if (conn) http_connection_destroy(conn);
+    actor_destroy(&state->actor);
+    free(state);
+}
+
+static void _send_stream_response(http_response_t* response, off_routes_context_t* ctx,
+                                   ori_t* file_ori, const char* content_type) {
+    size_t file_size = file_ori->final_byte;
+    const char* range_header = http_request_header(response->connection->request, "Range");
+    range_request_t range = parse_range_header(range_header, file_size);
+    http_response_set_header(response, "Content-Type", content_type);
+    http_response_set_header(response, "Accept-Ranges", "bytes");
+
+    if (range_header && !range.valid) {
+        http_response_set_status(response, HTTP_STATUS_RANGE_NOT_SATISFIABLE);
+        char cr_str[64];
+        snprintf(cr_str, sizeof(cr_str), "bytes */%zu", file_size);
+        http_response_set_header(response, "Content-Range", cr_str);
+        http_response_end(response);
+        DESTROY(file_ori, ori);
+        return;
+    }
+
+    ori_t* stream_ori = ori_create(file_size);
+    stream_ori->descriptor_hash = buffer_copy(file_ori->descriptor_hash);
+    stream_ori->file_hash = buffer_copy(file_ori->file_hash);
+    stream_ori->file_name = strdup(file_ori->file_name);
+    stream_ori->block_type = file_ori->block_type;
+    stream_ori->tuple_size = file_ori->tuple_size;
+    DESTROY(file_ori, ori);
+
+    if (range.valid) {
+        http_response_set_status(response, HTTP_STATUS_PARTIAL_CONTENT);
+        char cr_str[128];
+        snprintf(cr_str, sizeof(cr_str), "bytes %zu-%zu/%zu",
+                 range.start, range.end, file_size);
+        http_response_set_header(response, "Content-Range", cr_str);
+        char len_str[32];
+        snprintf(len_str, sizeof(len_str), "%zu", range.end - range.start + 1);
+        http_response_set_header(response, "Content-Length", len_str);
+        stream_ori->file_offset = range.start;
+        stream_ori->final_byte = range.end + 1;
+    } else {
+        char len_str[32];
+        snprintf(len_str, sizeof(len_str), "%zu", file_size);
+        http_response_set_header(response, "Content-Length", len_str);
+    }
+
+    _setup_stream_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32);
+}
+
+static void _off_get_dispatch(void* state, message_t* msg);
+
 static void _off_get_handler(http_request_t* request, http_response_t* response, void* user_data) {
     off_routes_context_t* ctx = (off_routes_context_t*)user_data;
     off_url_t* url = off_url_parse(request->path);
@@ -211,142 +290,45 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
         return;
     }
 
-    // Check if this is a directory content type
+    /* Directory content type — needs async resolution */
     if (url->content_type && strstr(url->content_type, "offsystem/directory") != NULL) {
-        // Resolve path within the OFD hierarchy
-        // Check for ?ofd=raw query parameter
+        off_get_state_t* state = get_clear_memory(sizeof(off_get_state_t));
+        actor_init(&state->actor, state, _off_get_dispatch, ctx->pool);
+        state->ctx = ctx;
+        state->response = response;
+        state->connection = response->connection;
+        refcounter_reference((refcounter_t*)state->connection);
+        refcounter_reference((refcounter_t*)state->response);
+        state->url = url;
+
+        /* ?ofd=raw — fetch block directly */
         if (request->query_string && strstr(request->query_string, "ofd=raw") != NULL) {
-            // Serve raw CBOR of the OFD block
-            block_t* block = block_cache_get(ctx->bc, url->file_hash);
-            if (!block) {
-                http_response_set_status(response, 404);
-                http_response_end(response);
-                off_url_destroy(url);
-                return;
-            }
-            http_response_set_header(response, "Content-Type", "application/cbor");
-            http_response_write(response, (const char*)block->data->data, block->data->size);
-            http_response_end(response);
-            block_destroy(block);
-            off_url_destroy(url);
+            state->phase = OFF_GET_FETCH_RAW_OFD;
+            buffer_t* hash_ref = (buffer_t*)refcounter_reference((refcounter_t*)url->file_hash);
+            block_cache_get_async(ctx->bc, hash_ref, &state->actor);
+            DESTROY(hash_ref, buffer);
             return;
         }
 
-        // Try to find index.html for root requests, or resolve path
+        /* Directory resolve — use async resolver */
         const char* resolve_path = url->file_name;
         size_t name_len = strlen(url->file_name);
+
         if (name_len > 4 && strcmp(url->file_name + name_len - 4, ".ofd") == 0) {
-            // Try index.html first
-            ori_t* index_ori = ofd_cache_resolve(ctx->ofd_cache, url->file_hash, "index.html");
-            if (index_ori) {
-                size_t file_size = index_ori->final_byte;
-                const char* range_header = http_request_header(request, "Range");
-                range_request_t range = parse_range_header(range_header, file_size);
-                http_response_set_header(response, "Accept-Ranges", "bytes");
-
-                if (range_header && !range.valid) {
-                    // Invalid range request
-                    http_response_set_status(response, HTTP_STATUS_RANGE_NOT_SATISFIABLE);
-                    char cr_str[64];
-                    snprintf(cr_str, sizeof(cr_str), "bytes */%zu", file_size);
-                    http_response_set_header(response, "Content-Range", cr_str);
-                    http_response_end(response);
-                    DESTROY(index_ori, ori);
-                    off_url_destroy(url);
-                    return;
-                }
-
-                http_response_set_header(response, "Content-Type", "text/html");
-
-                ori_t* stream_ori = ori_create(file_size);
-                stream_ori->descriptor_hash = buffer_copy(index_ori->descriptor_hash);
-                stream_ori->file_hash = buffer_copy(index_ori->file_hash);
-                stream_ori->file_name = strdup(index_ori->file_name);
-                stream_ori->block_type = index_ori->block_type;
-                stream_ori->tuple_size = index_ori->tuple_size;
-                DESTROY(index_ori, ori);
-
-                if (range.valid) {
-                    http_response_set_status(response, HTTP_STATUS_PARTIAL_CONTENT);
-                    char cr_str[128];
-                    snprintf(cr_str, sizeof(cr_str), "bytes %zu-%zu/%zu",
-                             range.start, range.end, file_size);
-                    http_response_set_header(response, "Content-Range", cr_str);
-                    char len_str[32];
-                    snprintf(len_str, sizeof(len_str), "%zu", range.end - range.start + 1);
-                    http_response_set_header(response, "Content-Length", len_str);
-                    stream_ori->file_offset = range.start;
-                    stream_ori->final_byte = range.end + 1;
-                } else {
-                    char len_str[32];
-                    snprintf(len_str, sizeof(len_str), "%zu", file_size);
-                    http_response_set_header(response, "Content-Length", len_str);
-                }
-
-                _setup_stream_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32);
-                off_url_destroy(url);
-                return;
-            }
-        }
-
-        // Resolve the file within the OFD
-        ori_t* file_ori = ofd_cache_resolve(ctx->ofd_cache, url->file_hash, resolve_path);
-        if (!file_ori) {
-            http_response_set_status(response, 404);
-            http_response_end(response);
-            off_url_destroy(url);
+            /* Try index.html first */
+            state->phase = OFF_GET_RESOLVE_INDEX;
+            ofd_cache_resolve_async(ctx->ofd_cache, url->file_hash, "index.html", &state->actor);
             return;
         }
 
-        // Stream the file
-        size_t file_size = file_ori->final_byte;
-        const char* range_header = http_request_header(request, "Range");
-        range_request_t range = parse_range_header(range_header, file_size);
-        const char* mime = mime_type_from_extension(resolve_path);
-        http_response_set_header(response, "Content-Type", mime);
-        http_response_set_header(response, "Accept-Ranges", "bytes");
-
-        if (range_header && !range.valid) {
-            http_response_set_status(response, HTTP_STATUS_RANGE_NOT_SATISFIABLE);
-            char cr_str[64];
-            snprintf(cr_str, sizeof(cr_str), "bytes */%zu", file_size);
-            http_response_set_header(response, "Content-Range", cr_str);
-            http_response_end(response);
-            DESTROY(file_ori, ori);
-            off_url_destroy(url);
-            return;
-        }
-
-        ori_t* stream_ori = ori_create(file_size);
-        stream_ori->descriptor_hash = buffer_copy(file_ori->descriptor_hash);
-        stream_ori->file_hash = buffer_copy(file_ori->file_hash);
-        stream_ori->file_name = strdup(file_ori->file_name);
-        stream_ori->block_type = file_ori->block_type;
-        stream_ori->tuple_size = file_ori->tuple_size;
-        DESTROY(file_ori, ori);
-
-        if (range.valid) {
-            http_response_set_status(response, HTTP_STATUS_PARTIAL_CONTENT);
-            char cr_str[128];
-            snprintf(cr_str, sizeof(cr_str), "bytes %zu-%zu/%zu",
-                     range.start, range.end, file_size);
-            http_response_set_header(response, "Content-Range", cr_str);
-            char len_str[32];
-            snprintf(len_str, sizeof(len_str), "%zu", range.end - range.start + 1);
-            http_response_set_header(response, "Content-Length", len_str);
-            stream_ori->file_offset = range.start;
-            stream_ori->final_byte = range.end + 1;
-        } else {
-            char len_str[32];
-            snprintf(len_str, sizeof(len_str), "%zu", file_size);
-            http_response_set_header(response, "Content-Length", len_str);
-        }
-
-        _setup_stream_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32);
-        off_url_destroy(url);
+        /* Resolve the path within the OFD */
+        state->phase = OFF_GET_RESOLVE_DIR;
+        state->resolve_path = strdup(resolve_path);
+        ofd_cache_resolve_async(ctx->ofd_cache, url->file_hash, resolve_path, &state->actor);
         return;
     }
 
+    /* Regular file — synchronous, no async needed */
     size_t file_size = url->stream_length;
     const char* range_header = http_request_header(request, "Range");
     range_request_t range = parse_range_header(range_header, file_size);
@@ -391,6 +373,80 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
 
     _setup_stream_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32);
     off_url_destroy(url);
+}
+
+static void _off_get_dispatch(void* state, message_t* msg) {
+    off_get_state_t* ctx = (off_get_state_t*)state;
+
+    switch (msg->type) {
+        case CACHE_GET_RESULT: {
+            /* ?ofd=raw — send the block data as CBOR */
+            if (ctx->phase == OFF_GET_FETCH_RAW_OFD) {
+                cache_get_result_payload_t* result = (cache_get_result_payload_t*)msg->payload;
+                block_t* block = result->block;
+
+                if (!block) {
+                    http_response_set_status(ctx->response, 404);
+                    http_response_end(ctx->response);
+                    DESTROY(result->hash, buffer);
+                    _off_get_state_destroy(ctx);
+                    return;
+                }
+
+                http_response_set_header(ctx->response, "Content-Type", "application/cbor");
+                http_response_write(ctx->response, (const char*)block->data->data, block->data->size);
+                http_response_end(ctx->response);
+                block_destroy(block);
+                DESTROY(result->hash, buffer);
+                _off_get_state_destroy(ctx);
+                return;
+            }
+            break;
+        }
+
+        case OFD_CACHE_RESOLVE_RESULT: {
+            ofd_resolve_result_t* result = (ofd_resolve_result_t*)msg->payload;
+
+            if (ctx->phase == OFF_GET_RESOLVE_INDEX) {
+                if (result->ori != NULL) {
+                    /* Found index.html — stream it */
+                    _send_stream_response(ctx->response, ctx->ctx, result->ori, "text/html");
+                    DESTROY(result->hash, buffer);
+                    if (result->path) free(result->path);
+                    _off_get_state_destroy(ctx);
+                    return;
+                }
+
+                /* index.html not found — try resolving the path directly */
+                DESTROY(result->hash, buffer);
+                if (result->path) free(result->path);
+
+                ctx->phase = OFF_GET_RESOLVE_DIR;
+                ctx->resolve_path = strdup(ctx->url->file_name);
+                ofd_cache_resolve_async(ctx->ctx->ofd_cache, ctx->url->file_hash,
+                                        ctx->resolve_path, &ctx->actor);
+                return;
+            }
+
+            if (ctx->phase == OFF_GET_RESOLVE_DIR) {
+                if (result->ori != NULL) {
+                    const char* mime = mime_type_from_extension(ctx->resolve_path);
+                    _send_stream_response(ctx->response, ctx->ctx, result->ori, mime);
+                } else {
+                    http_response_set_status(ctx->response, 404);
+                    http_response_end(ctx->response);
+                }
+                DESTROY(result->hash, buffer);
+                if (result->path) free(result->path);
+                _off_get_state_destroy(ctx);
+                return;
+            }
+            break;
+        }
+
+        default:
+            break;
+    }
 }
 
 typedef struct {
@@ -720,7 +776,7 @@ static void _off_delete_handler(http_request_t* request, http_response_t* respon
         return;
     }
 
-    block_cache_remove(ctx->bc, url->file_hash);
+    block_cache_remove_async(ctx->bc, url->file_hash, NULL);
     http_response_set_status(response, 200);
     http_response_end(response);
     off_url_destroy(url);

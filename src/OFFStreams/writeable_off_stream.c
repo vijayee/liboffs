@@ -87,11 +87,11 @@ static void _create_tuple(writeable_off_stream_t* stream, off_stream_tuple_entry
   tuple_push(tuple, off_block->hash);
 
   for (int i = 0; i < entry->random_blocks.length; i++) {
-    block_cache_put(stream->bc, entry->random_blocks.data[i]);
+    block_cache_put_async(stream->bc, entry->random_blocks.data[i], NULL);
   }
-  block_cache_put(stream->bc, off_block);
+  block_cache_put_async(stream->bc, off_block, NULL);
 
-  tuple_cache_update(stream->tc, tuple, origin_data);
+  tuple_cache_put_async(stream->tc, tuple, origin_data);
 
   buffer_t* tuple_val = (buffer_t*)refcounter_reference((refcounter_t*)tuple);
   stream_notify((stream_t*)stream, data_event, CONSUME(tuple_val, buffer_t), (void (*)(void*))tuple_destroy);

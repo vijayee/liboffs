@@ -34,7 +34,7 @@ void new_blocks_recipe_dispatch(void* state, message_t* msg) {
         recipe->recipe.stream.is_deactivated = 1;
         break;
       }
-      block_cache_put(recipe->recipe.bc, block);
+      block_cache_put_async(recipe->recipe.bc, block, NULL);
       stream_notify((stream_t*)recipe, data_event,
                     CONSUME(block, block_t), (void (*)(void*))block_destroy);
       break;

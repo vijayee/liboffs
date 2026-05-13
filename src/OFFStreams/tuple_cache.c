@@ -229,6 +229,10 @@ void tuple_cache_dispatch(void* state, message_t* msg) {
     case TUPLE_CACHE_PUT: {
       tuple_cache_put_payload_t* payload = (tuple_cache_put_payload_t*)msg->payload;
       tuple_cache_lru_put(tc->lru, payload->key, payload->value);
+      if (msg->payload_destroy != NULL) {
+        DESTROY(payload->key, tuple);
+        DESTROY(payload->value, buffer);
+      }
       break;
     }
     case TUPLE_CACHE_REMOVE: {
@@ -290,8 +294,8 @@ void tuple_cache_get_async(tuple_cache_t* tc, tuple_t* key, actor_t* reply_to) {
 
 void tuple_cache_put_async(tuple_cache_t* tc, tuple_t* key, buffer_t* value) {
   tuple_cache_put_payload_t* payload = get_clear_memory(sizeof(tuple_cache_put_payload_t));
-  payload->key = key;
-  payload->value = value;
+  payload->key = (tuple_t*)refcounter_reference((refcounter_t*)key);
+  payload->value = (buffer_t*)refcounter_reference((refcounter_t*)value);
   payload->reply_to = NULL;
 
   message_t msg;

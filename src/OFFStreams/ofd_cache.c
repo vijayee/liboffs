@@ -6,6 +6,8 @@
 #include "../Util/allocator.h"
 #include "../Util/hash.h"
 #include "../Buffer/buffer.h"
+#include "../Actor/actor.h"
+#include "../Actor/message.h"
 #include <hashmap.h>
 #include <string.h>
 #include <time.h>
@@ -133,4 +135,217 @@ ori_t* ofd_cache_resolve(ofd_cache_t* cache, buffer_t* root_hash, const char* pa
 
     free(path_copy);
     return NULL;
+}
+
+/* ---- Async resolver actor ---- */
+
+typedef struct {
+    actor_t actor;
+    ofd_cache_t* cache;
+    buffer_t* root_hash;
+    char* path;
+    char* saveptr;
+    ofd_t* current_ofd;
+    actor_t* reply_to;
+    uint8_t resolving_root;  /* 1 if fetching root hash, 0 if fetching directory */
+} ofd_resolver_t;
+
+static void _resolver_send_result(ofd_resolver_t* resolver, ori_t* ori) {
+    ofd_resolve_result_t* result = get_clear_memory(sizeof(ofd_resolve_result_t));
+    result->ori = ori;
+    result->hash = resolver->root_hash;
+    result->path = resolver->path;
+
+    message_t msg;
+    msg.type = OFD_CACHE_RESOLVE_RESULT;
+    msg.payload = result;
+    msg.payload_destroy = free;
+
+    if (resolver->reply_to) {
+        actor_send(resolver->reply_to, &msg);
+    }
+}
+
+static void _resolver_cleanup(ofd_resolver_t* resolver) {
+    if (resolver->current_ofd) {
+        ofd_destroy(resolver->current_ofd);
+        resolver->current_ofd = NULL;
+    }
+    DESTROY(resolver->root_hash, buffer);
+    if (resolver->path) {
+        free(resolver->path);
+        resolver->path = NULL;
+    }
+    actor_destroy(&resolver->actor);
+    free(resolver);
+}
+
+static void _resolver_dispatch(void* state, message_t* msg);
+
+static void _resolver_continue_path(ofd_resolver_t* resolver) {
+    if (resolver->path == NULL) {
+        /* Path was empty or already fully resolved — no match */
+        _resolver_send_result(resolver, NULL);
+        _resolver_cleanup(resolver);
+        return;
+    }
+
+    char* segment = strtok_r(NULL, "/", &resolver->saveptr);
+
+    while (segment) {
+        ofd_entry_t* entry = ofd_find(resolver->current_ofd, segment);
+        if (!entry) {
+            _resolver_send_result(resolver, NULL);
+            _resolver_cleanup(resolver);
+            return;
+        }
+
+        if (entry->type == OFD_ENTRY_FILE) {
+            /* If there are more segments, path doesn't exist */
+            if (resolver->saveptr && *resolver->saveptr) {
+                _resolver_send_result(resolver, NULL);
+                _resolver_cleanup(resolver);
+                return;
+            }
+            ori_t* result = entry->file_ori;
+            _resolver_send_result(resolver, result);
+            _resolver_cleanup(resolver);
+            return;
+        }
+
+        if (entry->type == OFD_ENTRY_DIRECTORY) {
+            /* Check in-memory cache first */
+            ofd_t* cached = ofd_cache_get(resolver->cache, entry->dir_hash);
+            if (cached) {
+                ofd_destroy(resolver->current_ofd);
+                resolver->current_ofd = cached;
+                segment = strtok_r(NULL, "/", &resolver->saveptr);
+                continue;
+            }
+
+            /* Need to fetch from block cache asynchronously */
+            buffer_t* hash_ref = (buffer_t*)refcounter_reference((refcounter_t*)entry->dir_hash);
+            block_cache_get_async(resolver->cache->bc, hash_ref, &resolver->actor);
+            DESTROY(hash_ref, buffer);
+            resolver->resolving_root = 0;
+            return;
+        }
+
+        segment = strtok_r(NULL, "/", &resolver->saveptr);
+    }
+
+    /* Path fully traversed without finding a file */
+    _resolver_send_result(resolver, NULL);
+    _resolver_cleanup(resolver);
+}
+
+static void _resolver_dispatch(void* state, message_t* msg) {
+    ofd_resolver_t* resolver = (ofd_resolver_t*)state;
+
+    switch (msg->type) {
+        case OFD_CACHE_RESOLVE: {
+            /* Initial message to start resolution */
+            ofd_resolve_result_t* payload = (ofd_resolve_result_t*)msg->payload;
+
+            /* Check in-memory cache for root hash */
+            ofd_t* cached = ofd_cache_get(resolver->cache, resolver->root_hash);
+            if (cached) {
+                resolver->current_ofd = cached;
+                _resolver_continue_path(resolver);
+                return;
+            }
+
+            /* Fetch root OFD from block cache */
+            buffer_t* hash_ref = (buffer_t*)refcounter_reference((refcounter_t*)resolver->root_hash);
+            block_cache_get_async(resolver->cache->bc, hash_ref, &resolver->actor);
+            DESTROY(hash_ref, buffer);
+            resolver->resolving_root = 1;
+            return;
+        }
+
+        case CACHE_GET_RESULT: {
+            cache_get_result_payload_t* result = (cache_get_result_payload_t*)msg->payload;
+            block_t* block = result->block;
+            buffer_t* hash = result->hash;
+
+            if (!block) {
+                /* Block not found — resolution failed */
+                DESTROY(hash, buffer);
+                _resolver_send_result(resolver, NULL);
+                _resolver_cleanup(resolver);
+                return;
+            }
+
+            ofd_t* ofd = ofd_decode(block->data);
+            block_destroy(block);
+            DESTROY(hash, buffer);
+
+            if (!ofd) {
+                _resolver_send_result(resolver, NULL);
+                _resolver_cleanup(resolver);
+                return;
+            }
+
+            /* Cache the decoded OFD */
+            ofd_cache_put(resolver->cache, resolver->resolving_root ? resolver->root_hash : ofd->hash, ofd);
+
+            if (resolver->resolving_root) {
+                /* We just fetched the root OFD */
+                resolver->current_ofd = ofd;
+                _resolver_continue_path(resolver);
+            } else {
+                /* We fetched a directory OFD — replace current_ofd and continue */
+                ofd_destroy(resolver->current_ofd);
+                resolver->current_ofd = ofd;
+                _resolver_continue_path(resolver);
+            }
+            return;
+        }
+
+        default:
+            break;
+    }
+}
+
+void ofd_cache_resolve_async(ofd_cache_t* cache, buffer_t* root_hash, const char* path, actor_t* reply_to) {
+    if (!cache || !root_hash || !path) {
+        if (reply_to) {
+            ofd_resolve_result_t* result = get_clear_memory(sizeof(ofd_resolve_result_t));
+            result->ori = NULL;
+            result->hash = NULL;
+            result->path = path ? strdup(path) : NULL;
+            message_t msg;
+            msg.type = OFD_CACHE_RESOLVE_RESULT;
+            msg.payload = result;
+            msg.payload_destroy = free;
+            actor_send(reply_to, &msg);
+        }
+        return;
+    }
+
+    ofd_resolver_t* resolver = get_clear_memory(sizeof(ofd_resolver_t));
+    actor_init(&resolver->actor, resolver, _resolver_dispatch, cache->pool);
+    resolver->cache = cache;
+    resolver->root_hash = (buffer_t*)refcounter_reference((refcounter_t*)root_hash);
+    resolver->path = strdup(path);
+    resolver->saveptr = NULL;
+    resolver->current_ofd = NULL;
+    resolver->reply_to = reply_to;
+    resolver->resolving_root = 1;
+
+    /* Tokenize the first segment so _resolver_continue_path can use strtok_r(NULL, ...) */
+    char* first_segment = strtok_r(resolver->path, "/", &resolver->saveptr);
+    if (!first_segment || strlen(path) == 0) {
+        /* Empty path — send NULL result immediately */
+        _resolver_send_result(resolver, NULL);
+        _resolver_cleanup(resolver);
+        return;
+    }
+
+    /* Kick off resolution */
+    message_t msg;
+    msg.type = OFD_CACHE_RESOLVE;
+    msg.payload = NULL;
+    msg.payload_destroy = NULL;
+    actor_send(&resolver->actor, &msg);
 }

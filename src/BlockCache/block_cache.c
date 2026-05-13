@@ -244,6 +244,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
   switch (msg->type) {
     case CACHE_PUT: {
       cache_put_payload_t* p = (cache_put_payload_t*)msg->payload;
+      int is_async = (msg->payload_destroy != NULL);
       p->result = -1;
       index_entry_t* entry = index_peek(block_cache->index, p->block->hash);
       if (entry == NULL) {
@@ -263,6 +264,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
         int result = write_payload.result;
         if (result) {
           index_entry_destroy(entry);
+          if (is_async) block_destroy(p->block);
           p->result = result;
         } else {
           entry->section_id = write_payload.section_id;
@@ -273,14 +275,14 @@ void block_cache_dispatch(void* state, message_t* msg) {
             index_set_entry_ejection(block_cache->index, ejection, time(NULL));
             index_entry_destroy(ejection);
           }
+          if (is_async) block_destroy(p->block);
           refcounter_yield((refcounter_t*) entry);
           index_add(block_cache->index, entry);
           p->result = 0;
         }
       } else {
-        /* Block already exists — consume the yielded reference and release it */
-        refcounter_reference((refcounter_t*) p->block);
-        block_destroy(p->block);
+        /* Block already exists — release the async reference if taken */
+        if (is_async) block_destroy(p->block);
         p->result = 0;
       }
       /* Async: send result back if reply_to is set */
@@ -545,7 +547,7 @@ void block_cache_get_async(block_cache_t* block_cache, buffer_t* hash, actor_t* 
 
 void block_cache_put_async(block_cache_t* block_cache, block_t* block, actor_t* reply_to) {
   cache_put_payload_t* payload = get_clear_memory(sizeof(cache_put_payload_t));
-  payload->block = block;
+  payload->block = (block_t*)refcounter_reference((refcounter_t*)block);
   payload->reply_to = reply_to;
   payload->result = -1;
 

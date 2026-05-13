@@ -64,7 +64,7 @@ static void _finish_decode_and_render(readable_off_stream_t* stream) {
     return;
   }
 
-  tuple_cache_update(stream->tc, stream->pending_tuple, stream->xor_accumulator);
+  tuple_cache_put_async(stream->tc, stream->pending_tuple, stream->xor_accumulator);
   _render_origin_data(stream, stream->xor_accumulator);
   DESTROY(stream->xor_accumulator, buffer);
   stream->xor_accumulator = NULL;
