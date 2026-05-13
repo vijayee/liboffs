@@ -168,7 +168,6 @@ static void _pipeline_on_desc_error(void* ctx, void* error) {
         http_connection_destroy(conn);
     }
     stream_deactivate((stream_t*)pipeline->rs, NULL);
-    stream_deferred_deref((stream_t*)pipeline->rs);
     stream_deferred_deref((stream_t*)pipeline->desc);
     if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
         DESTROY(pipeline->ori, ori);
