@@ -552,6 +552,7 @@ round_robin_t* cbor_to_round_robin(cbor_item_t* cbor, char* robin_path, timer_ac
   for(size_t i = 0; i < size; i++) {
     cbor_item_t* cbor_id = cbor_array_get(cbor, i);
     round_robin_add(robin, cbor_get_uint64(cbor_id));
+    cbor_decref(&cbor_id);
   }
   return robin;
 }
