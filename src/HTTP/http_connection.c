@@ -417,6 +417,15 @@ void http_connection_dispatch(void* state, message_t* msg) {
           DESTROY(connection->write_buffer, buffer);
           connection->write_buffer = NULL;
           connection->write_pending = 0;
+          if (connection->is_closing) {
+            /* All data flushed — finish the deferred close */
+            if (connection->fd >= 0) {
+              shutdown(connection->fd, SHUT_WR);
+            }
+            _connection_stop_watcher(connection);
+            _connection_close_fd(connection);
+            break;
+          }
           _connection_update_watcher(connection, PD_EVENT_READ);
         } else {
           size_t remaining = connection->write_buffer->size - (size_t)sent;
@@ -442,6 +451,14 @@ void http_connection_dispatch(void* state, message_t* msg) {
     }
 
     case HTTP_CONNECTION_CLOSE: {
+      /* If there's still buffered write data, defer the close until it's
+       * flushed. Otherwise the shutdown truncates the remaining bytes,
+       * causing ERR_CONTENT_LENGTH_MISMATCH on the client. */
+      if (connection->write_pending) {
+        connection->is_closing = 1;
+        _connection_update_watcher(connection, PD_EVENT_READ | PD_EVENT_WRITE);
+        break;
+      }
       if (connection->fd >= 0) {
         shutdown(connection->fd, SHUT_WR);
       }
