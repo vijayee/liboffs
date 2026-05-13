@@ -116,9 +116,5 @@ void section_read_async(section_t* section, size_t index, actor_t* reply_to);
 void section_write_async(section_t* section, buffer_t* data, actor_t* reply_to);
 void section_deallocate_async(section_t* section, size_t index, actor_t* reply_to);
 
-/* Sync API — direct dispatch. Temporary, will be removed as callers convert. */
-buffer_t* section_read(section_t* section, size_t index);
-int section_write(section_t* section, buffer_t* data, size_t* out_index, uint8_t* out_full);
-int section_deallocate(section_t* section, size_t index);
 
 #endif //OFFS_SECTION_H

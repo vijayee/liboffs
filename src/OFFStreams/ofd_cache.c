@@ -77,65 +77,7 @@ void ofd_cache_put(ofd_cache_t* cache, buffer_t* hash, ofd_t* ofd) {
     hashmap_put(&cache->cache, hash, entry);
 }
 
-static ofd_t* _fetch_ofd_from_block_cache(ofd_cache_t* cache, buffer_t* hash) {
-    ofd_t* cached = ofd_cache_get(cache, hash);
-    if (cached) return cached;
-
-    block_t* block = block_cache_get(cache->bc, hash);
-    if (!block) return NULL;
-
-    ofd_t* ofd = ofd_decode(block->data);
-    block_destroy(block);
-
-    if (!ofd) return NULL;
-
-    ofd_cache_put(cache, hash, ofd);
-    return ofd;
-}
-
-ori_t* ofd_cache_resolve(ofd_cache_t* cache, buffer_t* root_hash, const char* path) {
-    if (!cache || !root_hash || !path) return NULL;
-
-    ofd_t* current_ofd = _fetch_ofd_from_block_cache(cache, root_hash);
-    if (!current_ofd) return NULL;
-
-    if (strlen(path) == 0) return NULL;
-
-    char* path_copy = strdup(path);
-    char* saveptr = NULL;
-    char* segment = strtok_r(path_copy, "/", &saveptr);
-
-    while (segment) {
-        ofd_entry_t* entry = ofd_find(current_ofd, segment);
-        if (!entry) {
-            free(path_copy);
-            return NULL;
-        }
-
-        if (entry->type == OFD_ENTRY_FILE) {
-            if (saveptr && *saveptr) {
-                free(path_copy);
-                return NULL;
-            }
-            ori_t* result = entry->file_ori;
-            free(path_copy);
-            return result;
-        }
-
-        if (entry->type == OFD_ENTRY_DIRECTORY) {
-            current_ofd = _fetch_ofd_from_block_cache(cache, entry->dir_hash);
-            if (!current_ofd) {
-                free(path_copy);
-                return NULL;
-            }
-        }
-
-        segment = strtok_r(NULL, "/", &saveptr);
-    }
-
-    free(path_copy);
-    return NULL;
-}
+/* ---- Async resolver actor ---- */
 
 /* ---- Async resolver actor ---- */
 

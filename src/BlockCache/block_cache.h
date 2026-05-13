@@ -115,12 +115,6 @@ void block_cache_get_async(block_cache_t* block_cache, buffer_t* hash, actor_t* 
 void block_cache_put_async(block_cache_t* block_cache, block_t* block, actor_t* reply_to);
 void block_cache_remove_async(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
 
-/* Sync API — direct dispatch, caller must not be inside block_cache actor.
-   These are temporary and will be removed as callers convert to async. */
-block_t* block_cache_get(block_cache_t* block_cache, buffer_t* hash);
-int block_cache_put(block_cache_t* block_cache, block_t* block);
-int block_cache_remove(block_cache_t* block_cache, buffer_t* hash);
-
 #define BLOCK_CACHE_CANARY 0x424B4348u
 void block_cache_validate(block_cache_t* block_cache, const char* func, int line);
 

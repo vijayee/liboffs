@@ -8,6 +8,8 @@
 #include "http_route.h"
 #include "../Util/allocator.h"
 #include "../Util/threadding.h"
+#include "../Actor/message.h"
+#include <poll-dancer/poll-dancer.h>
 #include <string.h>
 #include <stdio.h>
 #include <sys/socket.h>
@@ -20,9 +22,33 @@ static void* _server_thread(void* arg);
 static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                               pd_event_t events, void* user_data);
 
+/* Server actor dispatch — processes watcher updates on the I/O thread. */
+void _server_dispatch(void* state, message_t* msg) {
+  (void)state;
+  switch (msg->type) {
+    case HTTP_SERVER_UPDATE_WATCHER: {
+      watcher_update_payload_t* payload = (watcher_update_payload_t*)msg->payload;
+      if (payload->watcher != NULL) {
+        pd_watcher_update(payload->watcher, payload->events);
+      }
+      break;
+    }
+    case HTTP_SERVER_STOP_WATCHER: {
+      watcher_update_payload_t* payload = (watcher_update_payload_t*)msg->payload;
+      if (payload->watcher != NULL) {
+        pd_watcher_stop(payload->watcher);
+        pd_watcher_destroy(payload->watcher);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
 http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint16_t port) {
   http_server_t* server = get_clear_memory(sizeof(http_server_t));
-  actor_init(&server->actor, server, NULL, pool);
+  actor_init(&server->actor, server, _server_dispatch, pool);
   server->pool = pool;
   server->loop = pd_loop_create(NULL);
   server->ssl_ctx = NULL;

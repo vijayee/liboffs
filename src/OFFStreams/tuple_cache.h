@@ -56,13 +56,6 @@ void tuple_cache_dispatch(void* state, message_t* msg);
 void tuple_cache_get_async(tuple_cache_t* tc, tuple_t* key, actor_t* reply_to);
 void tuple_cache_put_async(tuple_cache_t* tc, tuple_t* key, buffer_t* value);
 
-/* Sync API — direct dispatch. Temporary, will be removed as callers convert. */
-void tuple_cache_update(tuple_cache_t* tc, tuple_t* key, buffer_t* value);
-buffer_t* tuple_cache_apply(tuple_cache_t* tc, tuple_t* key);
-uint8_t tuple_cache_contains(tuple_cache_t* tc, tuple_t* key);
-size_t tuple_cache_size(tuple_cache_t* tc);
-void tuple_cache_remove(tuple_cache_t* tc, tuple_t* key);
-
 /* Async result payload for TUPLE_CACHE_GET_RESULT */
 typedef struct {
   tuple_t* key;

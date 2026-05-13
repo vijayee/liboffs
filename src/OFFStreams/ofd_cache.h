@@ -44,7 +44,6 @@ void ofd_cache_destroy(ofd_cache_t* cache);
 
 ofd_t* ofd_cache_get(ofd_cache_t* cache, buffer_t* hash);
 void ofd_cache_put(ofd_cache_t* cache, buffer_t* hash, ofd_t* ofd);
-ori_t* ofd_cache_resolve(ofd_cache_t* cache, buffer_t* root_hash, const char* path);
 
 /* Async resolve — creates a transient resolver actor that sends OFD_CACHE_RESOLVE_RESULT
    to reply_to when complete. The resolver self-destructs after sending the result. */

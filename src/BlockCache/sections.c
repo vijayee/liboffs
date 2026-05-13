@@ -396,7 +396,7 @@ void sections_write_async(sections_t* sections, buffer_t* data, actor_t* reply_t
   message_t msg;
   msg.type = SECTIONS_WRITE;
   msg.payload = payload;
-  msg.payload_destroy = NULL;
+  msg.payload_destroy = free;
 
   actor_send(&sections->actor, &msg);
 }
@@ -690,55 +690,3 @@ void sections_free(sections_t* sections, size_t section_id) {
   }
 }
 
-/* ---- Sync API (direct dispatch) ---- */
-
-buffer_t* sections_read(sections_t* sections, size_t section_id, size_t section_index) {
-  sections_read_payload_t payload;
-  payload.section_id = section_id;
-  payload.section_index = section_index;
-  payload.reply_to = NULL;
-  payload.result = NULL;
-
-  message_t msg;
-  msg.type = SECTIONS_READ;
-  msg.payload = &payload;
-  msg.payload_destroy = NULL;
-
-  sections_dispatch(sections, &msg);
-  return payload.result;
-}
-
-int sections_write(sections_t* sections, buffer_t* data, size_t* out_section_id, size_t* out_section_index) {
-  sections_write_payload_t payload;
-  payload.data = data;
-  payload.reply_to = NULL;
-  payload.result = -1;
-  payload.section_id = 0;
-  payload.section_index = 0;
-
-  message_t msg;
-  msg.type = SECTIONS_WRITE;
-  msg.payload = &payload;
-  msg.payload_destroy = NULL;
-
-  sections_dispatch(sections, &msg);
-  if (out_section_id) *out_section_id = payload.section_id;
-  if (out_section_index) *out_section_index = payload.section_index;
-  return payload.result;
-}
-
-int sections_deallocate(sections_t* sections, size_t section_id, size_t section_index) {
-  sections_deallocate_payload_t payload;
-  payload.section_id = section_id;
-  payload.section_index = section_index;
-  payload.reply_to = NULL;
-  payload.result = -1;
-
-  message_t msg;
-  msg.type = SECTIONS_DEALLOCATE;
-  msg.payload = &payload;
-  msg.payload_destroy = NULL;
-
-  sections_dispatch(sections, &msg);
-  return payload.result;
-}

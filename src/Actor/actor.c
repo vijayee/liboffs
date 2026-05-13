@@ -43,6 +43,12 @@ bool actor_run(actor_t* actor, size_t batch_size) {
     if (node->msg.payload_destroy != NULL && node->msg.payload != NULL) {
       node->msg.payload_destroy(node->msg.payload);
     }
+    /* If dispatch requested self-destruction, stop processing immediately.
+       The caller (typically the scheduler) must check ACTOR_FLAG_DESTROY
+       and skip further operations on this actor. */
+    if (atomic_load(&actor->flags) & ACTOR_FLAG_DESTROY) {
+      return false;
+    }
   }
   if (message_queue_markempty(&actor->queue)) {
     atomic_fetch_and(&actor->flags, ~ACTOR_FLAG_SCHEDULED);

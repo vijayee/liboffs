@@ -198,6 +198,7 @@ void block_lru_cache_move(block_lru_cache_t* lru, block_lru_node_t* node) {
         block_lru_node_t* first_node = lru->first;
         first_node->previous = node;
         node->next = first_node;
+        node->previous = NULL;
         lru->first = node;
       }
     }
@@ -435,7 +436,8 @@ void block_cache_dispatch(void* state, message_t* msg) {
             reply.payload_destroy = free;
             actor_send(pending->reply_to, &reply);
             /* block_create_existing_data_hash took a reference to data;
-               clear p->data so sections_read_result_destroy doesn't free it */
+               release the initial reference (matching the sync path pattern) */
+            buffer_destroy(data);
             p->data = NULL;
           } else {
             /* Failed to create block — destroy data and send NULL result */
@@ -571,51 +573,4 @@ void block_cache_remove_async(block_cache_t* block_cache, buffer_t* hash, actor_
   msg.payload_destroy = free;
 
   actor_send(&block_cache->actor, &msg);
-}
-
-/* ---- Sync API — direct dispatch, caller must not be inside block_cache actor ---- */
-
-block_t* block_cache_get(block_cache_t* block_cache, buffer_t* hash) {
-  cache_get_payload_t payload;
-  payload.hash = hash;
-  payload.reply_to = NULL;
-  payload.result = NULL;
-
-  message_t msg;
-  msg.type = CACHE_GET;
-  msg.payload = &payload;
-  msg.payload_destroy = NULL;
-
-  block_cache_dispatch(block_cache, &msg);
-  return payload.result;
-}
-
-int block_cache_put(block_cache_t* block_cache, block_t* block) {
-  cache_put_payload_t payload;
-  payload.block = block;
-  payload.reply_to = NULL;
-  payload.result = -1;
-
-  message_t msg;
-  msg.type = CACHE_PUT;
-  msg.payload = &payload;
-  msg.payload_destroy = NULL;
-
-  block_cache_dispatch(block_cache, &msg);
-  return payload.result;
-}
-
-int block_cache_remove(block_cache_t* block_cache, buffer_t* hash) {
-  cache_remove_payload_t payload;
-  payload.hash = hash;
-  payload.reply_to = NULL;
-  payload.result = -1;
-
-  message_t msg;
-  msg.type = CACHE_REMOVE;
-  msg.payload = &payload;
-  msg.payload_destroy = NULL;
-
-  block_cache_dispatch(block_cache, &msg);
-  return payload.result;
 }

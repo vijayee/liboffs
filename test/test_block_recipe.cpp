@@ -201,9 +201,9 @@ TEST(RecyclerRecipe, PullFromDescriptor) {
   ASSERT_NE(random2, nullptr);
   ASSERT_NE(off_block, nullptr);
 
-  block_cache_put(bc, random1);
-  block_cache_put(bc, random2);
-  block_cache_put(bc, off_block);
+  block_cache_put_async(bc, random1, NULL);
+  block_cache_put_async(bc, random2, NULL);
+  block_cache_put_async(bc, off_block, NULL);
 
   // Build a descriptor block containing the hashes
   // Format: [hash0][hash1][hash2] where hash0,hash1 are random (front) and hash2 is off (back)
@@ -222,7 +222,7 @@ TEST(RecyclerRecipe, PullFromDescriptor) {
   block_t* desc_block = block_create_existing_data_by_type(desc_data, standard);
   DESTROY(desc_data, buffer);
   ASSERT_NE(desc_block, nullptr);
-  block_cache_put(bc, desc_block);
+  block_cache_put_async(bc, desc_block, NULL);
 
   // Create ORI pointing to the descriptor block
   ori_t* ori = ori_create(128000);

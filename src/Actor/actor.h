@@ -14,6 +14,7 @@
 #define ACTOR_FLAG_SCHEDULED 0x01
 #define ACTOR_FLAG_OVERLOADED 0x02
 #define ACTOR_FLAG_RUNNING 0x04
+#define ACTOR_FLAG_DESTROY 0x08
 
 typedef struct scheduler_pool_t scheduler_pool_t;
 

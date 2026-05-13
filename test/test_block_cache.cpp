@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include <future>
+#include <chrono>
 extern "C" {
 #include "../src/BlockCache/block.h"
 #include "../src/BlockCache/block_cache.h"
@@ -9,8 +11,122 @@ extern "C" {
 #include "../src/Timer/timer_actor.h"
 #include "../src/Actor/actor.h"
 #include "../src/Actor/message.h"
+#include "../src/Scheduler/scheduler.h"
+#include "../src/Util/atomic_compat.h"
 #include <cbor.h>
 #include "../src/Util/allocator.h"
+}
+
+/* ---- Completion actor for async block_cache tests ---- */
+
+typedef struct {
+  ATOMIC(uint8_t) done;
+  int put_result;
+  block_t* get_block;
+  buffer_t* get_hash;
+  int remove_result;
+} bc_completion_t;
+
+static void bc_completion_dispatch(void* state, message_t* msg) {
+  bc_completion_t* cs = (bc_completion_t*)state;
+  switch (msg->type) {
+    case CACHE_PUT_RESULT: {
+      cache_put_result_payload_t* r = (cache_put_result_payload_t*)msg->payload;
+      cs->put_result = r->result;
+      break;
+    }
+    case CACHE_GET_RESULT: {
+      cache_get_result_payload_t* r = (cache_get_result_payload_t*)msg->payload;
+      cs->get_block = r->block;
+      cs->get_hash = r->hash;
+      r->block = NULL;
+      r->hash = NULL;
+      break;
+    }
+    case CACHE_REMOVE_RESULT: {
+      cache_remove_result_payload_t* r = (cache_remove_result_payload_t*)msg->payload;
+      cs->remove_result = r->result;
+      break;
+    }
+    default:
+      break;
+  }
+  ATOMIC_STORE(&cs->done, 1);
+}
+
+/* Helper: put a block and wait for result */
+static int bc_put_sync(block_cache_t* bc, block_t* block, scheduler_pool_t* pool) {
+  bc_completion_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, bc_completion_dispatch, pool);
+
+  block_t* ref_block = (block_t*)refcounter_reference((refcounter_t*)block);
+  refcounter_yield((refcounter_t*)ref_block);
+  block_cache_put_async(bc, ref_block, &comp);
+
+  if (pool) {
+    scheduler_inject(pool, &comp);
+    while (!ATOMIC_LOAD(&cs.done)) { usleep(1000); }
+  } else {
+    while (!ATOMIC_LOAD(&cs.done)) {
+      actor_run(&bc->actor, ACTOR_BATCH_SIZE);
+      actor_run(&comp, ACTOR_BATCH_SIZE);
+    }
+  }
+
+  actor_destroy(&comp);
+  return cs.put_result;
+}
+
+/* Helper: get a block and wait for result */
+static block_t* bc_get_sync(block_cache_t* bc, buffer_t* hash, scheduler_pool_t* pool) {
+  bc_completion_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, bc_completion_dispatch, pool);
+
+  block_cache_get_async(bc, hash, &comp);
+
+  if (pool) {
+    scheduler_inject(pool, &comp);
+    while (!ATOMIC_LOAD(&cs.done)) { usleep(1000); }
+  } else {
+    while (!ATOMIC_LOAD(&cs.done)) {
+      actor_run(&bc->actor, ACTOR_BATCH_SIZE);
+      actor_run(&comp, ACTOR_BATCH_SIZE);
+    }
+  }
+
+  if (cs.get_hash) {
+    DESTROY(cs.get_hash, buffer);
+  }
+
+  actor_destroy(&comp);
+  return cs.get_block;
+}
+
+/* Helper: remove a block and wait for result */
+static int bc_remove_sync(block_cache_t* bc, buffer_t* hash, scheduler_pool_t* pool) {
+  bc_completion_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, bc_completion_dispatch, pool);
+
+  block_cache_remove_async(bc, hash, &comp);
+
+  if (pool) {
+    scheduler_inject(pool, &comp);
+    while (!ATOMIC_LOAD(&cs.done)) { usleep(1000); }
+  } else {
+    while (!ATOMIC_LOAD(&cs.done)) {
+      actor_run(&bc->actor, ACTOR_BATCH_SIZE);
+      actor_run(&comp, ACTOR_BATCH_SIZE);
+    }
+  }
+
+  actor_destroy(&comp);
+  return cs.remove_result;
 }
 
 class TestBlockLRU : public testing::Test {
@@ -107,9 +223,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
 
   /* Put all blocks */
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    block_t* block = (block_t*)refcounter_reference((refcounter_t*)blocks[i]);
-    refcounter_yield((refcounter_t*)block);
-    int result = block_cache_put(block_cache, block);
+    int result = bc_put_sync(block_cache, blocks[i], NULL);
     EXPECT_EQ(result, 0) << "Failed to store block " << i;
   }
 
@@ -121,9 +235,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
 
   /* Re-put same blocks (should succeed, no duplicate) */
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    block_t* block = (block_t*)refcounter_reference((refcounter_t*)blocks[i]);
-    refcounter_yield((refcounter_t*)block);
-    int result = block_cache_put(block_cache, block);
+    int result = bc_put_sync(block_cache, blocks[i], NULL);
     EXPECT_EQ(result, 0) << "Failed to re-store block " << i;
   }
 
@@ -135,7 +247,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
 
   /* Get all blocks */
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    block_t* block = block_cache_get(block_cache, blocks[i]->hash);
+    block_t* block = bc_get_sync(block_cache, blocks[i]->hash, NULL);
     EXPECT_NE(block, nullptr) << "Failed to retrieve block " << i;
     if (block != NULL) {
       EXPECT_EQ(buffer_compare(block->hash, blocks[i]->hash), 0);
@@ -150,7 +262,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
 
   /* Remove all blocks */
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    int result = block_cache_remove(block_cache, blocks[i]->hash);
+    int result = bc_remove_sync(block_cache, blocks[i]->hash, NULL);
     EXPECT_EQ(result, 0) << "Failed to remove block " << i;
   }
 
@@ -158,7 +270,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
 
   /* Get removed blocks (should return NULL) */
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    block_t* block = block_cache_get(block_cache, blocks[i]->hash);
+    block_t* block = bc_get_sync(block_cache, blocks[i]->hash, NULL);
     EXPECT_EQ(block, nullptr) << "Retrieved removed block " << i;
     if (block != NULL) {
       block_destroy(block);
@@ -169,9 +281,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
 TEST_F(TestBlockCache, TestBlockCachePutOnly) {
   block_cache = block_cache_create(config, location, type, timer_actor, NULL);
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    block_t* block = (block_t*)refcounter_reference((refcounter_t*)blocks[i]);
-    refcounter_yield((refcounter_t*)block);
-    int result = block_cache_put(block_cache, block);
+    int result = bc_put_sync(block_cache, blocks[i], NULL);
     EXPECT_EQ(result, 0);
   }
   EXPECT_EQ(block_cache_count(block_cache), BLOCK_COUNT);
@@ -180,13 +290,11 @@ TEST_F(TestBlockCache, TestBlockCachePutOnly) {
 TEST_F(TestBlockCache, TestBlockCachePutGetOnly) {
   block_cache = block_cache_create(config, location, type, timer_actor, NULL);
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    block_t* block = (block_t*)refcounter_reference((refcounter_t*)blocks[i]);
-    refcounter_yield((refcounter_t*)block);
-    int result = block_cache_put(block_cache, block);
+    int result = bc_put_sync(block_cache, blocks[i], NULL);
     EXPECT_EQ(result, 0);
   }
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    block_t* block = block_cache_get(block_cache, blocks[i]->hash);
+    block_t* block = bc_get_sync(block_cache, blocks[i]->hash, NULL);
     EXPECT_NE(block, nullptr);
     if (block) block_destroy(block);
   }
@@ -196,13 +304,11 @@ TEST_F(TestBlockCache, TestBlockCachePutGetOnly) {
 TEST_F(TestBlockCache, TestBlockCachePutRemoveOnly) {
   block_cache = block_cache_create(config, location, type, timer_actor, NULL);
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    block_t* block = (block_t*)refcounter_reference((refcounter_t*)blocks[i]);
-    refcounter_yield((refcounter_t*)block);
-    int result = block_cache_put(block_cache, block);
+    int result = bc_put_sync(block_cache, blocks[i], NULL);
     EXPECT_EQ(result, 0);
   }
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    int result = block_cache_remove(block_cache, blocks[i]->hash);
+    int result = bc_remove_sync(block_cache, blocks[i]->hash, NULL);
     EXPECT_EQ(result, 0);
   }
   EXPECT_EQ(block_cache_count(block_cache), 0u);
@@ -220,6 +326,7 @@ public:
   block_cache_t* block_cache;
   block_t* blocks[LRU_COUNT];
   config_t config;
+  scheduler_pool_t* pool;
   void SetUp() override {
     location = path_join("/tmp", "BlockCacheIntegrationTest");
     rm_rf(location);
@@ -230,8 +337,12 @@ public:
     for (size_t i = 0; i < LRU_COUNT; i++) {
       blocks[i] = block_create_random_block_by_type(type);
     }
+    pool = scheduler_pool_create(4);
+    scheduler_pool_start(pool);
   }
   void TearDown() override {
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
     timer_actor_destroy(timer_actor);
     block_cache_destroy(block_cache);
     free(location);
@@ -242,13 +353,11 @@ public:
 };
 
 TEST_F(TestBlockCacheIntegration, TestLRUEjectionAndReload) {
-  block_cache = block_cache_create(config, location, type, timer_actor, NULL);
+  block_cache = block_cache_create(config, location, type, timer_actor, pool);
 
   /* Put more blocks than LRU can hold */
   for (size_t i = 0; i < LRU_COUNT; i++) {
-    block_t* block = (block_t*)refcounter_reference((refcounter_t*)blocks[i]);
-    refcounter_yield((refcounter_t*)block);
-    int result = block_cache_put(block_cache, block);
+    int result = bc_put_sync(block_cache, blocks[i], pool);
     EXPECT_EQ(result, 0) << "Failed to put block " << i;
   }
 
@@ -261,7 +370,7 @@ TEST_F(TestBlockCacheIntegration, TestLRUEjectionAndReload) {
 
   /* Get all blocks — ejected ones should reload from sections */
   for (size_t i = 0; i < LRU_COUNT; i++) {
-    block_t* block = block_cache_get(block_cache, blocks[i]->hash);
+    block_t* block = bc_get_sync(block_cache, blocks[i]->hash, pool);
     EXPECT_NE(block, nullptr) << "Failed to retrieve block " << i;
     if (block != NULL) {
       EXPECT_EQ(buffer_compare(block->data, blocks[i]->data), 0)
@@ -272,63 +381,55 @@ TEST_F(TestBlockCacheIntegration, TestLRUEjectionAndReload) {
 }
 
 TEST_F(TestBlockCacheIntegration, TestGetNonExistent) {
-  block_cache = block_cache_create(config, location, type, timer_actor, NULL);
+  block_cache = block_cache_create(config, location, type, timer_actor, pool);
 
-  block_t* result = block_cache_get(block_cache, blocks[0]->hash);
+  block_t* result = bc_get_sync(block_cache, blocks[0]->hash, pool);
   EXPECT_EQ(result, nullptr);
 
   /* Removing non-existent block should succeed (idempotent) */
-  int rc = block_cache_remove(block_cache, blocks[0]->hash);
+  int rc = bc_remove_sync(block_cache, blocks[0]->hash, pool);
   EXPECT_EQ(rc, 0);
 }
 
 TEST_F(TestBlockCacheIntegration, TestPutDuplicate) {
-  block_cache = block_cache_create(config, location, type, timer_actor, NULL);
+  block_cache = block_cache_create(config, location, type, timer_actor, pool);
 
   /* Put same block twice — should not create duplicate index entry */
-  block_t* block = (block_t*)refcounter_reference((refcounter_t*)blocks[0]);
-  refcounter_yield((refcounter_t*)block);
-  int result = block_cache_put(block_cache, block);
+  int result = bc_put_sync(block_cache, blocks[0], pool);
   EXPECT_EQ(result, 0);
 
-  block = (block_t*)refcounter_reference((refcounter_t*)blocks[0]);
-  refcounter_yield((refcounter_t*)block);
-  result = block_cache_put(block_cache, block);
+  result = bc_put_sync(block_cache, blocks[0], pool);
   EXPECT_EQ(result, 0);
 
   EXPECT_EQ(block_cache_count(block_cache), 1u);
 }
 
 TEST_F(TestBlockCacheIntegration, TestRemoveIdempotent) {
-  block_cache = block_cache_create(config, location, type, timer_actor, NULL);
+  block_cache = block_cache_create(config, location, type, timer_actor, pool);
 
-  block_t* block = (block_t*)refcounter_reference((refcounter_t*)blocks[0]);
-  refcounter_yield((refcounter_t*)block);
-  int result = block_cache_put(block_cache, block);
+  int result = bc_put_sync(block_cache, blocks[0], pool);
   EXPECT_EQ(result, 0);
   EXPECT_EQ(block_cache_count(block_cache), 1u);
 
   /* Remove once */
-  result = block_cache_remove(block_cache, blocks[0]->hash);
+  result = bc_remove_sync(block_cache, blocks[0]->hash, pool);
   EXPECT_EQ(result, 0);
   EXPECT_EQ(block_cache_count(block_cache), 0u);
 
   /* Remove again — should be idempotent */
-  result = block_cache_remove(block_cache, blocks[0]->hash);
+  result = bc_remove_sync(block_cache, blocks[0]->hash, pool);
   EXPECT_EQ(result, 0);
   EXPECT_EQ(block_cache_count(block_cache), 0u);
 }
 
 TEST_F(TestBlockCacheIntegration, TestMiniBlocks) {
-  block_cache = block_cache_create(config, location, mini, timer_actor, NULL);
+  block_cache = block_cache_create(config, location, mini, timer_actor, pool);
 
   for (size_t i = 0; i < 10; i++) {
     block_t* mini_block = block_create_random_block_by_type(mini);
-    block_t* put_block = (block_t*)refcounter_reference((refcounter_t*)mini_block);
-    refcounter_yield((refcounter_t*)put_block);
-    int result = block_cache_put(block_cache, put_block);
+    int result = bc_put_sync(block_cache, mini_block, pool);
     EXPECT_EQ(result, 0);
-    block_t* retrieved = block_cache_get(block_cache, mini_block->hash);
+    block_t* retrieved = bc_get_sync(block_cache, mini_block->hash, pool);
     EXPECT_NE(retrieved, nullptr);
     if (retrieved) {
       EXPECT_EQ(buffer_compare(retrieved->data, mini_block->data), 0);
@@ -337,4 +438,3 @@ TEST_F(TestBlockCacheIntegration, TestMiniBlocks) {
     block_destroy(mini_block);
   }
 }
-

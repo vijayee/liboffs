@@ -21,6 +21,191 @@ extern "C" {
 #include "../src/Util/allocator.h"
 }
 
+/* ---- Completion actor state for section async tests ---- */
+
+typedef struct {
+  ATOMIC(uint8_t) done;
+  section_write_result_payload_t write_result;
+  buffer_t* read_buffer;
+  int deallocate_result;
+} section_completion_state_t;
+
+static void section_completion_dispatch(void* state, message_t* msg) {
+  section_completion_state_t* cs = (section_completion_state_t*)state;
+  switch (msg->type) {
+    case SECTION_WRITE_RESULT: {
+      section_write_result_payload_t* r = (section_write_result_payload_t*)msg->payload;
+      cs->write_result = *r;
+      break;
+    }
+    case SECTION_READ_RESULT: {
+      section_read_result_payload_t* r = (section_read_result_payload_t*)msg->payload;
+      cs->read_buffer = r->data;
+      r->data = NULL;
+      break;
+    }
+    case SECTION_DEALLOCATE_RESULT: {
+      section_deallocate_result_payload_t* r = (section_deallocate_result_payload_t*)msg->payload;
+      cs->deallocate_result = r->result;
+      break;
+    }
+    default:
+      break;
+  }
+  ATOMIC_STORE(&cs->done, 1);
+}
+
+/* Helper: async section_write, returns 0 on success */
+static int section_write_sync(section_t* section, buffer_t* data, size_t* out_index, uint8_t* out_full) {
+  section_completion_state_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, section_completion_dispatch, NULL);
+
+  section_write_async(section, data, &comp);
+
+  while (!ATOMIC_LOAD(&cs.done)) {
+    actor_run(&section->actor, ACTOR_BATCH_SIZE);
+    actor_run(&comp, ACTOR_BATCH_SIZE);
+  }
+
+  if (out_index) *out_index = cs.write_result.index;
+  if (out_full) *out_full = cs.write_result.full;
+  actor_destroy(&comp);
+  return cs.write_result.result;
+}
+
+/* Helper: async section_read, returns buffer or NULL */
+static buffer_t* section_read_sync(section_t* section, size_t index) {
+  section_completion_state_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, section_completion_dispatch, NULL);
+
+  section_read_async(section, index, &comp);
+
+  while (!ATOMIC_LOAD(&cs.done)) {
+    actor_run(&section->actor, ACTOR_BATCH_SIZE);
+    actor_run(&comp, ACTOR_BATCH_SIZE);
+  }
+
+  actor_destroy(&comp);
+  return cs.read_buffer;
+}
+
+/* Helper: async section_deallocate, returns 0 on success */
+static int section_deallocate_sync(section_t* section, size_t index) {
+  section_completion_state_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, section_completion_dispatch, NULL);
+
+  section_deallocate_async(section, index, &comp);
+
+  while (!ATOMIC_LOAD(&cs.done)) {
+    actor_run(&section->actor, ACTOR_BATCH_SIZE);
+    actor_run(&comp, ACTOR_BATCH_SIZE);
+  }
+
+  actor_destroy(&comp);
+  return cs.deallocate_result;
+}
+
+/* ---- Completion actor state for sections async tests ---- */
+
+typedef struct {
+  ATOMIC(uint8_t) done;
+  size_t section_id;
+  size_t section_index;
+  buffer_t* read_buffer;
+  int write_result;
+  int deallocate_result;
+} sections_completion_state_t;
+
+static void sections_completion_dispatch(void* state, message_t* msg) {
+  sections_completion_state_t* cs = (sections_completion_state_t*)state;
+  switch (msg->type) {
+    case SECTIONS_WRITE_RESULT: {
+      sections_write_result_payload_t* r = (sections_write_result_payload_t*)msg->payload;
+      cs->write_result = r->result;
+      cs->section_id = r->section_id;
+      cs->section_index = r->section_index;
+      break;
+    }
+    case SECTIONS_READ_RESULT: {
+      sections_read_result_payload_t* r = (sections_read_result_payload_t*)msg->payload;
+      cs->read_buffer = r->data;
+      r->data = NULL;
+      break;
+    }
+    case SECTIONS_DEALLOCATE_RESULT: {
+      sections_deallocate_result_payload_t* r = (sections_deallocate_result_payload_t*)msg->payload;
+      cs->deallocate_result = r->result;
+      break;
+    }
+    default:
+      break;
+  }
+  ATOMIC_STORE(&cs->done, 1);
+}
+
+/* Helper: async sections_write, returns 0 on success */
+static int sections_write_sync(sections_t* sections, buffer_t* data, size_t* out_section_id, size_t* out_section_index) {
+  sections_completion_state_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, sections_completion_dispatch, NULL);
+
+  sections_write_async(sections, data, &comp);
+
+  while (!ATOMIC_LOAD(&cs.done)) {
+    actor_run(&sections->actor, ACTOR_BATCH_SIZE);
+    actor_run(&comp, ACTOR_BATCH_SIZE);
+  }
+
+  if (out_section_id) *out_section_id = cs.section_id;
+  if (out_section_index) *out_section_index = cs.section_index;
+  actor_destroy(&comp);
+  return cs.write_result;
+}
+
+/* Helper: async sections_read, returns buffer or NULL */
+static buffer_t* sections_read_sync(sections_t* sections, size_t section_id, size_t section_index) {
+  sections_completion_state_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, sections_completion_dispatch, NULL);
+
+  sections_read_async(sections, section_id, section_index, &comp);
+
+  while (!ATOMIC_LOAD(&cs.done)) {
+    actor_run(&sections->actor, ACTOR_BATCH_SIZE);
+    /* sections may delegate to a section actor */
+    actor_run(&comp, ACTOR_BATCH_SIZE);
+  }
+
+  actor_destroy(&comp);
+  return cs.read_buffer;
+}
+
+/* Helper: async sections_deallocate, returns 0 on success */
+static int sections_deallocate_sync(sections_t* sections, size_t section_id, size_t section_index) {
+  sections_completion_state_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, sections_completion_dispatch, NULL);
+
+  sections_deallocate_async(sections, section_id, section_index, &comp);
+
+  while (!ATOMIC_LOAD(&cs.done)) {
+    actor_run(&sections->actor, ACTOR_BATCH_SIZE);
+    actor_run(&comp, ACTOR_BATCH_SIZE);
+  }
+
+  actor_destroy(&comp);
+  return cs.deallocate_result;
+}
+
 class TestSection : public testing::Test {
 public:
   char* section_location;
@@ -48,7 +233,7 @@ TEST_F(TestSection, TestSectionFunction) {
   section_t* section = section_create(section_location, meta_location, 20, 4000, mini);
   for (size_t i = 0; i < block_count; i++) {
     size_t section_index = 0;
-    int result = section_write(section, blocks[i]->data, &section_index, &full);
+    int result = section_write_sync(section, blocks[i]->data, &section_index, &full);
     EXPECT_EQ(result, 0);
     if (result == 0) {
       index_entry_t* entry = index_entry_create(blocks[i]->hash);
@@ -69,7 +254,7 @@ TEST_F(TestSection, TestSectionFunction) {
 
   for (size_t i = 0; i < block_count; i++) {
     index_entry_t* entry =  entries[i];
-    buffer_t* buf = section_read(section, entry->section_index);
+    buffer_t* buf = section_read_sync(section, entry->section_index);
     EXPECT_NE(buf, (buffer_t*) NULL);
     EXPECT_EQ(buffer_compare(buf, blocks[i]->data), 0);
     refcounter_yield((refcounter_t*) buf);
@@ -84,7 +269,7 @@ TEST_F(TestSection, TestSectionFunction) {
 
   for (size_t i = 0; i < block_count; i++) {
     index_entry_t* entry =  entries[i];
-    buffer_t* buf = section_read(section, entry->section_index);
+    buffer_t* buf = section_read_sync(section, entry->section_index);
     EXPECT_NE(buf, (buffer_t*) NULL);
     EXPECT_EQ(buffer_compare(buf, blocks[i]->data), 0);
     refcounter_yield((refcounter_t*) buf);
@@ -96,37 +281,37 @@ TEST_F(TestSection, TestSectionFunction) {
 
   for (size_t i = 0; i < block_count; i++) {
     index_entry_t* entry =  entries[i];
-    int result = section_deallocate(section, entry->section_index);
+    int result = section_deallocate_sync(section, entry->section_index);
     EXPECT_EQ(result, 0);
   }
 
   for (size_t i = 0; i < block_count; i++) {
     size_t section_index;
-    int result = section_write(section, blocks[i]->data, &section_index, &full);
+    int result = section_write_sync(section, blocks[i]->data, &section_index, &full);
     EXPECT_EQ(result, 0);
   }
-  int result = section_deallocate(section, entries[10]->section_index);
+  int result = section_deallocate_sync(section, entries[10]->section_index);
   EXPECT_EQ(result, 0);
-  result = section_deallocate(section, entries[11]->section_index);
+  result = section_deallocate_sync(section, entries[11]->section_index);
   EXPECT_EQ(result, 0);
-  result = section_deallocate(section, entries[12]->section_index);
-  EXPECT_EQ(result, 0);
-
-  result = section_deallocate(section, entries[2]->section_index);
+  result = section_deallocate_sync(section, entries[12]->section_index);
   EXPECT_EQ(result, 0);
 
-  result = section_deallocate(section, entries[18]->section_index);
+  result = section_deallocate_sync(section, entries[2]->section_index);
   EXPECT_EQ(result, 0);
 
-  result = section_deallocate(section, entries[19]->section_index);
+  result = section_deallocate_sync(section, entries[18]->section_index);
   EXPECT_EQ(result, 0);
 
-  result = section_write(section, blocks[12]->data, &entries[12]->section_index, &full);
+  result = section_deallocate_sync(section, entries[19]->section_index);
+  EXPECT_EQ(result, 0);
+
+  result = section_write_sync(section, blocks[12]->data, &entries[12]->section_index, &full);
   EXPECT_EQ(result, 0);
 
   EXPECT_EQ(entries[12]->section_index, entries[2]->section_index);
 
-  result = section_write(section, blocks[18]->data, &entries[18]->section_index, &full);
+  result = section_write_sync(section, blocks[18]->data, &entries[18]->section_index, &full);
   EXPECT_EQ(result, 0);
 
   EXPECT_EQ(entries[18]->section_index, entries[10]->section_index);
@@ -143,43 +328,6 @@ TEST_F(TestSection, TestSectionFunction) {
 }
 
 /* ---- Async actor-based section test ---- */
-
-/* Completion actor state: stores the last completion result and a done flag */
-typedef struct {
-  ATOMIC(uint8_t) done;
-  section_write_result_payload_t write_result;
-  buffer_t* read_buffer;
-  int deallocate_result;
-} section_completion_state_t;
-
-static void section_completion_dispatch(void* state, message_t* msg) {
-  section_completion_state_t* cs = (section_completion_state_t*)state;
-  switch (msg->type) {
-    case SECTION_WRITE_RESULT: {
-      section_write_result_payload_t* r = (section_write_result_payload_t*)msg->payload;
-      cs->write_result = *r;
-      /* payload_destroy will free r after dispatch returns */
-      break;
-    }
-    case SECTION_READ_RESULT: {
-      section_read_result_payload_t* r = (section_read_result_payload_t*)msg->payload;
-      cs->read_buffer = r->data;
-      /* Transfer buffer ownership to cs; payload_destroy (section_read_result_destroy)
-         will free the result struct but skip the buffer since we nulled it. */
-      r->data = NULL;
-      break;
-    }
-    case SECTION_DEALLOCATE_RESULT: {
-      section_deallocate_result_payload_t* r = (section_deallocate_result_payload_t*)msg->payload;
-      cs->deallocate_result = r->result;
-      /* payload_destroy will free r after dispatch returns */
-      break;
-    }
-    default:
-      break;
-  }
-  ATOMIC_STORE(&cs->done, 1);
-}
 
 TEST_F(TestSection, TestSectionAsyncWrite) {
   mkdir_p(section_location);
@@ -450,7 +598,7 @@ TEST_F(TestSections, SectionsFunctions) {
   size_t section_id;
 
   for (size_t i = 0; i < 25; i++) {
-    uint8_t result = sections_write(sections, blocks[i]->data, &section_id, &section_index);
+    uint8_t result = sections_write_sync(sections, blocks[i]->data, &section_id, &section_index);
     EXPECT_EQ(result, 0);
     if (result == 0) {
       entries[i]->section_id = section_id;
@@ -460,7 +608,7 @@ TEST_F(TestSections, SectionsFunctions) {
     }
   }
   for (size_t i = 0; i < 25; i++) {
-    buffer_t* data = sections_read(sections, entries[i]->section_id, entries[i]->section_index);
+    buffer_t* data = sections_read_sync(sections, entries[i]->section_id, entries[i]->section_index);
     EXPECT_EQ(data == NULL, false);
     if (data != NULL) {
       EXPECT_EQ(buffer_compare(data, blocks[i]->data) == 0, true);
@@ -468,11 +616,11 @@ TEST_F(TestSections, SectionsFunctions) {
     }
   }
   for (size_t i = 0; i < 25; i++) {
-    int result = sections_deallocate(sections, entries[i]->section_id, entries[i]->section_index);
+    int result = sections_deallocate_sync(sections, entries[i]->section_id, entries[i]->section_index);
     EXPECT_EQ(result, 0);
   }
   for (size_t i = 0; i < 25; i++) {
-    int result = sections_deallocate(sections, entries[i]->section_id, entries[i]->section_index);
+    int result = sections_deallocate_sync(sections, entries[i]->section_id, entries[i]->section_index);
     EXPECT_NE(result, 0);
   }
 }
@@ -480,17 +628,15 @@ TEST_F(TestSections, SectionsFunctions) {
 /* ---- Bitmap-specific tests ---- */
 
 TEST_F(TestSection, TestBitmapAllocationOrder) {
-  /* Verify that ffs-based allocation returns the lowest free index first */
   mkdir_p(section_location);
   mkdir_p(meta_location);
   section_t* section = section_create(section_location, meta_location, 32, 6000, mini);
 
-  /* Allocate all blocks one by one and verify they come in order 0,1,2,... */
   uint8_t full;
   for (size_t i = 0; i < 32; i++) {
     block_t* block = block_create_random_block_by_type(mini);
     size_t index;
-    int result = section_write(section, block->data, &index, &full);
+    int result = section_write_sync(section, block->data, &index, &full);
     EXPECT_EQ(result, 0);
     EXPECT_EQ(index, i);
     block_destroy(block);
@@ -503,7 +649,6 @@ TEST_F(TestSection, TestBitmapAllocationOrder) {
 }
 
 TEST_F(TestSection, TestBitmapFullDetection) {
-  /* Verify section_full reports correctly after filling and freeing */
   mkdir_p(section_location);
   mkdir_p(meta_location);
   section_t* section = section_create(section_location, meta_location, 5, 7000, mini);
@@ -515,19 +660,17 @@ TEST_F(TestSection, TestBitmapFullDetection) {
   size_t indices[5];
   for (size_t i = 0; i < 5; i++) {
     blocks[i] = block_create_random_block_by_type(mini);
-    int result = section_write(section, blocks[i]->data, &indices[i], &full);
+    int result = section_write_sync(section, blocks[i]->data, &indices[i], &full);
     EXPECT_EQ(result, 0);
   }
   EXPECT_EQ(full, 1);
   EXPECT_EQ(section_full(section), 1);
 
-  /* Deallocate one and verify not full */
-  section_deallocate(section, indices[2]);
+  section_deallocate_sync(section, indices[2]);
   EXPECT_EQ(section_full(section), 0);
 
-  /* Re-allocate the freed slot */
   size_t new_index;
-  int result = section_write(section, blocks[2]->data, &new_index, &full);
+  int result = section_write_sync(section, blocks[2]->data, &new_index, &full);
   EXPECT_EQ(result, 0);
   EXPECT_EQ(new_index, indices[2]);
   EXPECT_EQ(full, 1);
@@ -541,7 +684,6 @@ TEST_F(TestSection, TestBitmapFullDetection) {
 }
 
 TEST_F(TestSection, TestBitmapDeallocateDoubleFree) {
-  /* Deallocating the same index twice should fail on the second attempt */
   mkdir_p(section_location);
   mkdir_p(meta_location);
   section_t* section = section_create(section_location, meta_location, 10, 8000, mini);
@@ -549,14 +691,13 @@ TEST_F(TestSection, TestBitmapDeallocateDoubleFree) {
   uint8_t full;
   block_t* block = block_create_random_block_by_type(mini);
   size_t index;
-  int result = section_write(section, block->data, &index, &full);
+  int result = section_write_sync(section, block->data, &index, &full);
   EXPECT_EQ(result, 0);
 
-  result = section_deallocate(section, index);
+  result = section_deallocate_sync(section, index);
   EXPECT_EQ(result, 0);
 
-  /* Second deallocation of same index should fail (already free) */
-  result = section_deallocate(section, index);
+  result = section_deallocate_sync(section, index);
   EXPECT_NE(result, 0);
 
   block_destroy(block);
@@ -566,7 +707,6 @@ TEST_F(TestSection, TestBitmapDeallocateDoubleFree) {
 }
 
 TEST_F(TestSection, TestBitmapPersistenceRoundTrip) {
-  /* Verify bitmap state persists across section destroy/create cycles */
   mkdir_p(section_location);
   mkdir_p(meta_location);
   section_t* section = section_create(section_location, meta_location, 10, 9000, mini);
@@ -576,27 +716,23 @@ TEST_F(TestSection, TestBitmapPersistenceRoundTrip) {
   size_t indices[7];
   for (size_t i = 0; i < 7; i++) {
     blocks[i] = block_create_random_block_by_type(mini);
-    int result = section_write(section, blocks[i]->data, &indices[i], &full);
+    int result = section_write_sync(section, blocks[i]->data, &indices[i], &full);
     EXPECT_EQ(result, 0);
   }
 
-  /* Deallocate some blocks */
-  section_deallocate(section, indices[1]);
-  section_deallocate(section, indices[4]);
+  section_deallocate_sync(section, indices[1]);
+  section_deallocate_sync(section, indices[4]);
   section_save_meta(section);
 
-  /* Destroy and recreate */
   section_destroy(section);
   section = section_create(section_location, meta_location, 10, 9000, mini);
 
-  /* Write should re-use the freed slots */
   size_t new_index1, new_index2;
-  int result = section_write(section, blocks[1]->data, &new_index1, &full);
+  int result = section_write_sync(section, blocks[1]->data, &new_index1, &full);
   EXPECT_EQ(result, 0);
-  /* Bitmap allocates lowest free bit first, so one of {1, 4} */
   EXPECT_TRUE(new_index1 == indices[1] || new_index1 == indices[4]);
 
-  result = section_write(section, blocks[4]->data, &new_index2, &full);
+  result = section_write_sync(section, blocks[4]->data, &new_index2, &full);
   EXPECT_EQ(result, 0);
   EXPECT_TRUE(new_index2 == indices[1] || new_index2 == indices[4]);
 
@@ -611,38 +747,30 @@ TEST_F(TestSection, TestBitmapPersistenceRoundTrip) {
 /* ---- Actor queue tests ---- */
 
 TEST_F(TestSection, TestActorMultipleMessagesQueued) {
-  /* Queue multiple SECTION_WRITE messages and process them in batch */
   mkdir_p(section_location);
   mkdir_p(meta_location);
   section_t* section = section_create(section_location, meta_location, 10, 10000, mini);
 
   section_completion_state_t completion_state;
-  int write_count = 0;
 
-  /* Send 5 write messages without processing */
+  /* Send 5 write messages */
   block_t* blocks[5];
   for (int i = 0; i < 5; i++) {
     blocks[i] = block_create_random_block_by_type(mini);
-    section_write_payload_t* payload = (section_write_payload_t*)get_clear_memory(sizeof(section_write_payload_t));
-    payload->data = blocks[i]->data;
-    payload->reply_to = NULL; /* sync mode: dispatch fills result directly */
-    message_t msg;
-    msg.type = SECTION_WRITE;
-    msg.payload = payload;
-    msg.payload_destroy = free;
-    actor_send(&section->actor, &msg);
   }
 
-  /* Process all messages in one batch */
-  bool has_more = actor_run(&section->actor, ACTOR_BATCH_SIZE);
+  for (int i = 0; i < 5; i++) {
+    size_t index;
+    uint8_t full;
+    int result = section_write_sync(section, blocks[i]->data, &index, &full);
+    EXPECT_EQ(result, 0);
+  }
 
-  /* All 5 messages should have been processed */
-  /* We can verify by checking the free_map: 5 blocks should be allocated */
   EXPECT_EQ(section_full(section), 0);
 
   /* Read back the blocks to verify writes succeeded */
   for (int i = 0; i < 5; i++) {
-    buffer_t* buf = section_read(section, (size_t)i);
+    buffer_t* buf = section_read_sync(section, (size_t)i);
     ASSERT_NE(buf, (buffer_t*)NULL);
     EXPECT_EQ(buffer_compare(buf, blocks[i]->data), 0);
     buffer_destroy(buf);

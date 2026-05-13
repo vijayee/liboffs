@@ -158,9 +158,4 @@ void sections_read_async(sections_t* sections, size_t section_id, size_t section
 void sections_write_async(sections_t* sections, buffer_t* data, actor_t* reply_to);
 void sections_deallocate_async(sections_t* sections, size_t section_id, size_t section_index, actor_t* reply_to);
 
-/* Sync API — direct dispatch. Temporary, will be removed as callers convert. */
-buffer_t* sections_read(sections_t* sections, size_t section_id, size_t section_index);
-int sections_write(sections_t* sections, buffer_t* data, size_t* out_section_id, size_t* out_section_index);
-int sections_deallocate(sections_t* sections, size_t section_id, size_t section_index);
-
 #endif //OFFS_SECTIONS_H

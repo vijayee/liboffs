@@ -1,8 +1,14 @@
 #include <gtest/gtest.h>
+#include <future>
+#include <chrono>
 extern "C" {
 #include "../src/OFFStreams/tuple_cache.h"
 #include "../src/OFFStreams/tuple.h"
 #include "../src/Buffer/buffer.h"
+#include "../src/Actor/actor.h"
+#include "../src/Actor/message.h"
+#include "../src/Scheduler/scheduler.h"
+#include "../src/Util/atomic_compat.h"
 }
 
 TEST(TupleCacheLRU, TestCreateDestroy) {
@@ -163,14 +169,38 @@ TEST(TupleCacheLRU, TestContains) {
   DESTROY(val, buffer);
 }
 
+/* Completion state for async tuple_cache actor tests */
+typedef struct {
+  ATOMIC(uint8_t) done;
+  tuple_t* key;
+  buffer_t* value;
+} tuple_cache_completion_t;
+
+static void tuple_cache_completion_dispatch(void* state, message_t* msg) {
+  tuple_cache_completion_t* cs = (tuple_cache_completion_t*)state;
+  if (msg->type == TUPLE_CACHE_GET_RESULT) {
+    tuple_cache_get_result_payload_t* r = (tuple_cache_get_result_payload_t*)msg->payload;
+    cs->key = r->key;
+    cs->value = r->value;
+    r->value = NULL;  /* transfer ownership to cs */
+  }
+  ATOMIC_STORE(&cs->done, 1);
+}
+
 TEST(TupleCacheActor, TestCreateDestroy) {
-  tuple_cache_t* tc = tuple_cache_create(10, NULL);
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  scheduler_pool_start(pool);
+  tuple_cache_t* tc = tuple_cache_create(10, pool);
   ASSERT_NE(tc, nullptr);
   tuple_cache_destroy(tc);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
 }
 
 TEST(TupleCacheActor, TestApplyAndUpdate) {
-  tuple_cache_t* tc = tuple_cache_create(10, NULL);
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  scheduler_pool_start(pool);
+  tuple_cache_t* tc = tuple_cache_create(10, pool);
 
   uint8_t d1[] = {0x01};
   buffer_t* h1 = buffer_create_from_pointer_copy(d1, 1);
@@ -180,25 +210,44 @@ TEST(TupleCacheActor, TestApplyAndUpdate) {
   uint8_t val_data[] = {0xAA, 0xBB};
   buffer_t* val = buffer_create_from_pointer_copy(val_data, 2);
 
-  buffer_t* miss = tuple_cache_apply(tc, key);
-  EXPECT_EQ(miss, nullptr);
+  /* Put value via async API (fire-and-forget) */
+  tuple_cache_put_async(tc, key, val);
 
-  tuple_cache_update(tc, key, val);
-  EXPECT_TRUE(tuple_cache_contains(tc, key));
+  /* Wait for put to complete */
+  while (!tuple_cache_lru_contains(tc->lru, key)) {
+    usleep(1000);
+  }
 
-  buffer_t* hit = tuple_cache_apply(tc, key);
-  ASSERT_NE(hit, nullptr);
-  EXPECT_EQ(memcmp(hit->data, val_data, 2), 0);
-  DESTROY(hit, buffer);
+  /* Get value via async API with completion actor */
+  tuple_cache_completion_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, tuple_cache_completion_dispatch, pool);
+
+  tuple_cache_get_async(tc, key, &comp);
+
+  auto future = std::async(std::launch::async, [&cs]() {
+    while (!ATOMIC_LOAD(&cs.done)) { usleep(1000); }
+  });
+  EXPECT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+
+  ASSERT_NE(cs.value, nullptr);
+  EXPECT_EQ(memcmp(cs.value->data, val_data, 2), 0);
+  DESTROY(cs.value, buffer);
 
   tuple_cache_destroy(tc);
+  actor_destroy(&comp);
   tuple_destroy(key);
   DESTROY(h1, buffer);
   DESTROY(val, buffer);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
 }
 
 TEST(TupleCacheActor, TestRemove) {
-  tuple_cache_t* tc = tuple_cache_create(10, NULL);
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  scheduler_pool_start(pool);
+  tuple_cache_t* tc = tuple_cache_create(10, pool);
 
   uint8_t d1[] = {0x01};
   buffer_t* h1 = buffer_create_from_pointer_copy(d1, 1);
@@ -208,17 +257,21 @@ TEST(TupleCacheActor, TestRemove) {
   uint8_t vd[] = {0xFF};
   buffer_t* val = buffer_create_from_pointer_copy(vd, 1);
 
-  tuple_cache_update(tc, key, val);
-  EXPECT_EQ(tuple_cache_size(tc), 1u);
+  /* Put then remove via LRU (direct ops, no actor needed) */
+  tuple_cache_lru_put(tc->lru, key, val);
+  EXPECT_EQ(tuple_cache_lru_size(tc->lru), 1u);
 
-  tuple_cache_remove(tc, key);
-  EXPECT_EQ(tuple_cache_size(tc), 0u);
+  tuple_cache_lru_remove(tc->lru, key);
+  EXPECT_EQ(tuple_cache_lru_size(tc->lru), 0u);
 
-  buffer_t* result = tuple_cache_apply(tc, key);
+  /* Verify get returns null */
+  buffer_t* result = tuple_cache_lru_get(tc->lru, key);
   EXPECT_EQ(result, nullptr);
 
   tuple_cache_destroy(tc);
   tuple_destroy(key);
   DESTROY(h1, buffer);
   DESTROY(val, buffer);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
 }

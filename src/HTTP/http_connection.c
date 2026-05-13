@@ -9,12 +9,14 @@
 #include "../Util/allocator.h"
 #include "../Buffer/buffer.h"
 #include "../Streams/stream.h"
+#include "../Actor/actor.h"
+#include "../Actor/message.h"
+#include "../Scheduler/scheduler.h"
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <poll.h>
 #include <ctype.h>
 #include <stdio.h>
 
@@ -181,12 +183,8 @@ static int _on_headers_complete(http_parser* parser) {
       http_response_t* response = http_response_create(connection->server->pool, connection);
       int streaming = route->headers_complete_handler(connection, connection->request, response);
       if (streaming) {
-        // Pipeline owns the response via its extra ref.
-        // Release the create-ref — pipeline's cleanup in
-        // _put_on_descriptor_close will drop its ref, freeing the response.
         http_response_destroy(response);
       } else {
-        // Handler declined streaming (e.g., multipart). Fall through to normal path.
         connection->streaming_route = NULL;
         DESTROY(response, http_response);
       }
@@ -246,9 +244,6 @@ static int _on_message_complete(http_parser* parser) {
   http_server_dispatch(connection->server, connection->request, response);
 
   if (response->is_piped) {
-    // Piped responses are async — the pipeline will call http_response_end
-    // and http_response_destroy when the stream closes. Skip cleanup here.
-    // Still release the initial ref from create; the pipe holds its own ref.
     http_response_destroy(response);
   } else {
     DESTROY(response, http_response);
@@ -267,13 +262,231 @@ static int _on_message_complete(http_parser* parser) {
   return 0;
 }
 
+/* Helper: send a watcher update request to the server actor (I/O thread). */
+static void _connection_update_watcher(http_connection_t* connection, pd_event_t events) {
+  if (connection->watcher == NULL) return;
+  watcher_update_payload_t* payload = get_clear_memory(sizeof(watcher_update_payload_t));
+  payload->watcher = connection->watcher;
+  payload->events = events;
+  message_t msg;
+  msg.type = HTTP_SERVER_UPDATE_WATCHER;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+  actor_send(&connection->server->actor, &msg);
+  pd_loop_async_send(connection->server->loop, NULL);
+}
+
+/* Helper: stop the connection's watcher via the server actor (I/O thread).
+ * Must NOT be called from the I/O thread — use pd_watcher_stop/destroy directly
+ * in that case. */
+static void _connection_stop_watcher(http_connection_t* connection) {
+  if (connection->watcher == NULL) return;
+  pd_watcher_t* watcher = connection->watcher;
+  connection->watcher = NULL;
+  watcher_update_payload_t* payload = get_clear_memory(sizeof(watcher_update_payload_t));
+  payload->watcher = watcher;
+  payload->events = 0;
+  message_t msg;
+  msg.type = HTTP_SERVER_STOP_WATCHER;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+  actor_send(&connection->server->actor, &msg);
+  pd_loop_async_send(connection->server->loop, NULL);
+}
+
+/* Close the fd and mark connection as closing. Used from dispatch (worker thread). */
+static void _connection_close_fd(http_connection_t* connection) {
+  if (connection->fd >= 0) {
+    close(connection->fd);
+    connection->fd = -1;
+  }
+  connection->is_closing = 1;
+}
+
+/* Connection actor dispatch — runs on scheduler worker threads. */
+void http_connection_dispatch(void* state, message_t* msg) {
+  http_connection_t* connection = (http_connection_t*)state;
+
+  if (connection->is_closing) {
+    /* Connection is shutting down — discard all messages. */
+    return;
+  }
+
+  switch (msg->type) {
+    case HTTP_CONNECTION_DATA: {
+      buffer_t* data = (buffer_t*)msg->payload;
+      msg->payload = NULL; /* Take ownership — actor_run won't destroy it */
+      if (connection->fd < 0) {
+        DESTROY(data, buffer);
+        break;
+      }
+      size_t nparsed = http_parser_execute(&connection->parser, &_parser_settings,
+                                            (const char*)data->data, data->size);
+      (void)nparsed;
+      DESTROY(data, buffer);
+      if (connection->parser.http_errno != HPE_OK) {
+        /* Parse error — close the connection */
+        if (connection->piped_pending) {
+          if (connection->streaming_route != NULL && connection->request != NULL) {
+            stream_deactivate((stream_t*)connection->request,
+                              ERROR("Connection closed during streaming upload"));
+            connection->streaming_route = NULL;
+          }
+        }
+        _connection_stop_watcher(connection);
+        _connection_close_fd(connection);
+      }
+      break;
+    }
+
+    case HTTP_CONNECTION_HANGUP:
+    case HTTP_CONNECTION_ERROR: {
+      if (connection->piped_pending) {
+        if (connection->streaming_route != NULL && connection->request != NULL) {
+          stream_deactivate((stream_t*)connection->request,
+                            ERROR("Connection closed during streaming upload"));
+          connection->streaming_route = NULL;
+        }
+      }
+      _connection_stop_watcher(connection);
+      _connection_close_fd(connection);
+      break;
+    }
+
+    case HTTP_CONNECTION_WRITE: {
+      buffer_t* buf = (buffer_t*)msg->payload;
+      msg->payload = NULL; /* Take ownership — actor_run won't destroy it */
+      if (connection->fd < 0) {
+        DESTROY(buf, buffer);
+        break;
+      }
+      /* If there's already buffered data, append to it */
+      if (connection->write_buffer != NULL && connection->write_buffer->size > 0) {
+        buffer_ensure_capacity(connection->write_buffer, connection->write_buffer->size + buf->size);
+        memcpy(connection->write_buffer->data + connection->write_buffer->size,
+               buf->data, buf->size);
+        connection->write_buffer->size += buf->size;
+        DESTROY(buf, buffer);
+        break;
+      }
+      /* Try direct send */
+      ssize_t sent = send(connection->fd, buf->data, buf->size, MSG_NOSIGNAL);
+      if (sent < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          connection->write_buffer = buf;
+          connection->write_pending = 1;
+          _connection_update_watcher(connection, PD_EVENT_READ | PD_EVENT_WRITE);
+        } else {
+          DESTROY(buf, buffer);
+          _connection_stop_watcher(connection);
+          _connection_close_fd(connection);
+        }
+      } else if (sent == 0) {
+        /* Peer closed read side — stop writing */
+        DESTROY(buf, buffer);
+        _connection_stop_watcher(connection);
+        _connection_close_fd(connection);
+      } else if ((size_t)sent < buf->size) {
+        size_t remaining = buf->size - (size_t)sent;
+        connection->write_buffer = buffer_create(remaining);
+        memcpy(connection->write_buffer->data, buf->data + sent, remaining);
+        connection->write_buffer->size = remaining;
+        connection->write_pending = 1;
+        _connection_update_watcher(connection, PD_EVENT_READ | PD_EVENT_WRITE);
+        DESTROY(buf, buffer);
+      } else {
+        DESTROY(buf, buffer);
+      }
+      break;
+    }
+
+    case HTTP_CONNECTION_WRITABLE: {
+      if (connection->fd < 0) {
+        break;
+      }
+      if (connection->write_buffer == NULL || connection->write_buffer->size == 0) {
+        connection->write_pending = 0;
+        _connection_update_watcher(connection, PD_EVENT_READ);
+        break;
+      }
+      ssize_t sent = send(connection->fd, connection->write_buffer->data,
+                           connection->write_buffer->size, MSG_NOSIGNAL);
+      if (sent > 0) {
+        if ((size_t)sent >= connection->write_buffer->size) {
+          DESTROY(connection->write_buffer, buffer);
+          connection->write_buffer = NULL;
+          connection->write_pending = 0;
+          _connection_update_watcher(connection, PD_EVENT_READ);
+        } else {
+          size_t remaining = connection->write_buffer->size - (size_t)sent;
+          memmove(connection->write_buffer->data,
+                  connection->write_buffer->data + sent, remaining);
+          connection->write_buffer->size = remaining;
+        }
+      } else if (sent == 0) {
+        /* Peer closed read side */
+        DESTROY(connection->write_buffer, buffer);
+        connection->write_buffer = NULL;
+        connection->write_pending = 0;
+        _connection_stop_watcher(connection);
+        _connection_close_fd(connection);
+      } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        DESTROY(connection->write_buffer, buffer);
+        connection->write_buffer = NULL;
+        connection->write_pending = 0;
+        _connection_stop_watcher(connection);
+        _connection_close_fd(connection);
+      }
+      break;
+    }
+
+    case HTTP_CONNECTION_CLOSE: {
+      if (connection->fd >= 0) {
+        shutdown(connection->fd, SHUT_WR);
+      }
+      _connection_stop_watcher(connection);
+      _connection_close_fd(connection);
+      break;
+    }
+
+    default:
+      break;
+  }
+}
+
+/* Thin I/O callback — only reads data and enqueues to actor. No HTTP parsing. */
 static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
-                                     pd_event_t events, void* user_data) {
+                                       pd_event_t events, void* user_data) {
+  (void)loop;
   http_connection_t* connection = (http_connection_t*)user_data;
-  char buffer[READ_BUFFER_SIZE];
+
+  if (events & PD_EVENT_WRITE) {
+    /* Socket is writable — flush any buffered write data */
+    message_t writable_msg;
+    writable_msg.type = HTTP_CONNECTION_WRITABLE;
+    writable_msg.payload = NULL;
+    writable_msg.payload_destroy = NULL;
+    actor_send(&connection->actor, &writable_msg);
+  }
+
+  if (events & (PD_EVENT_HANGUP | PD_EVENT_ERROR)) {
+    message_t msg;
+    msg.type = (events & PD_EVENT_HANGUP) ? HTTP_CONNECTION_HANGUP : HTTP_CONNECTION_ERROR;
+    msg.payload = NULL;
+    msg.payload_destroy = NULL;
+    actor_send(&connection->actor, &msg);
+    /* Stop the watcher on the I/O thread (safe here) and mark it NULL
+     * so the dispatch won't try to stop it again via server actor. */
+    pd_watcher_stop(watcher);
+    pd_watcher_destroy(watcher);
+    connection->watcher = NULL;
+    return;
+  }
 
   if (events & PD_EVENT_READ) {
+    char buffer[READ_BUFFER_SIZE];
     ssize_t bytes_read;
+
     if (connection->is_ssl && connection->ssl != NULL) {
       bytes_read = SSL_read(connection->ssl, buffer, sizeof(buffer));
       if (bytes_read <= 0) {
@@ -281,72 +494,43 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
         if (ssl_error == SSL_ERROR_WANT_READ) {
           return;
         }
-        goto close;
+        message_t msg;
+        msg.type = HTTP_CONNECTION_HANGUP;
+        msg.payload = NULL;
+        msg.payload_destroy = NULL;
+        actor_send(&connection->actor, &msg);
+        return;
       }
     } else {
       bytes_read = recv(connection->fd, buffer, sizeof(buffer), 0);
       if (bytes_read <= 0) {
         if (bytes_read == 0) {
-          goto close;
+          message_t msg;
+          msg.type = HTTP_CONNECTION_HANGUP;
+          msg.payload = NULL;
+          msg.payload_destroy = NULL;
+          actor_send(&connection->actor, &msg);
+          return;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
           return;
         }
-        goto close;
+        message_t msg;
+        msg.type = HTTP_CONNECTION_ERROR;
+        msg.payload = NULL;
+        msg.payload_destroy = NULL;
+        actor_send(&connection->actor, &msg);
+        return;
       }
     }
 
-    size_t nparsed = http_parser_execute(&connection->parser, &_parser_settings,
-                                          buffer, (size_t)bytes_read);
-    if (connection->parser.http_errno != HPE_OK) {
-      goto close;
-    }
-    (void)nparsed;
+    buffer_t* data = buffer_create_from_pointer_copy((uint8_t*)buffer, (size_t)bytes_read);
+    message_t msg;
+    msg.type = HTTP_CONNECTION_DATA;
+    msg.payload = data;
+    msg.payload_destroy = (void (*)(void*))buffer_destroy;
+    actor_send(&connection->actor, &msg);
   }
-
-  if (events & PD_EVENT_HANGUP) {
-    goto close;
-  }
-
-  if (events & PD_EVENT_ERROR) {
-    goto close;
-  }
-
-  return;
-
-close:
-  if (connection->piped_pending) {
-    // A piped response or streaming upload is still in progress.
-    // Emit error on request stream so the pipeline can clean up.
-    if (connection->streaming_route != NULL && connection->request != NULL) {
-      stream_deactivate((stream_t*)connection->request,
-                        ERROR("Connection closed during streaming upload"));
-      connection->streaming_route = NULL;
-    }
-    // Close the fd so the piped write path detects the broken connection.
-    // The worker thread will get EPIPE on send() and stop writing.
-    if (connection->fd >= 0) {
-      close(connection->fd);
-      connection->fd = -1;
-    }
-    // Stop and destroy the read watcher on the event loop thread
-    // (safe here) and release our reference to the connection.
-    // The worker thread holds the other reference and will free
-    // the connection when it finishes.
-    pd_watcher_stop(watcher);
-    pd_watcher_destroy(watcher);
-    connection->watcher = NULL;
-    http_connection_destroy(connection);
-    return;
-  }
-  pd_watcher_stop(watcher);
-  pd_watcher_destroy(watcher);
-  connection->watcher = NULL;
-  if (connection->fd >= 0) {
-    close(connection->fd);
-    connection->fd = -1;
-  }
-  DESTROY(connection, http_connection);
 }
 
 http_connection_t* http_connection_create(http_server_t* server, int fd) {
@@ -360,6 +544,7 @@ http_connection_t* http_connection_create(http_server_t* server, int fd) {
   connection->request_complete = 0;
   connection->request = NULL;
   connection->write_buffer = NULL;
+  connection->write_pending = 0;
   connection->header_field = NULL;
   connection->header_field_len = 0;
   connection->header_field_cap = 0;
@@ -367,6 +552,8 @@ http_connection_t* http_connection_create(http_server_t* server, int fd) {
   connection->header_value_len = 0;
   connection->header_value_cap = 0;
   connection->streaming_route = NULL;
+
+  actor_init(&connection->actor, connection, http_connection_dispatch, server->pool);
 
   int flags = fcntl(fd, F_GETFL, 0);
   fcntl(fd, F_SETFL, flags | O_NONBLOCK);
@@ -392,6 +579,7 @@ void http_connection_destroy(http_connection_t* connection) {
       atomic_fetch_sub(&connection->server->active_connections, 1);
       vec_remove(&connection->server->connections, connection);
     }
+    actor_destroy(&connection->actor);
     if (connection->watcher != NULL) {
       pd_watcher_stop(connection->watcher);
       pd_watcher_destroy(connection->watcher);
@@ -422,47 +610,21 @@ void http_connection_write(http_connection_t* connection, const char* data, size
   if (connection == NULL || connection->fd < 0) {
     return;
   }
-
-  size_t written = 0;
-  while (written < length) {
-    ssize_t result;
-    if (connection->is_ssl && connection->ssl != NULL) {
-      result = SSL_write(connection->ssl, data + written, (int)(length - written));
-      if (result <= 0) {
-        int ssl_error = SSL_get_error(connection->ssl, (int)result);
-        if (ssl_error == SSL_ERROR_WANT_WRITE) {
-          continue;
-        }
-        break;
-      }
-    } else {
-      result = send(connection->fd, data + written, length - written, MSG_NOSIGNAL);
-      if (result <= 0) {
-        if (result == 0) {
-          break;
-        }
-        if (errno == EINTR) {
-          continue;
-        }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-          struct pollfd poll_fd;
-          poll_fd.fd = connection->fd;
-          poll_fd.events = POLLOUT;
-          poll(&poll_fd, 1, 1000);
-          continue;
-        }
-        break;
-      }
-    }
-    written += (size_t)result;
-  }
+  buffer_t* buf = buffer_create_from_pointer_copy((uint8_t*)data, length);
+  message_t msg;
+  msg.type = HTTP_CONNECTION_WRITE;
+  msg.payload = buf;
+  msg.payload_destroy = (void (*)(void*))buffer_destroy;
+  actor_send(&connection->actor, &msg);
 }
 
 void http_connection_close(http_connection_t* connection) {
   if (connection == NULL) {
     return;
   }
-  if (connection->fd >= 0) {
-    shutdown(connection->fd, SHUT_WR);
-  }
+  message_t msg;
+  msg.type = HTTP_CONNECTION_CLOSE;
+  msg.payload = NULL;
+  msg.payload_destroy = NULL;
+  actor_send(&connection->actor, &msg);
 }

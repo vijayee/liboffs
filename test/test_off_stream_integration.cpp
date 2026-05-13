@@ -161,10 +161,10 @@ TEST(OffStreamIntegration, ReadableOffStreamDecodesBlock) {
   DESTROY(xored2, buffer);
   ASSERT_NE(off_block, nullptr);
 
-  block_cache_put(bc, origin_block);
-  block_cache_put(bc, random1);
-  block_cache_put(bc, random2);
-  block_cache_put(bc, off_block);
+  block_cache_put_async(bc, origin_block, NULL);
+  block_cache_put_async(bc, random1, NULL);
+  block_cache_put_async(bc, random2, NULL);
+  block_cache_put_async(bc, off_block, NULL);
 
   ori_t* ori = ori_create(128000);
   ori->block_type = standard;
