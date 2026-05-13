@@ -80,6 +80,7 @@ void sections_lru_cache_delete(sections_lru_cache_t* lru, size_t section_id) {
       sections_lru_node_t* previous_node = node->previous;
       if (node->next == NULL) {
         previous_node->next = NULL;
+        lru->last = previous_node;
       } else {
         sections_lru_node_t* next_node = node->next;
         next_node->previous = node->previous;
@@ -169,6 +170,7 @@ void sections_lru_cache_move(sections_lru_cache_t* lru, sections_lru_node_t* nod
         sections_lru_node_t* first_node = lru->first;
         first_node->previous = node;
         node->next = first_node;
+        node->previous = NULL;
         lru->first = node;
       }
     }

@@ -224,6 +224,7 @@ void tuple_cache_dispatch(void* state, message_t* msg) {
         reply.payload_destroy = free;
         actor_send(payload->reply_to, &reply);
       }
+      DESTROY(payload->key, tuple);
       break;
     }
     case TUPLE_CACHE_PUT: {
@@ -280,7 +281,7 @@ void tuple_cache_destroy(tuple_cache_t* tc) {
 
 void tuple_cache_get(tuple_cache_t* tc, tuple_t* key, actor_t* reply_to) {
   tuple_cache_get_payload_t* payload = get_clear_memory(sizeof(tuple_cache_get_payload_t));
-  payload->key = key;
+  payload->key = (tuple_t*)refcounter_reference((refcounter_t*)key);
   payload->reply_to = reply_to;
   payload->result = NULL;
 

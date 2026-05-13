@@ -93,6 +93,7 @@ void block_lru_cache_delete(block_lru_cache_t* lru, buffer_t* hash) {
       block_lru_node_t* previous_node = node->previous;
       if (node->next == NULL) {
         previous_node->next = NULL;
+        lru->last = previous_node;
       } else {
         block_lru_node_t* next_node = node->next;
         next_node->previous = node->previous;
@@ -396,6 +397,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
         sections_dispatch(block_cache->sections, &dealloc_msg);
         p->result = 0;
       }
+      DESTROY(p->hash, buffer);
       /* Async: send result back if reply_to is set */
       if (p->reply_to != NULL) {
         cache_remove_result_payload_t* result = get_clear_memory(sizeof(cache_remove_result_payload_t));
@@ -563,7 +565,7 @@ void block_cache_put(block_cache_t* block_cache, block_t* block, actor_t* reply_
 
 void block_cache_remove(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to) {
   cache_remove_payload_t* payload = get_clear_memory(sizeof(cache_remove_payload_t));
-  payload->hash = hash;
+  payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)hash);
   payload->reply_to = reply_to;
   payload->result = -1;
 

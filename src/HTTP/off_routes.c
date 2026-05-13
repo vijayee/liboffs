@@ -229,8 +229,9 @@ static void _off_get_state_destroy(off_get_state_t* state) {
     http_connection_t* conn = state->connection;
     http_response_destroy(state->response);
     if (conn) http_connection_destroy(conn);
+    atomic_fetch_or(&state->actor.flags, ACTOR_FLAG_DESTROY);
     actor_destroy(&state->actor);
-    free(state);
+    scheduler_pool_defer_cleanup(state->ctx->pool, state, free);
 }
 
 static void _send_stream_response(http_response_t* response, off_routes_context_t* ctx,
@@ -409,7 +410,8 @@ static void _off_get_dispatch(void* state, message_t* msg) {
 
             if (ctx->phase == OFF_GET_RESOLVE_INDEX) {
                 if (result->ori != NULL) {
-                    /* Found index.html — stream it */
+                    /* Found index.html — stream it.
+                       _send_stream_response takes ownership of the ori reference. */
                     _send_stream_response(ctx->response, ctx->ctx, result->ori, "text/html");
                     DESTROY(result->hash, buffer);
                     if (result->path) free(result->path);
@@ -431,6 +433,7 @@ static void _off_get_dispatch(void* state, message_t* msg) {
             if (ctx->phase == OFF_GET_RESOLVE_DIR) {
                 if (result->ori != NULL) {
                     const char* mime = mime_type_from_extension(ctx->resolve_path);
+                    /* _send_stream_response takes ownership of the ori reference. */
                     _send_stream_response(ctx->response, ctx->ctx, result->ori, mime);
                 } else {
                     http_response_set_status(ctx->response, 404);

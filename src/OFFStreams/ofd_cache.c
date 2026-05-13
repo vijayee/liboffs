@@ -8,6 +8,7 @@
 #include "../Buffer/buffer.h"
 #include "../Actor/actor.h"
 #include "../Actor/message.h"
+#include "../Scheduler/scheduler.h"
 #include <hashmap.h>
 #include <string.h>
 #include <time.h>
@@ -94,9 +95,9 @@ typedef struct {
 
 static void _resolver_send_result(ofd_resolver_t* resolver, ori_t* ori) {
     ofd_resolve_result_t* result = get_clear_memory(sizeof(ofd_resolve_result_t));
-    result->ori = ori;
-    result->hash = resolver->root_hash;
-    result->path = resolver->path;
+    result->ori = ori ? (ori_t*)refcounter_reference((refcounter_t*)ori) : NULL;
+    result->hash = (buffer_t*)refcounter_reference((refcounter_t*)resolver->root_hash);
+    result->path = resolver->path ? strdup(resolver->path) : NULL;
 
     message_t msg;
     msg.type = OFD_CACHE_RESOLVE_RESULT;
@@ -109,30 +110,31 @@ static void _resolver_send_result(ofd_resolver_t* resolver, ori_t* ori) {
 }
 
 static void _resolver_cleanup(ofd_resolver_t* resolver) {
-    if (resolver->current_ofd) {
-        ofd_destroy(resolver->current_ofd);
-        resolver->current_ofd = NULL;
-    }
+    /* current_ofd is owned by the cache — do not destroy it here */
     DESTROY(resolver->root_hash, buffer);
     if (resolver->path) {
         free(resolver->path);
         resolver->path = NULL;
     }
+    atomic_fetch_or(&resolver->actor.flags, ACTOR_FLAG_DESTROY);
     actor_destroy(&resolver->actor);
-    free(resolver);
+    scheduler_pool_defer_cleanup(resolver->cache->pool, resolver, free);
 }
 
 static void _resolver_dispatch(void* state, message_t* msg);
 
 static void _resolver_continue_path(ofd_resolver_t* resolver) {
     if (resolver->path == NULL) {
-        /* Path was empty or already fully resolved — no match */
+        /* Path was empty — no match */
         _resolver_send_result(resolver, NULL);
         _resolver_cleanup(resolver);
         return;
     }
 
-    char* segment = strtok_r(NULL, "/", &resolver->saveptr);
+    /* First call uses strtok_r(path, ...), subsequent calls use strtok_r(NULL, ...) */
+    char* segment = (resolver->saveptr == NULL)
+        ? strtok_r(resolver->path, "/", &resolver->saveptr)
+        : strtok_r(NULL, "/", &resolver->saveptr);
 
     while (segment) {
         ofd_entry_t* entry = ofd_find(resolver->current_ofd, segment);
@@ -149,8 +151,7 @@ static void _resolver_continue_path(ofd_resolver_t* resolver) {
                 _resolver_cleanup(resolver);
                 return;
             }
-            ori_t* result = entry->file_ori;
-            _resolver_send_result(resolver, result);
+            _resolver_send_result(resolver, entry->file_ori);
             _resolver_cleanup(resolver);
             return;
         }
@@ -159,7 +160,8 @@ static void _resolver_continue_path(ofd_resolver_t* resolver) {
             /* Check in-memory cache first */
             ofd_t* cached = ofd_cache_get(resolver->cache, entry->dir_hash);
             if (cached) {
-                ofd_destroy(resolver->current_ofd);
+                /* cached is borrowed from the cache — do not destroy current_ofd
+                   since it is also in the cache */
                 resolver->current_ofd = cached;
                 segment = strtok_r(NULL, "/", &resolver->saveptr);
                 continue;
@@ -236,8 +238,8 @@ static void _resolver_dispatch(void* state, message_t* msg) {
                 resolver->current_ofd = ofd;
                 _resolver_continue_path(resolver);
             } else {
-                /* We fetched a directory OFD — replace current_ofd and continue */
-                ofd_destroy(resolver->current_ofd);
+                /* We fetched a directory OFD — replace current_ofd and continue.
+                   current_ofd is owned by the cache, so we just update the pointer. */
                 resolver->current_ofd = ofd;
                 _resolver_continue_path(resolver);
             }
@@ -275,16 +277,14 @@ void ofd_cache_resolve(ofd_cache_t* cache, buffer_t* root_hash, const char* path
     resolver->reply_to = reply_to;
     resolver->resolving_root = 1;
 
-    /* Tokenize the first segment so _resolver_continue_path can use strtok_r(NULL, ...) */
-    char* first_segment = strtok_r(resolver->path, "/", &resolver->saveptr);
-    if (!first_segment || strlen(path) == 0) {
+    if (strlen(path) == 0) {
         /* Empty path — send NULL result immediately */
         _resolver_send_result(resolver, NULL);
         _resolver_cleanup(resolver);
         return;
     }
 
-    /* Kick off resolution */
+    /* Kick off resolution — _resolver_continue_path will tokenize from the start */
     message_t msg;
     msg.type = OFD_CACHE_RESOLVE;
     msg.payload = NULL;
