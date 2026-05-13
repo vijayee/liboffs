@@ -579,6 +579,7 @@ void http_connection_destroy(http_connection_t* connection) {
       atomic_fetch_sub(&connection->server->active_connections, 1);
       vec_remove(&connection->server->connections, connection);
     }
+    atomic_fetch_or(&connection->actor.flags, ACTOR_FLAG_DESTROY);
     actor_destroy(&connection->actor);
     if (connection->watcher != NULL) {
       /* Use _connection_stop_watcher to safely stop/destroy the watcher
