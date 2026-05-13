@@ -14,6 +14,7 @@
 #include "../Util/vec.h"
 #include "../Actor/actor.h"
 #include "http_route.h"
+#include "../Util/atomic_compat.h"
 #include <poll-dancer/poll-dancer.h>
 
 typedef struct http_server_t http_server_t;
@@ -30,7 +31,7 @@ typedef struct http_connection_t {
   actor_t actor;
   http_server_t* server;
   int fd;
-  pd_watcher_t* watcher;
+  ATOMIC(pd_watcher_t*) watcher;
   SSL* ssl;
   http_parser parser;
   http_request_t* request;

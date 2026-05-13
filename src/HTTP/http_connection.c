@@ -264,9 +264,10 @@ static int _on_message_complete(http_parser* parser) {
 
 /* Helper: send a watcher update request to the server actor (I/O thread). */
 static void _connection_update_watcher(http_connection_t* connection, pd_event_t events) {
-  if (connection->watcher == NULL) return;
+  pd_watcher_t* watcher = ATOMIC_LOAD(&connection->watcher);
+  if (watcher == NULL) return;
   watcher_update_payload_t* payload = get_clear_memory(sizeof(watcher_update_payload_t));
-  payload->watcher = connection->watcher;
+  payload->watcher = watcher;
   payload->events = events;
   message_t msg;
   msg.type = HTTP_SERVER_UPDATE_WATCHER;
@@ -277,12 +278,12 @@ static void _connection_update_watcher(http_connection_t* connection, pd_event_t
 }
 
 /* Helper: stop the connection's watcher via the server actor (I/O thread).
- * Must NOT be called from the I/O thread — use pd_watcher_stop/destroy directly
- * in that case. */
+ * Uses atomic exchange to claim the watcher — only one caller will succeed,
+ * preventing double-free when both the I/O callback and a dispatch handler
+ * try to stop the same watcher. */
 static void _connection_stop_watcher(http_connection_t* connection) {
-  if (connection->watcher == NULL) return;
-  pd_watcher_t* watcher = connection->watcher;
-  connection->watcher = NULL;
+  pd_watcher_t* watcher = ATOMIC_EXCHANGE(&connection->watcher, NULL);
+  if (watcher == NULL) return;
   watcher_update_payload_t* payload = get_clear_memory(sizeof(watcher_update_payload_t));
   payload->watcher = watcher;
   payload->events = 0;
@@ -475,11 +476,22 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
     msg.payload = NULL;
     msg.payload_destroy = NULL;
     actor_send(&connection->actor, &msg);
-    /* NULL the watcher pointer BEFORE destroying to prevent double-free
-     * with http_connection_destroy on the worker thread. */
-    connection->watcher = NULL;
-    pd_watcher_stop(watcher);
-    pd_watcher_destroy(watcher);
+    /* Atomically claim the watcher — only one of us (read callback or
+     * _connection_stop_watcher) will succeed. The loser skips the stop
+     * message, preventing double-free. */
+    pd_watcher_t* claimed = ATOMIC_EXCHANGE(&connection->watcher, NULL);
+    if (claimed != NULL) {
+      pd_watcher_stop(claimed);
+      watcher_update_payload_t* payload = get_clear_memory(sizeof(watcher_update_payload_t));
+      payload->watcher = claimed;
+      payload->events = 0;
+      message_t stop_msg;
+      stop_msg.type = HTTP_SERVER_STOP_WATCHER;
+      stop_msg.payload = payload;
+      stop_msg.payload_destroy = free;
+      actor_send(&connection->server->actor, &stop_msg);
+      pd_loop_async_send(connection->server->loop, NULL);
+    }
     return;
   }
 
@@ -561,10 +573,10 @@ http_connection_t* http_connection_create(http_server_t* server, int fd) {
   http_parser_init(&connection->parser, HTTP_REQUEST);
   connection->parser.data = connection;
 
-  connection->watcher = pd_watcher_create(server->loop, fd,
-    PD_EVENT_READ, _connection_read_callback, connection);
-  if (connection->watcher != NULL) {
-    pd_watcher_start(connection->watcher);
+  ATOMIC_STORE(&connection->watcher, pd_watcher_create(server->loop, fd,
+    PD_EVENT_READ, _connection_read_callback, connection));
+  if (ATOMIC_LOAD(&connection->watcher) != NULL) {
+    pd_watcher_start(ATOMIC_LOAD(&connection->watcher));
   }
 
   return connection;
@@ -581,7 +593,7 @@ void http_connection_destroy(http_connection_t* connection) {
     }
     atomic_fetch_or(&connection->actor.flags, ACTOR_FLAG_DESTROY);
     actor_destroy(&connection->actor);
-    if (connection->watcher != NULL) {
+    if (ATOMIC_LOAD(&connection->watcher) != NULL) {
       /* Use _connection_stop_watcher to safely stop/destroy the watcher
        * on the I/O thread, avoiding a race with _connection_read_callback. */
       _connection_stop_watcher(connection);
