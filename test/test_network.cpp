@@ -1,0 +1,925 @@
+//
+// Created by victor on 5/14/25.
+//
+
+#include <gtest/gtest.h>
+#include "Network/query.h"
+#include "Network/gossip.h"
+#include "Network/ring.h"
+#include "Network/ring_set.h"
+#include "Network/latency_cache.h"
+#include "Network/net_node.h"
+#include "Network/node_id.h"
+#include "Network/authority.h"
+#include "Network/find_block.h"
+#include "Network/store_block.h"
+#include "Network/eabf.h"
+
+// === Query tests ===
+
+class QueryTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    query = query_create(1, QUERY_TYPE_GOSSIP, 5000);
+  }
+  void TearDown() override {
+    query_destroy(query);
+  }
+  query_t* query;
+};
+
+TEST_F(QueryTest, CreateDestroy) {
+  ASSERT_NE(query, nullptr);
+  EXPECT_EQ(query->query_id, 1u);
+  EXPECT_EQ(query->type, QUERY_TYPE_GOSSIP);
+  EXPECT_EQ(query->status, QUERY_STATUS_INIT);
+  EXPECT_EQ(query->num_targets, 0u);
+}
+
+TEST_F(QueryTest, AddTargets) {
+  node_id_t id1 = {};
+  memset(id1.hash, 0xAA, NODE_ID_HASH_SIZE);
+  net_node_t* node1 = net_node_create(&id1, 0x0A000001, 8080);
+  ASSERT_NE(node1, nullptr);
+
+  node_id_t id2 = {};
+  memset(id2.hash, 0xBB, NODE_ID_HASH_SIZE);
+  net_node_t* node2 = net_node_create(&id2, 0x0A000002, 8081);
+
+  EXPECT_EQ(query_add_target(query, node1), 0);
+  EXPECT_EQ(query->num_targets, 1u);
+  EXPECT_EQ(query_add_target(query, node2), 0);
+  EXPECT_EQ(query->num_targets, 2u);
+
+  net_node_destroy(node1);
+  net_node_destroy(node2);
+}
+
+TEST_F(QueryTest, SetLatencyAndGetClosest) {
+  node_id_t id1 = {};
+  memset(id1.hash, 0xAA, NODE_ID_HASH_SIZE);
+  net_node_t* node1 = net_node_create(&id1, 0x0A000001, 8080);
+
+  node_id_t id2 = {};
+  memset(id2.hash, 0xBB, NODE_ID_HASH_SIZE);
+  net_node_t* node2 = net_node_create(&id2, 0x0A000002, 8081);
+
+  query_add_target(query, node1);
+  query_add_target(query, node2);
+
+  query_set_latency(query, 0, 15000);  // 15ms
+  query_set_latency(query, 1, 5000);   // 5ms
+
+  net_node_t* closest = query_get_closest(query);
+  ASSERT_NE(closest, nullptr);
+  EXPECT_EQ(closest, node2);  // node2 has lower latency
+
+  net_node_destroy(node1);
+  net_node_destroy(node2);
+}
+
+TEST_F(QueryTest, Expiration) {
+  EXPECT_FALSE(query_is_expired(query, 1000));  // Start time is 0, 5000ms timeout
+  EXPECT_TRUE(query_is_expired(query, 6000));    // Past timeout
+  EXPECT_TRUE(query_is_expired(nullptr, 0));      // NULL is expired
+}
+
+TEST_F(QueryTest, FinishAndFail) {
+  EXPECT_EQ(query_finish(query), 0);
+  EXPECT_EQ(query->status, QUERY_STATUS_FINISHED);
+  EXPECT_TRUE(query_is_finished(query));
+
+  query_t* query2 = query_create(2, QUERY_TYPE_CLOSEST, 1000);
+  EXPECT_EQ(query_fail(query2), 0);
+  EXPECT_EQ(query2->status, QUERY_STATUS_FAILED);
+  EXPECT_TRUE(query_is_finished(query2));
+  query_destroy(query2);
+}
+
+// === Query table tests ===
+
+class QueryTableTest : public ::testing::Test {
+protected:
+  query_table_t table;
+  void SetUp() override {
+    query_table_init(&table, 4);
+  }
+  void TearDown() override {
+    query_table_deinit(&table);
+  }
+};
+
+TEST_F(QueryTableTest, InitDeinit) {
+  EXPECT_EQ(table.count, 0u);
+  EXPECT_EQ(table.capacity, 4u);
+}
+
+TEST_F(QueryTableTest, InsertAndLookup) {
+  query_t* query = query_create(42, QUERY_TYPE_GOSSIP, 5000);
+  ASSERT_NE(query, nullptr);
+  query->start_time_ms = 1000;
+
+  EXPECT_EQ(query_table_insert(&table, query), 0);
+  EXPECT_EQ(table.count, 1u);
+
+  query_t* found = query_table_lookup(&table, 42);
+  ASSERT_NE(found, nullptr);
+  EXPECT_EQ(found->query_id, 42u);
+
+  // Lookup non-existent
+  EXPECT_EQ(query_table_lookup(&table, 99), nullptr);
+}
+
+TEST_F(QueryTableTest, Remove) {
+  query_t* query = query_create(10, QUERY_TYPE_GOSSIP, 5000);
+  query_table_insert(&table, query);
+
+  EXPECT_EQ(query_table_remove(&table, 10), 0);
+  EXPECT_EQ(table.count, 0u);
+  EXPECT_EQ(query_table_lookup(&table, 10), nullptr);
+
+  // Remove non-existent
+  EXPECT_EQ(query_table_remove(&table, 99), -1);
+}
+
+TEST_F(QueryTableTest, ExpireOld) {
+  query_t* query1 = query_create(1, QUERY_TYPE_GOSSIP, 1000);
+  query1->start_time_ms = 100;
+
+  query_t* query2 = query_create(2, QUERY_TYPE_CLOSEST, 5000);
+  query2->start_time_ms = 100;
+
+  query_table_insert(&table, query1);
+  query_table_insert(&table, query2);
+
+  // At time 500, query1 (start=100, timeout=1000) is expired (100+1000=1100 > 500? No)
+  // Actually 500 < 1100 so not expired yet. At time 2000, query1 is expired (100+1000=1100 < 2000)
+  size_t expired = query_table_expire(&table, 2000);
+  EXPECT_EQ(expired, 1u);
+  EXPECT_EQ(table.count, 1u);
+
+  query_t* remaining = query_table_lookup(&table, 2);
+  ASSERT_NE(remaining, nullptr);
+  EXPECT_EQ(remaining->query_id, 2u);
+}
+
+TEST_F(QueryTableTest, GrowOnCapacity) {
+  query_table_t small_table;
+  query_table_init(&small_table, 2);
+
+  for (int index = 0; index < 5; index++) {
+    query_t* query = query_create((uint64_t)index, QUERY_TYPE_GOSSIP, 5000);
+    query_table_insert(&small_table, query);
+  }
+  EXPECT_EQ(small_table.count, 5u);
+  EXPECT_GE(small_table.capacity, 5u);
+
+  query_table_deinit(&small_table);
+}
+
+// === Gossip scheduler tests ===
+
+class GossipSchedulerTest : public ::testing::Test {
+protected:
+  gossip_scheduler_t sched;
+  void SetUp() override {
+    gossip_scheduler_init(&sched, 2, 3, 30);
+  }
+};
+
+TEST_F(GossipSchedulerTest, InitialPhase) {
+  EXPECT_TRUE(sched.is_initial_phase);
+  EXPECT_EQ(sched.interval_idx, 0u);
+  EXPECT_EQ(sched.init_interval_s, 2u);
+  EXPECT_EQ(sched.steady_state_interval_s, 30u);
+}
+
+TEST_F(GossipSchedulerTest, TickTriggersGossip) {
+  // First tick at time 0 should trigger gossip (last_gossip_ms was 0)
+  gossip_scheduler_tick(&sched, 1000);
+  EXPECT_TRUE(sched.should_gossip);
+  EXPECT_EQ(sched.interval_idx, 1u);  // Advanced one init interval
+}
+
+TEST_F(GossipSchedulerTest, InitToSteadyTransition) {
+  // Tick 3 times to exhaust init phase
+  gossip_scheduler_tick(&sched, 1000);
+  gossip_scheduler_tick(&sched, 5000);  // Past 2s init interval
+  gossip_scheduler_tick(&sched, 10000);
+  // After 3 init intervals, should transition
+  EXPECT_FALSE(sched.is_initial_phase);
+}
+
+TEST_F(GossipSchedulerTest, NoGossipBeforeInterval) {
+  gossip_scheduler_tick(&sched, 1000);
+  EXPECT_TRUE(sched.should_gossip);
+
+  // Next tick too soon (within 2s init interval)
+  gossip_scheduler_tick(&sched, 1500);
+  EXPECT_FALSE(sched.should_gossip);
+}
+
+// === Gossip handle tests ===
+
+class GossipHandleTest : public ::testing::Test {
+protected:
+  gossip_handle_t handle;
+  void SetUp() override {
+    gossip_handle_init(&handle, 2, 3, 30, 5000);
+  }
+  void TearDown() override {
+    gossip_handle_deinit(&handle);
+  }
+};
+
+TEST_F(GossipHandleTest, InitDeinit) {
+  EXPECT_EQ(handle.active.length, 0);
+  EXPECT_EQ(handle.next_query_id, 1u);
+  EXPECT_FALSE(handle.running);
+}
+
+TEST_F(GossipHandleTest, NextQueryId) {
+  EXPECT_EQ(gossip_handle_next_query_id(&handle), 1u);
+  EXPECT_EQ(gossip_handle_next_query_id(&handle), 2u);
+  EXPECT_EQ(gossip_handle_next_query_id(&handle), 3u);
+}
+
+// === Ring tests ===
+
+TEST(RingTest, CreateDestroy) {
+  ring_t* ring = ring_create(0, 5000);
+  ASSERT_NE(ring, nullptr);
+  EXPECT_EQ(ring->latency_min_us, 0u);
+  EXPECT_EQ(ring->latency_max_us, 5000u);
+  EXPECT_FALSE(ring->frozen);
+  ring_destroy(ring);
+}
+
+TEST(RingTest, InsertPrimaryAndSecondary) {
+  ring_t* ring = ring_create(0, 5000);
+  node_id_t id = {};
+  memset(id.hash, 0x11, NODE_ID_HASH_SIZE);
+  net_node_t* node = net_node_create(&id, 0x0A000001, 8080);
+
+  EXPECT_EQ(ring_insert_primary(ring, node, 8), 0);
+  EXPECT_EQ(ring->primary.length, 1);
+
+  // Fill up primary (8 slots)
+  for (int index = 1; index < 8; index++) {
+    node_id_t nid = {};
+    memset(nid.hash, 0x11 + index, NODE_ID_HASH_SIZE);
+    net_node_t* inode = net_node_create(&nid, 0x0A000001 + index, 8080);
+    ring_insert_primary(ring, inode, 8);
+    net_node_destroy(inode);
+  }
+  EXPECT_EQ(ring->primary.length, 8);
+
+  // Overflow to secondary
+  node_id_t overflow_id = {};
+  memset(overflow_id.hash, 0xFF, NODE_ID_HASH_SIZE);
+  net_node_t* overflow = net_node_create(&overflow_id, 0x0A0000FF, 8080);
+  EXPECT_EQ(ring_insert_primary(ring, overflow, 8), -1);  // Primary full
+  EXPECT_EQ(ring_insert_secondary(ring, overflow, 4), 0);  // Goes to secondary
+  EXPECT_EQ(ring->secondary.length, 1);
+
+  net_node_destroy(node);
+  net_node_destroy(overflow);
+  ring_destroy(ring);
+}
+
+TEST(RingTest, FindAndErase) {
+  ring_t* ring = ring_create(0, 5000);
+  node_id_t id = {};
+  memset(id.hash, 0x22, NODE_ID_HASH_SIZE);
+  net_node_t* node = net_node_create(&id, 0x0A000001, 8080);
+
+  ring_insert_primary(ring, node, 8);
+
+  net_node_t* found = ring_find_by_id(ring, &id);
+  ASSERT_NE(found, nullptr);
+
+  EXPECT_TRUE(ring_erase(ring, &id));
+  EXPECT_EQ(ring->primary.length, 0);
+  EXPECT_EQ(ring_find_by_id(ring, &id), nullptr);
+
+  net_node_destroy(node);
+  ring_destroy(ring);
+}
+
+// === RingSet tests ===
+
+TEST(RingSetTest, CreateDestroy) {
+  ring_set_t* set = ring_set_create(8, 4, 2);
+  ASSERT_NE(set, nullptr);
+  EXPECT_EQ(set->ring_count, (size_t)RING_MAX_RINGS);
+  ring_set_destroy(set);
+}
+
+TEST(RingSetTest, InsertAndFind) {
+  ring_set_t* set = ring_set_create(8, 4, 2);
+  node_id_t id = {};
+  memset(id.hash, 0x33, NODE_ID_HASH_SIZE);
+  net_node_t* node = net_node_create(&id, 0x0A000001, 8080);
+
+  // Insert at 10ms latency
+  EXPECT_EQ(ring_set_insert(set, node, 10000), 0);
+
+  net_node_t* found = ring_set_find_by_id(set, &id);
+  ASSERT_NE(found, nullptr);
+
+  ring_set_destroy(set);
+  net_node_destroy(node);
+}
+
+TEST(RingSetTest, FindClosest) {
+  ring_set_t* set = ring_set_create(8, 4, 2);
+
+  node_id_t id1 = {};
+  memset(id1.hash, 0x11, NODE_ID_HASH_SIZE);
+  net_node_t* node1 = net_node_create(&id1, 0x0A000001, 8080);
+  ring_set_insert(set, node1, 3000);  // Low latency
+
+  node_id_t id2 = {};
+  memset(id2.hash, 0x22, NODE_ID_HASH_SIZE);
+  net_node_t* node2 = net_node_create(&id2, 0x0A000002, 8080);
+  ring_set_insert(set, node2, 50000);  // Higher latency
+
+  net_node_t* closest = ring_set_find_closest(set);
+  ASSERT_NE(closest, nullptr);
+  // Closest should be node1 (in lower-latency ring)
+  EXPECT_TRUE(net_node_equals_by_id(closest, node1));
+
+  net_node_destroy(node1);
+  net_node_destroy(node2);
+  ring_set_destroy(set);
+}
+
+TEST(RingSetTest, Erase) {
+  ring_set_t* set = ring_set_create(8, 4, 2);
+  node_id_t id = {};
+  memset(id.hash, 0x44, NODE_ID_HASH_SIZE);
+  net_node_t* node = net_node_create(&id, 0x0A000001, 8080);
+
+  ring_set_insert(set, node, 5000);
+  EXPECT_TRUE(ring_set_erase(set, &id));
+  EXPECT_EQ(ring_set_find_by_id(set, &id), nullptr);
+  EXPECT_EQ(ring_set_total_nodes(set), 0u);
+
+  net_node_destroy(node);
+  ring_set_destroy(set);
+}
+
+TEST(RingSetTest, EligibleForReplacement) {
+  ring_set_t* set = ring_set_create(8, 4, 2);
+
+  // Not eligible: ring is empty
+  EXPECT_FALSE(ring_set_eligible_for_replacement(set, 0));
+
+  // Fill primary ring (8 slots) and add one secondary
+  for (int index = 0; index < 8; index++) {
+    node_id_t id = {};
+    memset(id.hash, 0x55 + index, NODE_ID_HASH_SIZE);
+    net_node_t* node = net_node_create(&id, 0x0A000001 + index, 8080);
+    ring_set_insert(set, node, 10000);
+    net_node_destroy(node);
+  }
+  EXPECT_EQ(ring_set_total_nodes(set), 8u);
+
+  // Not eligible: primary full but secondary empty
+  EXPECT_FALSE(ring_set_eligible_for_replacement(set, 0));
+
+  // Add to secondary
+  node_id_t sec_id = {};
+  memset(sec_id.hash, 0xFF, NODE_ID_HASH_SIZE);
+  net_node_t* sec_node = net_node_create(&sec_id, 0x0A0000FF, 8080);
+  ring_set_insert(set, sec_node, 10000);  // Will overflow to secondary
+  EXPECT_GT(ring_set_total_nodes(set), 8u);
+
+  // Now eligible: primary full, secondary non-empty, >primary_ring_size non-rendezvous nodes
+  EXPECT_TRUE(ring_set_eligible_for_replacement(set, 0));
+
+  net_node_destroy(sec_node);
+  ring_set_destroy(set);
+}
+
+TEST(RingSetTest, PromoteSecondary) {
+  ring_set_t* set = ring_set_create(2, 2, 2);
+
+  // Fill primary
+  node_id_t id1 = {};
+  memset(id1.hash, 0x11, NODE_ID_HASH_SIZE);
+  net_node_t* node1 = net_node_create(&id1, 0x0A000001, 8080);
+  ring_set_insert(set, node1, 3000);
+
+  node_id_t id2 = {};
+  memset(id2.hash, 0x22, NODE_ID_HASH_SIZE);
+  net_node_t* node2 = net_node_create(&id2, 0x0A000002, 8080);
+  ring_set_insert(set, node2, 3000);
+
+  // Add secondary (overflow)
+  node_id_t id3 = {};
+  memset(id3.hash, 0x33, NODE_ID_HASH_SIZE);
+  net_node_t* node3 = net_node_create(&id3, 0x0A000003, 8080);
+  ring_set_insert(set, node3, 3000);
+
+  // Promote from secondary
+  net_node_t* promoted = ring_set_promote_secondary(set, 0);
+  ASSERT_NE(promoted, nullptr);
+  EXPECT_TRUE(net_node_equals_by_id(promoted, node3));
+
+  net_node_destroy(node1);
+  net_node_destroy(node2);
+  net_node_destroy(node3);
+  ring_set_destroy(set);
+}
+
+// === Latency cache tests ===
+
+TEST(LatencyCacheTest, CreateDestroy) {
+  latency_cache_t* cache = latency_cache_create(16);
+  ASSERT_NE(cache, nullptr);
+  latency_cache_destroy(cache);
+}
+
+TEST(LatencyCacheTest, InsertAndGet) {
+  latency_cache_t* cache = latency_cache_create(16);
+  node_id_t id = {};
+  memset(id.hash, 0xAA, NODE_ID_HASH_SIZE);
+
+  latency_cache_insert(cache, &id, 0x0A000001, 8080, 15.5f);
+
+  float latency_ms = 0;
+  EXPECT_EQ(latency_cache_get(cache, &id, &latency_ms), 0);
+  EXPECT_FLOAT_EQ(latency_ms, 15.5f);
+
+  latency_cache_destroy(cache);
+}
+
+TEST(LatencyCacheTest, UpdateInPlace) {
+  latency_cache_t* cache = latency_cache_create(16);
+  node_id_t id = {};
+  memset(id.hash, 0xBB, NODE_ID_HASH_SIZE);
+
+  latency_cache_insert(cache, &id, 0x0A000001, 8080, 10.0f);
+  latency_cache_insert(cache, &id, 0x0A000001, 8080, 20.0f);
+
+  float latency_ms = 0;
+  EXPECT_EQ(latency_cache_get(cache, &id, &latency_ms), 0);
+  EXPECT_FLOAT_EQ(latency_ms, 20.0f);  // Updated, not duplicated
+
+  latency_cache_destroy(cache);
+}
+
+TEST(LatencyCacheTest, Eviction) {
+  latency_cache_t* cache = latency_cache_create(2);
+
+  node_id_t id1 = {};
+  memset(id1.hash, 0x11, NODE_ID_HASH_SIZE);
+  node_id_t id2 = {};
+  memset(id2.hash, 0x22, NODE_ID_HASH_SIZE);
+  node_id_t id3 = {};
+  memset(id3.hash, 0x33, NODE_ID_HASH_SIZE);
+
+  latency_cache_insert(cache, &id1, 1, 8080, 10.0f);
+  latency_cache_insert(cache, &id2, 2, 8080, 20.0f);
+  EXPECT_EQ(cache->count, 2u);
+
+  // Third insert should evict oldest (id1)
+  latency_cache_insert(cache, &id3, 3, 8080, 30.0f);
+  EXPECT_EQ(cache->count, 2u);
+
+  // id1 should be gone
+  float latency_ms = 0;
+  EXPECT_EQ(latency_cache_get(cache, &id1, &latency_ms), -1);
+  // id2 should still be there
+  EXPECT_EQ(latency_cache_get(cache, &id2, &latency_ms), 0);
+  EXPECT_FLOAT_EQ(latency_ms, 20.0f);
+
+  latency_cache_destroy(cache);
+}
+
+// === NetNode tests ===
+
+TEST(NetNodeTest, CreateDestroy) {
+  node_id_t id = {};
+  memset(id.hash, 0x55, NODE_ID_HASH_SIZE);
+  net_node_t* node = net_node_create(&id, 0x0A000001, 8080);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node->addr, 0x0A000001);
+  EXPECT_EQ(node->port, 8080);
+  net_node_destroy(node);
+}
+
+TEST(NetNodeTest, UpdateLatency) {
+  node_id_t id = {};
+  memset(id.hash, 0x55, NODE_ID_HASH_SIZE);
+  net_node_t* node = net_node_create(&id, 0x0A000001, 8080);
+
+  net_node_update_latency(node, 100.0f);
+  EXPECT_FLOAT_EQ(node->latency_ms, 100.0f);
+
+  net_node_update_latency(node, 200.0f);
+  // EWMA with alpha=0.1: 0.1*200 + 0.9*100 = 110
+  EXPECT_FLOAT_EQ(node->latency_ms, 110.0f);
+
+  net_node_destroy(node);
+}
+
+TEST(NetNodeTest, RecordSuccessAndFail) {
+  node_id_t id = {};
+  memset(id.hash, 0x55, NODE_ID_HASH_SIZE);
+  net_node_t* node = net_node_create(&id, 0x0A000001, 8080);
+
+  // Initial availability is 0
+  EXPECT_FLOAT_EQ(node->availability, 0.0f);
+
+  net_node_record_success(node);
+  EXPECT_FLOAT_EQ(node->availability, 0.1f);  // 0.1*1.0 + 0.9*0.0
+
+  net_node_record_success(node);
+  // 0.1*1.0 + 0.9*0.1 = 0.19
+  EXPECT_NEAR(node->availability, 0.19f, 0.001f);
+
+  net_node_record_fail(node);
+  // 0.1*0.0 + 0.9*0.19 = 0.171
+  EXPECT_NEAR(node->availability, 0.171f, 0.001f);
+
+  net_node_destroy(node);
+}
+
+// === FindBlock visited bloom tests ===
+
+TEST(FindBlockVisitedTest, AddAndCheckVisited) {
+  uint8_t visited[FIND_BLOCK_MAX_VISITED_BLOOM] = {};
+  uint16_t count = 0;
+  uint8_t block_hash[32] = {};
+  memset(block_hash, 0xAA, 32);
+
+  EXPECT_FALSE(find_block_is_visited(visited, count, block_hash));
+
+  find_block_add_visited(visited, &count, block_hash);
+  EXPECT_EQ(count, 1u);
+  EXPECT_TRUE(find_block_is_visited(visited, count, block_hash));
+}
+
+TEST(FindBlockVisitedTest, DifferentHashesNotVisited) {
+  uint8_t visited[FIND_BLOCK_MAX_VISITED_BLOOM] = {};
+  uint16_t count = 0;
+  uint8_t hash_a[32] = {};
+  memset(hash_a, 0xAA, 32);
+  uint8_t hash_b[32] = {};
+  memset(hash_b, 0xBB, 32);
+
+  find_block_add_visited(visited, &count, hash_a);
+  EXPECT_TRUE(find_block_is_visited(visited, count, hash_a));
+  EXPECT_FALSE(find_block_is_visited(visited, count, hash_b));
+}
+
+TEST(FindBlockVisitedTest, NullInputs) {
+  uint8_t visited[FIND_BLOCK_MAX_VISITED_BLOOM] = {};
+  uint16_t count = 0;
+  uint8_t block_hash[32] = {};
+  memset(block_hash, 0xCC, 32);
+
+  find_block_add_visited(NULL, &count, block_hash);
+  find_block_add_visited(visited, NULL, block_hash);
+  find_block_add_visited(visited, &count, NULL);
+  EXPECT_EQ(count, 0u);
+
+  EXPECT_FALSE(find_block_is_visited(NULL, count, block_hash));
+  EXPECT_FALSE(find_block_is_visited(visited, count, NULL));
+  EXPECT_FALSE(find_block_is_visited(visited, 0, block_hash));
+}
+
+TEST(FindBlockVisitedTest, MultipleHashes) {
+  uint8_t visited[FIND_BLOCK_MAX_VISITED_BLOOM] = {};
+  uint16_t count = 0;
+
+  for (int index = 0; index < 5; index++) {
+    uint8_t hash[32] = {};
+    memset(hash, (uint8_t)(0x10 + index), 32);
+    find_block_add_visited(visited, &count, hash);
+  }
+
+  EXPECT_EQ(count, 5u);
+
+  // All added hashes should be found
+  for (int index = 0; index < 5; index++) {
+    uint8_t hash[32] = {};
+    memset(hash, (uint8_t)(0x10 + index), 32);
+    EXPECT_TRUE(find_block_is_visited(visited, count, hash));
+  }
+}
+
+// === FindBlock execute tests ===
+
+class FindBlockTest : public ::testing::Test {
+protected:
+  eabf_table_t eabf_table;
+  eabf_ttl_table_t eabf_ttl;
+  ring_set_t* rings;
+  node_id_t local_id;
+
+  void SetUp() override {
+    eabf_table_init(&eabf_table, 4);
+    eabf_ttl_table_init(&eabf_ttl, 16);
+    rings = ring_set_create(RING_K, RING_M, RING_ALPHA);
+    memset(local_id.hash, 0x01, NODE_ID_HASH_SIZE);
+  }
+
+  void TearDown() override {
+    ring_set_destroy(rings);
+    eabf_table_deinit(&eabf_table);
+    eabf_ttl_table_deinit(&eabf_ttl);
+  }
+};
+
+TEST_F(FindBlockTest, TtlExpiredReturnsTtlExpired) {
+  find_block_state_t state = {};
+  memset(state.block_hash, 0xAA, 32);
+  state.ttl = 0;  // TTL expired
+
+  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  find_block_result_e result = find_block_execute(
+      &eabf_table, &eabf_ttl, rings, &local_id, &state,
+      next_hops, &next_hop_count);
+
+  EXPECT_EQ(result, FIND_BLOCK_TTL_EXPIRED);
+  EXPECT_EQ(next_hop_count, 0u);
+}
+
+TEST_F(FindBlockTest, NullStateReturnsNotFound) {
+  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  find_block_result_e result = find_block_execute(
+      &eabf_table, &eabf_ttl, rings, &local_id, NULL,
+      next_hops, &next_hop_count);
+
+  EXPECT_EQ(result, FIND_BLOCK_NOT_FOUND);
+}
+
+TEST_F(FindBlockTest, NoPeersReturnsNotFound) {
+  find_block_state_t state = {};
+  memset(state.block_hash, 0xAA, 32);
+  state.ttl = 6;
+
+  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  find_block_result_e result = find_block_execute(
+      &eabf_table, &eabf_ttl, rings, &local_id, &state,
+      next_hops, &next_hop_count);
+
+  // No ring members, no EABF entries — should return NOT_FOUND
+  EXPECT_EQ(result, FIND_BLOCK_NOT_FOUND);
+}
+
+TEST_F(FindBlockTest, WithRingMembersForwards) {
+  // Create ring members with weights above minimum
+  node_id_t id_a = {};
+  memset(id_a.hash, 0x10, NODE_ID_HASH_SIZE);
+  net_node_t* node_a = net_node_create(&id_a, 0x0A000001, 8080);
+  node_a->weight = 0.5f;
+
+  node_id_t id_b = {};
+  memset(id_b.hash, 0x20, NODE_ID_HASH_SIZE);
+  net_node_t* node_b = net_node_create(&id_b, 0x0A000002, 8081);
+  node_b->weight = 0.8f;
+
+  node_id_t id_c = {};
+  memset(id_c.hash, 0x30, NODE_ID_HASH_SIZE);
+  net_node_t* node_c = net_node_create(&id_c, 0x0A000003, 8082);
+  node_c->weight = 0.6f;
+
+  // Insert nodes into ring (latency in microseconds)
+  ring_set_insert(rings, node_a, 5000);   // 5ms
+  ring_set_insert(rings, node_b, 10000);  // 10ms
+  ring_set_insert(rings, node_c, 20000);  // 20ms
+
+  find_block_state_t state = {};
+  memset(state.block_hash, 0xAA, 32);
+  state.ttl = 6;
+
+  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  find_block_result_e result = find_block_execute(
+      &eabf_table, &eabf_ttl, rings, &local_id, &state,
+      next_hops, &next_hop_count);
+
+  EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
+  EXPECT_GT(next_hop_count, 0u);
+  EXPECT_LE(next_hop_count, (size_t)FIND_BLOCK_FORWARD_FANOUT);
+
+  net_node_destroy(node_a);
+  net_node_destroy(node_b);
+  net_node_destroy(node_c);
+}
+
+TEST_F(FindBlockTest, EabfGravityWellOverrides) {
+  // Create a ring member
+  node_id_t id_a = {};
+  memset(id_a.hash, 0x10, NODE_ID_HASH_SIZE);
+  net_node_t* node_a = net_node_create(&id_a, 0x0A000001, 8080);
+  node_a->weight = 0.5f;
+
+  node_id_t id_b = {};
+  memset(id_b.hash, 0x20, NODE_ID_HASH_SIZE);
+  net_node_t* node_b = net_node_create(&id_b, 0x0A000002, 8081);
+  node_b->weight = 0.3f;  // Low weight
+
+  ring_set_insert(rings, node_a, 5000);
+  ring_set_insert(rings, node_b, 10000);
+
+  // Subscribe block hash in node_b's EABF (gravity well)
+  eabf_t* eabf_b = eabf_table_insert(&eabf_table, &id_b);
+  ASSERT_NE(eabf_b, nullptr);
+
+  uint8_t block_hash[32] = {};
+  memset(block_hash, 0xAA, 32);
+  eabf_subscribe(eabf_b, block_hash, 32);
+
+  find_block_state_t state = {};
+  memcpy(state.block_hash, block_hash, 32);
+  state.ttl = 6;
+
+  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  find_block_result_e result = find_block_execute(
+      &eabf_table, &eabf_ttl, rings, &local_id, &state,
+      next_hops, &next_hop_count);
+
+  EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
+  // Should route to node_b (gravity well) despite its lower weight
+  ASSERT_EQ(next_hop_count, 1u);
+  EXPECT_TRUE(node_id_equals(&next_hops[0]->id, &id_b));
+
+  net_node_destroy(node_a);
+  net_node_destroy(node_b);
+}
+
+TEST_F(FindBlockTest, PathCycleDetection) {
+  // Create a ring member that's already in the path
+  node_id_t id_a = {};
+  memset(id_a.hash, 0x10, NODE_ID_HASH_SIZE);
+  net_node_t* node_a = net_node_create(&id_a, 0x0A000001, 8080);
+  node_a->weight = 0.9f;
+
+  ring_set_insert(rings, node_a, 5000);
+
+  // EABF gravity well for node_a
+  eabf_t* eabf_a = eabf_table_insert(&eabf_table, &id_a);
+  ASSERT_NE(eabf_a, nullptr);
+  uint8_t block_hash[32] = {};
+  memset(block_hash, 0xAA, 32);
+  eabf_subscribe(eabf_a, block_hash, 32);
+
+  find_block_state_t state = {};
+  memcpy(state.block_hash, block_hash, 32);
+  state.ttl = 6;
+  // Put node_a in the path — should be skipped
+  memcpy(&state.path[0], &id_a, sizeof(node_id_t));
+  state.path_len = 1;
+
+  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  find_block_result_e result = find_block_execute(
+      &eabf_table, &eabf_ttl, rings, &local_id, &state,
+      next_hops, &next_hop_count);
+
+  // node_a is in the path so gravity well and ring candidate should be skipped
+  EXPECT_EQ(result, FIND_BLOCK_NOT_FOUND);
+
+  net_node_destroy(node_a);
+}
+
+// === StoreBlock tests ===
+
+class StoreBlockTest : public ::testing::Test {
+protected:
+  eabf_table_t eabf_table;
+  ring_set_t* rings;
+  node_id_t local_id;
+
+  void SetUp() override {
+    eabf_table_init(&eabf_table, 4);
+    rings = ring_set_create(RING_K, RING_M, RING_ALPHA);
+    memset(local_id.hash, 0x01, NODE_ID_HASH_SIZE);
+  }
+
+  void TearDown() override {
+    ring_set_destroy(rings);
+    eabf_table_deinit(&eabf_table);
+  }
+};
+
+TEST(StoreBlockShouldAcceptTest, LowCapacityAlwaysAccepts) {
+  // At capacity=0, accept probability = 1.0 - 0/0.80 = 1.0
+  uint8_t hash[32] = {};
+  memset(hash, 0xAA, 32);
+  EXPECT_TRUE(store_block_should_accept(0.0f, NODE_PHASE_INHALE, hash, 1024));
+}
+
+TEST(StoreBlockShouldAcceptTest, ExhalePhaseDeclines) {
+  uint8_t hash[32] = {};
+  memset(hash, 0xAA, 32);
+  EXPECT_FALSE(store_block_should_accept(0.3f, NODE_PHASE_EXHALE, hash, 1024));
+}
+
+TEST(StoreBlockShouldAcceptTest, HighCapacityDeclines) {
+  uint8_t hash[32] = {};
+  memset(hash, 0xAA, 32);
+  // At capacity >= 0.80, probability = 0 → always decline
+  EXPECT_FALSE(store_block_should_accept(0.85f, NODE_PHASE_NEUTRAL, hash, 1024));
+  EXPECT_FALSE(store_block_should_accept(1.0f, NODE_PHASE_NEUTRAL, hash, 1024));
+}
+
+TEST_F(StoreBlockTest, NullStateReturnsDeclined) {
+  net_node_t* next_hops[STORE_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  store_block_result_e result = store_block_execute(
+      &eabf_table, rings, &local_id, 0.3f, NODE_PHASE_INHALE,
+      NULL, next_hops, &next_hop_count);
+
+  EXPECT_EQ(result, STORE_BLOCK_DECLINED);
+}
+
+TEST_F(StoreBlockTest, MaxHopsZeroReturnsMaxHopsReached) {
+  store_block_state_t state = {};
+  memset(state.block_hash, 0xAA, 32);
+  state.max_hops = 0;  // No more hops allowed
+
+  net_node_t* next_hops[STORE_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  store_block_result_e result = store_block_execute(
+      &eabf_table, rings, &local_id, 0.9f, NODE_PHASE_NEUTRAL,
+      &state, next_hops, &next_hop_count);
+
+  EXPECT_EQ(result, STORE_BLOCK_MAX_HOPS_REACHED);
+}
+
+TEST_F(StoreBlockTest, LowCapacityAccepts) {
+  store_block_state_t state = {};
+  memset(state.block_hash, 0xAA, 32);
+  state.max_hops = 6;
+
+  net_node_t* next_hops[STORE_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  // Low capacity (0.2) → should accept
+  store_block_result_e result = store_block_execute(
+      &eabf_table, rings, &local_id, 0.2f, NODE_PHASE_INHALE,
+      &state, next_hops, &next_hop_count);
+
+  EXPECT_EQ(result, STORE_BLOCK_ACCEPTED);
+}
+
+TEST_F(StoreBlockTest, HighCapacityForwards) {
+  // Create ring members with good availability and weight
+  node_id_t id_a = {};
+  memset(id_a.hash, 0x10, NODE_ID_HASH_SIZE);
+  net_node_t* node_a = net_node_create(&id_a, 0x0A000001, 8080);
+  node_a->weight = 0.5f;
+  node_a->capacity = 0.3f;  // Has room
+  node_a->availability = 0.8f;
+  node_a->latency_ms = 5.0f;
+  net_node_record_success(node_a);
+
+  node_id_t id_b = {};
+  memset(id_b.hash, 0x20, NODE_ID_HASH_SIZE);
+  net_node_t* node_b = net_node_create(&id_b, 0x0A000002, 8081);
+  node_b->weight = 0.8f;
+  node_b->capacity = 0.2f;  // Has room
+  node_b->availability = 0.9f;
+  node_b->latency_ms = 10.0f;
+  net_node_record_success(node_b);
+
+  ring_set_insert(rings, node_a, 5000);
+  ring_set_insert(rings, node_b, 10000);
+
+  store_block_state_t state = {};
+  memset(state.block_hash, 0xAA, 32);
+  state.max_hops = 6;
+
+  net_node_t* next_hops[STORE_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  // High capacity (0.9) → decline locally, forward to peers with room
+  store_block_result_e result = store_block_execute(
+      &eabf_table, rings, &local_id, 0.9f, NODE_PHASE_NEUTRAL,
+      &state, next_hops, &next_hop_count);
+
+  EXPECT_EQ(result, STORE_BLOCK_FORWARDING);
+  EXPECT_GT(next_hop_count, 0u);
+  EXPECT_LE(next_hop_count, (size_t)STORE_BLOCK_FORWARD_FANOUT);
+
+  net_node_destroy(node_a);
+  net_node_destroy(node_b);
+}
