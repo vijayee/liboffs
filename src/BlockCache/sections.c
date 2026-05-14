@@ -200,6 +200,14 @@ void sections_dispatch(void* state, message_t* msg) {
       uint8_t tries = 0;
       do {
         p->section_id = round_robin_next(sections->robin);
+        if (p->section_id == 0) {
+          /* Robin is empty — create fresh sections and try again */
+          sections_full(sections, 0);
+          p->section_id = round_robin_next(sections->robin);
+          if (p->section_id == 0) {
+            break;
+          }
+        }
         section_t* section = sections_lru_cache_get(sections->lru, p->section_id);
         if (section == NULL) {
           section = section_create(sections->data_path, sections->meta_path,
@@ -208,8 +216,10 @@ void sections_dispatch(void* state, message_t* msg) {
           section->on_dirty_context = sections;
           refcounter_yield((refcounter_t*) section);
           sections_lru_cache_put(sections->lru, section);
-          if (section_full(section) == 0) {
-            round_robin_add(sections->robin, p->section_id);
+          if (section_full(section) != 0) {
+            sections_full(sections, p->section_id);
+            tries++;
+            continue;
           }
         }
         uint8_t full;
@@ -257,7 +267,7 @@ void sections_dispatch(void* state, message_t* msg) {
         section->on_dirty_context = sections;
         refcounter_yield((refcounter_t*) section);
         sections_lru_cache_put(sections->lru, section);
-        if (section_full(section) == 0) {
+        if (section_full(section) == 0 && !round_robin_contains(sections->robin, p->section_id)) {
           round_robin_add(sections->robin, p->section_id);
         }
       }
@@ -296,7 +306,7 @@ void sections_dispatch(void* state, message_t* msg) {
         section->on_dirty_context = sections;
         refcounter_yield((refcounter_t*) section);
         sections_lru_cache_put(sections->lru, section);
-        if (section_full(section) == 0) {
+        if (section_full(section) == 0 && !round_robin_contains(sections->robin, p->section_id)) {
           round_robin_add(sections->robin, p->section_id);
         }
       }
@@ -455,6 +465,23 @@ void round_robin_add(round_robin_t* robin, size_t id) {
     robin->last->next = node;
     robin->last = node;
   }
+  if (robin->timer_actor != NULL && robin->save_target != NULL) {
+    timer_actor_debounce(robin->timer_actor, robin->wait, robin->max_wait, robin->save_target, SECTION_SAVE_META);
+  }
+  robin->size++;
+}
+
+void round_robin_unshift(round_robin_t* robin, size_t id) {
+  round_robin_node_t* node = get_clear_memory(sizeof(round_robin_node_t));
+  node->id = id;
+  node->next = robin->first;
+  node->previous = NULL;
+  if (robin->first != NULL) {
+    robin->first->previous = node;
+  } else {
+    robin->last = node;
+  }
+  robin->first = node;
   if (robin->timer_actor != NULL && robin->save_target != NULL) {
     timer_actor_debounce(robin->timer_actor, robin->wait, robin->max_wait, robin->save_target, SECTION_SAVE_META);
   }
@@ -683,7 +710,7 @@ void sections_full(sections_t* sections, size_t section_id) {
     section->on_dirty_context = sections;
     refcounter_yield((refcounter_t*) section);
     sections_lru_cache_put(sections->lru, section);
-    round_robin_add(sections->robin, section->id);
+    round_robin_unshift(sections->robin, section->id);
   }
 }
 

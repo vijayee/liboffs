@@ -55,6 +55,7 @@ typedef struct {
 round_robin_t* round_robin_create(char* robin_path, timer_actor_t* timer_actor, actor_t* save_target, uint64_t wait, uint64_t max_wait);
 void round_robin_destroy(round_robin_t* robin);
 void round_robin_add(round_robin_t* robin, size_t id);
+void round_robin_unshift(round_robin_t* robin, size_t id);
 size_t round_robin_next(round_robin_t* robin);
 void round_robin_remove(round_robin_t* robin, size_t id);
 uint8_t round_robin_contains(round_robin_t* robin, size_t id);
