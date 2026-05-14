@@ -199,14 +199,8 @@ void sections_dispatch(void* state, message_t* msg) {
       p->section_index = 0;
       uint8_t tries = 0;
       do {
-        p->section_id = round_robin_next(sections->robin);
-        if (p->section_id == 0) {
-          /* Robin is empty — create fresh sections and try again */
-          sections_full(sections, 0);
-          p->section_id = round_robin_next(sections->robin);
-          if (p->section_id == 0) {
-            break;
-          }
+        if (!round_robin_next(sections->robin, &p->section_id)) {
+          break;
         }
         section_t* section = sections_lru_cache_get(sections->lru, p->section_id);
         if (section == NULL) {
@@ -488,26 +482,25 @@ void round_robin_unshift(round_robin_t* robin, size_t id) {
   robin->size++;
 }
 
-size_t round_robin_next(round_robin_t* robin) {
+int round_robin_next(round_robin_t* robin, size_t* out_id) {
   if ((robin->last == NULL) && (robin->first == NULL)) {
     return 0;
-  } else {
-    round_robin_node_t* node = robin->first;
-    if (robin->last == node) {
-      return node->id;
-    } else {
-      robin->first = node->next;
-      if (node->next != NULL) {
-        node->next->previous = NULL;
-        node->next = NULL;
-      }
-      size_t id = node->id;
-      node->previous = robin->last;
-      robin->last->next = node;
-      robin->last = node;
-      return id;
-    }
   }
+  round_robin_node_t* node = robin->first;
+  if (robin->last == node) {
+    *out_id = node->id;
+    return 1;
+  }
+  robin->first = node->next;
+  if (node->next != NULL) {
+    node->next->previous = NULL;
+    node->next = NULL;
+  }
+  *out_id = node->id;
+  node->previous = robin->last;
+  robin->last->next = node;
+  robin->last = node;
+  return 1;
 }
 
 void round_robin_remove(round_robin_t* robin, size_t id) {

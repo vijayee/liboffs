@@ -544,15 +544,19 @@ TEST_F(TestRoundRobin, TestRoundRobinFunctions) {
     round_robin_add(robin, i);
   }
   EXPECT_EQ(robin->size, size);
+  size_t id;
   for (size_t i= 0; i < (size * 10); i++) {
-    EXPECT_EQ(round_robin_next(robin), i % size);
+    int ok = round_robin_next(robin, &id);
+    EXPECT_EQ(ok, 1);
+    EXPECT_EQ(id, i % size);
   }
   for (size_t i = 0; i < size; i++) {
     round_robin_remove(robin, i);
   }
   EXPECT_EQ(robin->size, 0);
   for (size_t i= 0; i < (size * 10); i++) {
-    EXPECT_EQ(round_robin_next(robin), 0);
+    int ok = round_robin_next(robin, &id);
+    EXPECT_EQ(ok, 0);
   }
 }
 
