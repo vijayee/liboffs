@@ -298,6 +298,7 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
       break;
     }
     default:
+      stream_dispatch(state, msg);
       break;
   }
 }
@@ -342,7 +343,7 @@ writeable_off_stream_t* writeable_off_stream_create(
   }
   stream->has_pulled = 0;
 
-  stream_init((stream_t*)stream, push, writeable_stream, 1, pool,
+  stream_init((stream_t*)stream, push, transform_stream, 0, pool,
               (void (*)(stream_t*))writeable_off_stream_destroy);
   stream->stream.on_write = _writeable_off_stream_on_write;
 

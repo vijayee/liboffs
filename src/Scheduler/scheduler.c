@@ -119,6 +119,11 @@ static void* _scheduler_worker_loop(void* arg) {
       spin_count = 0;
       self->current = actor;
       uint8_t flags = atomic_load(&actor->flags);
+      if (flags & ACTOR_FLAG_DESTROY) {
+        /* Actor has been destroyed — skip it */
+        self->current = NULL;
+        continue;
+      }
       if (flags & ACTOR_FLAG_RUNNING) {
         /* Another worker is already running this actor; re-queue it */
         deque_push(&self->local_queue, (void*)actor);

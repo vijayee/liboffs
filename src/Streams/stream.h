@@ -8,6 +8,7 @@
 #include "../Actor/actor.h"
 #include "../Scheduler/scheduler.h"
 #include "../Util/error.h"
+#include "../Util/atomic_compat.h"
 
 typedef enum {
   readable_stream = 0,
@@ -58,7 +59,6 @@ struct stream_event_handler_list_node_t {
 };
 
 typedef struct {
-  PLATFORMLOCKTYPE(lock);
   stream_event_handler_list_node_t *first;
   stream_event_handler_list_node_t *last;
   size_t count;
@@ -106,13 +106,48 @@ typedef struct {
   void (*cb)(void*, void*);
 } stream_read_message_payload_t;
 
+/* Stream actor message payloads */
+typedef struct {
+  size_t id;
+  stream_event_e event;
+  void* ctx;
+  void (*handler)(void*, void*);
+  void (*ctx_destroy)(void*);
+  uint8_t once;
+} stream_subscribe_payload_t;
+
+typedef struct {
+  stream_event_e event;
+  size_t id;
+} stream_unsubscribe_payload_t;
+
+typedef struct {
+  async_error_t* error;
+} stream_deactivate_payload_t;
+
+typedef struct {
+  stream_t* source;
+  stream_t* dest;
+} stream_pipe_payload_t;
+
+typedef struct {
+  stream_t* source;
+} stream_piped_payload_t;
+
+typedef struct {
+  void (*on_close)(stream_t*);
+} stream_close_handler_payload_t;
+
+typedef struct {
+  uint8_t is_pulling;
+} stream_set_pulling_payload_t;
+
 #define STREAM_HANDLER_COUNT 15
 struct stream_t {
   refcounter_t refcounter;
-  PLATFORMLOCKTYPE(lock);
   stream_type_e type;
   stream_force_e force;
-  size_t next_handler_id;
+  ATOMIC(size_t) next_handler_id;
   stream_event_handler_list_t* handlers[STREAM_HANDLER_COUNT];
   uint8_t readable;
   uint8_t is_piped;
@@ -198,4 +233,8 @@ void readable_stream_pull_handler(stream_t* stream, void (*on_pull)(stream_t*));
 void writeable_pull_stream_pipe(stream_t* ws, stream_t* rs);
 void readable_pull_stream_pull(stream_t* stream);
 void stream_deferred_deref(stream_t* stream);
+void stream_subscribe_internal(stream_t* stream, stream_event_e event, size_t id, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*), uint8_t once);
+void stream_unsubscribe_internal(stream_t* stream, stream_event_e event, size_t id);
+void stream_pipe_internal(stream_t* source, stream_t* dest);
+void stream_piped_internal(stream_t* stream, stream_t* source);
 #endif //OFFS_STREAM_H

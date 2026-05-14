@@ -165,6 +165,7 @@ void writeable_descriptor_dispatch(void* state, message_t* msg) {
       break;
     }
     default:
+      stream_dispatch(state, msg);
       break;
   }
 }
@@ -184,7 +185,7 @@ writeable_descriptor_t* writeable_descriptor_create(
   desc->descriptor = buffer_create(0);
   desc->sent_descriptor = 0;
 
-  stream_init((stream_t*)desc, push, writeable_stream, 1, pool,
+  stream_init((stream_t*)desc, push, writeable_stream, 0, pool,
               (void (*)(stream_t*))writeable_descriptor_destroy);
 
   desc->stream.actor.state = desc;

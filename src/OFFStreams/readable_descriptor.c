@@ -245,6 +245,7 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
       break;
     }
     default:
+      stream_dispatch(state, msg);
       break;
   }
 }
@@ -267,7 +268,7 @@ readable_descriptor_t* readable_descriptor_create(
   desc->next_descriptor_hash = NULL;
   desc->is_readable = 1;
 
-  stream_init((stream_t*)desc, push, readable_stream, 1, pool,
+  stream_init((stream_t*)desc, push, readable_stream, 0, pool,
               (void (*)(stream_t*))readable_descriptor_destroy);
 
   desc->stream.actor.state = desc;

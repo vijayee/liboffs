@@ -606,7 +606,6 @@ void http_connection_destroy(http_connection_t* connection) {
       atomic_fetch_sub(&connection->server->active_connections, 1);
       vec_remove(&connection->server->connections, connection);
     }
-    atomic_fetch_or(&connection->actor.flags, ACTOR_FLAG_DESTROY);
     actor_destroy(&connection->actor);
     if (ATOMIC_LOAD(&connection->watcher) != NULL) {
       pd_watcher_t* watcher = ATOMIC_EXCHANGE(&connection->watcher, NULL);

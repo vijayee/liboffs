@@ -260,6 +260,7 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
       break;
     }
     default:
+      stream_dispatch(state, msg);
       break;
   }
 }
@@ -283,7 +284,7 @@ readable_off_stream_t* readable_off_stream_create(
   stream->sent_bytes = ori->file_offset;
   stream->offset_remainder = ori->file_offset % block_size;
 
-  stream_init((stream_t*)stream, push, readable_stream, 1, pool,
+  stream_init((stream_t*)stream, push, transform_stream, 0, pool,
               (void (*)(stream_t*))readable_off_stream_destroy);
   stream->stream.on_write = _readable_off_stream_on_write;
 

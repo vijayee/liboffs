@@ -17,10 +17,20 @@ void actor_init(actor_t* actor, void* state, void (*dispatch)(void* state, messa
 }
 
 void actor_destroy(actor_t* actor) {
+  /* Mark the actor as destroyed so the scheduler skips it and actor_send
+     drops new messages. Then drain and free the message queue. */
+  atomic_fetch_or(&actor->flags, ACTOR_FLAG_DESTROY);
   message_queue_destroy(&actor->queue);
 }
 
 bool actor_send(actor_t* actor, message_t* msg) {
+  if (atomic_load(&actor->flags) & ACTOR_FLAG_DESTROY) {
+    /* Actor is being destroyed — drop the message and clean up the payload. */
+    if (msg->payload_destroy != NULL && msg->payload != NULL) {
+      msg->payload_destroy(msg->payload);
+    }
+    return false;
+  }
   message_node_t* node = get_clear_memory(sizeof(message_node_t));
   node->msg = *msg;
   bool was_empty = message_queue_push(&actor->queue, node, node);
@@ -35,6 +45,9 @@ bool actor_send(actor_t* actor, message_t* msg) {
 
 bool actor_run(actor_t* actor, size_t batch_size) {
   for (size_t count = 0; count < batch_size; count++) {
+    if (atomic_load(&actor->flags) & ACTOR_FLAG_DESTROY) {
+      return false;
+    }
     message_node_t* node = message_queue_pop(&actor->queue);
     if (node == NULL) {
       break;

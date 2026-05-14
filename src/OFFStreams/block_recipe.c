@@ -45,6 +45,7 @@ void new_blocks_recipe_dispatch(void* state, message_t* msg) {
       break;
     }
     default:
+      stream_dispatch(state, msg);
       break;
   }
 }
@@ -355,6 +356,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
       break;
     }
     default:
+      stream_dispatch(state, msg);
       break;
   }
 }

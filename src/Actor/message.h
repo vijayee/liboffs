@@ -74,7 +74,15 @@ typedef enum message_type_e {
   HTTP_SERVER_STOP_WATCHER,
   /* OFD cache resolve messages */
   OFD_CACHE_RESOLVE,
-  OFD_CACHE_RESOLVE_RESULT
+  OFD_CACHE_RESOLVE_RESULT,
+  /* Stream actor messages */
+  STREAM_SUBSCRIBE,
+  STREAM_UNSUBSCRIBE,
+  STREAM_DEACTIVATE,
+  STREAM_PIPE,
+  STREAM_PIPED,
+  STREAM_CLOSE_HANDLER,
+  STREAM_SET_PULLING
 } message_type_e;
 
 typedef struct message_t {
