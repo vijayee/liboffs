@@ -235,7 +235,7 @@ void sections_dispatch(void* state, message_t* msg) {
           sections_full(sections, p->section_id);
         }
         tries++;
-      } while ((p->result == 2) && (tries < sections->max_tuple_size));
+      } while ((p->result == 2) && (tries < (sections->max_tuple_size * 16)));
       if (p->reply_to != NULL) {
         sections_write_result_payload_t* result = get_clear_memory(sizeof(sections_write_result_payload_t));
         result->result = p->result;
