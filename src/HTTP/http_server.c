@@ -22,9 +22,43 @@ static void* _server_thread(void* arg);
 static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                               pd_event_t events, void* user_data);
 
-/* Server actor dispatch — processes watcher updates on the I/O thread. */
+static void _destroy_stack_init(http_server_t* server) {
+  platform_lock_init(&server->destroy_lock);
+  server->destroy_head = NULL;
+}
+
+static void _destroy_stack_push(http_server_t* server, pd_watcher_t* watcher) {
+  server_destroy_node_t* node = get_clear_memory(sizeof(server_destroy_node_t));
+  node->watcher = watcher;
+  platform_lock(&server->destroy_lock);
+  node->next = server->destroy_head;
+  server->destroy_head = node;
+  platform_unlock(&server->destroy_lock);
+  pd_loop_async_send(server->loop, NULL);
+}
+
+static void _destroy_stack_drain(http_server_t* server) {
+  server_destroy_node_t* node;
+  platform_lock(&server->destroy_lock);
+  node = server->destroy_head;
+  server->destroy_head = NULL;
+  platform_unlock(&server->destroy_lock);
+  while (node != NULL) {
+    server_destroy_node_t* next = node->next;
+    pd_watcher_destroy(node->watcher);
+    free(node);
+    node = next;
+  }
+}
+
+static void _destroy_stack_destroy(http_server_t* server) {
+  _destroy_stack_drain(server);
+  platform_lock_destroy(&server->destroy_lock);
+}
+
+/* Server actor dispatch — processes watcher lifecycle messages on scheduler threads. */
 void _server_dispatch(void* state, message_t* msg) {
-  (void)state;
+  http_server_t* server = (http_server_t*)state;
   switch (msg->type) {
     case HTTP_SERVER_UPDATE_WATCHER: {
       watcher_update_payload_t* payload = (watcher_update_payload_t*)msg->payload;
@@ -37,7 +71,7 @@ void _server_dispatch(void* state, message_t* msg) {
       watcher_update_payload_t* payload = (watcher_update_payload_t*)msg->payload;
       if (payload->watcher != NULL) {
         pd_watcher_stop(payload->watcher);
-        pd_watcher_destroy(payload->watcher);
+        _destroy_stack_push(server, payload->watcher);
       }
       break;
     }
@@ -48,8 +82,8 @@ void _server_dispatch(void* state, message_t* msg) {
 
 http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint16_t port) {
   http_server_t* server = get_clear_memory(sizeof(http_server_t));
-  actor_init(&server->actor, server, _server_dispatch, NULL);
   server->pool = pool;
+  actor_init(&server->actor, server, _server_dispatch, server->pool);
   server->loop = pd_loop_create(NULL);
   server->ssl_ctx = NULL;
   vec_init(&server->routes);
@@ -60,6 +94,7 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
   server->listen_watcher = NULL;
   server->max_connections = 0;
   atomic_store(&server->active_connections, 0);
+  _destroy_stack_init(server);
 
   server->listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (server->listen_fd < 0) {
@@ -173,6 +208,7 @@ void http_server_destroy(http_server_t* server) {
     SSL_CTX_free(server->ssl_ctx);
   }
   actor_destroy(&server->actor);
+  _destroy_stack_destroy(server);
   pd_loop_destroy(server->loop);
   free(server);
 }
@@ -316,7 +352,7 @@ static void* _server_thread(void* arg) {
   }
 
   while (atomic_load(&server->running)) {
-    actor_run(&server->actor, ACTOR_BATCH_SIZE);
+    _destroy_stack_drain(server);
     pd_loop_run_once(server->loop, 100);
   }
 

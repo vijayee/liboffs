@@ -29,6 +29,11 @@ typedef vec_t(http_middleware_entry_t) vec_middleware_t;
 
 typedef vec_t(http_connection_t*) vec_connection_t;
 
+typedef struct server_destroy_node_t {
+  pd_watcher_t* watcher;
+  struct server_destroy_node_t* next;
+} server_destroy_node_t;
+
 typedef struct http_server_t {
   actor_t actor;
   pd_loop_t* loop;
@@ -43,6 +48,8 @@ typedef struct http_server_t {
   scheduler_pool_t* pool;
   size_t max_connections;
   ATOMIC(size_t) active_connections;
+  PLATFORMLOCKTYPE(destroy_lock);
+  server_destroy_node_t* destroy_head;
 } http_server_t;
 
 http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint16_t port);
