@@ -19,6 +19,7 @@ typedef struct http_response_t {
   http_headers_t headers;
   uint8_t headers_sent;
   uint8_t is_piped;
+  uint8_t keep_alive;
   size_t body_length;
   http_connection_t* connection;
 } http_response_t;

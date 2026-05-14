@@ -233,6 +233,37 @@ static pending_get_t* _block_cache_find_pending_get(block_cache_t* block_cache,
   return NULL;
 }
 
+/* Find and resolve ALL pending gets for the same section coordinates.
+   This handles concurrent requests for the same block from multiple actors. */
+static void _block_cache_resolve_pending_gets(block_cache_t* block_cache,
+                                               size_t section_id, size_t section_index,
+                                               block_t* block) {
+  pending_get_t** current = &block_cache->pending_gets;
+  while (*current != NULL) {
+    if ((*current)->entry->section_id == section_id &&
+        (*current)->entry->section_index == section_index) {
+      pending_get_t* found = *current;
+      *current = found->next;
+
+      cache_get_result_payload_t* result = get_clear_memory(sizeof(cache_get_result_payload_t));
+      result->hash = found->hash;
+      result->block = block ? (block_t*)refcounter_reference((refcounter_t*)block) : NULL;
+      result->reply_to = NULL;
+      message_t reply;
+      reply.type = CACHE_GET_RESULT;
+      reply.payload = result;
+      reply.payload_destroy = free;
+      actor_send(found->reply_to, &reply);
+
+      index_entry_destroy(found->entry);
+      free(found);
+      /* Don't advance current - the list head may have changed */
+    } else {
+      current = &(*current)->next;
+    }
+  }
+}
+
 void block_cache_dispatch(void* state, message_t* msg) {
   block_cache_t* block_cache = (block_cache_t*)state;
   if (block_cache == NULL) {
@@ -416,64 +447,39 @@ void block_cache_dispatch(void* state, message_t* msg) {
       break;
     }
     case SECTIONS_READ_RESULT: {
-      /* Async: sections read completed — match to pending get request */
+      /* Async: sections read completed — resolve all pending gets for this section */
       sections_read_result_payload_t* p = (sections_read_result_payload_t*)msg->payload;
-      pending_get_t* pending = _block_cache_find_pending_get(block_cache,
-                                                              p->section_id, p->section_index);
-      if (pending != NULL) {
-        buffer_t* data = p->data;
-        if (data != NULL) {
-          block_t* block = block_create_existing_data_hash(data, pending->entry->hash);
+      buffer_t* data = p->data;
+      block_t* block = NULL;
+      if (data != NULL) {
+        /* We need the entry to get the hash — find first pending to get it */
+        pending_get_t* first_pending = _block_cache_find_pending_get(block_cache,
+                                                                      p->section_id, p->section_index);
+        if (first_pending != NULL) {
+          block = block_create_existing_data_hash(data, first_pending->entry->hash);
           if (block != NULL) {
             index_entry_t* ejection = (index_entry_t*)refcounter_reference(
-                (refcounter_t*)block_lru_cache_put(block_cache->lru, block, pending->entry));
+                (refcounter_t*)block_lru_cache_put(block_cache->lru, block, first_pending->entry));
             if (ejection) {
               index_set_entry_ejection(block_cache->index, ejection, time(NULL));
               index_entry_destroy(ejection);
             }
-            /* Send result back to original caller */
-            cache_get_result_payload_t* result = get_clear_memory(sizeof(cache_get_result_payload_t));
-            result->hash = pending->hash;
-            result->block = block;
-            result->reply_to = NULL;
-            message_t reply;
-            reply.type = CACHE_GET_RESULT;
-            reply.payload = result;
-            reply.payload_destroy = free;
-            actor_send(pending->reply_to, &reply);
-            /* block_create_existing_data_hash took a reference to data;
-               release the initial reference (matching the sync path pattern) */
-            buffer_destroy(data);
-            p->data = NULL;
-          } else {
-            /* Failed to create block — destroy data and send NULL result */
-            buffer_destroy(data);
-            p->data = NULL;
-            cache_get_result_payload_t* result = get_clear_memory(sizeof(cache_get_result_payload_t));
-            result->hash = pending->hash;
-            result->block = NULL;
-            result->reply_to = NULL;
-            message_t reply;
-            reply.type = CACHE_GET_RESULT;
-            reply.payload = result;
-            reply.payload_destroy = free;
-            actor_send(pending->reply_to, &reply);
           }
-        } else {
-          /* Sections read failed — send NULL result */
-          cache_get_result_payload_t* result = get_clear_memory(sizeof(cache_get_result_payload_t));
-          result->hash = pending->hash;
-          result->block = NULL;
-          result->reply_to = NULL;
-          message_t reply;
-          reply.type = CACHE_GET_RESULT;
-          reply.payload = result;
-          reply.payload_destroy = free;
-          actor_send(pending->reply_to, &reply);
+          /* Re-add the first pending so _resolve_all can find it along with others */
+          first_pending->next = block_cache->pending_gets;
+          block_cache->pending_gets = first_pending;
         }
-        /* Clean up pending entry — hash ownership was transferred to result */
-        index_entry_destroy(pending->entry);
-        free(pending);
+      }
+
+      /* Resolve ALL pending gets for this section, not just the first one */
+      _block_cache_resolve_pending_gets(block_cache, p->section_id, p->section_index, block);
+
+      if (block != NULL) {
+        block_destroy(block);
+      }
+      if (data != NULL) {
+        buffer_destroy(data);
+        p->data = NULL;
       }
       break;
     }

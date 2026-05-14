@@ -25,6 +25,7 @@ typedef struct {
   tuple_t* current_tuple;
   buffer_t* offset_remainder;
   buffer_t* next_descriptor_hash;
+  buffer_t* expected_hash;
   uint8_t is_readable;
 } readable_descriptor_t;
 

@@ -36,8 +36,9 @@
 #include <poll-dancer/poll-dancer.h>
 
 // OFF URL regex matching /offsystem/v3/{type}/{length}/{hash1}/{hash2}/{name}
+// Type may contain '/' (e.g., "application/octet-stream") or be simple (e.g., "standard")
 // Filename group accepts spaces (decoded from %20) and most printable chars
-#define OFF_GET_PATTERN "/offsystem/v3/([-+._a-zA-Z0-9]+/[-+._a-zA-Z0-9-]+)/([0-9]+)/([123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+)/([123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+)/([^!`&*()+]+|\\\\[ !$`&*()+]+)+"
+#define OFF_GET_PATTERN "/offsystem/v3/([-+._a-zA-Z0-9]+/[-+._a-zA-Z0-9-]+|[-+._a-zA-Z0-9]+)/([0-9]+)/([123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+)/([123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+)/([^!`&*()+]+|\\\\[ !$`&*()+]+)+"
 
 typedef struct {
     size_t start;

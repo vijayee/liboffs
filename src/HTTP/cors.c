@@ -19,7 +19,7 @@ cors_config_t* cors_config_offsystem(void) {
   cors_config_t* config = get_clear_memory(sizeof(cors_config_t));
   config->allow_origin = strdup("*");
   config->allow_methods = strdup("GET, PUT, POST, DELETE, OPTIONS");
-  config->allow_headers = strdup("Content-Type, type, file-name, stream-length, server-address");
+  config->allow_headers = strdup("Content-Type, Range, type, file-name, stream-length, server-address");
   config->max_age = strdup("86400");
   config->allow_credentials = 0;
   return config;
@@ -39,7 +39,7 @@ int cors_middleware(http_request_t* request, http_response_t* response, void* us
 
   // Set common headers on every response
   http_response_set_header(response, "Access-Control-Allow-Origin", config->allow_origin);
-  http_response_set_header(response, "Access-Control-Expose-Headers", "Content-Type");
+  http_response_set_header(response, "Access-Control-Expose-Headers", "Content-Type, Content-Range, Content-Length");
 
   // Handle OPTIONS preflight
   if (request->method == HTTP_OPTIONS) {

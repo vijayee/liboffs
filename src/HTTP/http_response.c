@@ -3,6 +3,7 @@
 //
 #include "http_response.h"
 #include "http_connection.h"
+#include "http_request.h"
 #include "../Util/allocator.h"
 #include "../Buffer/buffer.h"
 #include <poll-dancer/poll-dancer.h>
@@ -26,7 +27,7 @@ static void _send_headers(http_response_t* response) {
   }
 
   if (http_headers_get(&response->headers, "Connection") == NULL) {
-    http_headers_set(&response->headers, "Connection", "close");
+    http_headers_set(&response->headers, "Connection", response->keep_alive ? "keep-alive" : "close");
   }
 
   const char* phrase = http_status_str((enum http_status)response->status_code);
@@ -58,6 +59,7 @@ http_response_t* http_response_create(scheduler_pool_t* pool, http_connection_t*
   response->status_code = HTTP_STATUS_OK;
   http_headers_init(&response->headers);
   response->headers_sent = 0;
+  response->keep_alive = connection && connection->request ? connection->request->keep_alive : 0;
   response->connection = connection;
   return response;
 }
@@ -103,7 +105,9 @@ void http_response_end(http_response_t* response) {
     return;
   }
   _send_headers(response);
-  http_connection_close(response->connection);
+  if (!response->keep_alive) {
+    http_connection_close(response->connection);
+  }
 }
 
 static void _pipe_on_data(void* ctx, void* chunk) {
@@ -116,11 +120,15 @@ static void _pipe_on_close(void* ctx, void* unused) {
     (void)unused;
     http_response_t* response = (http_response_t*)ctx;
     http_connection_t* conn = response->connection;
+    uint8_t keep_alive = response->keep_alive;
     http_response_end(response);
     response->connection = NULL;
     http_response_destroy(response);
     /* Release the reference taken in http_response_pipe */
     if (conn) {
+        if (keep_alive) {
+            conn->piped_pending = 0;
+        }
         http_connection_destroy(conn);
     }
 }
@@ -129,6 +137,7 @@ static void _pipe_on_error(void* ctx, async_error_t* error) {
     (void)error;
     http_response_t* response = (http_response_t*)ctx;
     http_connection_t* conn = response->connection;
+    uint8_t keep_alive = response->keep_alive;
     if (!response->headers_sent) {
         http_response_set_status(response, 404);
         http_response_set_header(response, "Content-Length", "0");
@@ -138,6 +147,9 @@ static void _pipe_on_error(void* ctx, async_error_t* error) {
     http_response_destroy(response);
     /* Release the reference taken in http_response_pipe */
     if (conn) {
+        if (keep_alive) {
+            conn->piped_pending = 0;
+        }
         http_connection_destroy(conn);
     }
 }

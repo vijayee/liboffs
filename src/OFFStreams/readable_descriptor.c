@@ -160,6 +160,10 @@ static int _process_descriptor(readable_descriptor_t* desc, buffer_t* block_data
 
 /* Request a descriptor block from block_cache. Result arrives as CACHE_GET_RESULT. */
 static void _fetch_descriptor_block(readable_descriptor_t* desc, buffer_t* hash) {
+  if (desc->expected_hash != NULL) {
+    DESTROY(desc->expected_hash, buffer);
+  }
+  desc->expected_hash = (buffer_t*)refcounter_reference((refcounter_t*)hash);
   block_cache_get(desc->bc, hash, &desc->stream.actor);
 }
 
@@ -190,6 +194,25 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
         }
         break;
       }
+
+      /* Verify the result is for the hash we requested — ignore stale results
+         from concurrent requests that may arrive at our actor */
+      if (desc->expected_hash != NULL && result->hash != NULL &&
+          buffer_compare(desc->expected_hash, result->hash) != 0) {
+        if (result->block != NULL) {
+          DESTROY(result->block, block);
+        }
+        if (result->hash != NULL) {
+          DESTROY(result->hash, buffer);
+        }
+        break;
+      }
+
+      if (desc->expected_hash != NULL) {
+        DESTROY(desc->expected_hash, buffer);
+        desc->expected_hash = NULL;
+      }
+
       if (result->block == NULL) {
         /* Block not found */
         if (result->hash != NULL) {
@@ -266,6 +289,9 @@ void readable_descriptor_destroy(readable_descriptor_t* desc) {
     }
     if (desc->next_descriptor_hash != NULL) {
       DESTROY(desc->next_descriptor_hash, buffer);
+    }
+    if (desc->expected_hash != NULL) {
+      DESTROY(desc->expected_hash, buffer);
     }
     stream_deinit((stream_t*)desc);
     free(desc);
