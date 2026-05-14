@@ -124,6 +124,12 @@ static void* _scheduler_worker_loop(void* arg) {
         self->current = NULL;
         continue;
       }
+      if (flags & ACTOR_FLAG_MUTED) {
+        /* Actor is muted due to backpressure — re-queue it for later */
+        self->current = NULL;
+        deque_push(&self->local_queue, (void*)actor);
+        continue;
+      }
       if (flags & ACTOR_FLAG_RUNNING) {
         /* Another worker is already running this actor; re-queue it */
         deque_push(&self->local_queue, (void*)actor);

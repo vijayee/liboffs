@@ -6,14 +6,13 @@
 #define OFFS_SCHEDULER_H
 
 #include "deque.h"
+#include "../Actor/actor.h"
 #include "../Util/threadding.h"
 #include "../Util/atomic_compat.h"
 #include <stddef.h>
 #include <stdint.h>
 
 #define CACHE_LINE_SIZE 64
-
-typedef struct actor_t actor_t;
 
 typedef struct pending_deref_node_t {
   struct pending_deref_node_t* next;

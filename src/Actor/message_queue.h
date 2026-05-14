@@ -8,6 +8,9 @@
 #include "message.h"
 #include "../Util/atomic_compat.h"
 #include <stdbool.h>
+#include <stddef.h>
+
+#define MAILBOX_MUTE_THRESHOLD 256
 
 typedef struct message_node_t message_node_t;
 struct message_node_t {
@@ -18,6 +21,7 @@ struct message_node_t {
 typedef struct message_queue_t {
   ATOMIC(message_node_t*) head;
   message_node_t* tail;
+  ATOMIC(size_t) size;
 } message_queue_t;
 
 void message_queue_init(message_queue_t* queue);

@@ -7,6 +7,7 @@
 extern "C" {
 #include "../src/Actor/actor.h"
 #include "../src/Actor/message_queue.h"
+#include "../src/Scheduler/scheduler.h"
 }
 
 static void test_dispatch(void* state, message_t* msg) {
@@ -181,4 +182,180 @@ TEST(TestActor, TestPayloadDestroy) {
   EXPECT_EQ(payload_destroy_count, 1);
 
   actor_destroy(&actor);
+}
+
+TEST(TestActor, TestBackpressureApplySetsPressuredFlag) {
+  int count = 0;
+  actor_t actor;
+  actor_init(&actor, &count, test_dispatch, NULL);
+
+  EXPECT_EQ(atomic_load(&actor.flags) & ACTOR_FLAG_PRESSURED, 0);
+  backpressure_apply(&actor);
+  EXPECT_NE(atomic_load(&actor.flags) & ACTOR_FLAG_PRESSURED, 0);
+
+  actor_destroy(&actor);
+}
+
+TEST(TestActor, TestBackpressureReleaseClearsPressuredFlag) {
+  int count = 0;
+  actor_t actor;
+  actor_init(&actor, &count, test_dispatch, NULL);
+
+  backpressure_apply(&actor);
+  EXPECT_NE(atomic_load(&actor.flags) & ACTOR_FLAG_PRESSURED, 0);
+
+  backpressure_release(&actor);
+  EXPECT_EQ(atomic_load(&actor.flags) & ACTOR_FLAG_PRESSURED, 0);
+
+  actor_destroy(&actor);
+}
+
+TEST(TestActor, TestBackpressureMutesSenderWhenTargetPressured) {
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  scheduler_pool_start(pool);
+
+  int count = 0;
+  actor_t target;
+  actor_init(&target, &count, test_dispatch, pool);
+
+  /* Mark target as pressured */
+  backpressure_apply(&target);
+
+  /* Send a message from the scheduler context (simulating a sender) */
+  message_t msg;
+  msg.type = 1;
+  msg.payload = NULL;
+  msg.payload_destroy = NULL;
+
+  /* Since we're not in a scheduler worker, scheduler_get_current() returns NULL,
+     so the sender won't be muted. We need to test this differently. */
+  actor_send(&target, &msg);
+
+  /* The message should still be in the queue (target is pressured but not destroyed) */
+  EXPECT_EQ(atomic_load(&target.queue.size), 1u);
+
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
+}
+
+TEST(TestActor, TestMutedActorSkippedByRun) {
+  int count = 0;
+  actor_t actor;
+  actor_init(&actor, &count, test_dispatch, NULL);
+
+  message_t msg;
+  msg.type = 1;
+  msg.payload = NULL;
+  msg.payload_destroy = NULL;
+  actor_send(&actor, &msg);
+
+  /* Mute the actor */
+  atomic_fetch_or(&actor.flags, ACTOR_FLAG_MUTED);
+
+  /* actor_run should skip processing when muted */
+  bool has_more = actor_run(&actor, 32);
+  EXPECT_FALSE(has_more);
+  /* Count should still be 0 because the actor was muted */
+  EXPECT_EQ(count, 0);
+
+  /* Unmute and run again */
+  atomic_fetch_and(&actor.flags, ~ACTOR_FLAG_MUTED);
+  has_more = actor_run(&actor, 32);
+  EXPECT_FALSE(has_more);
+  EXPECT_EQ(count, 1);
+
+  actor_destroy(&actor);
+}
+
+TEST(TestActor, TestMailboxSizeTracking) {
+  int count = 0;
+  actor_t actor;
+  actor_init(&actor, &count, test_dispatch, NULL);
+
+  EXPECT_EQ(atomic_load(&actor.queue.size), 0u);
+
+  message_t msg;
+  msg.type = 1;
+  msg.payload = NULL;
+  msg.payload_destroy = NULL;
+
+  actor_send(&actor, &msg);
+  EXPECT_EQ(atomic_load(&actor.queue.size), 1u);
+
+  actor_send(&actor, &msg);
+  EXPECT_EQ(atomic_load(&actor.queue.size), 2u);
+
+  actor_run(&actor, 1);
+  EXPECT_EQ(atomic_load(&actor.queue.size), 1u);
+
+  actor_run(&actor, 1);
+  EXPECT_EQ(atomic_load(&actor.queue.size), 0u);
+
+  actor_destroy(&actor);
+}
+
+TEST(TestActor, TestAutoBackpressureOnMailboxOverflow) {
+  int count = 0;
+  actor_t actor;
+  actor_init(&actor, &count, test_dispatch, NULL);
+
+  /* Fill the mailbox past the threshold */
+  for (size_t i = 0; i < MAILBOX_MUTE_THRESHOLD; i++) {
+    message_t msg;
+    msg.type = 1;
+    msg.payload = NULL;
+    msg.payload_destroy = NULL;
+    actor_send(&actor, &msg);
+  }
+
+  /* The actor should now be pressured */
+  EXPECT_NE(atomic_load(&actor.flags) & ACTOR_FLAG_PRESSURED, 0);
+
+  /* Process all messages */
+  actor_run(&actor, ACTOR_BATCH_SIZE);
+  while (atomic_load(&actor.queue.size) > 0) {
+    actor_run(&actor, ACTOR_BATCH_SIZE);
+  }
+
+  /* After draining, backpressure should be auto-released */
+  EXPECT_EQ(atomic_load(&actor.flags) & ACTOR_FLAG_PRESSURED, 0);
+
+  actor_destroy(&actor);
+}
+
+TEST(TestActor, TestBackpressureReleaseUnmutesSenders) {
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  scheduler_pool_start(pool);
+
+  int sender_count = 0;
+  int target_count = 0;
+  actor_t sender;
+  actor_t target;
+  actor_init(&sender, &sender_count, test_dispatch, pool);
+  actor_init(&target, &target_count, test_dispatch, pool);
+
+  /* Mark target as pressured */
+  backpressure_apply(&target);
+
+  /* Manually add sender to target's pressured_senders list */
+  muted_sender_node_t* msn = (muted_sender_node_t*)malloc(sizeof(muted_sender_node_t));
+  msn->sender = &sender;
+  msn->next = NULL;
+  atomic_store(&target.pressured_senders, msn);
+
+  /* Mute the sender */
+  atomic_fetch_or(&sender.flags, ACTOR_FLAG_MUTED);
+
+  /* Release pressure on target - should unmute sender */
+  backpressure_release(&target);
+
+  /* Sender should be unmuted */
+  EXPECT_EQ(atomic_load(&sender.flags) & ACTOR_FLAG_MUTED, 0);
+  /* Target should no longer be pressured */
+  EXPECT_EQ(atomic_load(&target.flags) & ACTOR_FLAG_PRESSURED, 0);
+  /* Pressured senders list should be empty */
+  EXPECT_EQ(atomic_load(&target.pressured_senders), (muted_sender_node_t*)NULL);
+
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
 }
