@@ -187,9 +187,21 @@ void http_server_destroy(http_server_t* server) {
   if (server->listen_fd >= 0) {
     close(server->listen_fd);
   }
+  /* Mark all connections as closing and close their fds so actors drain quickly. */
+  for (int i = 0; i < server->connections.length; i++) {
+    http_connection_t* conn = server->connections.data[i];
+    conn->is_closing = 1;
+    if (conn->fd >= 0) {
+      close(conn->fd);
+      conn->fd = -1;
+    }
+    conn->server = NULL;
+  }
+  /* Wait for all connection actors to finish processing pending messages. */
+  scheduler_pool_wait_for_idle(server->pool);
+  /* Safe to destroy connections now — no actor is running them. */
   for (int i = server->connections.length - 1; i >= 0; i--) {
     http_connection_t* conn = server->connections.data[i];
-    conn->server = NULL;
     DESTROY(conn, http_connection);
   }
   vec_deinit(&server->connections);

@@ -263,8 +263,10 @@ static int _on_message_complete(http_parser* parser) {
 }
 
 /* Helper: send a watcher update to the server actor (runs on scheduler thread).
- * pd_watcher_update is thread-safe (epoll_ctl MOD). */
+ * pd_watcher_update is thread-safe (epoll_ctl MOD). No-op when server is NULL
+ * (shutdown) since the I/O thread is already stopped. */
 static void _connection_update_watcher(http_connection_t* connection, pd_event_t events) {
+  if (connection->server == NULL) return;
   pd_watcher_t* watcher = ATOMIC_LOAD(&connection->watcher);
   if (watcher == NULL) return;
   watcher_update_payload_t* payload = get_clear_memory(sizeof(watcher_update_payload_t));
@@ -281,18 +283,24 @@ static void _connection_update_watcher(http_connection_t* connection, pd_event_t
  * Uses atomic exchange to claim the watcher — only one caller will succeed,
  * preventing double-free when both the I/O callback and a dispatch handler
  * try to stop the same watcher. The server actor calls pd_watcher_stop (thread-safe)
- * and defers pd_watcher_destroy to the I/O thread. */
+ * and defers pd_watcher_destroy to the I/O thread. When server is NULL (shutdown),
+ * the I/O thread is already stopped so we stop+destroy directly. */
 static void _connection_stop_watcher(http_connection_t* connection) {
   pd_watcher_t* watcher = ATOMIC_EXCHANGE(&connection->watcher, NULL);
   if (watcher == NULL) return;
-  watcher_update_payload_t* payload = get_clear_memory(sizeof(watcher_update_payload_t));
-  payload->watcher = watcher;
-  payload->events = 0;
-  message_t msg;
-  msg.type = HTTP_SERVER_STOP_WATCHER;
-  msg.payload = payload;
-  msg.payload_destroy = free;
-  actor_send(&connection->server->actor, &msg);
+  if (connection->server != NULL) {
+    watcher_update_payload_t* payload = get_clear_memory(sizeof(watcher_update_payload_t));
+    payload->watcher = watcher;
+    payload->events = 0;
+    message_t msg;
+    msg.type = HTTP_SERVER_STOP_WATCHER;
+    msg.payload = payload;
+    msg.payload_destroy = free;
+    actor_send(&connection->server->actor, &msg);
+  } else {
+    pd_watcher_stop(watcher);
+    pd_watcher_destroy(watcher);
+  }
 }
 
 /* Close the fd and mark connection as closing. Used from dispatch (worker thread). */
