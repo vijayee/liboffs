@@ -524,6 +524,132 @@ static void network_handle_store_block_response(network_t* network, message_t* m
   }
 }
 
+// --- SeekingBlocks handler ---
+// Inhale: peer asks what blocks we have that they might want
+
+static void network_handle_seeking_blocks(network_t* network, message_t* msg) {
+  wire_seeking_blocks_t* seeking = (wire_seeking_blocks_t*)msg->payload;
+  if (seeking == NULL) return;
+
+  float local_capacity = atomic_load(&network->authority->capacity);
+
+  // Only respond if we have blocks and the requester has capacity < 50%
+  if (local_capacity <= 0.0f) {
+    // No blocks to offer
+    return;
+  }
+
+  // Build response with offers from our local block index
+  // TODO: Query block_cache for available blocks when wired up
+  wire_seeking_blocks_response_t* response = get_clear_memory(sizeof(wire_seeking_blocks_response_t));
+  response->message_id = seeking->message_id;
+  response->offer_count = 0;
+
+  // TODO: Select up to MAX_OFFERS blocks from local index
+  // Use PICK-BLOCK-FOR-REPRESENTATION: walk ranks from highest fib downward,
+  // probability proportional to fibonacci(fib)
+  // Exclude hashes in seeking->exclude_hashes
+
+  message_t response_msg;
+  response_msg.type = NETWORK_SEEKING_BLOCKS_RESPONSE;
+  response_msg.payload = response;
+  response_msg.payload_destroy = free;
+  // TODO: Send response via QUIC when wired up
+  (void)response_msg;
+}
+
+static void network_handle_seeking_blocks_response(network_t* network, message_t* msg) {
+  wire_seeking_blocks_response_t* response = (wire_seeking_blocks_response_t*)msg->payload;
+  if (response == NULL) return;
+
+  float local_capacity = atomic_load(&network->authority->capacity);
+
+  // Evaluate each offer: if we should pull (capacity < 50% and block not stored)
+  if (!respiration_should_inhale(local_capacity)) {
+    return;  // We're not in inhale phase anymore
+  }
+
+  for (uint8_t index = 0; index < response->offer_count; index++) {
+    wire_block_offer_t* offer = &response->offers[index];
+    // TODO: Check if block is already stored in block_cache
+    // If not stored and capacity allows, send FindBlock for this hash
+    (void)offer;
+  }
+}
+
+// --- RankBlock handler ---
+// Fire-and-forget: upgrade our local rank or initiate seek
+
+static void network_handle_rank_block(network_t* network, message_t* msg) {
+  wire_rank_block_t* rank = (wire_rank_block_t*)msg->payload;
+  if (rank == NULL) return;
+
+  float local_capacity = atomic_load(&network->authority->capacity);
+
+  // TODO: Look up block in local index when wired up
+  // If we have the block and msg.fib > local.fib → upgrade
+  // If we don't have the block and capacity < 50% → initiate FindBlock
+  // If hop_count < MAX_RANK_HOPS → forward to random subset
+
+  (void)network;
+  (void)rank;
+  (void)local_capacity;
+}
+
+// --- RecallBlock handler ---
+
+static void network_handle_recall_block(network_t* network, message_t* msg) {
+  wire_recall_block_t* recall = (wire_recall_block_t*)msg->payload;
+  if (recall == NULL) return;
+
+  float local_capacity = atomic_load(&network->authority->capacity);
+
+  // If capacity < 50% → accept recall, otherwise decline
+  if (local_capacity < RESPIRATION_INHALE_THRESHOLD) {
+    // Send RecallAccept
+    wire_recall_accept_t* response = get_clear_memory(sizeof(wire_recall_accept_t));
+    response->message_id = recall->message_id;
+
+    message_t response_msg;
+    response_msg.type = NETWORK_RECALL_ACCEPT;
+    response_msg.payload = response;
+    response_msg.payload_destroy = free;
+    // TODO: Send response via QUIC when wired up
+    (void)response_msg;
+  } else {
+    // Send RecallDecline
+    wire_recall_decline_t* response = get_clear_memory(sizeof(wire_recall_decline_t));
+    response->message_id = recall->message_id;
+
+    message_t response_msg;
+    response_msg.type = NETWORK_RECALL_DECLINE;
+    response_msg.payload = response;
+    response_msg.payload_destroy = free;
+    // TODO: Send response via QUIC when wired up
+    (void)response_msg;
+  }
+}
+
+static void network_handle_recall_accept(network_t* network, message_t* msg) {
+  wire_recall_accept_t* accept = (wire_recall_accept_t*)msg->payload;
+  if (accept == NULL) return;
+
+  // Load block from sections and send StoreBlock with reason=RECALL
+  // TODO: Look up block in local cache and send StoreBlock when wired up
+  (void)network;
+  (void)accept;
+}
+
+static void network_handle_recall_decline(network_t* network, message_t* msg) {
+  wire_recall_decline_t* decline = (wire_recall_decline_t*)msg->payload;
+  if (decline == NULL) return;
+
+  // Remove block_hash from EABF_{self→source}
+  // TODO: Remove from EABF when source node ID is available
+  (void)network;
+  (void)decline;
+}
+
 // --- EABF expire handler ---
 // When a timer fires for an EABF entry TTL, remove the fingerprint from the EABF.
 // The timer payload contains the timer_id which maps to an eabf_ttl_entry_t.
@@ -609,16 +735,22 @@ void network_dispatch(void* state, message_t* msg) {
       network_handle_store_block_response(network, msg);
       break;
     case NETWORK_SEEKING_BLOCKS:
+      network_handle_seeking_blocks(network, msg);
       break;
     case NETWORK_SEEKING_BLOCKS_RESPONSE:
+      network_handle_seeking_blocks_response(network, msg);
       break;
     case NETWORK_RANK_BLOCK:
+      network_handle_rank_block(network, msg);
       break;
     case NETWORK_RECALL_BLOCK:
+      network_handle_recall_block(network, msg);
       break;
     case NETWORK_RECALL_ACCEPT:
+      network_handle_recall_accept(network, msg);
       break;
     case NETWORK_RECALL_DECLINE:
+      network_handle_recall_decline(network, msg);
       break;
     case NETWORK_RATE_LIMITED:
       break;
