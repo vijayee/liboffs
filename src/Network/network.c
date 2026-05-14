@@ -29,6 +29,7 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   eabf_table_init(&network->eabf_table, 16);
   eabf_ttl_table_init(&network->eabf_ttl, 64);
   hebbian_table_init(&network->hebbian, 32);
+  rate_limit_table_init(&network->rate_limits, 32);
 
   gossip_handle_init(&network->gossip,
                      GOSSIP_INIT_INTERVAL_S,
@@ -69,6 +70,7 @@ void network_destroy(network_t* network) {
   eabf_table_deinit(&network->eabf_table);
   eabf_ttl_table_deinit(&network->eabf_ttl);
   hebbian_table_deinit(&network->hebbian);
+  rate_limit_table_deinit(&network->rate_limits);
   actor_destroy(&network->actor);
   free(network);
 }
@@ -650,6 +652,19 @@ static void network_handle_recall_decline(network_t* network, message_t* msg) {
   (void)decline;
 }
 
+// --- RateLimited handler ---
+
+static void network_handle_rate_limited(network_t* network, message_t* msg) {
+  wire_rate_limited_t* limited = (wire_rate_limited_t*)msg->payload;
+  if (limited == NULL) return;
+
+  // A peer is telling us we've been rate limited
+  // Back off from sending further requests of this type to this peer
+  // TODO: Record the rate limit event and apply exponential backoff
+  (void)network;
+  (void)limited;
+}
+
 // --- EABF expire handler ---
 // When a timer fires for an EABF entry TTL, remove the fingerprint from the EABF.
 // The timer payload contains the timer_id which maps to an eabf_ttl_entry_t.
@@ -753,6 +768,7 @@ void network_dispatch(void* state, message_t* msg) {
       network_handle_recall_decline(network, msg);
       break;
     case NETWORK_RATE_LIMITED:
+      network_handle_rate_limited(network, msg);
       break;
     case NETWORK_EABF_EXPIRE:
       network_handle_eabf_expire(network, msg);

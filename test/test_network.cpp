@@ -16,6 +16,7 @@
 #include "Network/eabf.h"
 #include "Network/hebbian.h"
 #include "Network/respiration.h"
+#include "Network/rate_limit.h"
 
 // === Query tests ===
 
@@ -1109,4 +1110,112 @@ TEST(RespirationTest, BlocksToFree) {
 TEST(RespirationTest, BlocksToFreeBelowThreshold) {
   uint32_t to_free = respiration_blocks_to_free(0.70f, 100, 4096);
   EXPECT_EQ(to_free, 0u);
+}
+
+// === Rate limit tests ===
+
+class RateLimitTest : public ::testing::Test {
+protected:
+  rate_limit_table_t table;
+
+  void SetUp() override {
+    rate_limit_table_init(&table, 4);
+  }
+
+  void TearDown() override {
+    rate_limit_table_deinit(&table);
+  }
+};
+
+TEST_F(RateLimitTest, InitDeinit) {
+  EXPECT_NE(table.entries, nullptr);
+  EXPECT_EQ(table.count, 0u);
+  EXPECT_GE(table.capacity, 4u);
+}
+
+TEST_F(RateLimitTest, CheckAllowsFirstRequest) {
+  node_id_t peer = {};
+  memset(peer.hash, 0xAA, NODE_ID_HASH_SIZE);
+
+  // First request should be allowed (buckets start full)
+  bool allowed = rate_limit_check(&table, &peer, RPC_TYPE_FIND_BLOCK, 1000);
+  EXPECT_TRUE(allowed);
+}
+
+TEST_F(RateLimitTest, CheckRejectsWhenEmpty) {
+  node_id_t peer = {};
+  memset(peer.hash, 0xBB, NODE_ID_HASH_SIZE);
+
+  // Drain the bucket
+  peer_rate_limits_t* limits = rate_limit_table_get(&table, &peer);
+  ASSERT_NE(limits, nullptr);
+  limits->buckets[RPC_TYPE_STORE_BLOCK].tokens = 0.0f;
+
+  bool allowed = rate_limit_check(&table, &peer, RPC_TYPE_STORE_BLOCK, 1000);
+  EXPECT_FALSE(allowed);
+}
+
+TEST_F(RateLimitTest, RefillOverTime) {
+  node_id_t peer = {};
+  memset(peer.hash, 0xCC, NODE_ID_HASH_SIZE);
+
+  // Drain bucket
+  peer_rate_limits_t* limits = rate_limit_table_get(&table, &peer);
+  ASSERT_NE(limits, nullptr);
+  limits->buckets[RPC_TYPE_FIND_BLOCK].tokens = 0.0f;
+  limits->buckets[RPC_TYPE_FIND_BLOCK].last_refill = 1000;
+
+  // After 1 second, should have refilled tokens
+  bool allowed = rate_limit_check(&table, &peer, RPC_TYPE_FIND_BLOCK, 2000);
+  EXPECT_TRUE(allowed);
+}
+
+TEST_F(RateLimitTest, DefaultConfigs) {
+  // Verify default configs match the spec
+  EXPECT_FLOAT_EQ(RATE_LIMIT_DEFAULTS[RPC_TYPE_FIND_BLOCK].base_rate, 5.0f);
+  EXPECT_FLOAT_EQ(RATE_LIMIT_DEFAULTS[RPC_TYPE_STORE_BLOCK].base_rate, 0.5f);
+  EXPECT_FLOAT_EQ(RATE_LIMIT_DEFAULTS[RPC_TYPE_SEEKING_BLOCKS].base_rate, 1.0f);
+  EXPECT_FLOAT_EQ(RATE_LIMIT_DEFAULTS[RPC_TYPE_PING_CAPACITY].base_rate, 10.0f);
+  EXPECT_FLOAT_EQ(RATE_LIMIT_DEFAULTS[RPC_TYPE_PING].base_rate, 10.0f);
+}
+
+TEST_F(RateLimitTest, CapacityMultiplier) {
+  // StoreBlock at 0.80 → 0.05
+  EXPECT_NEAR(rate_limit_capacity_multiplier(0.80f, RPC_TYPE_STORE_BLOCK), 0.05f, 0.001f);
+
+  // StoreBlock at 0.50 → 1.0
+  EXPECT_NEAR(rate_limit_capacity_multiplier(0.50f, RPC_TYPE_STORE_BLOCK), 1.0f, 0.001f);
+
+  // StoreBlock at 0.65 → ~0.525 (linear taper)
+  float mid = rate_limit_capacity_multiplier(0.65f, RPC_TYPE_STORE_BLOCK);
+  EXPECT_GT(mid, 0.05f);
+  EXPECT_LT(mid, 1.0f);
+
+  // FindBlock always 1.0
+  EXPECT_FLOAT_EQ(rate_limit_capacity_multiplier(0.80f, RPC_TYPE_FIND_BLOCK), 1.0f);
+}
+
+TEST_F(RateLimitTest, RetryAfter) {
+  node_id_t peer = {};
+  memset(peer.hash, 0xDD, NODE_ID_HASH_SIZE);
+
+  // Drain bucket
+  peer_rate_limits_t* limits = rate_limit_table_get(&table, &peer);
+  ASSERT_NE(limits, nullptr);
+  limits->buckets[RPC_TYPE_FIND_BLOCK].tokens = 0.0f;
+  limits->buckets[RPC_TYPE_FIND_BLOCK].last_refill = 1000;
+
+  // retry_after should be non-zero when bucket is empty
+  uint32_t retry = rate_limit_retry_after(&table, &peer, RPC_TYPE_FIND_BLOCK, 1000);
+  EXPECT_GT(retry, 0u);
+}
+
+TEST_F(RateLimitTest, RemovePeer) {
+  node_id_t peer = {};
+  memset(peer.hash, 0xEE, NODE_ID_HASH_SIZE);
+  rate_limit_table_get(&table, &peer);
+  EXPECT_EQ(table.count, 1u);
+
+  rate_limit_table_remove(&table, &peer);
+  EXPECT_EQ(table.count, 0u);
 }
