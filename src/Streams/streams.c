@@ -261,7 +261,6 @@ void stream_dispatch(void* state, message_t* msg) {
       stream_event_e event = notify_payload->event;
       void* payload = notify_payload->payload;
       void (*payload_destroy)(void*) = notify_payload->payload_destroy;
-      free(notify_payload);
       stream_notify(stream, event, payload, payload_destroy);
       break;
     }
