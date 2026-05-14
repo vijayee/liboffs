@@ -14,6 +14,8 @@
 #include "Network/find_block.h"
 #include "Network/store_block.h"
 #include "Network/eabf.h"
+#include "Network/hebbian.h"
+#include "Network/respiration.h"
 
 // === Query tests ===
 
@@ -922,4 +924,189 @@ TEST_F(StoreBlockTest, HighCapacityForwards) {
 
   net_node_destroy(node_a);
   net_node_destroy(node_b);
+}
+
+// === Hebbian weight table tests ===
+
+class HebbianTest : public ::testing::Test {
+protected:
+  hebbian_table_t table;
+
+  void SetUp() override {
+    hebbian_table_init(&table, 4);
+  }
+
+  void TearDown() override {
+    hebbian_table_deinit(&table);
+  }
+};
+
+TEST_F(HebbianTest, InitDeinit) {
+  EXPECT_NE(table.entries, nullptr);
+  EXPECT_EQ(table.count, 0u);
+  EXPECT_GE(table.capacity, 4u);
+}
+
+TEST_F(HebbianTest, GetNonexistentReturnsMin) {
+  node_id_t id = {};
+  memset(id.hash, 0xAA, NODE_ID_HASH_SIZE);
+  float weight = hebbian_table_get(&table, &id);
+  EXPECT_FLOAT_EQ(weight, HEBBIAN_MIN_WEIGHT);
+}
+
+TEST_F(HebbianTest, SetAndGet) {
+  node_id_t id = {};
+  memset(id.hash, 0xBB, NODE_ID_HASH_SIZE);
+  hebbian_table_set(&table, &id, 0.75f);
+  EXPECT_FLOAT_EQ(hebbian_table_get(&table, &id), 0.75f);
+}
+
+TEST_F(HebbianTest, FrequencyRule) {
+  node_id_t holder = {};
+  memset(holder.hash, 0xCC, NODE_ID_HASH_SIZE);
+  hebbian_table_set(&table, &holder, 0.5f);
+
+  hebbian_frequency(&table, &holder, 0.1f);
+  float new_weight = hebbian_table_get(&table, &holder);
+  EXPECT_NEAR(new_weight, 0.6f, 0.001f);  // 0.5 + 0.1
+}
+
+TEST_F(HebbianTest, FrequencyCreatesNewEntry) {
+  node_id_t new_peer = {};
+  memset(new_peer.hash, 0xDD, NODE_ID_HASH_SIZE);
+
+  hebbian_frequency(&table, &new_peer, 0.15f);
+  float weight = hebbian_table_get(&table, &new_peer);
+  // New entry should be max(delta, INITIAL_WEIGHT) = max(0.15, 0.1) = 0.15
+  EXPECT_NEAR(weight, 0.15f, 0.001f);
+}
+
+TEST_F(HebbianTest, ComputeDeltaLowLatency) {
+  float delta = hebbian_compute_delta(100, HEBBIAN_FIND_BLOCK_MULTIPLIER);
+  EXPECT_GT(delta, 0.0f);
+  EXPECT_LT(delta, HEBBIAN_GAMMA_0);
+}
+
+TEST_F(HebbianTest, ComputeDeltaHighLatency) {
+  float delta = hebbian_compute_delta(HEBBIAN_MAX_SEARCH_TIME_MS + 1000,
+                                       HEBBIAN_FIND_BLOCK_MULTIPLIER);
+  EXPECT_NEAR(delta, 0.0f, 0.001f);
+}
+
+TEST_F(HebbianTest, FeedbackRule) {
+  node_id_t path[3];
+  memset(path[0].hash, 0x10, NODE_ID_HASH_SIZE);
+  memset(path[1].hash, 0x20, NODE_ID_HASH_SIZE);
+  memset(path[2].hash, 0x30, NODE_ID_HASH_SIZE);
+
+  hebbian_table_set(&table, &path[0], 0.5f);
+  hebbian_table_set(&table, &path[1], 0.3f);
+  hebbian_table_set(&table, &path[2], 0.2f);
+
+  hebbian_feedback(&table, path, 3, 0.1f);
+
+  // Feedback: w_{path[1]→path[2]} += eta_f * delta_w = 0.25 * 0.1 = 0.025
+  float w_b = hebbian_table_get(&table, &path[2]);
+  EXPECT_NEAR(w_b, 0.2f + 0.025f, 0.001f);
+}
+
+TEST_F(HebbianTest, SymmetryRule) {
+  node_id_t path[2];
+  memset(path[0].hash, 0x10, NODE_ID_HASH_SIZE);
+  memset(path[1].hash, 0x20, NODE_ID_HASH_SIZE);
+
+  hebbian_table_set(&table, &path[0], 0.5f);
+  hebbian_table_set(&table, &path[1], 0.3f);
+
+  hebbian_symmetry(&table, path, 2, 0.1f);
+
+  // Symmetry: w_{path[1]→path[0]} += eta_s * delta_w = 0.05 * 0.1 = 0.005
+  float w_reverse = hebbian_table_get(&table, &path[0]);
+  EXPECT_NEAR(w_reverse, 0.5f + 0.005f, 0.001f);
+}
+
+TEST_F(HebbianTest, ApplySuccessFull) {
+  node_id_t path[3];
+  memset(path[0].hash, 0x10, NODE_ID_HASH_SIZE);
+  memset(path[1].hash, 0x20, NODE_ID_HASH_SIZE);
+  memset(path[2].hash, 0x30, NODE_ID_HASH_SIZE);
+
+  hebbian_apply_success(&table, path, 3, 100, HEBBIAN_FIND_BLOCK_MULTIPLIER);
+  EXPECT_GT(table.count, 0u);
+}
+
+TEST_F(HebbianTest, DecayReducesWeights) {
+  node_id_t id = {};
+  memset(id.hash, 0xEE, NODE_ID_HASH_SIZE);
+  hebbian_table_set(&table, &id, 0.5f);
+
+  hebbian_decay(&table);
+  float weight = hebbian_table_get(&table, &id);
+  EXPECT_NEAR(weight, 0.5f * HEBBIAN_DECAY_FACTOR, 0.001f);
+}
+
+TEST_F(HebbianTest, DecayClampsToMin) {
+  node_id_t id = {};
+  memset(id.hash, 0xFF, NODE_ID_HASH_SIZE);
+  hebbian_table_set(&table, &id, HEBBIAN_MIN_WEIGHT);
+
+  hebbian_decay(&table);
+  float weight = hebbian_table_get(&table, &id);
+  EXPECT_FLOAT_EQ(weight, HEBBIAN_MIN_WEIGHT);
+}
+
+TEST_F(HebbianTest, Remove) {
+  node_id_t id = {};
+  memset(id.hash, 0xAA, NODE_ID_HASH_SIZE);
+  hebbian_table_set(&table, &id, 0.5f);
+  EXPECT_EQ(table.count, 1u);
+
+  hebbian_table_remove(&table, &id);
+  EXPECT_EQ(table.count, 0u);
+  EXPECT_FLOAT_EQ(hebbian_table_get(&table, &id), HEBBIAN_MIN_WEIGHT);
+}
+
+// === Respiration tests ===
+
+TEST(RespirationTest, SeekIntervalAtZeroCapacity) {
+  uint64_t interval = respiration_seek_interval(0.0f);
+  EXPECT_EQ(interval, RESPIRATION_TAU_MIN_MS);
+}
+
+TEST(RespirationTest, SeekIntervalAtHighCapacity) {
+  uint64_t interval = respiration_seek_interval(0.50f);
+  EXPECT_EQ(interval, UINT64_MAX);
+
+  interval = respiration_seek_interval(0.80f);
+  EXPECT_EQ(interval, UINT64_MAX);
+}
+
+TEST(RespirationTest, SeekIntervalAtMidCapacity) {
+  uint64_t interval = respiration_seek_interval(0.25f);
+  EXPECT_GT(interval, RESPIRATION_TAU_MIN_MS);
+  EXPECT_LT(interval, RESPIRATION_TAU_MAX_MS);
+}
+
+TEST(RespirationTest, ShouldInhale) {
+  EXPECT_TRUE(respiration_should_inhale(0.3f));
+  EXPECT_TRUE(respiration_should_inhale(0.49f));
+  EXPECT_FALSE(respiration_should_inhale(0.50f));
+  EXPECT_FALSE(respiration_should_inhale(0.80f));
+}
+
+TEST(RespirationTest, ShouldExhale) {
+  EXPECT_FALSE(respiration_should_exhale(0.3f));
+  EXPECT_FALSE(respiration_should_exhale(0.70f));
+  EXPECT_TRUE(respiration_should_exhale(0.80f));
+  EXPECT_TRUE(respiration_should_exhale(0.95f));
+}
+
+TEST(RespirationTest, BlocksToFree) {
+  uint32_t to_free = respiration_blocks_to_free(0.80f, 100, 4096);
+  EXPECT_EQ(to_free, 50u);  // 100 - 100*0.50 = 50
+}
+
+TEST(RespirationTest, BlocksToFreeBelowThreshold) {
+  uint32_t to_free = respiration_blocks_to_free(0.70f, 100, 4096);
+  EXPECT_EQ(to_free, 0u);
 }

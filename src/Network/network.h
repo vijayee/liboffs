@@ -13,6 +13,7 @@
 #include "ring_set.h"
 #include "latency_cache.h"
 #include "eabf.h"
+#include "hebbian.h"
 #include "node_id.h"
 #include <stdint.h>
 #include <stddef.h>
@@ -30,6 +31,7 @@ typedef struct network_t {
   latency_cache_t* latency_cache;
   eabf_table_t eabf_table;
   eabf_ttl_table_t eabf_ttl;
+  hebbian_table_t hebbian;
   uint64_t gossip_timer_id;
   uint64_t eabf_maintenance_timer_id;
   ATOMIC(uint8_t) running;

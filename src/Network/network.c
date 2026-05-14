@@ -6,11 +6,15 @@
 #include "wire.h"
 #include "find_block.h"
 #include "store_block.h"
+#include "respiration.h"
 #include "../Timer/timer_actor.h"
 #include "../Bloom/elastic_bloom_filter.h"
 #include "../Util/allocator.h"
 #include <string.h>
 #include <time.h>
+
+// Forward declarations for internal handlers
+static void network_sync_hebbian_to_rings(network_t* network);
 
 network_t* network_create(authority_t* authority, block_cache_t* block_cache,
                           timer_actor_t* timer, scheduler_pool_t* pool) {
@@ -24,6 +28,7 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   network->latency_cache = latency_cache_create(0);
   eabf_table_init(&network->eabf_table, 16);
   eabf_ttl_table_init(&network->eabf_ttl, 64);
+  hebbian_table_init(&network->hebbian, 32);
 
   gossip_handle_init(&network->gossip,
                      GOSSIP_INIT_INTERVAL_S,
@@ -63,6 +68,7 @@ void network_destroy(network_t* network) {
   latency_cache_destroy(network->latency_cache);
   eabf_table_deinit(&network->eabf_table);
   eabf_ttl_table_deinit(&network->eabf_ttl);
+  hebbian_table_deinit(&network->hebbian);
   actor_destroy(&network->actor);
   free(network);
 }
@@ -103,6 +109,48 @@ static void network_handle_ping_response(network_t* network, message_t* msg) {
   (void)network;
 }
 
+// --- PingBlock handler ---
+
+static void network_handle_ping_block(network_t* network, message_t* msg) {
+  wire_ping_block_t* ping = (wire_ping_block_t*)msg->payload;
+  if (ping == NULL) return;
+
+  // Check if we have the block locally
+  // TODO: Look up block in block_cache via actor_send when wired up
+  uint8_t exists = 0;
+  uint32_t fib = 0;
+  uint8_t healthy = 0;
+
+  // Respond with PingBlockResponse
+  wire_ping_block_response_t* response = get_clear_memory(sizeof(wire_ping_block_response_t));
+  response->message_id = ping->message_id;
+  response->exists = exists;
+  response->fib = fib;
+  response->healthy = healthy;
+
+  message_t response_msg;
+  response_msg.type = NETWORK_PING_BLOCK_RESPONSE;
+  response_msg.payload = response;
+  response_msg.payload_destroy = free;
+  // TODO: Send response to peer connection when QUIC is wired up
+  (void)network;
+}
+
+static void network_handle_ping_block_response(network_t* network, message_t* msg) {
+  wire_ping_block_response_t* response = (wire_ping_block_response_t*)msg->payload;
+  if (response == NULL) return;
+
+  // On successful block existence confirmation, strengthen Hebbian weight
+  if (response->exists) {
+    // Frequency rule: strengthen connection to the peer that confirmed
+    // The peer's node_id comes from the message source, not the response itself
+    // TODO: Look up source from query tracking when wired up
+    float delta = hebbian_compute_delta(0, HEBBIAN_FIND_BLOCK_MULTIPLIER);
+    (void)delta;
+  }
+  (void)network;
+}
+
 // --- Gossip tick handler ---
 
 static void network_handle_gossip_tick(network_t* network, message_t* msg) {
@@ -111,6 +159,9 @@ static void network_handle_gossip_tick(network_t* network, message_t* msg) {
 
   // Expire stale gossip exchanges and timed-out queries
   gossip_handle_expire_queries(&network->gossip, now_ms);
+
+  // Apply Hebbian decay on each gossip tick
+  hebbian_decay(&network->hebbian);
 
   // Tick the scheduler to determine if we should gossip
   gossip_scheduler_tick(&network->gossip.scheduler, now_ms);
@@ -315,19 +366,44 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
   if (response == NULL) return;
 
   if (response->found) {
-    // Block found — update Hebbian weights along the response path
-    // TODO: Wire Hebbian weight updates when hebbian module is implemented
-  } else {
-    // Block not found — subscribe block_hash in EABFs as negative info
+    // Block found — apply Hebbian learning rules along the response path
+    // Use latency from start_time to now as the total search time
+    uint64_t now_ms = (uint64_t)time(NULL) * 1000;
+    uint64_t latency_ms = 0;
+    if (response->latency_ms > 0) {
+      latency_ms = response->latency_ms;
+    } else if (now_ms > 0) {
+      latency_ms = now_ms;
+    }
+
+    hebbian_apply_success(&network->hebbian, response->path, response->path_len,
+                          latency_ms, HEBBIAN_FIND_BLOCK_MULTIPLIER);
+    network_sync_hebbian_to_rings(network);
+
+    // Populate EABFs along the path
     for (size_t index = 0; index < network->eabf_table.count; index++) {
       eabf_t* eabf = network->eabf_table.entries[index].eabf;
       if (eabf != NULL) {
-        // Use the original source's block_hash (we'd need it from the query)
-        // For now, negative info is handled by TTL_EXPIRED
+        eabf_subscribe(eabf, response->holder.hash, 32);
       }
     }
+  } else {
+    // Block not found — subscribe block_hash in EABFs as negative info
+    // This is handled by TTL_EXPIRED in the forwarding path
   }
-  (void)network;
+}
+
+// --- Hebbian weight sync ---
+// After Hebbian updates, sync weights back to ring table nodes
+
+static void network_sync_hebbian_to_rings(network_t* network) {
+  for (size_t index = 0; index < network->hebbian.count; index++) {
+    hebbian_weight_t* weight = &network->hebbian.entries[index];
+    net_node_t* node = ring_set_find_by_id(network->rings, &weight->peer_id);
+    if (node != NULL) {
+      node->weight = weight->weight;
+    }
+  }
 }
 
 // --- StoreBlock handler ---
@@ -432,8 +508,11 @@ static void network_handle_store_block_response(network_t* network, message_t* m
   if (response == NULL) return;
 
   if (response->accepted) {
-    // Block accepted — apply Hebbian weight updates along path
-    // TODO: Wire Hebbian weight updates when hebbian module is implemented
+    // Block accepted — apply Hebbian learning rules along the response path
+    uint64_t latency_ms = response->latency_ms;
+    hebbian_apply_success(&network->hebbian, response->path, response->path_len,
+                          latency_ms, HEBBIAN_STORE_BLOCK_EXHALE_MULTIPLIER);
+    network_sync_hebbian_to_rings(network);
 
     // Populate EABFs along the response path
     for (size_t index = 0; index < network->eabf_table.count; index++) {
@@ -443,7 +522,6 @@ static void network_handle_store_block_response(network_t* network, message_t* m
       }
     }
   }
-  (void)network;
 }
 
 // --- EABF expire handler ---
@@ -507,8 +585,10 @@ void network_dispatch(void* state, message_t* msg) {
       network_handle_ping_capacity_response(network, msg);
       break;
     case NETWORK_PING_BLOCK:
+      network_handle_ping_block(network, msg);
       break;
     case NETWORK_PING_BLOCK_RESPONSE:
+      network_handle_ping_block_response(network, msg);
       break;
     case NETWORK_FIND_BLOCK:
       network_handle_find_block(network, msg);
