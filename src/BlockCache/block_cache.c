@@ -282,7 +282,6 @@ void block_cache_dispatch(void* state, message_t* msg) {
       index_entry_t* entry = index_peek(block_cache->index, p->block->hash);
       if (entry == NULL) {
         entry = index_entry_create(p->block->hash);
-        /* Write to sections via direct dispatch — sections is owned by block_cache */
         sections_write_payload_t write_payload;
         write_payload.data = p->block->data;
         write_payload.reply_to = NULL;

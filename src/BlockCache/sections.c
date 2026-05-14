@@ -197,8 +197,7 @@ void sections_dispatch(void* state, message_t* msg) {
       p->result = -1;
       p->section_id = 0;
       p->section_index = 0;
-      uint8_t tries = 0;
-      do {
+      for (size_t attempt = 0; attempt < sections->max_tuple_size; attempt++) {
         if (!round_robin_next(sections->robin, &p->section_id)) {
           break;
         }
@@ -212,11 +211,9 @@ void sections_dispatch(void* state, message_t* msg) {
           sections_lru_cache_put(sections->lru, section);
           if (section_full(section) != 0) {
             sections_full(sections, p->section_id);
-            tries++;
             continue;
           }
         }
-        uint8_t full;
         section_write_payload_t write_payload;
         write_payload.data = p->data;
         write_payload.reply_to = NULL;
@@ -230,12 +227,13 @@ void sections_dispatch(void* state, message_t* msg) {
         section_dispatch(section, &section_msg);
         p->result = write_payload.result;
         p->section_index = write_payload.index;
-        full = write_payload.full;
-        if ((p->result == 2) || full) {
+        if ((p->result == 2) || write_payload.full) {
           sections_full(sections, p->section_id);
         }
-        tries++;
-      } while ((p->result == 2) && (tries < (sections->max_tuple_size * 16)));
+        if (p->result != 2) {
+          break;
+        }
+      }
       if (p->reply_to != NULL) {
         sections_write_result_payload_t* result = get_clear_memory(sizeof(sections_write_result_payload_t));
         result->result = p->result;
@@ -674,6 +672,30 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
     vec_deinit(files);
     free(files);
   }
+
+  /* Replace any full sections in the robin with fresh ones.
+     Stale sections from a previous run may have all blocks occupied. */
+  {
+    size_t ids[sections->robin->size];
+    size_t robin_size = 0;
+    round_robin_node_t* node = sections->robin->first;
+    while (node != NULL) {
+      ids[robin_size++] = node->id;
+      node = node->next;
+    }
+    for (size_t i = 0; i < robin_size; i++) {
+      section_t* section = section_create(sections->data_path, sections->meta_path,
+                                          sections->size, ids[i], sections->type);
+      section->on_dirty = section_on_dirty;
+      section->on_dirty_context = sections;
+      refcounter_yield((refcounter_t*) section);
+      sections_lru_cache_put(sections->lru, section);
+      if (section_full(section) != 0) {
+        sections_full(sections, ids[i]);
+      }
+    }
+  }
+
   while (sections->robin->size < sections->max_tuple_size) {
     section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type);
     section->on_dirty = section_on_dirty;
