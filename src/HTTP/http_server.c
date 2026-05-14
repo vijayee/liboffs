@@ -48,7 +48,7 @@ void _server_dispatch(void* state, message_t* msg) {
 
 http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint16_t port) {
   http_server_t* server = get_clear_memory(sizeof(http_server_t));
-  actor_init(&server->actor, server, _server_dispatch, pool);
+  actor_init(&server->actor, server, _server_dispatch, NULL);
   server->pool = pool;
   server->loop = pd_loop_create(NULL);
   server->ssl_ctx = NULL;
