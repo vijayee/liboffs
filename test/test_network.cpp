@@ -22,6 +22,7 @@ extern "C" {
 #include "Network/hebbian.h"
 #include "Network/respiration.h"
 #include "Network/rate_limit.h"
+#include "Network/timing_wheel.h"
 #include "Configuration/config.h"
 }
 
@@ -1388,4 +1389,82 @@ TEST_F(AuthorityPeerStoreTest, SaveWithNullPathReturnsError) {
   authority->peer_store_path = nullptr;
   EXPECT_EQ(authority_save_peers(authority, network), -1);
   authority->peer_store_path = original_path;
+}
+
+// === TimingWheel tests ===
+
+class TimingWheelTest : public ::testing::Test {
+protected:
+  timing_wheel_t wheel;
+  void SetUp() override {
+    timing_wheel_init(&wheel, 64, 60000);
+  }
+  void TearDown() override {
+    timing_wheel_deinit(&wheel);
+  }
+};
+
+TEST_F(TimingWheelTest, InitDeinit) {
+  EXPECT_NE(wheel.slots, (timing_wheel_slot_t*)NULL);
+  EXPECT_EQ(wheel.slot_count, 64u);
+  EXPECT_EQ(wheel.slot_duration_ms, 60000u);
+}
+
+TEST_F(TimingWheelTest, AddEntry) {
+  node_id_t peer_id = {};
+  memset(peer_id.hash, 0xAA, NODE_ID_HASH_SIZE);
+  uint8_t block_hash[32];
+  memset(block_hash, 0xBB, 32);
+  uint64_t id = timing_wheel_add(&wheel, &peer_id, 0, 42, 7, block_hash);
+  EXPECT_NE(id, 0u);
+  EXPECT_EQ(wheel.count, 1u);
+}
+
+TEST_F(TimingWheelTest, AddAndExpire) {
+  node_id_t peer_id = {};
+  memset(peer_id.hash, 0xAA, NODE_ID_HASH_SIZE);
+  uint8_t block_hash[32];
+  memset(block_hash, 0xBB, 32);
+  timing_wheel_add(&wheel, &peer_id, 0, 42, 7, block_hash);
+  size_t expired_count = 0;
+  timing_wheel_entry_t* expired = timing_wheel_advance(&wheel, 64, &expired_count);
+  EXPECT_EQ(expired_count, 1u);
+  EXPECT_EQ(wheel.count, 0u);
+  free(expired);
+}
+
+TEST_F(TimingWheelTest, AddAndRefresh) {
+  node_id_t peer_id = {};
+  memset(peer_id.hash, 0xAA, NODE_ID_HASH_SIZE);
+  uint8_t block_hash[32];
+  memset(block_hash, 0xBB, 32);
+  uint64_t id1 = timing_wheel_add(&wheel, &peer_id, 0, 42, 7, block_hash);
+  uint64_t id2 = timing_wheel_refresh(&wheel, id1, &peer_id, 0, 42, 7, block_hash);
+  EXPECT_NE(id2, 0u);
+  size_t expired_count = 0;
+  timing_wheel_entry_t* expired = timing_wheel_advance(&wheel, 32, &expired_count);
+  EXPECT_EQ(expired_count, 0u);
+  free(expired);
+  expired = timing_wheel_advance(&wheel, 32, &expired_count);
+  EXPECT_EQ(expired_count, 1u);
+  free(expired);
+}
+
+TEST_F(TimingWheelTest, RemoveById) {
+  node_id_t peer_id = {};
+  memset(peer_id.hash, 0xAA, NODE_ID_HASH_SIZE);
+  uint8_t block_hash[32];
+  memset(block_hash, 0xBB, 32);
+  uint64_t id = timing_wheel_add(&wheel, &peer_id, 1, 99, 3, block_hash);
+  int result = timing_wheel_remove(&wheel, id);
+  EXPECT_EQ(result, 0);
+  EXPECT_EQ(wheel.count, 0u);
+}
+
+TEST_F(TimingWheelTest, TTLForLevel) {
+  uint64_t base = 3600000;
+  EXPECT_EQ(timing_wheel_ttl_for_level(0, base), base);
+  EXPECT_GT(timing_wheel_ttl_for_level(1, base), 0u);
+  EXPECT_GT(timing_wheel_ttl_for_level(0, base), timing_wheel_ttl_for_level(1, base));
+  EXPECT_GT(timing_wheel_ttl_for_level(1, base), timing_wheel_ttl_for_level(2, base));
 }
