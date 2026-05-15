@@ -26,6 +26,7 @@ extern "C" {
 #include "Network/hebbian_config.h"
 #include "Network/wire.h"
 #include "Network/peer_connection.h"
+#include "Network/connection_manager.h"
 #include "Configuration/config.h"
 }
 
@@ -1594,4 +1595,111 @@ TEST_F(PeerConnectionTest, EABFTickExpire) {
   uint32_t hops = 0;
   bool found = peer_eabf_check(peer, topic, 32, &hops);
   EXPECT_FALSE(found);
+}
+
+// === ConnectionManager tests ===
+
+class ConnectionManagerTest : public ::testing::Test {
+protected:
+  connection_manager_t mgr;
+  hebbian_config_t config;
+  void SetUp() override {
+    hebbian_config_init(&config);
+    connection_manager_init(&mgr, 4, &config);
+  }
+  void TearDown() override {
+    connection_manager_deinit(&mgr);
+  }
+};
+
+TEST_F(ConnectionManagerTest, InitDeinit) {
+  EXPECT_NE(mgr.peers, (peer_connection_t**)NULL);
+  EXPECT_EQ(mgr.peer_count, 0u);
+  EXPECT_EQ(mgr.max_connections, 128u);
+}
+
+TEST_F(ConnectionManagerTest, AddLookupRemove) {
+  node_id_t id1 = {};
+  memset(id1.hash, 0xAA, NODE_ID_HASH_SIZE);
+  peer_connection_t* peer = connection_manager_add(&mgr, NULL, &id1, NULL);
+  ASSERT_NE(peer, (peer_connection_t*)NULL);
+  EXPECT_EQ(mgr.peer_count, 1u);
+
+  peer_connection_t* found = connection_manager_lookup(&mgr, &id1);
+  EXPECT_EQ(found, peer);
+
+  int result = connection_manager_remove(&mgr, &id1);
+  EXPECT_EQ(result, 0);
+  EXPECT_EQ(mgr.peer_count, 0u);
+}
+
+TEST_F(ConnectionManagerTest, AddMultiplePeers) {
+  node_id_t id1 = {};
+  memset(id1.hash, 0xAA, NODE_ID_HASH_SIZE);
+  node_id_t id2 = {};
+  memset(id2.hash, 0xBB, NODE_ID_HASH_SIZE);
+  node_id_t id3 = {};
+  memset(id3.hash, 0xCC, NODE_ID_HASH_SIZE);
+
+  connection_manager_add(&mgr, NULL, &id1, NULL);
+  connection_manager_add(&mgr, NULL, &id2, NULL);
+  connection_manager_add(&mgr, NULL, &id3, NULL);
+  EXPECT_EQ(mgr.peer_count, 3u);
+
+  // Remove middle one
+  int result = connection_manager_remove(&mgr, &id2);
+  EXPECT_EQ(result, 0);
+  EXPECT_EQ(mgr.peer_count, 2u);
+
+  // Verify removed
+  peer_connection_t* found = connection_manager_lookup(&mgr, &id2);
+  EXPECT_EQ(found, (peer_connection_t*)NULL);
+}
+
+TEST_F(ConnectionManagerTest, GravityWellSearch) {
+  node_id_t id1 = {};
+  memset(id1.hash, 0xAA, NODE_ID_HASH_SIZE);
+  node_id_t id2 = {};
+  memset(id2.hash, 0xBB, NODE_ID_HASH_SIZE);
+
+  peer_connection_t* peer1 = connection_manager_add(&mgr, NULL, &id1, NULL);
+  peer_connection_t* peer2 = connection_manager_add(&mgr, NULL, &id2, NULL);
+
+  uint8_t topic[32];
+  memset(topic, 0xDD, 32);
+  peer_eabf_subscribe(peer1, topic, 32);
+
+  size_t match_count = 0;
+  peer_connection_t** matches = connection_manager_get_peers_for_topic(&mgr, topic, 32, &match_count);
+  ASSERT_NE(matches, (peer_connection_t**)NULL);
+  EXPECT_EQ(match_count, 1u);
+  EXPECT_EQ(matches[0], peer1);
+  free(matches);
+}
+
+TEST_F(ConnectionManagerTest, DecayTickRemovesLowWeight) {
+  node_id_t id1 = {};
+  memset(id1.hash, 0xAA, NODE_ID_HASH_SIZE);
+  peer_connection_t* peer = connection_manager_add(&mgr, NULL, &id1, NULL);
+  ASSERT_NE(peer, (peer_connection_t*)NULL);
+  // Initial weight is 0.1, decay_rate is 0.001, drop_threshold is 0.01
+  // After 100 decay ticks: weight = 0.1 - 100*0.001 = 0.0, which is < 0.01
+  size_t removed = 0;
+  for (int i = 0; i < 100; i++) {
+    removed = connection_manager_decay_tick(&mgr);
+    if (removed > 0) break;
+  }
+  EXPECT_GT(removed, 0u);
+  EXPECT_EQ(mgr.peer_count, 0u);
+}
+
+TEST_F(ConnectionManagerTest, CollectMetrics) {
+  node_id_t id1 = {};
+  memset(id1.hash, 0xAA, NODE_ID_HASH_SIZE);
+  connection_manager_add(&mgr, NULL, &id1, NULL);
+
+  peer_metrics_snapshot_t snapshots[4];
+  size_t count = connection_manager_collect_metrics(&mgr, snapshots, 4);
+  EXPECT_EQ(count, 1u);
+  EXPECT_TRUE(snapshots[0].connected);
 }
