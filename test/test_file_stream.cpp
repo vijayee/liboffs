@@ -179,7 +179,9 @@ namespace PullFileStream {
     }
     scheduler_pool_wait_for_idle(pool);
     scheduler_pool_stop(pool);
-    DESTROY(rs, readable_pull_file_stream);
+    stream_unsubscribe_pipe_notifiers((stream_t*)rs);
+    stream_unsubscribe_pipe_notifiers((stream_t*)ws);
     DESTROY(ws, writeable_pull_file_stream);
+    DESTROY(rs, readable_pull_file_stream);
   }
 };

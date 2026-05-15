@@ -100,8 +100,10 @@ TEST_F(TestStreamActor, TestPullFileStreamActorDispatch) {
 
   EXPECT_GT(data_count.load(), 0);
 
-  DESTROY(rs, readable_pull_file_stream);
+  stream_unsubscribe_pipe_notifiers((stream_t*)rs);
+  stream_unsubscribe_pipe_notifiers((stream_t*)ws);
   DESTROY(ws, writeable_pull_file_stream);
+  DESTROY(rs, readable_pull_file_stream);
 }
 
 TEST_F(TestStreamActor, TestStreamNotifyManyHandlers) {

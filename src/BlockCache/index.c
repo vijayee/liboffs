@@ -466,6 +466,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
             if ((read_result != -3) || (cursor != wal_size)) { // some error other than end of file
               DESTROY(index, index);
               *error_code = read_result;
+              destroy_files(files);
               free(index_location);
               free(parent_location);
               return _index_new_empty(bucket_size, location, timer_actor, wait, max_wait, most_recent_id, max_snapshots, max_wals);

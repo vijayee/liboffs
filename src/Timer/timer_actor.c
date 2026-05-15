@@ -97,6 +97,8 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
         pd_timer_start(timer);
         completion->timer_id = (uint64_t)(uintptr_t)timer;
         _timer_actor_track(timer_actor, timer);
+      } else {
+        free(completion);
       }
       if (msg->payload_destroy != NULL) {
         msg->payload_destroy(msg->payload);
@@ -158,6 +160,12 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
         entry->completion_type = payload->completion_type;
         entry->timer = timer;
         entry->completion_payload = completion;
+      } else {
+        if (timer != NULL) {
+          _timer_actor_untrack(timer_actor, timer);
+          pd_timer_destroy(timer);
+        }
+        free(completion);
       }
       if (msg->payload_destroy != NULL) {
         msg->payload_destroy(msg->payload);

@@ -372,10 +372,10 @@ void writeable_off_stream_destroy(writeable_off_stream_t* stream) {
 
     _unregister_recipe(stream);
     if (stream->current_recipe != NULL) {
-      refcounter_dereference((refcounter_t*)stream->current_recipe);
+      stream_destroy((stream_t*)stream->current_recipe);
     }
     for (int i = 0; i < stream->recipes.length; i++) {
-      refcounter_dereference((refcounter_t*)stream->recipes.data[i]);
+      stream_destroy((stream_t*)stream->recipes.data[i]);
     }
     vec_deinit(&stream->recipes);
 

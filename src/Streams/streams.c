@@ -727,14 +727,14 @@ void _writeable_pull_stream_on_pipe(stream_t* ws, stream_t* rs) {
       ws->pipe_notifiers = get_clear_memory(size * sizeof(stream_notifier_t));
     }
     ws->pipe_notifiers[0].event = piped_event;
-    ws->pipe_notifiers[0].id = stream_subscribe(rs, piped_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_pull_stream_piped_notify, (void (*)(void*))rs->destructor);
+    ws->pipe_notifiers[0].id = stream_subscribe(rs, piped_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_pull_stream_piped_notify, (void (*)(void*))ws->destructor);
     ws->pipe_notifiers[0].stream = REFERENCE(rs, stream_t);
     ws->pullable_stream = REFERENCE(rs, stream_t);
     ws->pipe_notifiers[1].event = error_event;
-    ws->pipe_notifiers[1].id = stream_subscribe(rs, error_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_pull_stream_error_notify, (void (*)(void*))rs->destructor);
+    ws->pipe_notifiers[1].id = stream_subscribe(rs, error_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_pull_stream_error_notify, (void (*)(void*))ws->destructor);
     ws->pipe_notifiers[1].stream = REFERENCE(rs, stream_t);
     ws->pipe_notifiers[2].event = close_event;
-    ws->pipe_notifiers[2].id = stream_subscribe(rs, close_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_pull_stream_close_notify, (void (*)(void*))rs->destructor);
+    ws->pipe_notifiers[2].id = stream_subscribe(rs, close_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_pull_stream_close_notify, (void (*)(void*))ws->destructor);
     ws->pipe_notifiers[2].stream = REFERENCE(rs, stream_t);
     ws->pipe_notifiers[3].event = complete_event;
     ws->pipe_notifiers[3].id = stream_subscribe(rs, complete_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_pull_stream_complete_notify, (void (*)(void*))ws->destructor);

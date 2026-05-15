@@ -167,6 +167,9 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
         if (result->value != NULL) {
           DESTROY(result->value, buffer);
         }
+        if (result->key != NULL) {
+          DESTROY(result->key, tuple);
+        }
         break;
       }
       if (result->value != NULL) {
@@ -179,6 +182,9 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
       } else {
         /* Cache miss — start fetching blocks */
         _start_block_fetches(stream);
+      }
+      if (result->key != NULL) {
+        DESTROY(result->key, tuple);
       }
       break;
     }
