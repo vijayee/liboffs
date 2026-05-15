@@ -8,6 +8,7 @@
 #include "eabf.h"
 #include "ring_set.h"
 #include "authority.h"
+#include "connection_manager.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -43,6 +44,7 @@ typedef struct find_block_state_t {
 find_block_result_e find_block_execute(
     eabf_table_t* eabf_table,
     eabf_ttl_table_t* eabf_ttl,
+    connection_manager_t* conn_mgr,
     ring_set_t* rings,
     const node_id_t* local_id,
     const find_block_state_t* state,

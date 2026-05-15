@@ -319,6 +319,7 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
   find_block_result_e result = find_block_execute(
       &network->eabf_table,
       &network->eabf_ttl,
+      &network->conn_mgr,
       network->rings,
       &network->authority->local_id,
       &state,

@@ -656,7 +656,7 @@ TEST_F(FindBlockTest, TtlExpiredReturnsTtlExpired) {
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
-      &eabf_table, &eabf_ttl, rings, &local_id, &state,
+      &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
       next_hops, &next_hop_count);
 
   EXPECT_EQ(result, FIND_BLOCK_TTL_EXPIRED);
@@ -668,7 +668,7 @@ TEST_F(FindBlockTest, NullStateReturnsNotFound) {
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
-      &eabf_table, &eabf_ttl, rings, &local_id, NULL,
+      &eabf_table, &eabf_ttl, NULL, rings, &local_id, NULL,
       next_hops, &next_hop_count);
 
   EXPECT_EQ(result, FIND_BLOCK_NOT_FOUND);
@@ -683,7 +683,7 @@ TEST_F(FindBlockTest, NoPeersReturnsNotFound) {
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
-      &eabf_table, &eabf_ttl, rings, &local_id, &state,
+      &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
       next_hops, &next_hop_count);
 
   // No ring members, no EABF entries — should return NOT_FOUND
@@ -720,7 +720,7 @@ TEST_F(FindBlockTest, WithRingMembersForwards) {
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
-      &eabf_table, &eabf_ttl, rings, &local_id, &state,
+      &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
       next_hops, &next_hop_count);
 
   EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
@@ -763,7 +763,7 @@ TEST_F(FindBlockTest, EabfGravityWellOverrides) {
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
-      &eabf_table, &eabf_ttl, rings, &local_id, &state,
+      &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
       next_hops, &next_hop_count);
 
   EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
@@ -802,7 +802,7 @@ TEST_F(FindBlockTest, PathCycleDetection) {
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
-      &eabf_table, &eabf_ttl, rings, &local_id, &state,
+      &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
       next_hops, &next_hop_count);
 
   // node_a is in the path so gravity well and ring candidate should be skipped

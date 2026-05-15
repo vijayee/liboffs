@@ -6,6 +6,8 @@
 #include "eabf.h"
 #include "ring_set.h"
 #include "net_node.h"
+#include "connection_manager.h"
+#include "peer_connection.h"
 #include "../Util/allocator.h"
 #include <xxh3.h>
 #include <string.h>
@@ -130,6 +132,7 @@ size_t find_block_roulette_wheel_select(net_node_t** candidates, float* weights,
 find_block_result_e find_block_execute(
     eabf_table_t* eabf_table,
     eabf_ttl_table_t* eabf_ttl,
+    connection_manager_t* conn_mgr,
     ring_set_t* rings,
     const node_id_t* local_id,
     const find_block_state_t* state,
@@ -157,7 +160,39 @@ find_block_result_e find_block_execute(
     return FIND_BLOCK_TTL_EXPIRED;
   }
 
-  // Step 4: Check EABF gravity wells — directed walk
+  // Step 3: Check connection manager gravity wells first (connected peers)
+  // Prefer connected peers — they have live QUIC streams for immediate forwarding
+  if (conn_mgr != NULL) {
+    size_t match_count = 0;
+    peer_connection_t** matches = connection_manager_get_peers_for_topic(
+        conn_mgr, state->block_hash, 32, &match_count);
+    if (matches != NULL && match_count > 0) {
+      // Find the first matching peer not already in the path
+      for (size_t match_index = 0; match_index < match_count; match_index++) {
+        peer_connection_t* peer = matches[match_index];
+        bool in_path = false;
+        for (uint8_t path_index = 0; path_index < state->path_len; path_index++) {
+          if (node_id_equals(&state->path[path_index], &peer->remote_node_id)) {
+            in_path = true;
+            break;
+          }
+        }
+        if (!in_path) {
+          // Look up the peer node in ring table for net_node_t
+          net_node_t* peer_node = ring_set_find_by_id(rings, &peer->remote_node_id);
+          if (peer_node != NULL && !(peer_node->flags & NET_NODE_FLAG_RENDEZVOUS)) {
+            next_hops[0] = peer_node;
+            *next_hop_count = 1;
+            free(matches);
+            return FIND_BLOCK_FORWARDING;
+          }
+        }
+      }
+      free(matches);
+    }
+  }
+
+  // Step 4: Check EABF gravity wells — directed walk (ring table peers)
   // For each peer's EABF, check if block_hash appears at some level L.
   // Prefer the peer with the lowest L (strongest gravity well) and highest weight.
   // Skip peers already in the path (cycle detection).
