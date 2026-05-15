@@ -3,6 +3,11 @@
 //
 
 #include <gtest/gtest.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+
+extern "C" {
+#include "Network/network.h"
 #include "Network/query.h"
 #include "Network/gossip.h"
 #include "Network/ring.h"
@@ -17,6 +22,8 @@
 #include "Network/hebbian.h"
 #include "Network/respiration.h"
 #include "Network/rate_limit.h"
+#include "Configuration/config.h"
+}
 
 // === Query tests ===
 
@@ -1218,4 +1225,169 @@ TEST_F(RateLimitTest, RemovePeer) {
 
   rate_limit_table_remove(&table, &peer);
   EXPECT_EQ(table.count, 0u);
+}
+
+// === Authority persistence tests ===
+
+class AuthorityPeerStoreTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    config = config_default();
+    authority = authority_create(&config);
+    ASSERT_NE(authority, nullptr);
+
+    // Set a temp file path for peer store
+    authority->peer_store_path = strdup("/tmp/test_peer_store.cbor");
+
+    // Construct a minimal network_t for testing persistence
+    network = (network_t*)calloc(1, sizeof(network_t));
+    ASSERT_NE(network, nullptr);
+    network->authority = authority;
+    network->rings = ring_set_create(0, 0, 0);
+    ASSERT_NE(network->rings, nullptr);
+    hebbian_table_init(&network->hebbian, 4);
+    rate_limit_table_init(&network->rate_limits, 4);
+
+    // Set a known local_id
+    memset(authority->local_id.hash, 0xAB, NODE_ID_HASH_SIZE);
+  }
+
+  void TearDown() override {
+    // Save path before destroying authority (which frees it)
+    char* path = (authority && authority->peer_store_path) ? strdup(authority->peer_store_path) : nullptr;
+    if (network != nullptr) {
+      ring_set_clear_nodes(network->rings);
+      ring_set_destroy(network->rings);
+      hebbian_table_deinit(&network->hebbian);
+      rate_limit_table_deinit(&network->rate_limits);
+      free(network);
+    }
+    authority_destroy(authority);
+    if (path != nullptr) {
+      unlink(path);
+      free(path);
+    }
+  }
+
+  config_t config;
+  authority_t* authority;
+  network_t* network;
+};
+
+TEST_F(AuthorityPeerStoreTest, SaveAndLoadEmptyPeers) {
+  // Save with no peers/hebbian entries
+  int result = authority_save_peers(authority, network);
+  EXPECT_EQ(result, 0);
+
+  // Clear hebbian table and reload
+  hebbian_table_deinit(&network->hebbian);
+  hebbian_table_init(&network->hebbian, 4);
+  EXPECT_EQ(network->hebbian.count, 0u);
+
+  result = authority_load_peers(authority, network);
+  EXPECT_EQ(result, 0);
+}
+
+TEST_F(AuthorityPeerStoreTest, SaveAndLoadHebbianWeights) {
+  // Add some hebbian weights
+  node_id_t peer1 = {};
+  memset(peer1.hash, 0x11, NODE_ID_HASH_SIZE);
+  hebbian_table_set(&network->hebbian, &peer1, 0.75f);
+
+  node_id_t peer2 = {};
+  memset(peer2.hash, 0x22, NODE_ID_HASH_SIZE);
+  hebbian_table_set(&network->hebbian, &peer2, 0.42f);
+
+  EXPECT_EQ(network->hebbian.count, 2u);
+
+  // Save
+  int result = authority_save_peers(authority, network);
+  EXPECT_EQ(result, 0);
+
+  // Reset hebbian table
+  hebbian_table_deinit(&network->hebbian);
+  hebbian_table_init(&network->hebbian, 4);
+  EXPECT_EQ(network->hebbian.count, 0u);
+
+  // Load
+  result = authority_load_peers(authority, network);
+  EXPECT_EQ(result, 0);
+
+  // Verify weights were restored
+  EXPECT_EQ(network->hebbian.count, 2u);
+  float weight1 = hebbian_table_get(&network->hebbian, &peer1);
+  float weight2 = hebbian_table_get(&network->hebbian, &peer2);
+  EXPECT_NEAR(weight1, 0.75f, 0.001f);
+  EXPECT_NEAR(weight2, 0.42f, 0.001f);
+}
+
+TEST_F(AuthorityPeerStoreTest, SaveAndLoadPeersWithMetadata) {
+  // Add nodes to ring set
+  node_id_t peer_id = {};
+  memset(peer_id.hash, 0x33, NODE_ID_HASH_SIZE);
+  net_node_t* node = net_node_create(&peer_id, htonl(INADDR_LOOPBACK), 9000);
+  ASSERT_NE(node, nullptr);
+  node->latency_ms = 15.5f;
+  node->weight = 0.88f;
+  node->capacity = 0.45f;
+  node->phase = NODE_PHASE_INHALE;
+  node->availability = 0.99f;
+
+  ring_set_insert(network->rings, node, (uint32_t)(node->latency_ms * 1000));
+
+  // Save
+  int result = authority_save_peers(authority, network);
+  EXPECT_EQ(result, 0);
+
+  // Record original count
+  size_t original_ring_count = ring_set_total_nodes(network->rings);
+
+  // Destroy and recreate network for a clean load
+  ring_set_clear_nodes(network->rings);
+  ring_set_destroy(network->rings);
+  hebbian_table_deinit(&network->hebbian);
+  rate_limit_table_deinit(&network->rate_limits);
+  network->rings = ring_set_create(0, 0, 0);
+  ASSERT_NE(network->rings, nullptr);
+  hebbian_table_init(&network->hebbian, 4);
+  rate_limit_table_init(&network->rate_limits, 4);
+
+  // Load
+  result = authority_load_peers(authority, network);
+  EXPECT_EQ(result, 0);
+
+  // Verify local_id was restored
+  for (int i = 0; i < NODE_ID_HASH_SIZE; i++) {
+    EXPECT_EQ(authority->local_id.hash[i], 0xAB);
+  }
+
+  // Verify ring nodes were restored
+  EXPECT_EQ(ring_set_total_nodes(network->rings), original_ring_count);
+
+  // Verify the peer's metadata
+  net_node_t* loaded = ring_set_find_by_id(network->rings, &peer_id);
+  ASSERT_NE(loaded, nullptr);
+  EXPECT_EQ(loaded->addr, htonl(INADDR_LOOPBACK));
+  EXPECT_EQ(loaded->port, 9000u);
+  EXPECT_NEAR(loaded->latency_ms, 15.5f, 0.01f);
+  EXPECT_NEAR(loaded->weight, 0.88f, 0.01f);
+  EXPECT_NEAR(loaded->capacity, 0.45f, 0.01f);
+  EXPECT_EQ(loaded->phase, NODE_PHASE_INHALE);
+  EXPECT_NEAR(loaded->availability, 0.99f, 0.01f);
+}
+
+TEST_F(AuthorityPeerStoreTest, LoadFromNonexistentFile) {
+  char* original_path = authority->peer_store_path;
+  authority->peer_store_path = strdup("/tmp/nonexistent_peer_store_test.cbor");
+  int result = authority_load_peers(authority, network);
+  EXPECT_EQ(result, -1);
+  free(authority->peer_store_path);
+  authority->peer_store_path = original_path;
+}
+
+TEST_F(AuthorityPeerStoreTest, SaveWithNullPathReturnsError) {
+  char* original_path = authority->peer_store_path;
+  authority->peer_store_path = nullptr;
+  EXPECT_EQ(authority_save_peers(authority, network), -1);
+  authority->peer_store_path = original_path;
 }

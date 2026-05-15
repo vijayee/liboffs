@@ -74,7 +74,7 @@ typedef struct pending_get_t {
   struct pending_get_t* next;
 } pending_get_t;
 
-typedef struct {
+typedef struct block_cache_t {
   refcounter_t refcounter;
   block_lru_cache_t* lru;
   sections_t* sections;

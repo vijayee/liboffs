@@ -30,12 +30,13 @@ if (BUILD_TESTING)
             test_off_url.cpp
             test_ofd.cpp
             test_ofd_cache.cpp
-            test_off_routes.cpp)
+            test_off_routes.cpp
+            test_network.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
     add_dependencies(testliboffs http-parser)
-    target_link_libraries(testliboffs PRIVATE offs)
+    target_link_libraries(testliboffs PRIVATE -Wl,--whole-archive offs -Wl,--no-whole-archive)
     target_link_libraries(testliboffs PRIVATE blake3)
     target_link_libraries(testliboffs PRIVATE hashmap)
     target_link_libraries(testliboffs PRIVATE http-parser)
@@ -44,6 +45,7 @@ if (BUILD_TESTING)
     target_link_libraries(testliboffs PRIVATE GTest::gtest_main)
     target_link_libraries(testliboffs PRIVATE GTest::gmock)
     target_include_directories(testliboffs PUBLIC ${C_INC})
+    target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
     target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../poll-dancer/include)
     target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/http-parser)
 

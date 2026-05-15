@@ -1,0 +1,58 @@
+//
+// Created by victor on 5/14/25.
+//
+
+#ifndef OFFS_QUIC_LISTENER_H
+#define OFFS_QUIC_LISTENER_H
+
+#include "../Actor/actor.h"
+#include "../Network/network.h"
+#include "../Scheduler/scheduler.h"
+#include "../Util/atomic_compat.h"
+#include "../Util/threadding.h"
+#include <poll-dancer/poll-dancer.h>
+#include <stdint.h>
+#include <stddef.h>
+
+#ifdef HAS_MSQUIC
+#include <msquic.h>
+#endif
+
+typedef struct quic_connection_t quic_connection_t;
+
+typedef struct quic_listener_t {
+  actor_t actor;
+  network_t* network;
+  scheduler_pool_t* pool;
+
+  // QUIC state (only used when HAS_MSQUIC is defined)
+#ifdef HAS_MSQUIC
+  const struct QUIC_API_TABLE* msquic;
+  HQUIC registration;
+  HQUIC configuration;
+  HQUIC listener;
+#else
+  void* msquic;
+  void* registration;
+  void* configuration;
+  void* listener_handle;
+#endif
+
+  // I/O thread for poll-dancer timers
+  pd_loop_t* loop;
+  PLATFORMTHREADTYPE thread;
+  ATOMIC(uint8_t) running;
+
+  // Destroy stack for deferred watcher cleanup
+  PLATFORMLOCKTYPE(destroy_lock);
+  struct quic_destroy_node_t* destroy_head;
+} quic_listener_t;
+
+quic_listener_t* quic_listener_create(network_t* network, scheduler_pool_t* pool);
+void quic_listener_destroy(quic_listener_t* listener);
+int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t port);
+void quic_listener_stop(quic_listener_t* listener);
+
+void quic_listener_dispatch(void* state, message_t* msg);
+
+#endif // OFFS_QUIC_LISTENER_H
