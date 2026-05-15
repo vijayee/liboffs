@@ -27,6 +27,7 @@ extern "C" {
 #include "Network/wire.h"
 #include "Network/peer_connection.h"
 #include "Network/connection_manager.h"
+#include "Network/topology_metrics.h"
 #include "Configuration/config.h"
 }
 
@@ -1702,4 +1703,74 @@ TEST_F(ConnectionManagerTest, CollectMetrics) {
   size_t count = connection_manager_collect_metrics(&mgr, snapshots, 4);
   EXPECT_EQ(count, 1u);
   EXPECT_TRUE(snapshots[0].connected);
+}
+
+// === TopologyMetrics tests ===
+
+class TopologyMetricsTest : public ::testing::Test {
+protected:
+  topology_metrics_t* metrics;
+  void SetUp() override {
+    metrics = topology_metrics_create(NULL);
+  }
+  void TearDown() override {
+    topology_metrics_destroy(metrics);
+  }
+};
+
+TEST_F(TopologyMetricsTest, CreateDestroy) {
+  ASSERT_NE(metrics, (topology_metrics_t*)NULL);
+  EXPECT_EQ(metrics->peer_snapshot_count, 0u);
+  EXPECT_EQ(metrics->ring_entry_count, 0u);
+}
+
+TEST_F(TopologyMetricsTest, UpdatePeers) {
+  peer_metrics_snapshot_t snapshots[2];
+  memset(snapshots, 0, sizeof(snapshots));
+  memset(snapshots[0].node_id.hash, 0xAA, NODE_ID_HASH_SIZE);
+  snapshots[0].hebbian_weight = 0.5f;
+  snapshots[0].rtt_ewma_ms = 20.0;
+  snapshots[0].connected = true;
+  memset(snapshots[1].node_id.hash, 0xBB, NODE_ID_HASH_SIZE);
+  snapshots[1].hebbian_weight = 0.8f;
+  snapshots[1].rtt_ewma_ms = 30.0;
+  snapshots[1].connected = true;
+
+  topology_metrics_update_peers(metrics, snapshots, 2);
+  EXPECT_EQ(metrics->peer_snapshot_count, 2u);
+  EXPECT_EQ(metrics->total_connections, 2u);
+  EXPECT_FLOAT_EQ(metrics->avg_hebbian_weight, 0.65f);
+}
+
+TEST_F(TopologyMetricsTest, UpdateRings) {
+  ring_topology_entry_t entries[3];
+  memset(entries, 0, sizeof(entries));
+  memset(entries[0].node_id.hash, 0x11, NODE_ID_HASH_SIZE);
+  entries[0].ring_level = 0;
+  entries[0].rtt_ms = 5.0;
+  entries[0].is_active_connection = true;
+  memset(entries[1].node_id.hash, 0x22, NODE_ID_HASH_SIZE);
+  entries[1].ring_level = 1;
+  entries[1].rtt_ms = 15.0;
+  entries[1].is_active_connection = false;
+
+  topology_metrics_update_rings(metrics, entries, 2);
+  EXPECT_EQ(metrics->ring_entry_count, 2u);
+  EXPECT_EQ(metrics->ring_entries[0].ring_level, 0u);
+  EXPECT_EQ(metrics->ring_entries[1].ring_level, 1u);
+}
+
+TEST_F(TopologyMetricsTest, AggregateRpcCalls) {
+  peer_metrics_snapshot_t snapshots[2];
+  memset(snapshots, 0, sizeof(snapshots));
+  snapshots[0].rpc_count[WIRE_FIND_BLOCK] = 10;
+  snapshots[0].rpc_count[WIRE_STORE_BLOCK] = 5;
+  snapshots[0].connected = true;
+  snapshots[1].rpc_count[WIRE_FIND_BLOCK] = 20;
+  snapshots[1].rpc_count[WIRE_STORE_BLOCK] = 15;
+  snapshots[1].connected = true;
+
+  topology_metrics_update_peers(metrics, snapshots, 2);
+  EXPECT_EQ(metrics->total_rpc_calls[WIRE_FIND_BLOCK], 30u);
+  EXPECT_EQ(metrics->total_rpc_calls[WIRE_STORE_BLOCK], 20u);
 }
