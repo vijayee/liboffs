@@ -343,6 +343,20 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
           }
         }
       }
+
+      // Failed FindBlock: insert block_hash into requesting peer's EABF at level 0.
+      // The requesting peer is the last node in the path (or original_source if path is empty).
+      {
+        const node_id_t* sender_id = &state.original_source;
+        if (state.path_len > 0) {
+          sender_id = &state.path[state.path_len - 1];
+        }
+        peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, sender_id);
+        if (peer != NULL) {
+          peer_eabf_subscribe(peer, state.block_hash, 32);
+        }
+      }
+
       // Send NOT_FOUND response back along the path
       // TODO: Send response via QUIC when wired up
       break;
@@ -353,6 +367,19 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
       if (state.path_len < FIND_BLOCK_MAX_PATH) {
         memcpy(&state.path[state.path_len], &network->authority->local_id, sizeof(node_id_t));
         state.path_len++;
+      }
+
+      // When forwarding FindBlock, insert block_hash into the requesting peer's EABF
+      // at level 0. The requesting peer is the last node in the path.
+      {
+        const node_id_t* sender_id = &state.original_source;
+        if (state.path_len > 1) {
+          sender_id = &state.path[state.path_len - 2];
+        }
+        peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, sender_id);
+        if (peer != NULL) {
+          peer_eabf_subscribe(peer, state.block_hash, 32);
+        }
       }
       // Add self to visited bloom
       find_block_add_visited(state.visited_bloom, &state.visited_count, network->authority->local_id.hash);
@@ -399,11 +426,26 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
                           latency_ms, HEBBIAN_FIND_BLOCK_MULTIPLIER);
     network_sync_hebbian_to_rings(network);
 
-    // Populate EABFs along the path
+    // Populate EABFs along the path in the global table
     for (size_t index = 0; index < network->eabf_table.count; index++) {
       eabf_t* eabf = network->eabf_table.entries[index].eabf;
       if (eabf != NULL) {
+        // TODO: Subscribe block_hash, not holder.hash, once wire_find_block_response_t
+        // carries block_hash. Currently using holder.hash as a routing hint for
+        // the node that holds the block, but this should be the content hash for
+        // proper content-based routing.
         eabf_subscribe(eabf, response->holder.hash, 32);
+      }
+    }
+
+    // Populate peer EABFs along the response path.
+    // For each node at position i in the path, insert block hash into
+    // the EABF of the next-hop peer.
+    for (size_t index = 0; index + 1 < response->path_len; index++) {
+      peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &response->path[index + 1]);
+      if (peer != NULL) {
+        // TODO: Use block_hash, not holder.hash, once wire response carries it.
+        peer_eabf_subscribe(peer, response->holder.hash, 32);
       }
     }
   } else {
@@ -459,6 +501,7 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
 
   store_block_result_e result = store_block_execute(
       &network->eabf_table,
+      &network->conn_mgr,
       network->rings,
       &network->authority->local_id,
       local_capacity,
@@ -539,11 +582,40 @@ static void network_handle_store_block_response(network_t* network, message_t* m
                           latency_ms, HEBBIAN_STORE_BLOCK_EXHALE_MULTIPLIER);
     network_sync_hebbian_to_rings(network);
 
-    // Populate EABFs along the response path
+    // Populate EABFs along the response path in the global table
     for (size_t index = 0; index < network->eabf_table.count; index++) {
       eabf_t* eabf = network->eabf_table.entries[index].eabf;
       if (eabf != NULL) {
+        // TODO: Subscribe block_hash, not holder.hash, once wire_store_block_response_t
+        // carries block_hash. Currently using holder.hash as a routing hint.
         eabf_subscribe(eabf, response->holder.hash, 32);
+      }
+    }
+
+    // Populate peer EABFs along the response path.
+    for (size_t index = 0; index + 1 < response->path_len; index++) {
+      peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &response->path[index + 1]);
+      if (peer != NULL) {
+        // TODO: Use block_hash, not holder.hash, once wire response carries it.
+        peer_eabf_subscribe(peer, response->holder.hash, 32);
+      }
+    }
+
+    // Recall on block acquisition: check all peers' EABFs at level 0 for this hash.
+    // If a peer previously requested this block (failed FindBlock), push it to them.
+    // TODO: Use block_hash instead of holder.hash once wire response carries block_hash.
+    {
+      size_t recall_count = 0;
+      peer_connection_t** recall_peers = connection_manager_get_peers_for_topic(
+          &network->conn_mgr, response->holder.hash, 32, &recall_count);
+      if (recall_peers != NULL && recall_count > 0) {
+        for (size_t index = 0; index < recall_count; index++) {
+          peer_connection_t* peer = recall_peers[index];
+          // Apply amplified Hebbian reinforcement for recall
+          peer_hebbian_update(peer, network->conn_mgr.hebbian.recall_reward);
+          // TODO: Send StoreBlock(reason=RECALL) to peer via QUIC when wired up
+        }
+        free(recall_peers);
       }
     }
   }
@@ -987,16 +1059,20 @@ void network_dispatch(void* state, message_t* msg) {
       // New QUIC connection — add peer to connection manager
       quic_data_payload_t* quic_data = (quic_data_payload_t*)msg->payload;
       if (quic_data != NULL) {
-        // Extract node_id from peer address (placeholder — real extraction from QUIC handshake)
+        // TODO: Extract node_id from QUIC handshake. Using zeroed node_id
+        // means only one QUIC-connected peer can exist at a time — all
+        // subsequent connects will match the first via connection_manager_lookup.
         node_id_t peer_id;
         memset(&peer_id, 0, sizeof(node_id_t));
-        connection_manager_add(&network->conn_mgr, network, &peer_id, &quic_data->peer_addr);
+        connection_manager_add(&network->conn_mgr, &peer_id, &quic_data->peer_addr, network->pool);
       }
       break;
     }
     case NETWORK_QUIC_DISCONNECTED: {
-      // QUIC connection closed — remove peer from connection manager
-      // TODO: Extract node_id from QUIC connection handle when available
+      // QUIC connection closed — mark peer disconnected in connection manager
+      // TODO: Extract node_id from QUIC connection handle when available.
+      // Without the node_id we can't remove the peer from the connection manager.
+      // Peers remain in the table as disconnected until Hebbian decay removes them.
       break;
     }
     case CM_PEER_CONNECTED: {

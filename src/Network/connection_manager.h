@@ -13,8 +13,6 @@
 #include <stdbool.h>
 #include <sys/socket.h>
 
-typedef struct network_t network_t;
-
 typedef struct connection_manager_t {
   peer_connection_t** peers;
   size_t peer_count;
@@ -28,9 +26,9 @@ void connection_manager_init(connection_manager_t* mgr, size_t initial_capacity,
 void connection_manager_deinit(connection_manager_t* mgr);
 
 peer_connection_t* connection_manager_add(connection_manager_t* mgr,
-                                          network_t* network,
                                           const node_id_t* remote_id,
-                                          const struct sockaddr_storage* peer_addr);
+                                          const struct sockaddr_storage* peer_addr,
+                                          scheduler_pool_t* pool);
 int connection_manager_remove(connection_manager_t* mgr, const node_id_t* remote_id);
 peer_connection_t* connection_manager_lookup(const connection_manager_t* mgr,
                                              const node_id_t* remote_id);

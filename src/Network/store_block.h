@@ -8,6 +8,7 @@
 #include "eabf.h"
 #include "ring_set.h"
 #include "authority.h"
+#include "connection_manager.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -52,6 +53,7 @@ bool store_block_should_accept(float local_capacity, node_phase_e local_phase,
 // Returns result code and populates next_hops for FORWARDING result
 store_block_result_e store_block_execute(
     eabf_table_t* eabf_table,
+    connection_manager_t* conn_mgr,
     ring_set_t* rings,
     const node_id_t* local_id,
     float local_capacity,

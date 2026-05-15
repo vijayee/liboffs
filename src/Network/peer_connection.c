@@ -5,12 +5,12 @@
 #include "peer_connection.h"
 #include "../Util/allocator.h"
 #include <string.h>
-#include <math.h>
 #include <time.h>
 
-peer_connection_t* peer_connection_create(network_t* network, const node_id_t* remote_id,
+peer_connection_t* peer_connection_create(const node_id_t* remote_id,
                                           const struct sockaddr_storage* peer_addr,
-                                          float initial_weight) {
+                                          float initial_weight,
+                                          scheduler_pool_t* pool) {
   peer_connection_t* peer = get_clear_memory(sizeof(peer_connection_t));
   if (peer == NULL) {
     return NULL;
@@ -25,7 +25,6 @@ peer_connection_t* peer_connection_create(network_t* network, const node_id_t* r
   }
 
   peer->hebbian_weight = initial_weight;
-  peer->network = network;
   peer->connected = true;
   peer->connected_at_ms = (int64_t)time(NULL) * 1000;
 
@@ -37,14 +36,8 @@ peer_connection_t* peer_connection_create(network_t* network, const node_id_t* r
 
   timing_wheel_init(&peer->eabf_wheel, 64, 60000);
 
-  /* Initialize actor — if network provides a pool, use full actor_init.
-     Otherwise (tests), just set the dispatch function directly. */
-  if (network != NULL) {
-    /* We need the pool from network_t; the actor's state pointer is the
-       peer_connection itself. We'll set dispatch manually since we don't
-       have easy access to the pool here without including network.h. */
-    peer->actor.state = peer;
-    peer->actor.dispatch = peer_connection_dispatch;
+  if (pool != NULL) {
+    actor_init(&peer->actor, peer, peer_connection_dispatch, pool);
   } else {
     peer->actor.state = peer;
     peer->actor.dispatch = peer_connection_dispatch;
@@ -64,10 +57,7 @@ void peer_connection_destroy(peer_connection_t* peer) {
 
   timing_wheel_deinit(&peer->eabf_wheel);
 
-  /* Note: we don't call actor_destroy here because in test mode the actor
-     was never fully initialized with a pool. The queue is safe to destroy
-     since get_clear_memory zero-initialized it. */
-  if (peer->actor.queue.head != NULL || peer->actor.queue.tail != NULL) {
+  if (peer->actor.pool != NULL) {
     actor_destroy(&peer->actor);
   }
 

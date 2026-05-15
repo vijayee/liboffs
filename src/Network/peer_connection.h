@@ -15,8 +15,6 @@
 #include <stdbool.h>
 #include <sys/socket.h>
 
-typedef struct network_t network_t;
-
 #define PEER_RPC_TYPE_COUNT 20
 
 typedef struct peer_metrics_snapshot_t {
@@ -49,13 +47,12 @@ typedef struct peer_connection_t {
 
   bool connected;
   int64_t connected_at_ms;
-
-  network_t* network;
 } peer_connection_t;
 
-peer_connection_t* peer_connection_create(network_t* network, const node_id_t* remote_id,
+peer_connection_t* peer_connection_create(const node_id_t* remote_id,
                                           const struct sockaddr_storage* peer_addr,
-                                          float initial_weight);
+                                          float initial_weight,
+                                          scheduler_pool_t* pool);
 void peer_connection_destroy(peer_connection_t* peer);
 void peer_connection_dispatch(void* state, message_t* msg);
 

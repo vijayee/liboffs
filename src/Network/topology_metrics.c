@@ -37,8 +37,19 @@ void topology_metrics_destroy(topology_metrics_t* metrics) {
 
 void topology_metrics_dispatch(void* state, message_t* msg) {
   if (state == NULL || msg == NULL) return;
-  // TOPOLOGY_METRICS_UPDATE is handled via direct function calls below
-  // This dispatch is for future async message-based updates
+  topology_metrics_t* metrics = (topology_metrics_t*)state;
+
+  switch (msg->type) {
+    case TOPOLOGY_METRICS_UPDATE: {
+      // Peer/ring updates arrive via direct function calls
+      // (topology_metrics_update_peers, topology_metrics_update_rings).
+      // This message type is reserved for async push-based updates.
+      break;
+    }
+    default:
+      break;
+  }
+
   if (msg->payload != NULL && msg->payload_destroy != NULL) {
     msg->payload_destroy(msg->payload);
   }

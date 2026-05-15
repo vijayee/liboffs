@@ -46,9 +46,9 @@ void connection_manager_deinit(connection_manager_t* mgr) {
 }
 
 peer_connection_t* connection_manager_add(connection_manager_t* mgr,
-                                           network_t* network,
                                            const node_id_t* remote_id,
-                                           const struct sockaddr_storage* peer_addr) {
+                                           const struct sockaddr_storage* peer_addr,
+                                           scheduler_pool_t* pool) {
   if (mgr == NULL || remote_id == NULL) {
     return NULL;
   }
@@ -67,16 +67,18 @@ peer_connection_t* connection_manager_add(connection_manager_t* mgr,
   // Grow array if needed
   if (mgr->peer_count >= mgr->peer_capacity) {
     size_t new_capacity = mgr->peer_capacity * 2;
-    peer_connection_t** new_peers = realloc(mgr->peers, new_capacity * sizeof(peer_connection_t*));
+    peer_connection_t** new_peers = get_clear_memory(new_capacity * sizeof(peer_connection_t*));
     if (new_peers == NULL) {
       return NULL;
     }
+    memcpy(new_peers, mgr->peers, mgr->peer_count * sizeof(peer_connection_t*));
+    free(mgr->peers);
     mgr->peers = new_peers;
     mgr->peer_capacity = new_capacity;
   }
 
-  peer_connection_t* peer = peer_connection_create(network, remote_id, peer_addr,
-                                                    mgr->hebbian.initial_weight);
+  peer_connection_t* peer = peer_connection_create(remote_id, peer_addr,
+                                                    mgr->hebbian.initial_weight, pool);
   if (peer == NULL) {
     return NULL;
   }
@@ -182,7 +184,7 @@ peer_connection_t** connection_manager_get_peers_for_topic(
   qsort(matches, match_count, sizeof(peer_match_t), compare_peer_match);
 
   // Build result array
-  peer_connection_t** result = malloc(match_count * sizeof(peer_connection_t*));
+  peer_connection_t** result = get_clear_memory(match_count * sizeof(peer_connection_t*));
   if (result == NULL) {
     free(matches);
     return NULL;

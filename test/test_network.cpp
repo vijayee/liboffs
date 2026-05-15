@@ -857,7 +857,7 @@ TEST_F(StoreBlockTest, NullStateReturnsDeclined) {
   size_t next_hop_count = 0;
 
   store_block_result_e result = store_block_execute(
-      &eabf_table, rings, &local_id, 0.3f, NODE_PHASE_INHALE,
+      &eabf_table, NULL, rings, &local_id, 0.3f, NODE_PHASE_INHALE,
       NULL, next_hops, &next_hop_count);
 
   EXPECT_EQ(result, STORE_BLOCK_DECLINED);
@@ -872,7 +872,7 @@ TEST_F(StoreBlockTest, MaxHopsZeroReturnsMaxHopsReached) {
   size_t next_hop_count = 0;
 
   store_block_result_e result = store_block_execute(
-      &eabf_table, rings, &local_id, 0.9f, NODE_PHASE_NEUTRAL,
+      &eabf_table, NULL, rings, &local_id, 0.9f, NODE_PHASE_NEUTRAL,
       &state, next_hops, &next_hop_count);
 
   EXPECT_EQ(result, STORE_BLOCK_MAX_HOPS_REACHED);
@@ -889,7 +889,7 @@ TEST_F(StoreBlockTest, LowCapacityAccepts) {
 
   // Low capacity (0.2) → should accept
   store_block_result_e result = store_block_execute(
-      &eabf_table, rings, &local_id, 0.2f, NODE_PHASE_INHALE,
+      &eabf_table, NULL, rings, &local_id, 0.2f, NODE_PHASE_INHALE,
       &state, next_hops, &next_hop_count);
 
   EXPECT_EQ(result, STORE_BLOCK_ACCEPTED);
@@ -927,7 +927,7 @@ TEST_F(StoreBlockTest, HighCapacityForwards) {
 
   // High capacity (0.9) → decline locally, forward to peers with room
   store_block_result_e result = store_block_execute(
-      &eabf_table, rings, &local_id, 0.9f, NODE_PHASE_NEUTRAL,
+      &eabf_table, NULL, rings, &local_id, 0.9f, NODE_PHASE_NEUTRAL,
       &state, next_hops, &next_hop_count);
 
   EXPECT_EQ(result, STORE_BLOCK_FORWARDING);
@@ -1514,7 +1514,7 @@ protected:
   void SetUp() override {
     memset(&peer_id, 0, sizeof(peer_id));
     memset(peer_id.hash, 0xCC, NODE_ID_HASH_SIZE);
-    peer = peer_connection_create(NULL, &peer_id, NULL, 0.1f);
+    peer = peer_connection_create(&peer_id, NULL, 0.1f, NULL);
   }
   void TearDown() override {
     peer_connection_destroy(peer);
@@ -1622,7 +1622,7 @@ TEST_F(ConnectionManagerTest, InitDeinit) {
 TEST_F(ConnectionManagerTest, AddLookupRemove) {
   node_id_t id1 = {};
   memset(id1.hash, 0xAA, NODE_ID_HASH_SIZE);
-  peer_connection_t* peer = connection_manager_add(&mgr, NULL, &id1, NULL);
+  peer_connection_t* peer = connection_manager_add(&mgr, &id1, NULL, NULL);
   ASSERT_NE(peer, (peer_connection_t*)NULL);
   EXPECT_EQ(mgr.peer_count, 1u);
 
@@ -1642,9 +1642,9 @@ TEST_F(ConnectionManagerTest, AddMultiplePeers) {
   node_id_t id3 = {};
   memset(id3.hash, 0xCC, NODE_ID_HASH_SIZE);
 
-  connection_manager_add(&mgr, NULL, &id1, NULL);
-  connection_manager_add(&mgr, NULL, &id2, NULL);
-  connection_manager_add(&mgr, NULL, &id3, NULL);
+  connection_manager_add(&mgr, &id1, NULL, NULL);
+  connection_manager_add(&mgr, &id2, NULL, NULL);
+  connection_manager_add(&mgr, &id3, NULL, NULL);
   EXPECT_EQ(mgr.peer_count, 3u);
 
   // Remove middle one
@@ -1663,8 +1663,8 @@ TEST_F(ConnectionManagerTest, GravityWellSearch) {
   node_id_t id2 = {};
   memset(id2.hash, 0xBB, NODE_ID_HASH_SIZE);
 
-  peer_connection_t* peer1 = connection_manager_add(&mgr, NULL, &id1, NULL);
-  peer_connection_t* peer2 = connection_manager_add(&mgr, NULL, &id2, NULL);
+  peer_connection_t* peer1 = connection_manager_add(&mgr, &id1, NULL, NULL);
+  peer_connection_t* peer2 = connection_manager_add(&mgr, &id2, NULL, NULL);
 
   uint8_t topic[32];
   memset(topic, 0xDD, 32);
@@ -1681,7 +1681,7 @@ TEST_F(ConnectionManagerTest, GravityWellSearch) {
 TEST_F(ConnectionManagerTest, DecayTickRemovesLowWeight) {
   node_id_t id1 = {};
   memset(id1.hash, 0xAA, NODE_ID_HASH_SIZE);
-  peer_connection_t* peer = connection_manager_add(&mgr, NULL, &id1, NULL);
+  peer_connection_t* peer = connection_manager_add(&mgr, &id1, NULL, NULL);
   ASSERT_NE(peer, (peer_connection_t*)NULL);
   // Initial weight is 0.1, decay_rate is 0.001, drop_threshold is 0.01
   // After 100 decay ticks: weight = 0.1 - 100*0.001 = 0.0, which is < 0.01
@@ -1697,7 +1697,7 @@ TEST_F(ConnectionManagerTest, DecayTickRemovesLowWeight) {
 TEST_F(ConnectionManagerTest, CollectMetrics) {
   node_id_t id1 = {};
   memset(id1.hash, 0xAA, NODE_ID_HASH_SIZE);
-  connection_manager_add(&mgr, NULL, &id1, NULL);
+  connection_manager_add(&mgr, &id1, NULL, NULL);
 
   peer_metrics_snapshot_t snapshots[4];
   size_t count = connection_manager_collect_metrics(&mgr, snapshots, 4);
