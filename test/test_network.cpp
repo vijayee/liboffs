@@ -25,6 +25,7 @@ extern "C" {
 #include "Network/timing_wheel.h"
 #include "Network/hebbian_config.h"
 #include "Network/wire.h"
+#include "Network/peer_connection.h"
 #include "Configuration/config.h"
 }
 
@@ -1500,4 +1501,97 @@ TEST_F(HebbianConfigTest, ProductionDefaults) {
   EXPECT_FLOAT_EQ(config.decay_rate, 0.002f);
   EXPECT_FLOAT_EQ(config.drop_threshold, 0.05f);
   EXPECT_FLOAT_EQ(config.initial_weight, 0.1f);
+}
+
+// === PeerConnection tests ===
+
+class PeerConnectionTest : public ::testing::Test {
+protected:
+  peer_connection_t* peer;
+  node_id_t peer_id;
+  void SetUp() override {
+    memset(&peer_id, 0, sizeof(peer_id));
+    memset(peer_id.hash, 0xCC, NODE_ID_HASH_SIZE);
+    peer = peer_connection_create(NULL, &peer_id, NULL, 0.1f);
+  }
+  void TearDown() override {
+    peer_connection_destroy(peer);
+  }
+};
+
+TEST_F(PeerConnectionTest, CreateDestroy) {
+  ASSERT_NE(peer, (peer_connection_t*)NULL);
+  EXPECT_FLOAT_EQ(peer->hebbian_weight, 0.1f);
+  EXPECT_TRUE(peer->connected);
+  EXPECT_NE(peer->eabf, (eabf_t*)NULL);
+}
+
+TEST_F(PeerConnectionTest, HebbianUpdate) {
+  peer_hebbian_update(peer, 0.5f);
+  EXPECT_FLOAT_EQ(peer->hebbian_weight, 0.6f);
+  peer_hebbian_update(peer, -0.3f);
+  EXPECT_FLOAT_EQ(peer->hebbian_weight, 0.3f);
+}
+
+TEST_F(PeerConnectionTest, HebbianDecay) {
+  peer_hebbian_update(peer, 0.5f);
+  peer_hebbian_decay(peer, 0.1f);
+  EXPECT_FLOAT_EQ(peer->hebbian_weight, 0.5f);
+}
+
+TEST_F(PeerConnectionTest, HebbianClampZero) {
+  peer_hebbian_update(peer, -1.0f);
+  EXPECT_FLOAT_EQ(peer->hebbian_weight, 0.0f);
+}
+
+TEST_F(PeerConnectionTest, EABFSubscribeCheck) {
+  uint8_t topic[32];
+  memset(topic, 0xDD, 32);
+  bool result = peer_eabf_subscribe(peer, topic, 32);
+  EXPECT_TRUE(result);
+  uint32_t hops = 0;
+  bool found = peer_eabf_check(peer, topic, 32, &hops);
+  EXPECT_TRUE(found);
+  EXPECT_EQ(hops, 0u);
+}
+
+TEST_F(PeerConnectionTest, RTTUpdate) {
+  peer_update_rtt(peer, 15.0);
+  EXPECT_DOUBLE_EQ(peer->rtt_ewma, 15.0);
+  peer_update_rtt(peer, 25.0);
+  EXPECT_NEAR(peer->rtt_ewma, 16.0, 0.01);
+}
+
+TEST_F(PeerConnectionTest, MetricsSnapshot) {
+  peer_hebbian_update(peer, 0.5f);
+  peer_update_rtt(peer, 20.0);
+  peer_metrics_snapshot_t snapshot;
+  memset(&snapshot, 0, sizeof(snapshot));
+  peer_get_metrics(peer, &snapshot);
+  EXPECT_FLOAT_EQ(snapshot.hebbian_weight, 0.6f);
+  EXPECT_DOUBLE_EQ(snapshot.rtt_ewma_ms, 20.0);
+  EXPECT_TRUE(snapshot.connected);
+}
+
+TEST_F(PeerConnectionTest, EABFTickExpire) {
+  uint8_t topic[32];
+  memset(topic, 0xEE, 32);
+  peer_eabf_subscribe(peer, topic, 32);
+
+  // Subscribe adds to the bloom filter, but the TTL entry must be added
+  // separately via timing_wheel_add. Use the peer's wheel directly.
+  timing_wheel_add(&peer->eabf_wheel, &peer->remote_node_id,
+                   0, 0, 0, topic);
+
+  // Level 0 TTL = slot_count * slot_duration = 64 * 60000ms = 3840000ms.
+  // slots_ahead = ttl / slot_duration = 3840000 / 60000 = 64, capped to 63.
+  // So the entry lands at slot 63. We need to advance 63 slots to expire it.
+  for (int i = 0; i < 63; i++) {
+    peer_eabf_tick(peer);
+  }
+
+  // After 63 ticks, the entry should have expired and been removed from the EBF
+  uint32_t hops = 0;
+  bool found = peer_eabf_check(peer, topic, 32, &hops);
+  EXPECT_FALSE(found);
 }
