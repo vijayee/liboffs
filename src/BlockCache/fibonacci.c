@@ -92,8 +92,14 @@ cbor_item_t* fibonacci_hit_counter_to_cbor(fibonacci_hit_counter_t* counter) {
 
 fibonacci_hit_counter_t cbor_to_fibonacci_hit_counter(cbor_item_t* cbor) {
   fibonacci_hit_counter_t counter = {0};
-  counter.fib = cbor_get_uint32(cbor_move(cbor_array_get(cbor, 0)));
-  counter.count = cbor_get_uint32(cbor_move(cbor_array_get(cbor, 1)));
-  counter.threshold = cbor_get_uint32(cbor_move(cbor_array_get(cbor, 2)));
+  cbor_item_t* fib_item = cbor_array_get(cbor, 0);
+  cbor_item_t* count_item = cbor_array_get(cbor, 1);
+  cbor_item_t* threshold_item = cbor_array_get(cbor, 2);
+  counter.fib = cbor_get_uint32(fib_item);
+  counter.count = cbor_get_uint32(count_item);
+  counter.threshold = cbor_get_uint32(threshold_item);
+  cbor_decref(&fib_item);
+  cbor_decref(&count_item);
+  cbor_decref(&threshold_item);
   return counter;
 }

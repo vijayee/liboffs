@@ -121,10 +121,12 @@ cbor_item_t* block_to_cbor(block_t* block) {
 }
 
 block_t* cbor_to_block(cbor_item_t* cbor) {
-  cbor_item_t* cbor_hash = cbor_move(cbor_array_get(cbor, 0));
-  cbor_item_t* cbor_data = cbor_move(cbor_array_get(cbor, 1));
+  cbor_item_t* cbor_hash = cbor_array_get(cbor, 0);
+  cbor_item_t* cbor_data = cbor_array_get(cbor, 1);
   buffer_t* hash = cbor_to_buffer(cbor_hash);
   buffer_t* data = cbor_to_buffer(cbor_data);
+  cbor_decref(&cbor_hash);
+  cbor_decref(&cbor_data);
   refcounter_yield((refcounter_t*) hash);
   refcounter_yield((refcounter_t*) data);
   block_t* block = block_create_existing_data_hash_by_type(data, hash, data->size);

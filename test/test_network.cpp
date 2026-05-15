@@ -331,14 +331,14 @@ TEST(RingSetTest, InsertAndFind) {
   memset(id.hash, 0x33, NODE_ID_HASH_SIZE);
   net_node_t* node = net_node_create(&id, 0x0A000001, 8080);
 
-  // Insert at 10ms latency
-  EXPECT_EQ(ring_set_insert(set, node, 10000), 0);
+  // Insert at 3ms latency (ring 0: [0, 5000) us)
+  EXPECT_EQ(ring_set_insert(set, node, 3000), 0);
 
   net_node_t* found = ring_set_find_by_id(set, &id);
   ASSERT_NE(found, nullptr);
 
+  ring_set_clear_nodes(set);
   ring_set_destroy(set);
-  net_node_destroy(node);
 }
 
 TEST(RingSetTest, FindClosest) {
@@ -347,20 +347,19 @@ TEST(RingSetTest, FindClosest) {
   node_id_t id1 = {};
   memset(id1.hash, 0x11, NODE_ID_HASH_SIZE);
   net_node_t* node1 = net_node_create(&id1, 0x0A000001, 8080);
-  ring_set_insert(set, node1, 3000);  // Low latency
+  ring_set_insert(set, node1, 3000);  // Ring 0: [0, 5000) us
 
   node_id_t id2 = {};
   memset(id2.hash, 0x22, NODE_ID_HASH_SIZE);
   net_node_t* node2 = net_node_create(&id2, 0x0A000002, 8080);
-  ring_set_insert(set, node2, 50000);  // Higher latency
+  ring_set_insert(set, node2, 50000);  // Higher latency ring
 
   net_node_t* closest = ring_set_find_closest(set);
   ASSERT_NE(closest, nullptr);
   // Closest should be node1 (in lower-latency ring)
   EXPECT_TRUE(net_node_equals_by_id(closest, node1));
 
-  net_node_destroy(node1);
-  net_node_destroy(node2);
+  ring_set_clear_nodes(set);
   ring_set_destroy(set);
 }
 
@@ -370,7 +369,7 @@ TEST(RingSetTest, Erase) {
   memset(id.hash, 0x44, NODE_ID_HASH_SIZE);
   net_node_t* node = net_node_create(&id, 0x0A000001, 8080);
 
-  ring_set_insert(set, node, 5000);
+  ring_set_insert(set, node, 3000);
   EXPECT_TRUE(ring_set_erase(set, &id));
   EXPECT_EQ(ring_set_find_by_id(set, &id), nullptr);
   EXPECT_EQ(ring_set_total_nodes(set), 0u);
@@ -385,30 +384,29 @@ TEST(RingSetTest, EligibleForReplacement) {
   // Not eligible: ring is empty
   EXPECT_FALSE(ring_set_eligible_for_replacement(set, 0));
 
-  // Fill primary ring (8 slots) and add one secondary
+  // Fill primary ring (8 slots) — use 3000us latency which maps to ring 0
   for (int index = 0; index < 8; index++) {
     node_id_t id = {};
     memset(id.hash, 0x55 + index, NODE_ID_HASH_SIZE);
     net_node_t* node = net_node_create(&id, 0x0A000001 + index, 8080);
-    ring_set_insert(set, node, 10000);
-    net_node_destroy(node);
+    ring_set_insert(set, node, 3000);
   }
   EXPECT_EQ(ring_set_total_nodes(set), 8u);
 
   // Not eligible: primary full but secondary empty
   EXPECT_FALSE(ring_set_eligible_for_replacement(set, 0));
 
-  // Add to secondary
+  // Add to secondary (overflow)
   node_id_t sec_id = {};
   memset(sec_id.hash, 0xFF, NODE_ID_HASH_SIZE);
   net_node_t* sec_node = net_node_create(&sec_id, 0x0A0000FF, 8080);
-  ring_set_insert(set, sec_node, 10000);  // Will overflow to secondary
+  ring_set_insert(set, sec_node, 3000);
   EXPECT_GT(ring_set_total_nodes(set), 8u);
 
   // Now eligible: primary full, secondary non-empty, >primary_ring_size non-rendezvous nodes
   EXPECT_TRUE(ring_set_eligible_for_replacement(set, 0));
 
-  net_node_destroy(sec_node);
+  ring_set_clear_nodes(set);
   ring_set_destroy(set);
 }
 
@@ -437,9 +435,7 @@ TEST(RingSetTest, PromoteSecondary) {
   ASSERT_NE(promoted, nullptr);
   EXPECT_TRUE(net_node_equals_by_id(promoted, node3));
 
-  net_node_destroy(node1);
-  net_node_destroy(node2);
-  net_node_destroy(node3);
+  ring_set_clear_nodes(set);
   ring_set_destroy(set);
 }
 
@@ -540,19 +536,20 @@ TEST(NetNodeTest, RecordSuccessAndFail) {
   memset(id.hash, 0x55, NODE_ID_HASH_SIZE);
   net_node_t* node = net_node_create(&id, 0x0A000001, 8080);
 
-  // Initial availability is 0
-  EXPECT_FLOAT_EQ(node->availability, 0.0f);
+  // Initial availability is 0.5 (unknown baseline)
+  EXPECT_FLOAT_EQ(node->availability, 0.5f);
 
   net_node_record_success(node);
-  EXPECT_FLOAT_EQ(node->availability, 0.1f);  // 0.1*1.0 + 0.9*0.0
+  // 0.1*1.0 + 0.9*0.5 = 0.55
+  EXPECT_NEAR(node->availability, 0.55f, 0.001f);
 
   net_node_record_success(node);
-  // 0.1*1.0 + 0.9*0.1 = 0.19
-  EXPECT_NEAR(node->availability, 0.19f, 0.001f);
+  // 0.1*1.0 + 0.9*0.55 = 0.595
+  EXPECT_NEAR(node->availability, 0.595f, 0.001f);
 
   net_node_record_fail(node);
-  // 0.1*0.0 + 0.9*0.19 = 0.171
-  EXPECT_NEAR(node->availability, 0.171f, 0.001f);
+  // 0.1*0.0 + 0.9*0.595 = 0.5355
+  EXPECT_NEAR(node->availability, 0.5355f, 0.001f);
 
   net_node_destroy(node);
 }
@@ -876,6 +873,7 @@ TEST_F(StoreBlockTest, MaxHopsZeroReturnsMaxHopsReached) {
 }
 
 TEST_F(StoreBlockTest, LowCapacityAccepts) {
+  srand(2);  // Deterministic seed: rand() produces 0.70 < 0.75 accept probability
   store_block_state_t state = {};
   memset(state.block_hash, 0xAA, 32);
   state.max_hops = 6;

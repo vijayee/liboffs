@@ -174,11 +174,21 @@ cbor_item_t* index_entry_to_cbor(index_entry_t* entry) {
 }
 
 index_entry_t* cbor_to_index_entry(cbor_item_t* cbor) {
- fibonacci_hit_counter_t counter = cbor_to_fibonacci_hit_counter(cbor_move(cbor_array_get(cbor, 0)));
- buffer_t* hash= cbor_to_buffer(cbor_move(cbor_array_get(cbor, 1)));
- size_t section_index = (size_t) cbor_get_uint64(cbor_move(cbor_array_get(cbor, 2)));
- size_t section_id = (size_t) cbor_get_uint64(cbor_move(cbor_array_get(cbor, 3)));
- uint64_t ejection_date = (size_t) cbor_get_uint64(cbor_move(cbor_array_get(cbor,4)));
+ cbor_item_t* item0 = cbor_array_get(cbor, 0);
+ cbor_item_t* item1 = cbor_array_get(cbor, 1);
+ cbor_item_t* item2 = cbor_array_get(cbor, 2);
+ cbor_item_t* item3 = cbor_array_get(cbor, 3);
+ cbor_item_t* item4 = cbor_array_get(cbor, 4);
+ fibonacci_hit_counter_t counter = cbor_to_fibonacci_hit_counter(item0);
+ buffer_t* hash = cbor_to_buffer(item1);
+ size_t section_index = (size_t) cbor_get_uint64(item2);
+ size_t section_id = (size_t) cbor_get_uint64(item3);
+ uint64_t ejection_date = (size_t) cbor_get_uint64(item4);
+ cbor_decref(&item0);
+ cbor_decref(&item1);
+ cbor_decref(&item2);
+ cbor_decref(&item3);
+ cbor_decref(&item4);
  refcounter_yield((refcounter_t*) hash);
  return index_entry_from(hash, section_id, section_index, ejection_date, counter);
 }
@@ -691,13 +701,15 @@ cbor_item_t* index_node_to_cbor(index_node_t* node) {
 index_node_t* cbor_to_index_node(cbor_item_t* cbor, size_t bucket_size) {
   size_t size = cbor_array_size(cbor);
   if (size == 2) {
-    cbor_item_t* cbor_left = cbor_move(cbor_array_get(cbor,0));
+    cbor_item_t* cbor_left = cbor_array_get(cbor, 0);
     index_node_t* left = cbor_to_index_node(cbor_left, bucket_size);
+    cbor_decref(&cbor_left);
     if (left == NULL) {
       return NULL;
     }
-    cbor_item_t* cbor_right = cbor_move(cbor_array_get(cbor, 1));
+    cbor_item_t* cbor_right = cbor_array_get(cbor, 1);
     index_node_t* right = cbor_to_index_node(cbor_right, bucket_size);
+    cbor_decref(&cbor_right);
     if (right == NULL) {
       return NULL;
     }
@@ -706,19 +718,22 @@ index_node_t* cbor_to_index_node(cbor_item_t* cbor, size_t bucket_size) {
     index_node_t* node = index_node_create_from_leaves(left, right);
     return node;
   } else if (size == 1) {
-    cbor_item_t* cbor_bucket = cbor_move(cbor_array_get(cbor, 0));
+    cbor_item_t* cbor_bucket = cbor_array_get(cbor, 0);
     index_node_t* node = index_node_create(bucket_size);
     size_t length = cbor_array_size(cbor_bucket);
 
     for (size_t i = 0; i < length; i++) {
-      cbor_item_t* cbor_entry = cbor_move(cbor_array_get(cbor_bucket, i));
+      cbor_item_t* cbor_entry = cbor_array_get(cbor_bucket, i);
       index_entry_t* entry = cbor_to_index_entry(cbor_entry);
+      cbor_decref(&cbor_entry);
       if (entry == NULL) {
         index_node_destroy(node);
+        cbor_decref(&cbor_bucket);
         return NULL;
       }
       vec_push(node->bucket, entry);
     }
+    cbor_decref(&cbor_bucket);
     return node;
   } else {
     return NULL;
@@ -1135,9 +1150,12 @@ cbor_item_t* _index_to_cbor(index_t* index) {
 
 
 index_t* cbor_to_index(cbor_item_t* cbor, char* location, timer_actor_t* timer_actor, uint64_t wait, uint64_t max_wait, size_t max_snapshots, size_t max_wals) {
-  cbor_item_t* cbor_root = cbor_move(cbor_array_get(cbor,0));
-  size_t bucket_size = cbor_get_uint64(cbor_move(cbor_array_get(cbor, 1)));
+  cbor_item_t* cbor_root = cbor_array_get(cbor, 0);
+  cbor_item_t* cbor_bucket_size = cbor_array_get(cbor, 1);
+  size_t bucket_size = cbor_get_uint64(cbor_bucket_size);
+  cbor_decref(&cbor_bucket_size);
   index_node_t* root = cbor_to_index_node(cbor_root, bucket_size);
+  cbor_decref(&cbor_root);
   if (root == NULL) {
     return NULL;
   }

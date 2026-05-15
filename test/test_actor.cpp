@@ -234,6 +234,7 @@ TEST(TestActor, TestBackpressureMutesSenderWhenTargetPressured) {
   /* The message should still be in the queue (target is pressured but not destroyed) */
   EXPECT_EQ(atomic_load(&target.queue.size), 1u);
 
+  actor_destroy(&target);
   scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }
@@ -356,6 +357,8 @@ TEST(TestActor, TestBackpressureReleaseUnmutesSenders) {
   /* Pressured senders list should be empty */
   EXPECT_EQ(atomic_load(&target.pressured_senders), (muted_sender_node_t*)NULL);
 
+  actor_destroy(&sender);
+  actor_destroy(&target);
   scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }

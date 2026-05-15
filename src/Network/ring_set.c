@@ -50,7 +50,9 @@ void ring_set_destroy(ring_set_t* set) {
 
 int ring_set_get_ring_index(const ring_set_t* set, uint32_t latency_us) {
   if (set == NULL || set->exponent_base <= 0) return 0;
-  int ring = (int)floor(log((double)latency_us) / log((double)set->exponent_base));
+  uint32_t beta_us = (uint32_t)RING_BETA_MS * 1000;
+  if (latency_us < beta_us) return 0;
+  int ring = (int)floor(log((double)latency_us / (double)beta_us) / log((double)set->exponent_base)) + 1;
   if (ring < 0) ring = 0;
   if (ring >= (int)set->ring_count) ring = (int)set->ring_count - 1;
   return ring;

@@ -63,6 +63,7 @@ stream_event_handler_list_t* stream_event_list_create() {
 }
 
 void stream_event_list_destroy(stream_event_handler_list_t* list) {
+  if (list == NULL) return;
   stream_event_handler_list_node_t* current = list->first;
   stream_event_handler_list_node_t* next = NULL;
   while (current != NULL) {
@@ -188,6 +189,10 @@ void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, uin
 void stream_deinit(stream_t* stream) {
   if (refcounter_count((refcounter_t*) stream) == 0) {
     _stream_purge_handlers(stream);
+    if (stream->pipe_notifiers != NULL) {
+      free(stream->pipe_notifiers);
+      stream->pipe_notifiers = NULL;
+    }
     if (stream->pullable_stream != NULL) {
       if (refcounter_dereference_is_zero((refcounter_t*) stream->pullable_stream)) {
         stream_destroy(stream->pullable_stream);
@@ -204,7 +209,9 @@ void stream_destroy(stream_t* stream) {
 
 void _stream_purge_handlers(stream_t* stream) {
   for (size_t i = 0; i < STREAM_HANDLER_COUNT; i++) {
-    stream_event_list_destroy(stream->handlers[i]);
+    stream_event_handler_list_t* list = stream->handlers[i];
+    stream->handlers[i] = NULL;
+    stream_event_list_destroy(list);
   }
 }
 
@@ -386,8 +393,10 @@ void stream_unsubscribe_pipe_notifiers(stream_t* stream) {
     }
     for (size_t i = 0; i < count; i++) {
       stream_notifier_t* notifier = &stream->pipe_notifiers[i];
-      stream_unsubscribe(notifier->stream, notifier->event, notifier->id);
-      DEREFERENCE(notifier->stream);
+      if (notifier->stream != NULL) {
+        stream_unsubscribe(notifier->stream, notifier->event, notifier->id);
+        DEREFERENCE(notifier->stream);
+      }
     }
     free(stream->pipe_notifiers);
     stream->pipe_notifiers = NULL;
@@ -507,7 +516,9 @@ size_t stream_subscribe(stream_t* stream, stream_event_e event, void* ctx, void 
 }
 
 void stream_unsubscribe(stream_t* stream, stream_event_e event, size_t id) {
+  if (stream == NULL) return;
   stream_event_handler_list_t* list = stream->handlers[event];
+  if (list == NULL) return;
   stream_event_handler_list_node_t* current = list->first;
   stream_event_handler_list_node_t* next = NULL;
   stream_event_handler_list_node_t* node = NULL;
