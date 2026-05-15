@@ -14,6 +14,22 @@
 #include <stdatomic.h>
 #include <time.h>
 
+static void cache_put_payload_destroy(void* ptr) {
+  cache_put_payload_t* payload = (cache_put_payload_t*)ptr;
+  if (payload->block != NULL) {
+    block_destroy(payload->block);
+  }
+  free(payload);
+}
+
+static void cache_remove_payload_destroy(void* ptr) {
+  cache_remove_payload_t* payload = (cache_remove_payload_t*)ptr;
+  if (payload->hash != NULL) {
+    DESTROY(payload->hash, buffer);
+  }
+  free(payload);
+}
+
 static void cache_get_payload_destroy(void* ptr) {
   cache_get_payload_t* payload = (cache_get_payload_t*)ptr;
   if (payload->hash != NULL) {
@@ -299,7 +315,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
                     result, p->block->hash->data[0], p->block->hash->data[1],
                     p->block->hash->data[2], p->block->hash->data[3]);
           index_entry_destroy(entry);
-          if (is_async) block_destroy(p->block);
+          if (is_async) { block_destroy(p->block); p->block = NULL; }
           p->result = result;
         } else {
           entry->section_id = write_payload.section_id;
@@ -310,7 +326,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
             index_set_entry_ejection(block_cache->index, ejection, time(NULL));
             index_entry_destroy(ejection);
           }
-          if (is_async) block_destroy(p->block);
+          if (is_async) { block_destroy(p->block); p->block = NULL; }
           refcounter_yield((refcounter_t*) entry);
           index_add(block_cache->index, entry);
           p->result = 0;
@@ -318,7 +334,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
       } else {
         /* Block already exists */
         /* Block already exists — release the async reference if taken */
-        if (is_async) block_destroy(p->block);
+        if (is_async) { block_destroy(p->block); p->block = NULL; }
         p->result = 0;
       }
       /* Async: send result back if reply_to is set */
@@ -432,6 +448,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
         p->result = 0;
       }
       DESTROY(p->hash, buffer);
+      p->hash = NULL;
       /* Async: send result back if reply_to is set */
       if (p->reply_to != NULL) {
         cache_remove_result_payload_t* result = get_clear_memory(sizeof(cache_remove_result_payload_t));
@@ -567,7 +584,7 @@ void block_cache_put(block_cache_t* block_cache, block_t* block, actor_t* reply_
   message_t msg;
   msg.type = CACHE_PUT;
   msg.payload = payload;
-  msg.payload_destroy = free;
+  msg.payload_destroy = cache_put_payload_destroy;
 
   actor_send(&block_cache->actor, &msg);
 }
@@ -581,7 +598,7 @@ void block_cache_remove(block_cache_t* block_cache, buffer_t* hash, actor_t* rep
   message_t msg;
   msg.type = CACHE_REMOVE;
   msg.payload = payload;
-  msg.payload_destroy = free;
+  msg.payload_destroy = cache_remove_payload_destroy;
 
   actor_send(&block_cache->actor, &msg);
 }

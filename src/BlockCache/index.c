@@ -398,12 +398,13 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
                   cbor = cbor_load(data->data, data->size, &result);
                   if (result.error.code == CBOR_ERR_NONE) {
                     if (cbor_isa_array(cbor)) {
-                      cbor_item_t* cbor_hash = cbor_move(cbor_array_get(cbor, 0));
-                      cbor_item_t* cbor_date = cbor_move(cbor_array_get(cbor,1));
+                      cbor_item_t* cbor_hash = cbor_array_get(cbor, 0);
+                      cbor_item_t* cbor_date = cbor_array_get(cbor, 1);
                       if (cbor_isa_bytestring(cbor_hash) && cbor_isa_uint(cbor_date)) {
-                        buffer_t* hash = cbor_to_buffer(cbor_move(cbor_hash));
+                        buffer_t* hash = cbor_to_buffer(cbor_hash);
                         index_entry_t* entry = index_find(index, hash);
                         index_entry_set_ejection_date(entry, cbor_get_uint64(cbor_date));
+                        DESTROY(hash, buffer);
                         cbor_decref(&cbor_hash);
                         cbor_decref(&cbor_date);
                         cbor_decref(&cbor);
@@ -433,8 +434,9 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
                   cbor = cbor_load(data->data, data->size, &result);
                   if (result.error.code == CBOR_ERR_NONE) {
                     if (cbor_isa_bytestring(cbor)) {
-                      buffer_t* hash = cbor_to_buffer(cbor_move(cbor));
+                      buffer_t* hash = cbor_to_buffer(cbor);
                       index_remove(index, hash);
+                      DESTROY(hash, buffer);
                     } else {
                       cbor_decref(&cbor);
                       DESTROY(index, index);

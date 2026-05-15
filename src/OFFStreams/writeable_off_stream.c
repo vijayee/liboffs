@@ -77,6 +77,7 @@ static void _create_tuple(writeable_off_stream_t* stream, off_stream_tuple_entry
   block_t* off_block = block_create_existing_data_by_type(off_data, stream->block_type);
   DESTROY(off_data, buffer);
   if (off_block == NULL) {
+    _entry_destroy(entry);
     return;
   }
 

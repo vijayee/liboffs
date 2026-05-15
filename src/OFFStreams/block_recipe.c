@@ -329,8 +329,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
       /* Data block result — transfer ownership of result->block to stream_notify */
       if (result->block != NULL) {
         stream_notify((stream_t*)recipe, data_event,
-                      result->block, (void (*)(void*))block_destroy);
-        result->block = NULL;
+                      CONSUME(result->block, block_t), (void (*)(void*))block_destroy);
         recipe->pending_pull--;
       } else {
         if (result->hash != NULL) {
