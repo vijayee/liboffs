@@ -23,6 +23,8 @@ extern "C" {
 #include "Network/respiration.h"
 #include "Network/rate_limit.h"
 #include "Network/timing_wheel.h"
+#include "Network/hebbian_config.h"
+#include "Network/wire.h"
 #include "Configuration/config.h"
 }
 
@@ -1467,4 +1469,35 @@ TEST_F(TimingWheelTest, TTLForLevel) {
   EXPECT_GT(timing_wheel_ttl_for_level(1, base), 0u);
   EXPECT_GT(timing_wheel_ttl_for_level(0, base), timing_wheel_ttl_for_level(1, base));
   EXPECT_GT(timing_wheel_ttl_for_level(1, base), timing_wheel_ttl_for_level(2, base));
+}
+
+// === HebbianConfig tests ===
+
+class HebbianConfigTest : public ::testing::Test {
+protected:
+  hebbian_config_t config;
+  void SetUp() override { hebbian_config_init(&config); }
+};
+
+TEST_F(HebbianConfigTest, Defaults) {
+  EXPECT_FLOAT_EQ(config.initial_weight, 0.1f);
+  EXPECT_FLOAT_EQ(config.drop_threshold, 0.01f);
+  EXPECT_FLOAT_EQ(config.decay_rate, 0.001f);
+  EXPECT_EQ(config.decay_tick_ms, 60000u);
+  EXPECT_FLOAT_EQ(config.base_reward, 0.1f);
+  EXPECT_FLOAT_EQ(config.failure_penalty, 0.2f);
+  EXPECT_FLOAT_EQ(config.rate_limit_penalty, 0.1f);
+  EXPECT_FLOAT_EQ(config.recall_reward, 2.0f);
+  EXPECT_FLOAT_EQ(config.rpc_multipliers[WIRE_FIND_BLOCK], 1.0f);
+  EXPECT_FLOAT_EQ(config.rpc_multipliers[WIRE_STORE_BLOCK], 1.5f);
+  EXPECT_FLOAT_EQ(config.rpc_multipliers[WIRE_PING_BLOCK], 0.8f);
+  EXPECT_FLOAT_EQ(config.rpc_multipliers[WIRE_SEEKING_BLOCKS], 0.5f);
+  EXPECT_FLOAT_EQ(config.rpc_multipliers[WIRE_PING_CAPACITY], 0.3f);
+}
+
+TEST_F(HebbianConfigTest, ProductionDefaults) {
+  hebbian_config_init_production(&config);
+  EXPECT_FLOAT_EQ(config.decay_rate, 0.002f);
+  EXPECT_FLOAT_EQ(config.drop_threshold, 0.05f);
+  EXPECT_FLOAT_EQ(config.initial_weight, 0.1f);
 }
