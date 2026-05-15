@@ -14,6 +14,8 @@
 #include "latency_cache.h"
 #include "eabf.h"
 #include "hebbian.h"
+#include "hebbian_config.h"
+#include "connection_manager.h"
 #include "rate_limit.h"
 #include "node_id.h"
 #include <stdint.h>
@@ -34,8 +36,11 @@ typedef struct network_t {
   eabf_ttl_table_t eabf_ttl;
   hebbian_table_t hebbian;
   rate_limit_table_t rate_limits;
+  connection_manager_t conn_mgr;
   uint64_t gossip_timer_id;
   uint64_t eabf_maintenance_timer_id;
+  uint64_t hebbian_decay_timer_id;
+  uint64_t metrics_push_timer_id;
   ATOMIC(uint8_t) running;
 } network_t;
 
