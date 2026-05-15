@@ -37,7 +37,7 @@ void platform_rw_unlock_r(pthread_rwlock_t* lock) {
 }
 
 void platform_rw_unlock_w(pthread_rwlock_t* lock) {
-  ReleaseSRWLockExclusive((lock);
+  ReleaseSRWLockExclusive(lock);
 }
 
 void platform_lock_init(CRITICAL_SECTION* lock) {
@@ -201,7 +201,7 @@ void platform_condition_init(pthread_cond_t* condition) {
 void platform_condition_wait(pthread_mutex_t* lock, pthread_cond_t* condition) {
   int result = pthread_cond_wait(condition, lock);
   if (result) {
-    log_trace("Failed to destroy condition");
+    log_trace("Failed to wait on condition");
     abort();
   }
 }
@@ -209,7 +209,7 @@ void platform_condition_wait(pthread_mutex_t* lock, pthread_cond_t* condition) {
 void platform_condition_destroy(pthread_cond_t* condition) {
   int result = pthread_cond_destroy(condition);
   if (result) {
-    log_trace("Failed to initialize condition");
+    log_trace("Failed to destroy condition");
     abort();
   }
 }

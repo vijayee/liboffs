@@ -315,20 +315,32 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id, b
 #endif
     if (meta_fd < 0) {
       log_error("Failed to open section meta file");
-      abort();
+      actor_destroy(&section->actor);
+      free(section->path);
+      free(section->meta_path);
+      free(section);
+      return NULL;
     }
 
     off_t file_size = lseek(meta_fd, 0, SEEK_END);
     if (file_size < 0) {
       log_error("Failed to read section meta file size");
       close(meta_fd);
-      abort();
+      actor_destroy(&section->actor);
+      free(section->path);
+      free(section->meta_path);
+      free(section);
+      return NULL;
     }
 
     if (lseek(meta_fd, 0, SEEK_SET) < 0) {
       log_error("Failed to seek section meta file");
       close(meta_fd);
-      abort();
+      actor_destroy(&section->actor);
+      free(section->path);
+      free(section->meta_path);
+      free(section);
+      return NULL;
     }
 
     uint8_t* buffer = get_memory((size_t)file_size);
@@ -338,13 +350,21 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id, b
     if (read_size != file_size) {
       log_error("Failed to read section meta file");
       free(buffer);
-      abort();
+      actor_destroy(&section->actor);
+      free(section->path);
+      free(section->meta_path);
+      free(section);
+      return NULL;
     }
 
     if (free_map_deserialize(&section->free_map, buffer, (size_t)file_size) != 0) {
       log_error("Failed to parse section meta file: malformed data");
       free(buffer);
-      abort();
+      actor_destroy(&section->actor);
+      free(section->path);
+      free(section->meta_path);
+      free(section);
+      return NULL;
     }
     free(buffer);
   } else {

@@ -16,6 +16,7 @@
 // XXH3 double-hashing with 3 hash functions. This avoids allocating a
 // bloom_filter_t struct — we operate directly on the byte array.
 
+#define VISITED_BLOOM_HASH_COUNT 3
 #define VISITED_BLOOM_BITS (FIND_BLOCK_MAX_VISITED_BLOOM * 8)
 #define VISITED_SEED_A 0x4F464653ULL  // "OFFS"
 #define VISITED_SEED_B 0x46534E4F55444E53ULL  // "FSOUNDS"
@@ -24,7 +25,7 @@ static void visited_bloom_set(uint8_t* bloom, const uint8_t* data, size_t len) {
   uint64_t hash_a = XXH3_64bits_withSeed(data, len, VISITED_SEED_A);
   uint64_t hash_b = XXH3_64bits_withSeed(data, len, VISITED_SEED_B);
 
-  for (uint32_t index = 0; index < FIND_BLOCK_MAX_VISITED_BLOOM; index++) {
+  for (uint32_t index = 0; index < VISITED_BLOOM_HASH_COUNT; index++) {
     // Double hashing: h(i) = (hash_a + i * hash_b) % bits
     uint64_t combined = hash_a + (uint64_t)index * hash_b;
     size_t bit_index = (size_t)(combined % VISITED_BLOOM_BITS);
@@ -38,7 +39,7 @@ static bool visited_bloom_check(const uint8_t* bloom, const uint8_t* data, size_
   uint64_t hash_a = XXH3_64bits_withSeed(data, len, VISITED_SEED_A);
   uint64_t hash_b = XXH3_64bits_withSeed(data, len, VISITED_SEED_B);
 
-  for (uint32_t index = 0; index < FIND_BLOCK_MAX_VISITED_BLOOM; index++) {
+  for (uint32_t index = 0; index < VISITED_BLOOM_HASH_COUNT; index++) {
     uint64_t combined = hash_a + (uint64_t)index * hash_b;
     size_t bit_index = (size_t)(combined % VISITED_BLOOM_BITS);
     size_t byte_index = bit_index / 8;

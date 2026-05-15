@@ -1288,8 +1288,10 @@ void index_debounce(void* ctx) {
   free(cbor_data);
   wal_destroy(wal);
   cbor_intermediate_decref(cbor);
+  INDEX_LOCK(index);
   uint64_t first_kept_id = _index_prune_old_snapshots(index);
   _index_prune_old_wals(index, first_kept_id);
+  INDEX_UNLOCK(index);
 }
 int _index_to_crc(index_t* index, uint64_t* crc) {
   XXH64_state_t* const state = XXH64_createState();

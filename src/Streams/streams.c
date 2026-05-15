@@ -384,7 +384,7 @@ void stream_unsubscribe_pipe_notifiers(stream_t* stream) {
         break;
       case duplex_stream:
       case transform_stream:
-        count = 7;
+        count = 8;
         break;
       default:
         log_error("stream_unsubscribe_pipe_notifiers: unknown stream type");
@@ -563,7 +563,7 @@ void stream_subscribe_internal(stream_t* stream, stream_event_e event, size_t id
 void readable_push_stream_pipe(stream_t* rs, stream_t* ws) {
   if (rs->type == writeable_stream || rs->force == pull) {
     stream_notify(rs, error_event, ERROR("Invalid read stream being piped"), (void (*)(void*))error_destroy);
-  } if (ws->type == readable_stream || ws->force == pull) {
+  } else if (ws->type == readable_stream || ws->force == pull) {
     stream_notify(rs, error_event, ERROR("Invalid write stream being piped to"), (void (*)(void*))error_destroy);
   } else {
     rs->on_pipe(rs, ws);
@@ -695,7 +695,7 @@ void _writeable_push_stream_complete_notify(stream_t* stream, void* payload) {
 void writeable_pull_stream_pipe(stream_t* ws, stream_t* rs) {
   if (rs->type == writeable_stream || rs->force == push) {
     stream_notify(rs, error_event, ERROR("Invalid write stream being piped"), (void (*)(void*))error_destroy);
-  } if (ws->type == readable_stream || ws->force == push) {
+  } else if (ws->type == readable_stream || ws->force == push) {
     stream_notify(rs, error_event, ERROR("Invalid read stream being piped to"), (void (*)(void*))error_destroy);
   } else {
     ws->on_pipe(ws, rs);
@@ -721,7 +721,7 @@ void _writeable_pull_stream_on_pipe(stream_t* ws, stream_t* rs) {
           break;
         case duplex_stream:
         case transform_stream:
-          size = 7;
+          size = 8;
           break;
       }
       ws->pipe_notifiers = get_clear_memory(size * sizeof(stream_notifier_t));
@@ -757,16 +757,13 @@ void _readable_pull_stream_on_piped(stream_t* rs, stream_t* ws) {
   } else {
     if (rs->pipe_notifiers == NULL) {
       size_t size = 0;
-      switch (ws->type) {
-        case readable_stream:
-          size = 3;
-          break;
-        case writeable_stream:
-          size = 5;
-          break;
+      switch (rs->type) {
         case duplex_stream:
         case transform_stream:
-          size = 7;
+          size = 8;
+          break;
+        default:
+          size = 3;
           break;
       }
       rs->pipe_notifiers = get_clear_memory(size * sizeof(stream_notifier_t));

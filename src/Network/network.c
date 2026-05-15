@@ -98,6 +98,7 @@ static void network_handle_ping(network_t* network, message_t* msg) {
   // For now, we echo back through whatever channel sent the ping
   (void)network;
   // TODO: Send response to peer connection when QUIC is wired up
+  free(response);
 }
 
 static void network_handle_ping_response(network_t* network, message_t* msg) {
@@ -135,6 +136,7 @@ static void network_handle_ping_block(network_t* network, message_t* msg) {
   response_msg.payload = response;
   response_msg.payload_destroy = free;
   // TODO: Send response to peer connection when QUIC is wired up
+  free(response);
   (void)network;
 }
 
@@ -208,6 +210,7 @@ static void network_handle_ping_capacity(network_t* network, message_t* msg) {
   response_msg.payload = response;
   response_msg.payload_destroy = free;
   // TODO: Send response to peer connection when QUIC is wired up
+  free(response);
   (void)response_msg;
 }
 
@@ -253,6 +256,7 @@ static void network_handle_find_node(network_t* network, message_t* msg) {
   response_msg.payload = response;
   response_msg.payload_destroy = free;
   // TODO: Send response to peer connection when QUIC is wired up
+  free(response);
   (void)response_msg;
 }
 
@@ -336,7 +340,7 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         state.path_len++;
       }
       // Add self to visited bloom
-      find_block_add_visited(state.visited_bloom, &state.visited_count, state.block_hash);
+      find_block_add_visited(state.visited_bloom, &state.visited_count, network->authority->local_id.hash);
       // Decrement TTL
       state.ttl--;
 
@@ -374,8 +378,6 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
     uint64_t latency_ms = 0;
     if (response->latency_ms > 0) {
       latency_ms = response->latency_ms;
-    } else if (now_ms > 0) {
-      latency_ms = now_ms;
     }
 
     hebbian_apply_success(&network->hebbian, response->path, response->path_len,
@@ -476,7 +478,7 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
         memcpy(&state.path[state.path_len], &network->authority->local_id, sizeof(node_id_t));
         state.path_len++;
       }
-      find_block_add_visited(state.visited_bloom, &state.visited_count, state.block_hash);
+      find_block_add_visited(state.visited_bloom, &state.visited_count, network->authority->local_id.hash);
       state.max_hops--;
 
       // Forward to each selected next-hop
@@ -617,6 +619,7 @@ static void network_handle_recall_block(network_t* network, message_t* msg) {
     response_msg.payload = response;
     response_msg.payload_destroy = free;
     // TODO: Send response via QUIC when wired up
+    free(response);
     (void)response_msg;
   } else {
     // Send RecallDecline
@@ -628,6 +631,7 @@ static void network_handle_recall_block(network_t* network, message_t* msg) {
     response_msg.payload = response;
     response_msg.payload_destroy = free;
     // TODO: Send response via QUIC when wired up
+    free(response);
     (void)response_msg;
   }
 }

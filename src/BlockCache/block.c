@@ -130,5 +130,9 @@ block_t* cbor_to_block(cbor_item_t* cbor) {
   refcounter_yield((refcounter_t*) hash);
   refcounter_yield((refcounter_t*) data);
   block_t* block = block_create_existing_data_hash_by_type(data, hash, data->size);
+  if (block == NULL) {
+    DESTROY(hash, buffer);
+    DESTROY(data, buffer);
+  }
   return block;
 }

@@ -39,14 +39,22 @@ int rm_rf(const char *path) {
     sprintf(buf, "%s/%s", path, p->d_name);
 
     struct stat statbuf;
-    if (stat(buf, &statbuf) == -1) {
+    if (lstat(buf, &statbuf) == -1) {
       log_error("failed to stat");
       free(buf);
       r = -1;
       break;
     }
 
-    if (S_ISDIR(statbuf.st_mode)) {
+    if (S_ISLNK(statbuf.st_mode)) {
+      // Remove symlink — do not follow it
+      if (unlink(buf) == -1) {
+        log_error("failed to unlink symlink");
+        free(buf);
+        r = -1;
+        break;
+      }
+    } else if (S_ISDIR(statbuf.st_mode)) {
       // Recursively remove subdirectory
       if (rm_rf(buf) == -1) {
         r = -1;

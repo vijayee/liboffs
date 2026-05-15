@@ -30,6 +30,7 @@ TEST_F(TestOfd, AddFileEntry) {
     ori->file_name = strdup("test.txt");
 
     ofd_add_file(ofd, "test.txt", ori);
+    DESTROY(ori, ori);
     ASSERT_EQ(ofd->entries.length, 1);
     EXPECT_STREQ(ofd->entries.data[0].name, "test.txt");
     EXPECT_EQ(ofd->entries.data[0].type, OFD_ENTRY_FILE);
@@ -47,6 +48,7 @@ TEST_F(TestOfd, AddDirectoryEntry) {
     buffer_t* dir_hash = buffer_create_from_pointer_copy(hash_data, 32);
 
     ofd_add_directory(ofd, "css", dir_hash);
+    DESTROY(dir_hash, buffer);
     ASSERT_EQ(ofd->entries.length, 1);
     EXPECT_STREQ(ofd->entries.data[0].name, "css");
     EXPECT_EQ(ofd->entries.data[0].type, OFD_ENTRY_DIRECTORY);
@@ -67,6 +69,7 @@ TEST_F(TestOfd, FindEntry) {
     ori->file_name = strdup("index.html");
 
     ofd_add_file(ofd, "index.html", ori);
+    DESTROY(ori, ori);
 
     ofd_entry_t* found = ofd_find(ofd, "index.html");
     ASSERT_NE(found, nullptr);
@@ -90,12 +93,14 @@ TEST_F(TestOfd, EncodeDecodeRoundTrip) {
     file_ori->file_hash = buffer_create_from_pointer_copy(file_hash_data, 32);
     file_ori->file_name = strdup("readme.md");
     ofd_add_file(ofd, "readme.md", file_ori);
+    DESTROY(file_ori, ori);
 
     // Add a directory entry
     uint8_t dir_hash_data[32];
     for (int i = 0; i < 32; i++) dir_hash_data[i] = (uint8_t)(i + 50);
     buffer_t* dir_hash = buffer_create_from_pointer_copy(dir_hash_data, 32);
     ofd_add_directory(ofd, "assets", dir_hash);
+    DESTROY(dir_hash, buffer);
 
     // Encode
     buffer_t* encoded = ofd_encode(ofd);

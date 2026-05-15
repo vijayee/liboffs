@@ -116,12 +116,13 @@ TEST(OffStreamIntegration, WriteableOffStreamEncodesData) {
     DESTROY(collector.file_hash, buffer);
   }
 
-  scheduler_pool_stop(pool);
   new_blocks_recipe_destroy(recipe);
   writeable_off_stream_destroy(stream);
   tuple_cache_destroy(tc);
   block_cache_destroy(bc);
   timer_actor_destroy(timer);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }
 

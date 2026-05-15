@@ -26,9 +26,9 @@ size_t hash_uint32(const void* data) {
 
 size_t hash_size_t(const void* data) {
   if(sizeof(size_t) == 8) {
-    return XXH3_64bits(data,4);
+    return XXH3_64bits(data,sizeof(size_t));
   } else {
-    return XXH32(data, 4, 0);
+    return XXH32(data, sizeof(size_t), 0);
   }
 }
 

@@ -15,9 +15,9 @@ readable_push_file_stream_t* readable_push_file_stream_create(scheduler_pool_t* 
   rs->filename = strdup(filename);
   rs->chunk_size = chunk_size;
 #ifdef _WIN32
-  rs->fd = open(rs->filename, _O_RDONLY | _O_BINARY | _O_CREAT, 0644);
+  rs->fd = open(rs->filename, _O_RDONLY | _O_BINARY, 0644);
 #else
-  rs->fd = open(rs->filename, O_RDONLY | O_CREAT, 0644);
+  rs->fd = open(rs->filename, O_RDONLY, 0644);
 #endif
   int file_size = lseek(rs->fd, 0, SEEK_END);
   rs->file_size = file_size;
@@ -82,8 +82,8 @@ void readable_push_file_stream_read(readable_push_file_stream_t* stream, size_t 
     stream_notify((stream_t*)stream, error_event, ERROR("Stream is already destroyed"), (void (*)(void*))error_destroy);
   } else {
     int32_t diff = stream->file_size - stream->cursor;
-    if (size < diff) {
-      size = diff;
+    if (size > (size_t)diff) {
+      size = (size_t)diff;
     }
     uint8_t* buf = get_memory(size);
     size_t bytes = read(stream->fd, buf, size);
@@ -117,9 +117,9 @@ writeable_push_file_stream_t* writeable_push_file_stream_create(scheduler_pool_t
   stream_close_handler((stream_t*) ws, (void(*)(stream_t*))writeable_push_file_stream_close);
   ws->filename = strdup(filename);
 #ifdef _WIN32
-  ws->fd = open(ws->filename, _O_WRONLY | _O_BINARY | _O_CREAT, 0644);
+  ws->fd = open(ws->filename, _O_WRONLY | _O_BINARY | _O_CREAT | _O_TRUNC, 0644);
 #else
-  ws->fd = open(ws->filename, O_WRONLY | O_CREAT, 0644);
+  ws->fd = open(ws->filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 #endif
   return ws;
 }
@@ -157,9 +157,9 @@ readable_pull_file_stream_t* readable_pull_file_stream_create(scheduler_pool_t* 
   rs->filename = strdup(filename);
   rs->chunk_size = chunk_size;
 #ifdef _WIN32
-  rs->fd = open(rs->filename, _O_RDONLY | _O_BINARY | _O_CREAT, 0644);
+  rs->fd = open(rs->filename, _O_RDONLY | _O_BINARY, 0644);
 #else
-  rs->fd = open(rs->filename, O_RDONLY | O_CREAT, 0644);
+  rs->fd = open(rs->filename, O_RDONLY, 0644);
 #endif
   int file_size = lseek(rs->fd, 0, SEEK_END);
   rs->file_size = file_size;
@@ -235,9 +235,9 @@ writeable_pull_file_stream_t* writeable_pull_file_stream_create(scheduler_pool_t
   stream_close_handler((stream_t*) ws, (void(*)(stream_t*))writeable_pull_file_stream_close);
   ws->filename = strdup(filename);
 #ifdef _WIN32
-  ws->fd = open(ws->filename, _O_WRONLY | _O_BINARY | _O_CREAT, 0644);
+  ws->fd = open(ws->filename, _O_WRONLY | _O_BINARY | _O_CREAT | _O_TRUNC, 0644);
 #else
-  ws->fd = open(ws->filename, O_WRONLY | O_CREAT, 0644);
+  ws->fd = open(ws->filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 #endif
   return ws;
 }

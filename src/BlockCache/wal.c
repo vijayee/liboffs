@@ -88,7 +88,7 @@ int wal_read(wal_t* wal, wal_type_e* type, buffer_t** data, uint64_t* cursor, in
     wal->log = open(wal->current_file, O_RDWR | O_CREAT, 0644);
 #endif
     *wal_size = lseek(wal->log, 0,SEEK_END);
-    if(wal_size < 0) {
+    if(*wal_size < 0) {
       return -1;
     }
     if (lseek(wal->log, 0, SEEK_SET) < 0) {
@@ -140,7 +140,9 @@ int wal_read(wal_t* wal, wal_type_e* type, buffer_t** data, uint64_t* cursor, in
   }
 }
 void wal_destroy(wal_t* wal) {
-  close(wal->log);
+  if (wal->log > 0) {
+    close(wal->log);
+  }
   free(wal->current_file);
   if (wal->last_file != NULL) {
     free(wal->last_file);

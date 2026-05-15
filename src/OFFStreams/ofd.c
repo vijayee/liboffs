@@ -44,7 +44,7 @@ void ofd_add_file(ofd_t* ofd, const char* name, ori_t* file_ori) {
     ofd_entry_t entry;
     entry.name = strdup(name);
     entry.type = OFD_ENTRY_FILE;
-    entry.file_ori = file_ori;
+    entry.file_ori = (ori_t*)refcounter_reference((refcounter_t*)file_ori);
     vec_push(&ofd->entries, entry);
 }
 
@@ -53,7 +53,7 @@ void ofd_add_directory(ofd_t* ofd, const char* name, buffer_t* dir_hash) {
     ofd_entry_t entry;
     entry.name = strdup(name);
     entry.type = OFD_ENTRY_DIRECTORY;
-    entry.dir_hash = dir_hash;
+    entry.dir_hash = (buffer_t*)refcounter_reference((refcounter_t*)dir_hash);
     vec_push(&ofd->entries, entry);
 }
 
@@ -227,9 +227,13 @@ ofd_t* ofd_decode(buffer_t* data) {
                 file_ori->file_hash = hash;
                 file_ori->file_name = strdup(name);
                 ofd_add_file(ofd, name, file_ori);
+                DESTROY(file_ori, ori);
             } else {
                 ofd_add_directory(ofd, name, hash);
+                DESTROY(hash, buffer);
             }
+        } else if (hash) {
+            DESTROY(hash, buffer);
         }
         free(name);
         cbor_decref(&entry_map);
