@@ -261,6 +261,452 @@ TEST_F(FileTransferIntegrationTest, FixtureCompiles) {
   EXPECT_TRUE(true);
 }
 
+/* ── Category A: Direct Peer-to-Peer (No Relay) ─────────────────────── */
+
+TEST_F(FileTransferIntegrationTest, DirectSmallFileTransfer) {
+#ifndef HAS_MSQUIC
+    GTEST_SKIP() << "msquic not available";
+#else
+    uint16_t port_a = base_port + 0;
+    uint16_t ctrl_a = base_port + 10;
+    uint16_t port_b = base_port + 1;
+    uint16_t ctrl_b = base_port + 11;
+
+    start_node_no_relay(port_a, ctrl_a, test_dir + "/cache_a");
+    ASSERT_GT(nodes[0].pid, 0);
+    ASSERT_GE(nodes[0].control_fd, 0);
+
+    start_node_no_relay(port_b, ctrl_b, test_dir + "/cache_b");
+    ASSERT_GT(nodes[1].pid, 0);
+    ASSERT_GE(nodes[1].control_fd, 0);
+
+    std::string peer_cmd = std::string(CTRL_PEER_ADD) + " 127.0.0.1:" + std::to_string(port_b);
+    send_command(nodes[0].control_fd, peer_cmd);
+    send_command(nodes[0].control_fd, std::string(CTRL_WAIT_FOR_PEER) + " 1");
+
+    std::string resp = send_command(nodes[0].control_fd, std::string(CTRL_STORE_FILE) + " 100000 2 3");
+    ASSERT_NE(resp.find(CTRL_RESP_HASH), std::string::npos) << "STORE: " << resp;
+
+    std::istringstream hash_stream(resp.substr(strlen(CTRL_RESP_HASH) + 1));
+    std::string desc_hash_hex, file_hash_hex, stored_checksum_hex;
+    size_t final_byte;
+    hash_stream >> desc_hash_hex >> file_hash_hex >> final_byte >> stored_checksum_hex;
+
+    std::string fetch_cmd = std::string(CTRL_FETCH_FILE) + " " + desc_hash_hex + " " +
+                            file_hash_hex + " " + std::to_string(final_byte) + " 2 3";
+    resp = send_command(nodes[1].control_fd, fetch_cmd);
+    ASSERT_NE(resp.find(CTRL_RESP_DATA), std::string::npos) << "FETCH: " << resp;
+
+    std::istringstream data_stream(resp.substr(strlen(CTRL_RESP_DATA) + 1));
+    std::string fetched_checksum_hex;
+    size_t data_size;
+    data_stream >> fetched_checksum_hex >> data_size;
+    EXPECT_GT(data_size, 0u);
+    EXPECT_EQ(fetched_checksum_hex, stored_checksum_hex) << "Data integrity check failed";
+#endif
+}
+
+TEST_F(FileTransferIntegrationTest, DirectLargeFileTransfer) {
+#ifndef HAS_MSQUIC
+    GTEST_SKIP() << "msquic not available";
+#else
+    uint16_t port_a = base_port + 0;
+    uint16_t ctrl_a = base_port + 10;
+    uint16_t port_b = base_port + 1;
+    uint16_t ctrl_b = base_port + 11;
+
+    start_node_no_relay(port_a, ctrl_a, test_dir + "/cache_a");
+    ASSERT_GT(nodes[0].pid, 0);
+    ASSERT_GE(nodes[0].control_fd, 0);
+
+    start_node_no_relay(port_b, ctrl_b, test_dir + "/cache_b");
+    ASSERT_GT(nodes[1].pid, 0);
+    ASSERT_GE(nodes[1].control_fd, 0);
+
+    std::string peer_cmd = std::string(CTRL_PEER_ADD) + " 127.0.0.1:" + std::to_string(port_b);
+    send_command(nodes[0].control_fd, peer_cmd);
+    send_command(nodes[0].control_fd, std::string(CTRL_WAIT_FOR_PEER) + " 1");
+
+    std::string resp = send_command(nodes[0].control_fd, std::string(CTRL_STORE_FILE) + " 640000 2 3");
+    ASSERT_NE(resp.find(CTRL_RESP_HASH), std::string::npos) << "STORE: " << resp;
+
+    std::istringstream hash_stream(resp.substr(strlen(CTRL_RESP_HASH) + 1));
+    std::string desc_hash_hex, file_hash_hex, stored_checksum_hex;
+    size_t final_byte;
+    hash_stream >> desc_hash_hex >> file_hash_hex >> final_byte >> stored_checksum_hex;
+
+    std::string fetch_cmd = std::string(CTRL_FETCH_FILE) + " " + desc_hash_hex + " " +
+                            file_hash_hex + " " + std::to_string(final_byte) + " 2 3";
+    resp = send_command(nodes[1].control_fd, fetch_cmd);
+    ASSERT_NE(resp.find(CTRL_RESP_DATA), std::string::npos) << "FETCH: " << resp;
+
+    std::istringstream data_stream(resp.substr(strlen(CTRL_RESP_DATA) + 1));
+    std::string fetched_checksum_hex;
+    size_t data_size;
+    data_stream >> fetched_checksum_hex >> data_size;
+    EXPECT_GT(data_size, 0u);
+    EXPECT_EQ(fetched_checksum_hex, stored_checksum_hex) << "Data integrity check failed";
+#endif
+}
+
+TEST_F(FileTransferIntegrationTest, DirectLateJoin) {
+#ifndef HAS_MSQUIC
+    GTEST_SKIP() << "msquic not available";
+#else
+    uint16_t port_a = base_port + 0;
+    uint16_t ctrl_a = base_port + 10;
+    uint16_t port_b = base_port + 1;
+    uint16_t ctrl_b = base_port + 11;
+
+    start_node_no_relay(port_a, ctrl_a, test_dir + "/cache_a");
+    ASSERT_GT(nodes[0].pid, 0);
+    ASSERT_GE(nodes[0].control_fd, 0);
+
+    std::string resp = send_command(nodes[0].control_fd, std::string(CTRL_STORE_FILE) + " 100000 2 3");
+    ASSERT_NE(resp.find(CTRL_RESP_HASH), std::string::npos) << "STORE: " << resp;
+
+    std::istringstream hash_stream(resp.substr(strlen(CTRL_RESP_HASH) + 1));
+    std::string desc_hash_hex, file_hash_hex, stored_checksum_hex;
+    size_t final_byte;
+    hash_stream >> desc_hash_hex >> file_hash_hex >> final_byte >> stored_checksum_hex;
+
+    start_node_no_relay(port_b, ctrl_b, test_dir + "/cache_b");
+    ASSERT_GT(nodes[1].pid, 0);
+    ASSERT_GE(nodes[1].control_fd, 0);
+
+    std::string peer_cmd = std::string(CTRL_PEER_ADD) + " 127.0.0.1:" + std::to_string(port_a);
+    send_command(nodes[1].control_fd, peer_cmd);
+    send_command(nodes[1].control_fd, std::string(CTRL_WAIT_FOR_PEER) + " 1");
+
+    std::string fetch_cmd = std::string(CTRL_FETCH_FILE) + " " + desc_hash_hex + " " +
+                            file_hash_hex + " " + std::to_string(final_byte) + " 2 3";
+    resp = send_command(nodes[1].control_fd, fetch_cmd);
+    ASSERT_NE(resp.find(CTRL_RESP_DATA), std::string::npos) << "FETCH: " << resp;
+
+    std::istringstream data_stream(resp.substr(strlen(CTRL_RESP_DATA) + 1));
+    std::string fetched_checksum_hex;
+    size_t data_size;
+    data_stream >> fetched_checksum_hex >> data_size;
+    EXPECT_GT(data_size, 0u);
+    EXPECT_EQ(fetched_checksum_hex, stored_checksum_hex) << "Data integrity check failed";
+#endif
+}
+
+/* ── Category B: Relay-Mediated ─────────────────────────────────────── */
+
+TEST_F(FileTransferIntegrationTest, RelaySmallFileTransfer) {
+#ifndef HAS_MSQUIC
+    GTEST_SKIP() << "msquic not available";
+#else
+    uint16_t relay_port = base_port + 0;
+    uint16_t port_a = base_port + 1;
+    uint16_t ctrl_a = base_port + 11;
+    uint16_t port_b = base_port + 2;
+    uint16_t ctrl_b = base_port + 12;
+
+    start_relay(relay_port);
+
+    start_node(port_a, ctrl_a, relay_port, test_dir + "/cache_a");
+    ASSERT_GT(nodes[0].pid, 0);
+    ASSERT_GE(nodes[0].control_fd, 0);
+
+    start_node(port_b, ctrl_b, relay_port, test_dir + "/cache_b");
+    ASSERT_GT(nodes[1].pid, 0);
+    ASSERT_GE(nodes[1].control_fd, 0);
+
+    std::string resp = send_command(nodes[0].control_fd, std::string(CTRL_STORE_FILE) + " 100000 2 3");
+    ASSERT_NE(resp.find(CTRL_RESP_HASH), std::string::npos) << "STORE: " << resp;
+
+    std::istringstream hash_stream(resp.substr(strlen(CTRL_RESP_HASH) + 1));
+    std::string desc_hash_hex, file_hash_hex, stored_checksum_hex;
+    size_t final_byte;
+    hash_stream >> desc_hash_hex >> file_hash_hex >> final_byte >> stored_checksum_hex;
+
+    std::string fetch_cmd = std::string(CTRL_FETCH_FILE) + " " + desc_hash_hex + " " +
+                            file_hash_hex + " " + std::to_string(final_byte) + " 2 3";
+    resp = send_command(nodes[1].control_fd, fetch_cmd);
+    ASSERT_NE(resp.find(CTRL_RESP_DATA), std::string::npos) << "FETCH: " << resp;
+
+    std::istringstream data_stream(resp.substr(strlen(CTRL_RESP_DATA) + 1));
+    std::string fetched_checksum_hex;
+    size_t data_size;
+    data_stream >> fetched_checksum_hex >> data_size;
+    EXPECT_GT(data_size, 0u);
+    EXPECT_EQ(fetched_checksum_hex, stored_checksum_hex) << "Data integrity check failed";
+#endif
+}
+
+TEST_F(FileTransferIntegrationTest, RelayLargeFileTransfer) {
+#ifndef HAS_MSQUIC
+    GTEST_SKIP() << "msquic not available";
+#else
+    uint16_t relay_port = base_port + 0;
+    uint16_t port_a = base_port + 1;
+    uint16_t ctrl_a = base_port + 11;
+    uint16_t port_b = base_port + 2;
+    uint16_t ctrl_b = base_port + 12;
+
+    start_relay(relay_port);
+
+    start_node(port_a, ctrl_a, relay_port, test_dir + "/cache_a");
+    ASSERT_GT(nodes[0].pid, 0);
+    ASSERT_GE(nodes[0].control_fd, 0);
+
+    start_node(port_b, ctrl_b, relay_port, test_dir + "/cache_b");
+    ASSERT_GT(nodes[1].pid, 0);
+    ASSERT_GE(nodes[1].control_fd, 0);
+
+    std::string resp = send_command(nodes[0].control_fd, std::string(CTRL_STORE_FILE) + " 640000 2 3");
+    ASSERT_NE(resp.find(CTRL_RESP_HASH), std::string::npos) << "STORE: " << resp;
+
+    std::istringstream hash_stream(resp.substr(strlen(CTRL_RESP_HASH) + 1));
+    std::string desc_hash_hex, file_hash_hex, stored_checksum_hex;
+    size_t final_byte;
+    hash_stream >> desc_hash_hex >> file_hash_hex >> final_byte >> stored_checksum_hex;
+
+    std::string fetch_cmd = std::string(CTRL_FETCH_FILE) + " " + desc_hash_hex + " " +
+                            file_hash_hex + " " + std::to_string(final_byte) + " 2 3";
+    resp = send_command(nodes[1].control_fd, fetch_cmd);
+    ASSERT_NE(resp.find(CTRL_RESP_DATA), std::string::npos) << "FETCH: " << resp;
+
+    std::istringstream data_stream(resp.substr(strlen(CTRL_RESP_DATA) + 1));
+    std::string fetched_checksum_hex;
+    size_t data_size;
+    data_stream >> fetched_checksum_hex >> data_size;
+    EXPECT_GT(data_size, 0u);
+    EXPECT_EQ(fetched_checksum_hex, stored_checksum_hex) << "Data integrity check failed";
+#endif
+}
+
+TEST_F(FileTransferIntegrationTest, RelayLateJoin) {
+#ifndef HAS_MSQUIC
+    GTEST_SKIP() << "msquic not available";
+#else
+    uint16_t relay_port = base_port + 0;
+    uint16_t port_a = base_port + 1;
+    uint16_t ctrl_a = base_port + 11;
+    uint16_t port_b = base_port + 2;
+    uint16_t ctrl_b = base_port + 12;
+
+    start_relay(relay_port);
+
+    start_node(port_a, ctrl_a, relay_port, test_dir + "/cache_a");
+    ASSERT_GT(nodes[0].pid, 0);
+    ASSERT_GE(nodes[0].control_fd, 0);
+
+    std::string resp = send_command(nodes[0].control_fd, std::string(CTRL_STORE_FILE) + " 100000 2 3");
+    ASSERT_NE(resp.find(CTRL_RESP_HASH), std::string::npos) << "STORE: " << resp;
+
+    std::istringstream hash_stream(resp.substr(strlen(CTRL_RESP_HASH) + 1));
+    std::string desc_hash_hex, file_hash_hex, stored_checksum_hex;
+    size_t final_byte;
+    hash_stream >> desc_hash_hex >> file_hash_hex >> final_byte >> stored_checksum_hex;
+
+    start_node(port_b, ctrl_b, relay_port, test_dir + "/cache_b");
+    ASSERT_GT(nodes[1].pid, 0);
+    ASSERT_GE(nodes[1].control_fd, 0);
+
+    std::string fetch_cmd = std::string(CTRL_FETCH_FILE) + " " + desc_hash_hex + " " +
+                            file_hash_hex + " " + std::to_string(final_byte) + " 2 3";
+    resp = send_command(nodes[1].control_fd, fetch_cmd);
+    ASSERT_NE(resp.find(CTRL_RESP_DATA), std::string::npos) << "FETCH: " << resp;
+
+    std::istringstream data_stream(resp.substr(strlen(CTRL_RESP_DATA) + 1));
+    std::string fetched_checksum_hex;
+    size_t data_size;
+    data_stream >> fetched_checksum_hex >> data_size;
+    EXPECT_GT(data_size, 0u);
+    EXPECT_EQ(fetched_checksum_hex, stored_checksum_hex) << "Data integrity check failed";
+#endif
+}
+
+TEST_F(FileTransferIntegrationTest, NATDetectionOpen) {
+#ifndef HAS_MSQUIC
+    GTEST_SKIP() << "msquic not available";
+#else
+    uint16_t relay1_port = base_port + 0;
+    uint16_t relay2_port = base_port + 1;
+    uint16_t port_a = base_port + 2;
+    uint16_t ctrl_a = base_port + 12;
+
+    start_relay(relay1_port);
+    start_relay(relay2_port);
+
+    start_node(port_a, ctrl_a, relay1_port, test_dir + "/cache_a");
+    ASSERT_GT(nodes[0].pid, 0);
+    ASSERT_GE(nodes[0].control_fd, 0);
+
+    std::string connect_cmd = std::string(CTRL_CONNECT_RELAY) + " 127.0.0.1:" + std::to_string(relay2_port);
+    send_command(nodes[0].control_fd, connect_cmd);
+
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    std::string resp = send_command(nodes[0].control_fd, CTRL_STATUS);
+    EXPECT_NE(resp.find("nat=open"), std::string::npos) << "NAT not detected as open: " << resp;
+#endif
+}
+
+/* ── Category C: Multi-Node Distribution ────────────────────────────── */
+
+TEST_F(FileTransferIntegrationTest, ThreeNodePropagation) {
+#ifndef HAS_MSQUIC
+    GTEST_SKIP() << "msquic not available";
+#else
+    uint16_t relay_port = base_port + 0;
+    uint16_t port_a = base_port + 1;
+    uint16_t ctrl_a = base_port + 11;
+    uint16_t port_b = base_port + 2;
+    uint16_t ctrl_b = base_port + 12;
+    uint16_t port_c = base_port + 3;
+    uint16_t ctrl_c = base_port + 13;
+
+    start_relay(relay_port);
+
+    start_node(port_a, ctrl_a, relay_port, test_dir + "/cache_a");
+    ASSERT_GT(nodes[0].pid, 0);
+    ASSERT_GE(nodes[0].control_fd, 0);
+
+    start_node(port_b, ctrl_b, relay_port, test_dir + "/cache_b");
+    ASSERT_GT(nodes[1].pid, 0);
+    ASSERT_GE(nodes[1].control_fd, 0);
+
+    start_node(port_c, ctrl_c, relay_port, test_dir + "/cache_c");
+    ASSERT_GT(nodes[2].pid, 0);
+    ASSERT_GE(nodes[2].control_fd, 0);
+
+    std::string resp = send_command(nodes[0].control_fd, std::string(CTRL_STORE_FILE) + " 100000 2 3");
+    ASSERT_NE(resp.find(CTRL_RESP_HASH), std::string::npos) << "STORE: " << resp;
+
+    std::istringstream hash_stream(resp.substr(strlen(CTRL_RESP_HASH) + 1));
+    std::string desc_hash_hex, file_hash_hex, stored_checksum_hex;
+    size_t final_byte;
+    hash_stream >> desc_hash_hex >> file_hash_hex >> final_byte >> stored_checksum_hex;
+
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+
+    std::string fetch_cmd = std::string(CTRL_FETCH_FILE) + " " + desc_hash_hex + " " +
+                            file_hash_hex + " " + std::to_string(final_byte) + " 2 3";
+    resp = send_command(nodes[2].control_fd, fetch_cmd);
+    ASSERT_NE(resp.find(CTRL_RESP_DATA), std::string::npos) << "FETCH: " << resp;
+
+    std::istringstream data_stream(resp.substr(strlen(CTRL_RESP_DATA) + 1));
+    std::string fetched_checksum_hex;
+    size_t data_size;
+    data_stream >> fetched_checksum_hex >> data_size;
+    EXPECT_GT(data_size, 0u);
+    EXPECT_EQ(fetched_checksum_hex, stored_checksum_hex) << "Data integrity check failed";
+#endif
+}
+
+TEST_F(FileTransferIntegrationTest, ThreeNodeLateJoin) {
+#ifndef HAS_MSQUIC
+    GTEST_SKIP() << "msquic not available";
+#else
+    uint16_t relay_port = base_port + 0;
+    uint16_t port_a = base_port + 1;
+    uint16_t ctrl_a = base_port + 11;
+    uint16_t port_b = base_port + 2;
+    uint16_t ctrl_b = base_port + 12;
+    uint16_t port_c = base_port + 3;
+    uint16_t ctrl_c = base_port + 13;
+
+    start_relay(relay_port);
+
+    start_node(port_a, ctrl_a, relay_port, test_dir + "/cache_a");
+    ASSERT_GT(nodes[0].pid, 0);
+    ASSERT_GE(nodes[0].control_fd, 0);
+
+    start_node(port_b, ctrl_b, relay_port, test_dir + "/cache_b");
+    ASSERT_GT(nodes[1].pid, 0);
+    ASSERT_GE(nodes[1].control_fd, 0);
+
+    std::string resp = send_command(nodes[0].control_fd, std::string(CTRL_STORE_FILE) + " 100000 2 3");
+    ASSERT_NE(resp.find(CTRL_RESP_HASH), std::string::npos) << "STORE: " << resp;
+
+    std::istringstream hash_stream(resp.substr(strlen(CTRL_RESP_HASH) + 1));
+    std::string desc_hash_hex, file_hash_hex, stored_checksum_hex;
+    size_t final_byte;
+    hash_stream >> desc_hash_hex >> file_hash_hex >> final_byte >> stored_checksum_hex;
+
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+
+    start_node(port_c, ctrl_c, relay_port, test_dir + "/cache_c");
+    ASSERT_GT(nodes[2].pid, 0);
+    ASSERT_GE(nodes[2].control_fd, 0);
+
+    std::string fetch_cmd = std::string(CTRL_FETCH_FILE) + " " + desc_hash_hex + " " +
+                            file_hash_hex + " " + std::to_string(final_byte) + " 2 3";
+    resp = send_command(nodes[2].control_fd, fetch_cmd);
+    ASSERT_NE(resp.find(CTRL_RESP_DATA), std::string::npos) << "FETCH: " << resp;
+
+    std::istringstream data_stream(resp.substr(strlen(CTRL_RESP_DATA) + 1));
+    std::string fetched_checksum_hex;
+    size_t data_size;
+    data_stream >> fetched_checksum_hex >> data_size;
+    EXPECT_GT(data_size, 0u);
+    EXPECT_EQ(fetched_checksum_hex, stored_checksum_hex) << "Data integrity check failed";
+#endif
+}
+
+TEST_F(FileTransferIntegrationTest, ConcurrentDownloads) {
+#ifndef HAS_MSQUIC
+    GTEST_SKIP() << "msquic not available";
+#else
+    uint16_t relay_port = base_port + 0;
+    uint16_t port_a = base_port + 1;
+    uint16_t ctrl_a = base_port + 11;
+    uint16_t port_b = base_port + 2;
+    uint16_t ctrl_b = base_port + 12;
+    uint16_t port_c = base_port + 3;
+    uint16_t ctrl_c = base_port + 13;
+
+    start_relay(relay_port);
+
+    start_node(port_a, ctrl_a, relay_port, test_dir + "/cache_a");
+    ASSERT_GT(nodes[0].pid, 0);
+    ASSERT_GE(nodes[0].control_fd, 0);
+
+    start_node(port_b, ctrl_b, relay_port, test_dir + "/cache_b");
+    ASSERT_GT(nodes[1].pid, 0);
+    ASSERT_GE(nodes[1].control_fd, 0);
+
+    start_node(port_c, ctrl_c, relay_port, test_dir + "/cache_c");
+    ASSERT_GT(nodes[2].pid, 0);
+    ASSERT_GE(nodes[2].control_fd, 0);
+
+    std::string resp = send_command(nodes[0].control_fd, std::string(CTRL_STORE_FILE) + " 100000 2 3");
+    ASSERT_NE(resp.find(CTRL_RESP_HASH), std::string::npos) << "STORE: " << resp;
+
+    std::istringstream hash_stream(resp.substr(strlen(CTRL_RESP_HASH) + 1));
+    std::string desc_hash_hex, file_hash_hex, stored_checksum_hex;
+    size_t final_byte;
+    hash_stream >> desc_hash_hex >> file_hash_hex >> final_byte >> stored_checksum_hex;
+
+    std::string fetch_cmd = std::string(CTRL_FETCH_FILE) + " " + desc_hash_hex + " " +
+                            file_hash_hex + " " + std::to_string(final_byte) + " 2 3";
+
+    resp = send_command(nodes[1].control_fd, fetch_cmd);
+    ASSERT_NE(resp.find(CTRL_RESP_DATA), std::string::npos) << "FETCH B: " << resp;
+
+    std::istringstream data_stream_b(resp.substr(strlen(CTRL_RESP_DATA) + 1));
+    std::string fetched_checksum_hex_b;
+    size_t data_size_b;
+    data_stream_b >> fetched_checksum_hex_b >> data_size_b;
+    EXPECT_GT(data_size_b, 0u);
+    EXPECT_EQ(fetched_checksum_hex_b, stored_checksum_hex) << "Node B data integrity check failed";
+
+    resp = send_command(nodes[2].control_fd, fetch_cmd);
+    ASSERT_NE(resp.find(CTRL_RESP_DATA), std::string::npos) << "FETCH C: " << resp;
+
+    std::istringstream data_stream_c(resp.substr(strlen(CTRL_RESP_DATA) + 1));
+    std::string fetched_checksum_hex_c;
+    size_t data_size_c;
+    data_stream_c >> fetched_checksum_hex_c >> data_size_c;
+    EXPECT_GT(data_size_c, 0u);
+    EXPECT_EQ(fetched_checksum_hex_c, stored_checksum_hex) << "Node C data integrity check failed";
+#endif
+}
+
 int main(int argc, char* argv[]) {
   for (int idx = 1; idx < argc; idx++) {
     std::string arg(argv[idx]);
