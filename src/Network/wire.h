@@ -31,6 +31,10 @@
 #define WIRE_RECALL_ACCEPT       17
 #define WIRE_RECALL_DECLINE      18
 #define WIRE_RATE_LIMITED        19
+#define WIRE_RELAY_SEND          30
+#define WIRE_RELAY_RECEIVED      31
+#define WIRE_ADDR_REQUEST        32
+#define WIRE_ADDR_RESPONSE       33
 
 // Magic number for protocol identification
 #define WIRE_MAGIC 0x4F464653  // "OFFS"
@@ -237,6 +241,38 @@ typedef struct {
   float current_limit;
 } wire_rate_limited_t;
 
+// --- RelaySend ---
+
+typedef struct wire_relay_send_t {
+  uint32_t src_endpoint_id;
+  uint32_t dest_endpoint_id;
+  uint8_t* payload;
+  size_t payload_len;
+} wire_relay_send_t;
+
+// --- RelayReceived ---
+
+typedef struct wire_relay_received_t {
+  uint32_t src_endpoint_id;
+  uint8_t* payload;
+  size_t payload_len;
+} wire_relay_received_t;
+
+// --- AddrRequest ---
+
+typedef struct wire_addr_request_t {
+  uint64_t message_id;
+} wire_addr_request_t;
+
+// --- AddrResponse ---
+
+typedef struct wire_addr_response_t {
+  uint64_t message_id;
+  uint32_t endpoint_id;
+  uint32_t reflexive_addr;
+  uint16_t reflexive_port;
+} wire_addr_response_t;
+
 // Encode functions — return CBOR item (caller must cbor_decref)
 cbor_item_t* wire_ping_encode(const wire_ping_t* msg);
 cbor_item_t* wire_ping_response_encode(const wire_ping_response_t* msg);
@@ -257,6 +293,10 @@ cbor_item_t* wire_recall_block_encode(const wire_recall_block_t* msg);
 cbor_item_t* wire_recall_accept_encode(const wire_recall_accept_t* msg);
 cbor_item_t* wire_recall_decline_encode(const wire_recall_decline_t* msg);
 cbor_item_t* wire_rate_limited_encode(const wire_rate_limited_t* msg);
+cbor_item_t* wire_relay_send_encode(const wire_relay_send_t* msg);
+cbor_item_t* wire_relay_received_encode(const wire_relay_received_t* msg);
+cbor_item_t* wire_addr_request_encode(const wire_addr_request_t* msg);
+cbor_item_t* wire_addr_response_encode(const wire_addr_response_t* msg);
 
 // Decode functions — fill existing struct, return 0 on success, -1 on error
 int wire_ping_decode(cbor_item_t* item, wire_ping_t* msg);
@@ -278,6 +318,10 @@ int wire_recall_block_decode(cbor_item_t* item, wire_recall_block_t* msg);
 int wire_recall_accept_decode(cbor_item_t* item, wire_recall_accept_t* msg);
 int wire_recall_decline_decode(cbor_item_t* item, wire_recall_decline_t* msg);
 int wire_rate_limited_decode(cbor_item_t* item, wire_rate_limited_t* msg);
+int wire_relay_send_decode(cbor_item_t* item, wire_relay_send_t* msg);
+int wire_relay_received_decode(cbor_item_t* item, wire_relay_received_t* msg);
+int wire_addr_request_decode(cbor_item_t* item, wire_addr_request_t* msg);
+int wire_addr_response_decode(cbor_item_t* item, wire_addr_response_t* msg);
 
 // Helper: extract type byte from CBOR item
 uint8_t wire_get_type(cbor_item_t* item);
@@ -291,5 +335,9 @@ void wire_find_block_response_destroy(wire_find_block_response_t* msg);
 void wire_recall_accept_destroy(wire_recall_accept_t* msg);
 // Frees exclude_hashes array and each hash pointer, then the struct itself
 void wire_seeking_blocks_destroy(wire_seeking_blocks_t* msg);
+// Frees payload and the struct itself
+void wire_relay_send_destroy(wire_relay_send_t* msg);
+// Frees payload and the struct itself
+void wire_relay_received_destroy(wire_relay_received_t* msg);
 
 #endif // OFFS_WIRE_H

@@ -1357,3 +1357,199 @@ void wire_seeking_blocks_destroy(wire_seeking_blocks_t* msg) {
   }
   free(msg);
 }
+
+// --- RelaySend ---
+
+cbor_item_t* wire_relay_send_encode(const wire_relay_send_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(4);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(WIRE_RELAY_SEND);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32(msg->src_endpoint_id);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32(msg->dest_endpoint_id);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_bytestring(msg->payload, msg->payload_len);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int wire_relay_send_decode(cbor_item_t* item, wire_relay_send_t* msg) {
+  if (cbor_array_size(item) < 4) return -1;
+  msg->payload = NULL;
+  msg->payload_len = 0;
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (cbor_get_uint8(type_item) != WIRE_RELAY_SEND) { cbor_decref(&type_item); return -1; }
+  cbor_decref(&type_item);
+  cbor_item_t* src = cbor_array_get(item, 1);
+  msg->src_endpoint_id = cbor_get_uint32(src);
+  cbor_decref(&src);
+  cbor_item_t* dest = cbor_array_get(item, 2);
+  msg->dest_endpoint_id = cbor_get_uint32(dest);
+  cbor_decref(&dest);
+  cbor_item_t* data = cbor_array_get(item, 3);
+  if (cbor_isa_bytestring(data) && cbor_bytestring_length(data) > 0) {
+    msg->payload_len = cbor_bytestring_length(data);
+    msg->payload = get_clear_memory(msg->payload_len);
+    if (msg->payload != NULL) {
+      memcpy(msg->payload, cbor_bytestring_handle(data), msg->payload_len);
+    }
+  }
+  cbor_decref(&data);
+  return 0;
+}
+
+// --- RelayReceived ---
+
+cbor_item_t* wire_relay_received_encode(const wire_relay_received_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(3);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(WIRE_RELAY_RECEIVED);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32(msg->src_endpoint_id);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_bytestring(msg->payload, msg->payload_len);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int wire_relay_received_decode(cbor_item_t* item, wire_relay_received_t* msg) {
+  if (cbor_array_size(item) < 3) return -1;
+  msg->payload = NULL;
+  msg->payload_len = 0;
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (cbor_get_uint8(type_item) != WIRE_RELAY_RECEIVED) { cbor_decref(&type_item); return -1; }
+  cbor_decref(&type_item);
+  cbor_item_t* src = cbor_array_get(item, 1);
+  msg->src_endpoint_id = cbor_get_uint32(src);
+  cbor_decref(&src);
+  cbor_item_t* data = cbor_array_get(item, 2);
+  if (cbor_isa_bytestring(data) && cbor_bytestring_length(data) > 0) {
+    msg->payload_len = cbor_bytestring_length(data);
+    msg->payload = get_clear_memory(msg->payload_len);
+    if (msg->payload != NULL) {
+      memcpy(msg->payload, cbor_bytestring_handle(data), msg->payload_len);
+    }
+  }
+  cbor_decref(&data);
+  return 0;
+}
+
+// --- AddrRequest ---
+
+cbor_item_t* wire_addr_request_encode(const wire_addr_request_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(3);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(WIRE_ADDR_REQUEST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->message_id >> 32);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->message_id & 0xFFFFFFFF);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int wire_addr_request_decode(cbor_item_t* item, wire_addr_request_t* msg) {
+  if (cbor_array_size(item) < 3) return -1;
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (cbor_get_uint8(type_item) != WIRE_ADDR_REQUEST) { cbor_decref(&type_item); return -1; }
+  cbor_decref(&type_item);
+  cbor_item_t* id_hi = cbor_array_get(item, 1);
+  cbor_item_t* id_lo = cbor_array_get(item, 2);
+  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  cbor_decref(&id_hi);
+  cbor_decref(&id_lo);
+  return 0;
+}
+
+// --- AddrResponse ---
+
+cbor_item_t* wire_addr_response_encode(const wire_addr_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(6);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(WIRE_ADDR_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->message_id >> 32);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->message_id & 0xFFFFFFFF);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32(msg->endpoint_id);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32(msg->reflexive_addr);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint16(msg->reflexive_port);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int wire_addr_response_decode(cbor_item_t* item, wire_addr_response_t* msg) {
+  if (cbor_array_size(item) < 6) return -1;
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (cbor_get_uint8(type_item) != WIRE_ADDR_RESPONSE) { cbor_decref(&type_item); return -1; }
+  cbor_decref(&type_item);
+  cbor_item_t* id_hi = cbor_array_get(item, 1);
+  cbor_item_t* id_lo = cbor_array_get(item, 2);
+  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  cbor_decref(&id_hi);
+  cbor_decref(&id_lo);
+  cbor_item_t* endpoint = cbor_array_get(item, 3);
+  msg->endpoint_id = cbor_get_uint32(endpoint);
+  cbor_decref(&endpoint);
+  cbor_item_t* addr = cbor_array_get(item, 4);
+  msg->reflexive_addr = cbor_get_uint32(addr);
+  cbor_decref(&addr);
+  cbor_item_t* port = cbor_array_get(item, 5);
+  msg->reflexive_port = (uint16_t)cbor_get_uint16(port);
+  cbor_decref(&port);
+  return 0;
+}
+
+// --- Destroy helpers for relay wire types ---
+
+void wire_relay_send_destroy(wire_relay_send_t* msg) {
+  if (msg == NULL) return;
+  free(msg->payload);
+  free(msg);
+}
+
+void wire_relay_received_destroy(wire_relay_received_t* msg) {
+  if (msg == NULL) return;
+  free(msg->payload);
+  free(msg);
+}
