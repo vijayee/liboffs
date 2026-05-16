@@ -29,6 +29,7 @@ extern "C" {
 #include "Network/connection_manager.h"
 #include "Network/topology_metrics.h"
 #include "Configuration/config.h"
+#include "Util/allocator.h"
 }
 
 // === Query tests ===
@@ -1773,4 +1774,299 @@ TEST_F(TopologyMetricsTest, AggregateRpcCalls) {
   topology_metrics_update_peers(metrics, snapshots, 2);
   EXPECT_EQ(metrics->total_rpc_calls[WIRE_FIND_BLOCK], 30u);
   EXPECT_EQ(metrics->total_rpc_calls[WIRE_STORE_BLOCK], 20u);
+}
+
+// === Wire protocol CBOR round-trip tests ===
+
+// Helper: encode CBOR item to bytes, then decode back
+static int wire_encode_decode_roundtrip(cbor_item_t* encoded, unsigned char** out, size_t* out_len) {
+  size_t written = cbor_serialize_alloc(encoded, out, out_len);
+  if (written == 0) return -1;
+  return 0;
+}
+
+// --- FindBlockResponse round-trip tests ---
+
+TEST(WireFindBlockResponseTest, EncodeDecodeWithoutBlockData) {
+  wire_find_block_response_t original = {};
+  original.message_id = 0xAABBCCDDEEFF0011ULL;
+  memset(original.block_hash, 0xDD, 32);
+  original.found = 0;
+  memset(original.holder.hash, 0x11, NODE_ID_HASH_SIZE);
+  strcpy(original.holder.str, "node-holder");
+  original.fib = 42;
+  memset(original.path[0].hash, 0x22, NODE_ID_HASH_SIZE);
+  strcpy(original.path[0].str, "path-node-0");
+  original.path_len = 1;
+  original.latency_ms = 1500;
+  original.block_data = NULL;
+  original.block_data_len = 0;
+  original.block_fib = 0;
+
+  cbor_item_t* encoded = wire_find_block_response_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  // Serialize and deserialize
+  unsigned char* buf = NULL;
+  size_t buf_len = 0;
+  int rc = wire_encode_decode_roundtrip(encoded, &buf, &buf_len);
+  cbor_decref(&encoded);
+  ASSERT_EQ(rc, 0);
+  ASSERT_NE(buf, nullptr);
+
+  // Parse CBOR
+  struct cbor_load_result load_result;
+  cbor_item_t* decoded = cbor_load(buf, buf_len, &load_result);
+  free(buf);
+  ASSERT_NE(decoded, nullptr);
+  ASSERT_EQ(load_result.error.code, CBOR_ERR_NONE);
+
+  wire_find_block_response_t result = {};
+  rc = wire_find_block_response_decode(decoded, &result);
+  cbor_decref(&decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(result.message_id, original.message_id);
+  EXPECT_EQ(result.found, original.found);
+  EXPECT_EQ(result.fib, original.fib);
+  EXPECT_EQ(result.path_len, original.path_len);
+  EXPECT_EQ(result.latency_ms, original.latency_ms);
+  EXPECT_EQ(result.block_data_len, (size_t)0);
+  EXPECT_EQ(result.block_data, nullptr);
+  EXPECT_EQ(result.block_fib, (uint32_t)0);
+  EXPECT_EQ(memcmp(result.block_hash, original.block_hash, 32), 0);
+}
+
+TEST(WireFindBlockResponseTest, EncodeDecodeWithBlockData) {
+  wire_find_block_response_t original = {};
+  original.message_id = 0x1122334455667788ULL;
+  memset(original.block_hash, 0xAA, 32);
+  original.found = 1;
+  memset(original.holder.hash, 0xBB, NODE_ID_HASH_SIZE);
+  strcpy(original.holder.str, "holder-node");
+  original.fib = 99;
+  memset(original.path[0].hash, 0xCC, NODE_ID_HASH_SIZE);
+  strcpy(original.path[0].str, "path-node-0");
+  memset(original.path[1].hash, 0xDD, NODE_ID_HASH_SIZE);
+  strcpy(original.path[1].str, "path-node-1");
+  original.path_len = 2;
+  original.latency_ms = 3200;
+  uint8_t test_data[] = {0x01, 0x02, 0x03, 0x04, 0x05};
+  original.block_data = test_data;
+  original.block_data_len = sizeof(test_data);
+  original.block_fib = 77;
+
+  cbor_item_t* encoded = wire_find_block_response_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  // Verify the array has 12 elements (9 base + 3 block data)
+  EXPECT_EQ(cbor_array_size(encoded), (size_t)12);
+
+  unsigned char* buf = NULL;
+  size_t buf_len = 0;
+  int rc = wire_encode_decode_roundtrip(encoded, &buf, &buf_len);
+  cbor_decref(&encoded);
+  ASSERT_EQ(rc, 0);
+  ASSERT_NE(buf, nullptr);
+
+  struct cbor_load_result load_result;
+  cbor_item_t* decoded = cbor_load(buf, buf_len, &load_result);
+  free(buf);
+  ASSERT_NE(decoded, nullptr);
+  ASSERT_EQ(load_result.error.code, CBOR_ERR_NONE);
+
+  wire_find_block_response_t result = {};
+  rc = wire_find_block_response_decode(decoded, &result);
+  cbor_decref(&decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(result.message_id, original.message_id);
+  EXPECT_EQ(result.found, original.found);
+  EXPECT_EQ(result.fib, original.fib);
+  EXPECT_EQ(result.path_len, original.path_len);
+  EXPECT_EQ(result.latency_ms, original.latency_ms);
+  EXPECT_EQ(result.block_data_len, original.block_data_len);
+  EXPECT_NE(result.block_data, nullptr);
+  EXPECT_EQ(result.block_fib, original.block_fib);
+  EXPECT_EQ(memcmp(result.block_data, original.block_data, original.block_data_len), 0);
+  EXPECT_EQ(memcmp(result.block_hash, original.block_hash, 32), 0);
+
+  free(result.block_data);
+}
+
+TEST(WireFindBlockResponseTest, EncodeDecodeFoundButNoBlockData) {
+  wire_find_block_response_t original = {};
+  original.message_id = 0x1234ULL;
+  memset(original.block_hash, 0xEE, 32);
+  original.found = 1;  // found=true, but block_data is NULL
+  memset(original.holder.hash, 0xFF, NODE_ID_HASH_SIZE);
+  strcpy(original.holder.str, "holder");
+  original.fib = 10;
+  original.path_len = 0;
+  original.latency_ms = 500;
+  original.block_data = NULL;  // No inline data even though found
+  original.block_data_len = 0;
+  original.block_fib = 0;
+
+  cbor_item_t* encoded = wire_find_block_response_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  // Should produce 9 elements (no block data)
+  EXPECT_EQ(cbor_array_size(encoded), (size_t)9);
+
+  unsigned char* buf = NULL;
+  size_t buf_len = 0;
+  int rc = wire_encode_decode_roundtrip(encoded, &buf, &buf_len);
+  cbor_decref(&encoded);
+  ASSERT_EQ(rc, 0);
+  ASSERT_NE(buf, nullptr);
+
+  struct cbor_load_result load_result;
+  cbor_item_t* decoded = cbor_load(buf, buf_len, &load_result);
+  free(buf);
+  ASSERT_NE(decoded, nullptr);
+  ASSERT_EQ(load_result.error.code, CBOR_ERR_NONE);
+
+  wire_find_block_response_t result = {};
+  rc = wire_find_block_response_decode(decoded, &result);
+  cbor_decref(&decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(result.found, 1);
+  EXPECT_EQ(result.block_data, nullptr);
+  EXPECT_EQ(result.block_data_len, (size_t)0);
+  EXPECT_EQ(result.block_fib, (uint32_t)0);
+}
+
+// --- RecallAccept round-trip tests ---
+
+TEST(WireRecallAcceptTest, EncodeDecodeWithoutBlockData) {
+  wire_recall_accept_t original = {};
+  original.message_id = 0xDEADBEEFCAFEBABEULL;
+  memset(original.block_hash, 0x55, 32);
+  original.block_data = NULL;
+  original.block_data_len = 0;
+  original.block_fib = 0;
+
+  cbor_item_t* encoded = wire_recall_accept_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  // Should produce 4 elements (no block data)
+  EXPECT_EQ(cbor_array_size(encoded), (size_t)4);
+
+  unsigned char* buf = NULL;
+  size_t buf_len = 0;
+  int rc = wire_encode_decode_roundtrip(encoded, &buf, &buf_len);
+  cbor_decref(&encoded);
+  ASSERT_EQ(rc, 0);
+  ASSERT_NE(buf, nullptr);
+
+  struct cbor_load_result load_result;
+  cbor_item_t* decoded = cbor_load(buf, buf_len, &load_result);
+  free(buf);
+  ASSERT_NE(decoded, nullptr);
+  ASSERT_EQ(load_result.error.code, CBOR_ERR_NONE);
+
+  wire_recall_accept_t result = {};
+  rc = wire_recall_accept_decode(decoded, &result);
+  cbor_decref(&decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(result.message_id, original.message_id);
+  EXPECT_EQ(memcmp(result.block_hash, original.block_hash, 32), 0);
+  EXPECT_EQ(result.block_data, nullptr);
+  EXPECT_EQ(result.block_data_len, (size_t)0);
+  EXPECT_EQ(result.block_fib, (uint32_t)0);
+}
+
+TEST(WireRecallAcceptTest, EncodeDecodeWithBlockData) {
+  wire_recall_accept_t original = {};
+  original.message_id = 0x0102030405060708ULL;
+  memset(original.block_hash, 0x77, 32);
+  uint8_t test_data[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE};
+  original.block_data = test_data;
+  original.block_data_len = sizeof(test_data);
+  original.block_fib = 1234;
+
+  cbor_item_t* encoded = wire_recall_accept_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  // Should produce 7 elements (4 base + 3 block data)
+  EXPECT_EQ(cbor_array_size(encoded), (size_t)7);
+
+  unsigned char* buf = NULL;
+  size_t buf_len = 0;
+  int rc = wire_encode_decode_roundtrip(encoded, &buf, &buf_len);
+  cbor_decref(&encoded);
+  ASSERT_EQ(rc, 0);
+  ASSERT_NE(buf, nullptr);
+
+  struct cbor_load_result load_result;
+  cbor_item_t* decoded = cbor_load(buf, buf_len, &load_result);
+  free(buf);
+  ASSERT_NE(decoded, nullptr);
+  ASSERT_EQ(load_result.error.code, CBOR_ERR_NONE);
+
+  wire_recall_accept_t result = {};
+  rc = wire_recall_accept_decode(decoded, &result);
+  cbor_decref(&decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(result.message_id, original.message_id);
+  EXPECT_EQ(memcmp(result.block_hash, original.block_hash, 32), 0);
+  EXPECT_NE(result.block_data, nullptr);
+  EXPECT_EQ(result.block_data_len, original.block_data_len);
+  EXPECT_EQ(memcmp(result.block_data, original.block_data, original.block_data_len), 0);
+  EXPECT_EQ(result.block_fib, original.block_fib);
+
+  free(result.block_data);
+}
+
+// --- Destroy function tests ---
+
+TEST(WireDestroyTest, FindBlockResponseDestroyFreesBlockData) {
+  wire_find_block_response_t* msg = (wire_find_block_response_t*)get_clear_memory(sizeof(wire_find_block_response_t));
+  ASSERT_NE(msg, nullptr);
+  uint8_t data[] = {0x01, 0x02, 0x03};
+  msg->block_data = (uint8_t*)malloc(sizeof(data));
+  memcpy(msg->block_data, data, sizeof(data));
+  msg->block_data_len = sizeof(data);
+
+  wire_find_block_response_destroy(msg);
+  // No use-after-free crash means success
+}
+
+TEST(WireDestroyTest, FindBlockResponseDestroyNullBlockData) {
+  wire_find_block_response_t* msg = (wire_find_block_response_t*)get_clear_memory(sizeof(wire_find_block_response_t));
+  ASSERT_NE(msg, nullptr);
+  msg->block_data = NULL;
+  msg->block_data_len = 0;
+
+  wire_find_block_response_destroy(msg);
+}
+
+TEST(WireDestroyTest, RecallAcceptDestroyFreesBlockData) {
+  wire_recall_accept_t* msg = (wire_recall_accept_t*)get_clear_memory(sizeof(wire_recall_accept_t));
+  ASSERT_NE(msg, nullptr);
+  uint8_t data[] = {0xAA, 0xBB, 0xCC, 0xDD};
+  msg->block_data = (uint8_t*)malloc(sizeof(data));
+  memcpy(msg->block_data, data, sizeof(data));
+  msg->block_data_len = sizeof(data);
+  msg->block_fib = 42;
+
+  wire_recall_accept_destroy(msg);
+}
+
+TEST(WireDestroyTest, RecallAcceptDestroyNullBlockData) {
+  wire_recall_accept_t* msg = (wire_recall_accept_t*)get_clear_memory(sizeof(wire_recall_accept_t));
+  ASSERT_NE(msg, nullptr);
+  msg->block_data = NULL;
+  msg->block_data_len = 0;
+
+  wire_recall_accept_destroy(msg);
+}
+
+TEST(WireDestroyTest, DestroyNullPointerIsSafe) {
+  wire_find_block_response_destroy(NULL);
+  wire_recall_accept_destroy(NULL);
 }

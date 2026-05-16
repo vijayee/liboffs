@@ -447,7 +447,9 @@ int wire_recall_block_decode(cbor_item_t* item, wire_recall_block_t* msg) {
 // --- RecallAccept / RecallDecline ---
 
 cbor_item_t* wire_recall_accept_encode(const wire_recall_accept_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(4);
+  int has_block_data = msg->block_data != NULL && msg->block_data_len > 0;
+  int num_elements = has_block_data ? 7 : 4;
+  cbor_item_t* array = cbor_new_definite_array(num_elements);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_RECALL_ACCEPT);
@@ -466,11 +468,29 @@ cbor_item_t* wire_recall_accept_encode(const wire_recall_accept_t* msg) {
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
+  if (has_block_data) {
+    item = cbor_build_bytestring(msg->block_data, msg->block_data_len);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+
+    item = cbor_build_uint64(msg->block_data_len);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+
+    item = cbor_build_uint32(msg->block_fib);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+  }
+
   return array;
 }
 
 int wire_recall_accept_decode(cbor_item_t* item, wire_recall_accept_t* msg) {
-  if (cbor_array_size(item) < 4) return -1;
+  size_t array_size = cbor_array_size(item);
+  if (array_size < 4) return -1;
+  msg->block_data = NULL;
+  msg->block_data_len = 0;
+  msg->block_fib = 0;
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_RECALL_ACCEPT) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
@@ -483,6 +503,23 @@ int wire_recall_accept_decode(cbor_item_t* item, wire_recall_accept_t* msg) {
   if (cbor_bytestring_length(hash) != 32) { cbor_decref(&hash); return -1; }
   memcpy(msg->block_hash, cbor_bytestring_handle(hash), 32);
   cbor_decref(&hash);
+  if (array_size >= 7) {
+    cbor_item_t* data = cbor_array_get(item, 4);
+    if (cbor_isa_bytestring(data) && cbor_bytestring_length(data) > 0) {
+      msg->block_data_len = cbor_bytestring_length(data);
+      msg->block_data = get_clear_memory(msg->block_data_len);
+      if (msg->block_data != NULL) {
+        memcpy(msg->block_data, cbor_bytestring_handle(data), msg->block_data_len);
+      }
+    }
+    cbor_decref(&data);
+    cbor_item_t* data_len = cbor_array_get(item, 5);
+    msg->block_data_len = (size_t)cbor_get_uint64(data_len);
+    cbor_decref(&data_len);
+    cbor_item_t* bfib = cbor_array_get(item, 6);
+    msg->block_fib = cbor_get_uint32(bfib);
+    cbor_decref(&bfib);
+  }
   return 0;
 }
 
@@ -780,7 +817,9 @@ int wire_find_block_decode(cbor_item_t* item, wire_find_block_t* msg) {
 // --- FindBlockResponse ---
 
 cbor_item_t* wire_find_block_response_encode(const wire_find_block_response_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(9);
+  int has_block_data = msg->found && msg->block_data != NULL && msg->block_data_len > 0;
+  int num_elements = has_block_data ? 12 : 9;
+  cbor_item_t* array = cbor_new_definite_array(num_elements);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_FIND_BLOCK_RESPONSE);
@@ -824,11 +863,29 @@ cbor_item_t* wire_find_block_response_encode(const wire_find_block_response_t* m
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
+  if (has_block_data) {
+    item = cbor_build_bytestring(msg->block_data, msg->block_data_len);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+
+    item = cbor_build_uint64(msg->block_data_len);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+
+    item = cbor_build_uint32(msg->block_fib);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+  }
+
   return array;
 }
 
 int wire_find_block_response_decode(cbor_item_t* item, wire_find_block_response_t* msg) {
-  if (cbor_array_size(item) < 9) return -1;
+  size_t array_size = cbor_array_size(item);
+  if (array_size < 9) return -1;
+  msg->block_data = NULL;
+  msg->block_data_len = 0;
+  msg->block_fib = 0;
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_FIND_BLOCK_RESPONSE) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
@@ -864,6 +921,23 @@ int wire_find_block_response_decode(cbor_item_t* item, wire_find_block_response_
   cbor_item_t* latency = cbor_array_get(item, 8);
   msg->latency_ms = (uint64_t)cbor_get_uint64(latency);
   cbor_decref(&latency);
+  if (array_size >= 12) {
+    cbor_item_t* data = cbor_array_get(item, 9);
+    if (cbor_isa_bytestring(data) && cbor_bytestring_length(data) > 0) {
+      msg->block_data_len = cbor_bytestring_length(data);
+      msg->block_data = get_clear_memory(msg->block_data_len);
+      if (msg->block_data != NULL) {
+        memcpy(msg->block_data, cbor_bytestring_handle(data), msg->block_data_len);
+      }
+    }
+    cbor_decref(&data);
+    cbor_item_t* data_len = cbor_array_get(item, 10);
+    msg->block_data_len = (size_t)cbor_get_uint64(data_len);
+    cbor_decref(&data_len);
+    cbor_item_t* bfib = cbor_array_get(item, 11);
+    msg->block_fib = cbor_get_uint32(bfib);
+    cbor_decref(&bfib);
+  }
   return 0;
 }
 
@@ -1236,6 +1310,18 @@ int wire_seeking_blocks_response_decode(cbor_item_t* item, wire_seeking_blocks_r
 // --- Destroy helpers for wire types with nested allocations ---
 
 void wire_store_block_destroy(wire_store_block_t* msg) {
+  if (msg == NULL) return;
+  free(msg->block_data);
+  free(msg);
+}
+
+void wire_find_block_response_destroy(wire_find_block_response_t* msg) {
+  if (msg == NULL) return;
+  free(msg->block_data);
+  free(msg);
+}
+
+void wire_recall_accept_destroy(wire_recall_accept_t* msg) {
   if (msg == NULL) return;
   free(msg->block_data);
   free(msg);

@@ -121,6 +121,9 @@ typedef struct {
   node_id_t path[WIRE_MAX_PATH];
   uint8_t path_len;
   uint64_t latency_ms;
+  uint8_t* block_data;       /* block content (NULL if not found) */
+  size_t   block_data_len;   /* length of block data */
+  uint32_t block_fib;        /* FIB counter from the holder */
 } wire_find_block_response_t;
 
 // --- FindNode ---
@@ -214,6 +217,9 @@ typedef struct {
 typedef struct {
   uint64_t message_id;
   uint8_t block_hash[32];
+  uint8_t* block_data;       /* the requested block's data */
+  size_t   block_data_len;  /* length of block data */
+  uint32_t block_fib;        /* FIB counter for the block */
 } wire_recall_accept_t;
 
 typedef struct {
@@ -277,6 +283,10 @@ uint8_t wire_get_type(cbor_item_t* item);
 // Destroy helpers for wire types with nested allocations
 // Frees block_data and the struct itself
 void wire_store_block_destroy(wire_store_block_t* msg);
+// Frees block_data and the struct itself
+void wire_find_block_response_destroy(wire_find_block_response_t* msg);
+// Frees block_data and the struct itself
+void wire_recall_accept_destroy(wire_recall_accept_t* msg);
 // Frees exclude_hashes array and each hash pointer, then the struct itself
 void wire_seeking_blocks_destroy(wire_seeking_blocks_t* msg);
 
