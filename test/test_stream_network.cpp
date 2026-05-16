@@ -189,7 +189,8 @@ TEST_F(ReadableOffStreamNetworkTest, FindBlockResultFoundReissuesCacheGet) {
   // Verify: pending_fetch_hash should be cleared
   EXPECT_EQ(stream->pending_fetch_hash, nullptr);
 
-  // Clean up our references
+  // Clean up our references (result.hash holds a reference we need to release)
+  DESTROY(result.hash, buffer);
   DESTROY(hash, buffer);
 }
 
@@ -231,11 +232,11 @@ TEST_F(ReadableOffStreamNetworkTest, FindBlockResultNotFoundDeactivates) {
   EXPECT_EQ(stream->pending_fetch_hash, nullptr);
 
   // Clean up our references
+  DESTROY(result.hash, buffer);
   DESTROY(hash, buffer);
-  // Note: pending_tuple was destroyed by the dispatch handler via DESTROY macro
-  // which sets the pointer to NULL. The REFERENCE we created in SetUp is now the
-  // only reference, but dispatch already called DESTROY on stream->pending_tuple.
-  // We must NOT call tuple_destroy(pending) again — it was already freed.
+  // pending still holds a reference (REFERENCE incremented refcount to 2,
+  // then dispatch handler's DESTROY decremented it to 1)
+  tuple_destroy(pending);
 }
 
 // Test: ReadableOffStream with network=NULL deactivates on cache miss
@@ -290,6 +291,8 @@ TEST_F(ReadableOffStreamNetworkTest, LocalOnlyDeactivatesOnCacheMiss) {
 
   // Cleanup
   DESTROY(hash, buffer);
+  // pending still holds a reference (dispatch handler decremented refcount from 2 to 1)
+  tuple_destroy(pending);
   readable_off_stream_destroy(local_stream);
   ori_destroy(local_ori);
 }
