@@ -1321,14 +1321,19 @@ void network_dispatch(void* state, message_t* msg) {
     }
     case NETWORK_QUIC_CONNECTED: {
       // New QUIC connection — add peer to connection manager
-      quic_data_payload_t* quic_data = (quic_data_payload_t*)msg->payload;
-      if (quic_data != NULL) {
-        // TODO: Extract node_id from QUIC handshake. Using zeroed node_id
-        // means only one QUIC-connected peer can exist at a time — all
-        // subsequent connects will match the first via connection_manager_lookup.
+      quic_connected_payload_t* quic_conn = (quic_connected_payload_t*)msg->payload;
+      if (quic_conn != NULL) {
+        // TODO: Extract node_id from QUIC handshake / TLS certificate.
+        // Using zeroed node_id means only one QUIC-connected peer can exist
+        // at a time — all subsequent connects will match the first via
+        // connection_manager_lookup.
         node_id_t peer_id;
-        memset(&peer_id, 0, sizeof(node_id_t));
-        connection_manager_add(&network->conn_mgr, &peer_id, &quic_data->peer_addr, network->pool);
+        node_id_clear(&peer_id);
+        peer_connection_t* peer = connection_manager_add(
+            &network->conn_mgr, &peer_id, &quic_conn->peer_addr, network->pool);
+        // Store HQUIC connection handle on peer for later send/close
+        // (field added in subsequent task)
+        (void)peer;
       }
       break;
     }

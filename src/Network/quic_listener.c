@@ -5,8 +5,20 @@
 #include "msquic_singleton.h"
 #include "quic_listener.h"
 
-// Destroy helper for QUIC data payloads (used in both HAS_MSQUIC and stub builds)
+// Destroy helpers for QUIC payloads (used in both HAS_MSQUIC and stub builds)
 void quic_data_payload_destroy(quic_data_payload_t* payload) {
+  if (payload == NULL) return;
+  free(payload->data);
+  free(payload);
+}
+
+void quic_connected_payload_destroy(quic_connected_payload_t* payload) {
+  if (payload == NULL) return;
+  // connection handle is owned by msquic — do not close it here
+  free(payload);
+}
+
+void quic_send_payload_destroy(quic_send_payload_t* payload) {
   if (payload == NULL) return;
   free(payload->data);
   free(payload);
@@ -67,7 +79,7 @@ static QUIC_STATUS QUIC_API quic_stream_callback(
     case QUIC_STREAM_EVENT_RECEIVE: {
       // Forward received data to network protocol actor via actor_send
       for (uint32_t index = 0; index < event->RECEIVE.BufferCount; index++) {
-        QUIC_BUFFER* buffer = &event->RECEIVE.Buffers[index];
+        const QUIC_BUFFER* buffer = &event->RECEIVE.Buffers[index];
         quic_data_payload_t* payload = get_clear_memory(sizeof(quic_data_payload_t));
         if (payload == NULL) continue;
         payload->length = buffer->Length;
@@ -102,20 +114,41 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
   quic_listener_t* listener = (quic_listener_t*)context;
   switch (event->Type) {
     case QUIC_CONNECTION_EVENT_CONNECTED: {
-      // Send NETWORK_QUIC_CONNECTED to protocol actor
+      // Extract peer address from the connection
+      QUIC_ADDR peer_addr;
+      uint32_t peer_addr_len = sizeof(peer_addr);
+      listener->msquic->GetParam(
+          connection,
+          QUIC_PARAM_CONN_REMOTE_ADDRESS,
+          &peer_addr_len,
+          &peer_addr);
+
+      // Build payload with connection handle and peer address
+      quic_connected_payload_t* payload = get_clear_memory(sizeof(quic_connected_payload_t));
+      if (payload != NULL) {
+        payload->connection = connection;
+        memcpy(&payload->peer_addr, &peer_addr, sizeof(peer_addr));
+      }
+
       message_t msg;
       msg.type = NETWORK_QUIC_CONNECTED;
-      msg.payload = connection;
-      msg.payload_destroy = NULL;
+      msg.payload = payload;
+      msg.payload_destroy = (void (*)(void*))quic_connected_payload_destroy;
       actor_send(&listener->network->actor, &msg);
       break;
     }
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
       // Send NETWORK_QUIC_DISCONNECTED to protocol actor
+      quic_connected_payload_t* payload = get_clear_memory(sizeof(quic_connected_payload_t));
+      if (payload != NULL) {
+        payload->connection = connection;
+        memset(&payload->peer_addr, 0, sizeof(payload->peer_addr));
+      }
+
       message_t msg;
       msg.type = NETWORK_QUIC_DISCONNECTED;
-      msg.payload = connection;
-      msg.payload_destroy = NULL;
+      msg.payload = payload;
+      msg.payload_destroy = (void (*)(void*))quic_connected_payload_destroy;
       actor_send(&listener->network->actor, &msg);
       break;
     }
@@ -232,6 +265,9 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
     return -1;
   }
 
+  // ALPN — negotiate the "offs" protocol
+  QUIC_BUFFER alpn = { sizeof("offs") - 1, (uint8_t*)"offs" };
+
   // Open configuration
   QUIC_SETTINGS settings = {0};
   settings.PeerUnidiStreamCount = 1;
@@ -241,10 +277,11 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
 
   if (QUIC_FAILED(status = listener->msquic->ConfigurationOpen(
           listener->registration,
+          &alpn,
+          1,
           &settings,
           sizeof(settings),
           NULL,
-          0,
           &listener->configuration))) {
     log_error("ConfigurationOpen failed: 0x%x", status);
     listener->msquic->RegistrationClose(listener->registration);
@@ -304,12 +341,15 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
   QUIC_ADDR addr;
   QuicAddrSetFamily(&addr, QUIC_ADDRESS_FAMILY_UNSPEC);
   if (host != NULL) {
-    QuicAddrSetString(&addr, host);
+    QuicAddrFromString(host, port, &addr);
+  } else {
+    QuicAddrSetPort(&addr, port);
   }
-  QuicAddrSetPort(&addr, port);
 
   if (QUIC_FAILED(status = listener->msquic->ListenerStart(
           listener->listener,
+          &alpn,
+          1,
           &addr))) {
     log_error("ListenerStart failed: 0x%x", status);
     listener->msquic->ListenerClose(listener->listener);
@@ -335,6 +375,70 @@ void quic_listener_stop(quic_listener_t* listener) {
   pthread_join(listener->thread, NULL);
   if (listener->listener != NULL) {
     listener->msquic->ListenerStop(listener->listener);
+  }
+}
+
+void quic_listener_dispatch(void* state, message_t* msg) {
+  quic_listener_t* listener = (quic_listener_t*)state;
+  if (msg == NULL) return;
+
+  switch (msg->type) {
+    case QUIC_LISTENER_SEND: {
+      quic_send_payload_t* payload = (quic_send_payload_t*)msg->payload;
+      if (payload == NULL) break;
+
+      // Look up the peer connection by node_id
+      peer_connection_t* peer = connection_manager_lookup(
+          &listener->network->conn_mgr, &payload->dest);
+      if (peer == NULL) {
+        log_error("QUIC_LISTENER_SEND: no peer for node_id");
+        break;
+      }
+
+      // TODO: Use peer->quic_connection (Task 5) to find a stream and
+      // call StreamSend. For now, log that send is not yet wired.
+      (void)peer;
+      log_error("QUIC_LISTENER_SEND: stream send not yet implemented");
+      break;
+    }
+    case QUIC_LISTENER_OPEN_STREAM: {
+      quic_send_payload_t* payload = (quic_send_payload_t*)msg->payload;
+      if (payload == NULL) break;
+
+      peer_connection_t* peer = connection_manager_lookup(
+          &listener->network->conn_mgr, &payload->dest);
+      if (peer == NULL) {
+        log_error("QUIC_LISTENER_OPEN_STREAM: no peer for node_id");
+        break;
+      }
+
+      // TODO: Use peer->quic_connection (Task 5) to open a bidirectional
+      // stream via StreamOpen + StreamStart. For now, log that this is not
+      // yet wired.
+      (void)peer;
+      log_error("QUIC_LISTENER_OPEN_STREAM: stream open not yet implemented");
+      break;
+    }
+    case QUIC_LISTENER_CLOSE_CONNECTION: {
+      quic_send_payload_t* payload = (quic_send_payload_t*)msg->payload;
+      if (payload == NULL) break;
+
+      peer_connection_t* peer = connection_manager_lookup(
+          &listener->network->conn_mgr, &payload->dest);
+      if (peer == NULL) {
+        log_error("QUIC_LISTENER_CLOSE_CONNECTION: no peer for node_id");
+        break;
+      }
+
+      // TODO: Use peer->quic_connection (Task 5) to gracefully shut down
+      // the QUIC connection via ConnectionShutdown. For now, log that this
+      // is not yet wired.
+      (void)peer;
+      log_error("QUIC_LISTENER_CLOSE_CONNECTION: close not yet implemented");
+      break;
+    }
+    default:
+      break;
   }
 }
 

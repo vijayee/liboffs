@@ -7,6 +7,7 @@
 
 #include "../Actor/actor.h"
 #include "../Network/network.h"
+#include "../Network/node_id.h"
 #include "../Scheduler/scheduler.h"
 #include "../Util/atomic_compat.h"
 #include "../Util/threadding.h"
@@ -30,6 +31,23 @@ typedef struct quic_data_payload_t {
 } quic_data_payload_t;
 
 void quic_data_payload_destroy(quic_data_payload_t* payload);
+
+// Payload for NETWORK_QUIC_CONNECTED messages
+typedef struct quic_connected_payload_t {
+  void* connection;               /* HQUIC connection handle */
+  struct sockaddr_storage peer_addr;
+} quic_connected_payload_t;
+
+void quic_connected_payload_destroy(quic_connected_payload_t* payload);
+
+// Payload for QUIC_LISTENER_SEND messages
+typedef struct quic_send_payload_t {
+  node_id_t dest;                  /* Destination node ID */
+  uint8_t* data;                   /* Framed CBOR data to send */
+  size_t length;                   /* Length of data */
+} quic_send_payload_t;
+
+void quic_send_payload_destroy(quic_send_payload_t* payload);
 
 typedef struct quic_listener_t {
   actor_t actor;
