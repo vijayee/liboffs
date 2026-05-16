@@ -63,7 +63,7 @@ static int bc_put_sync(block_cache_t* bc, block_t* block, scheduler_pool_t* pool
 
   block_t* ref_block = (block_t*)refcounter_reference((refcounter_t*)block);
   refcounter_yield((refcounter_t*)ref_block);
-  block_cache_put(bc, ref_block, &comp);
+  block_cache_put(bc, ref_block, 0, &comp);
 
   if (pool) {
     scheduler_inject(pool, &comp);
@@ -224,7 +224,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
   /* Put all blocks */
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
     int result = bc_put_sync(block_cache, blocks[i], NULL);
-    EXPECT_EQ(result, 0) << "Failed to store block " << i;
+    EXPECT_EQ(result, CACHE_PUT_NEW) << "Failed to store block " << i;
   }
 
   EXPECT_EQ(block_cache_count(block_cache), BLOCK_COUNT);
@@ -233,10 +233,10 @@ TEST_F(TestBlockCache, TestBlockCache) {
     GTEST_SKIP();
   }
 
-  /* Re-put same blocks (should succeed, no duplicate) */
+  /* Re-put same blocks (should return CACHE_PUT_EXISTS, no duplicate) */
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
     int result = bc_put_sync(block_cache, blocks[i], NULL);
-    EXPECT_EQ(result, 0) << "Failed to re-store block " << i;
+    EXPECT_EQ(result, CACHE_PUT_EXISTS) << "Re-put should return CACHE_PUT_EXISTS for block " << i;
   }
 
   EXPECT_EQ(block_cache_count(block_cache), BLOCK_COUNT);
@@ -282,7 +282,7 @@ TEST_F(TestBlockCache, TestBlockCachePutOnly) {
   block_cache = block_cache_create(config, location, type, timer_actor, NULL);
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
     int result = bc_put_sync(block_cache, blocks[i], NULL);
-    EXPECT_EQ(result, 0);
+    EXPECT_EQ(result, CACHE_PUT_NEW);
   }
   EXPECT_EQ(block_cache_count(block_cache), BLOCK_COUNT);
 }
@@ -291,7 +291,7 @@ TEST_F(TestBlockCache, TestBlockCachePutGetOnly) {
   block_cache = block_cache_create(config, location, type, timer_actor, NULL);
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
     int result = bc_put_sync(block_cache, blocks[i], NULL);
-    EXPECT_EQ(result, 0);
+    EXPECT_EQ(result, CACHE_PUT_NEW);
   }
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
     block_t* block = bc_get_sync(block_cache, blocks[i]->hash, NULL);
@@ -305,7 +305,7 @@ TEST_F(TestBlockCache, TestBlockCachePutRemoveOnly) {
   block_cache = block_cache_create(config, location, type, timer_actor, NULL);
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
     int result = bc_put_sync(block_cache, blocks[i], NULL);
-    EXPECT_EQ(result, 0);
+    EXPECT_EQ(result, CACHE_PUT_NEW);
   }
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
     int result = bc_remove_sync(block_cache, blocks[i]->hash, NULL);
@@ -358,7 +358,7 @@ TEST_F(TestBlockCacheIntegration, TestLRUEjectionAndReload) {
   /* Put more blocks than LRU can hold */
   for (size_t i = 0; i < LRU_COUNT; i++) {
     int result = bc_put_sync(block_cache, blocks[i], pool);
-    EXPECT_EQ(result, 0) << "Failed to put block " << i;
+    EXPECT_EQ(result, CACHE_PUT_NEW) << "Failed to put block " << i;
   }
 
   /* All blocks should still be in the index (including ejected ones) */
@@ -396,10 +396,10 @@ TEST_F(TestBlockCacheIntegration, TestPutDuplicate) {
 
   /* Put same block twice — should not create duplicate index entry */
   int result = bc_put_sync(block_cache, blocks[0], pool);
-  EXPECT_EQ(result, 0);
+  EXPECT_EQ(result, CACHE_PUT_NEW);
 
   result = bc_put_sync(block_cache, blocks[0], pool);
-  EXPECT_EQ(result, 0);
+  EXPECT_EQ(result, CACHE_PUT_EXISTS);
 
   EXPECT_EQ(block_cache_count(block_cache), 1u);
 }
@@ -408,7 +408,7 @@ TEST_F(TestBlockCacheIntegration, TestRemoveIdempotent) {
   block_cache = block_cache_create(config, location, type, timer_actor, pool);
 
   int result = bc_put_sync(block_cache, blocks[0], pool);
-  EXPECT_EQ(result, 0);
+  EXPECT_EQ(result, CACHE_PUT_NEW);
   EXPECT_EQ(block_cache_count(block_cache), 1u);
 
   /* Remove once */
@@ -428,7 +428,7 @@ TEST_F(TestBlockCacheIntegration, TestMiniBlocks) {
   for (size_t i = 0; i < 10; i++) {
     block_t* mini_block = block_create_random_block_by_type(mini);
     int result = bc_put_sync(block_cache, mini_block, pool);
-    EXPECT_EQ(result, 0);
+    EXPECT_EQ(result, CACHE_PUT_NEW);
     block_t* retrieved = bc_get_sync(block_cache, mini_block->hash, pool);
     EXPECT_NE(retrieved, nullptr);
     if (retrieved) {

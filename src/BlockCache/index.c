@@ -38,61 +38,6 @@ size_t _index_count(index_t* index);
 void _index_increment(index_t* index, index_entry_t* entry);
 cbor_item_t* _index_to_cbor(index_t* index);
 
-void index_validate_lock(index_t* index, const char* func, int line) {
-  if (index == NULL) {
-    log_error("index_validate_lock: index is NULL at %s:%d", func, line);
-    abort();
-  }
-  if (index->pre_lock_canary != INDEX_PRE_LOCK_CANARY) {
-    log_error("index_validate_lock: PRE-LOCK CANARY CORRUPTED at %s:%d! Expected 0x%X, got 0x%X, index=%p",
-              func, line, INDEX_PRE_LOCK_CANARY, index->pre_lock_canary, (void*)index);
-    /* Dump raw bytes around the corruption */
-    unsigned char* bytes = (unsigned char*)index;
-    log_error("  bytes[0-7]   (refcounter): %02x %02x %02x %02x %02x %02x %02x %02x",
-              bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]);
-    log_error("  bytes[8-15]  (pre_canary):  %02x %02x %02x %02x %02x %02x %02x %02x",
-              bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
-    log_error("  bytes[16-23] (lock start):  %02x %02x %02x %02x %02x %02x %02x %02x",
-              bytes[16], bytes[17], bytes[18], bytes[19], bytes[20], bytes[21], bytes[22], bytes[23]);
-    log_error("  bytes[24-31] (lock mid):    %02x %02x %02x %02x %02x %02x %02x %02x",
-              bytes[24], bytes[25], bytes[26], bytes[27], bytes[28], bytes[29], bytes[30], bytes[31]);
-    log_error("  bytes[32-39] (lock end):    %02x %02x %02x %02x %02x %02x %02x %02x",
-              bytes[32], bytes[33], bytes[34], bytes[35], bytes[36], bytes[37], bytes[38], bytes[39]);
-    log_error("  bytes[40-47] (post_canary): %02x %02x %02x %02x %02x %02x %02x %02x",
-              bytes[40], bytes[41], bytes[42], bytes[43], bytes[44], bytes[45], bytes[46], bytes[47]);
-    log_error("  bytes[48-63] (root+bucket): %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
-              bytes[48], bytes[49], bytes[50], bytes[51], bytes[52], bytes[53], bytes[54], bytes[55],
-              bytes[56], bytes[57], bytes[58], bytes[59], bytes[60], bytes[61], bytes[62], bytes[63]);
-    /* Check if post-lock canary is also corrupted */
-    log_error("  pre_lock_canary=0x%X lock_canary=0x%X __kind=%d __lock=%d __owner=%d __nusers=%u",
-              index->pre_lock_canary, index->lock_canary,
-              index->lock.__data.__kind, index->lock.__data.__lock,
-              index->lock.__data.__owner, index->lock.__data.__nusers);
-    log_error("  refcounter: count=%u yield=%u pending_deref=%u is_actor=%u",
-              (unsigned)index->refcounter.count, (unsigned)index->refcounter.yield,
-              (unsigned)index->refcounter.pending_deref, (unsigned)index->refcounter.is_actor);
-    abort();
-  }
-  if (index->lock_canary != INDEX_LOCK_CANARY) {
-    log_error("index_validate_lock: POST-LOCK CANARY CORRUPTED at %s:%d! Expected 0x%X, got 0x%X, index=%p lock=%p __kind=%d",
-              func, line, INDEX_LOCK_CANARY, index->lock_canary, (void*)index, (void*)&index->lock,
-              index->lock.__data.__kind);
-    unsigned char* bytes = (unsigned char*)index;
-    log_error("  bytes[40-47] (post_canary): %02x %02x %02x %02x %02x %02x %02x %02x",
-              bytes[40], bytes[41], bytes[42], bytes[43], bytes[44], bytes[45], bytes[46], bytes[47]);
-    log_error("  bytes[48-63] (root+bucket): %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
-              bytes[48], bytes[49], bytes[50], bytes[51], bytes[52], bytes[53], bytes[54], bytes[55],
-              bytes[56], bytes[57], bytes[58], bytes[59], bytes[60], bytes[61], bytes[62], bytes[63]);
-    log_error("  pre_lock_canary=0x%X refcounter: count=%u yield=%u pending_deref=%u is_actor=%u",
-              index->pre_lock_canary, (unsigned)index->refcounter.count, (unsigned)index->refcounter.yield,
-              (unsigned)index->refcounter.pending_deref, (unsigned)index->refcounter.is_actor);
-    abort();
-  }
-}
-
-#define INDEX_LOCK(index) do { index_validate_lock(index, __func__, __LINE__); platform_lock(&(index)->lock); } while(0)
-#define INDEX_UNLOCK(index) do { platform_unlock(&(index)->lock); } while(0)
-
 void index_dispatch(void* state, message_t* msg) {
   index_t* index = (index_t*)state;
   switch (msg->type) {
@@ -116,7 +61,6 @@ uint8_t get_bit(buffer_t* buffer, size_t index) {
 index_entry_t* index_entry_create(buffer_t* hash) {
   index_entry_t* entry = get_clear_memory(sizeof(index_entry_t));
   refcounter_init((refcounter_t*) entry);
-  platform_lock_init(&entry->lock);
   entry->counter = fibonacci_hit_counter_create();
   entry->hash = (buffer_t*) refcounter_reference( (refcounter_t*) hash);
   return entry;
@@ -125,7 +69,6 @@ index_entry_t* index_entry_create(buffer_t* hash) {
 index_entry_t* index_entry_from(buffer_t* hash, size_t section_id, size_t section_index, uint64_t ejection_date, fibonacci_hit_counter_t counter) {
   index_entry_t* entry = get_clear_memory(sizeof(index_entry_t));
   refcounter_init((refcounter_t*) entry);
-  platform_lock_init(&entry->lock);
   entry->hash= (buffer_t*) refcounter_reference((refcounter_t*) hash);
   entry->counter = counter;
   entry->section_id = section_id;
@@ -138,7 +81,6 @@ void index_entry_destroy(index_entry_t* entry) {
   refcounter_dereference((refcounter_t*) entry);
   if (refcounter_count((refcounter_t*) entry) == 0) {
     refcounter_destroy_lock((refcounter_t *) entry);
-    platform_lock_destroy(&entry->lock);
     buffer_destroy(entry->hash);
     free(entry);
   }
@@ -146,16 +88,12 @@ void index_entry_destroy(index_entry_t* entry) {
 
 int index_entry_increment(index_entry_t* entry) {
   int promoted;
-  platform_lock(&entry->lock);
   promoted = fibonacci_hit_counter_increment(&entry->counter);
-  platform_unlock(&entry->lock);
   return promoted;
 }
 
 void index_entry_set_ejection_date(index_entry_t* entry, uint64_t ejection_date) {
-  platform_lock(&entry->lock);
   entry->ejection_date = ejection_date;
-  platform_unlock(&entry->lock);
 }
 
 cbor_item_t* index_entry_to_cbor(index_entry_t* entry) {
@@ -232,9 +170,6 @@ void index_node_destroy(index_node_t* node) {
 
 index_t* _index_new_empty(size_t bucket_size, char* location, timer_actor_t* timer_actor, uint64_t wait, uint64_t max_wait, uint64_t most_recent_id, size_t max_snapshots, size_t max_wals) {
   index_t* index = get_clear_memory(sizeof(index_t));
-  platform_lock_init(&index->lock);
-  index->pre_lock_canary = INDEX_PRE_LOCK_CANARY;
-  index->lock_canary = INDEX_LOCK_CANARY;
   index->bucket_size = bucket_size;
   index->root = index_node_create(bucket_size);
   index->location = path_join(location,"index");
@@ -515,9 +450,6 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
 }
 index_t* index_create_from(size_t bucket_size, index_node_t* root, char* location, timer_actor_t* timer_actor, uint64_t wait, uint64_t max_wait, size_t max_snapshots, size_t max_wals) {
   index_t* index = get_clear_memory(sizeof(index_t));
-  platform_lock_init(&index->lock);
-  index->pre_lock_canary = INDEX_PRE_LOCK_CANARY;
-  index->lock_canary = INDEX_LOCK_CANARY;
   index->bucket_size = bucket_size;
   index->location = path_join(location,"index");
   index->parent_location = strdup(location);
@@ -796,9 +728,7 @@ int _index_node_to_crc(index_node_t* node, XXH64_state_t* const state) {
 }
 
 void index_add(index_t* index, index_entry_t* entry) {
-  INDEX_LOCK(index);
   index_add_to_node(index, entry, index->root, 0);
-  INDEX_UNLOCK(index);
 }
 
 void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node, size_t current) {
@@ -862,9 +792,7 @@ void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node,
    }
 }
 void index_increment(index_t* index, index_entry_t* entry) {
-  INDEX_LOCK(index);
   _index_increment(index, entry);
-  INDEX_UNLOCK(index);
 }
 
 void _index_increment(index_t* index, index_entry_t* entry) {
@@ -927,36 +855,29 @@ void index_split_node(index_t* index, index_node_t* node, size_t current) {
 
 index_entry_t* index_get(index_t* index, buffer_t* hash) {
   index_entry_t* entry;
-  INDEX_LOCK(index);
   entry = index_get_from_node(index, hash, index->root, 0);
   if (entry != NULL) {
     entry = (index_entry_t*) refcounter_reference((refcounter_t*) entry);
     refcounter_yield((refcounter_t*) entry);
   }
-  INDEX_UNLOCK(index);
   return entry;
 }
 
 index_entry_t* index_find(index_t* index, buffer_t* hash) {
   index_entry_t* entry;
-  INDEX_LOCK(index);
   entry = index_find_in_node(index, hash, index->root, 0);
   if (entry != NULL) {
     entry = (index_entry_t*) refcounter_reference((refcounter_t*) entry);
     refcounter_yield((refcounter_t*) entry);
   }
-  INDEX_UNLOCK(index);
   return entry;
 }
 
 index_entry_t* index_peek(index_t* index, buffer_t* hash) {
-  INDEX_LOCK(index);
   if (index->root == NULL) {
-    INDEX_UNLOCK(index);
     return NULL;
   }
   index_entry_t* entry = index_find_in_node(index, hash, index->root, 0);
-  INDEX_UNLOCK(index);
   return entry;
 }
 
@@ -1014,9 +935,7 @@ index_entry_t* index_find_in_node(index_t* index, buffer_t* hash, index_node_t* 
 }
 
 void index_remove(index_t* index, buffer_t* hash) {
-  INDEX_LOCK(index);
   index_remove_from_node(index, hash, index->root, 0);
-  INDEX_UNLOCK(index);
 }
 void index_remove_from_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current) {
   if (node == NULL) {
@@ -1074,7 +993,6 @@ void index_destroy(index_t* index) {
   if (refcounter_dereference_is_zero((refcounter_t*) index)) {
     index_debounce(index);
     refcounter_destroy_lock((refcounter_t*) index);
-    platform_lock_destroy(&index->lock);
     index_destroy_node(index, index->root);
     index_entry_vec_t *rank;
     hashmap_foreach_data(rank, &index->ranks) {
@@ -1114,9 +1032,7 @@ void index_destroy_node(index_t* index, index_node_t* node) {
 }
 
 size_t index_count(index_t* index) {
-  INDEX_LOCK(index);
   size_t count = _index_count(index);
-  INDEX_UNLOCK(index);
   return count;
 }
 
@@ -1127,17 +1043,13 @@ size_t _index_count(index_t* index) {
 index_entry_vec_t* index_to_array(index_t* index) {
  index_entry_vec_t* entries = get_clear_memory(sizeof(index_entry_vec_t));
  vec_init(entries);
- INDEX_LOCK(index);
  vec_reserve(entries, _index_count(index));
  index_node_to_array(index->root, entries);
- INDEX_UNLOCK(index);
  return entries;
 }
 
 cbor_item_t* index_to_cbor(index_t* index) {
-  INDEX_LOCK(index);
   cbor_item_t* array = _index_to_cbor(index);
-  INDEX_UNLOCK(index);
   return array;
 }
 cbor_item_t* _index_to_cbor(index_t* index) {
@@ -1166,7 +1078,6 @@ index_t* cbor_to_index(cbor_item_t* cbor, char* location, timer_actor_t* timer_a
   return index;
 }
 void index_set_entry_ejection(index_t* index, index_entry_t* entry, uint64_t date) {
-  INDEX_LOCK(index);
   if (!index->is_rebuilding) {
     cbor_item_t *array = cbor_new_definite_array(2);
     bool success = cbor_array_push(array, cbor_move(cbor_build_bytestring(entry->hash->data, entry->hash->size)));
@@ -1183,7 +1094,6 @@ void index_set_entry_ejection(index_t* index, index_entry_t* entry, uint64_t dat
       log_error("Failed to commit ejection date to log");
     }
   }
-  INDEX_UNLOCK(index);
   index_entry_set_ejection_date(entry, date);
 }
 
@@ -1249,7 +1159,6 @@ static void _index_prune_old_wals(index_t* index, uint64_t first_kept_id) {
 
 void index_debounce(void* ctx) {
   index_t *index = (index_t *) ctx;
-  INDEX_LOCK(index);
   cbor_item_t *cbor = _index_to_cbor(index);
   uint64_t crc = 0;
   int result = _index_to_crc(index, &crc);
@@ -1272,7 +1181,6 @@ void index_debounce(void* ctx) {
   index->next_id++;
   wal_t* wal = index->wal;
   index->wal = wal_create_next(index->parent_location, wal->next_id, wal->last_file);
-  INDEX_UNLOCK(index);
 
   uint8_t *cbor_data;
   size_t cbor_size;
@@ -1288,10 +1196,8 @@ void index_debounce(void* ctx) {
   free(cbor_data);
   wal_destroy(wal);
   cbor_intermediate_decref(cbor);
-  INDEX_LOCK(index);
   uint64_t first_kept_id = _index_prune_old_snapshots(index);
   _index_prune_old_wals(index, first_kept_id);
-  INDEX_UNLOCK(index);
 }
 int _index_to_crc(index_t* index, uint64_t* crc) {
   XXH64_state_t* const state = XXH64_createState();
@@ -1314,9 +1220,7 @@ int _index_to_crc(index_t* index, uint64_t* crc) {
 }
 
 int index_to_crc(index_t* index, uint64_t* crc) {
-  INDEX_LOCK(index);
   int result = _index_to_crc(index, crc);
-  INDEX_UNLOCK(index);
   return result;
 }
 int _index_get_id_crc(char* filename, uint64_t* id, uint64_t* crc) {

@@ -9,6 +9,7 @@
 #include "../Actor/message.h"
 #include "../Buffer/buffer.h"
 #include "../Scheduler/scheduler.h"
+#include "../Network/network.h"
 #include <string.h>
 
 static size_t _block_size_for_type(block_size_e type) {
@@ -215,11 +216,29 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
 
       if (result->block == NULL) {
         /* Block not found */
-        if (result->hash != NULL) {
-          DESTROY(result->hash, buffer);
+        if (desc->network != NULL) {
+          /* Network-aware: send NETWORK_LOCAL_FIND_BLOCK */
+          desc->state = DESCRIPTOR_AWAITING_NETWORK;
+          desc->pending_fetch_hash = REFERENCE(result->hash, buffer_t);
+          network_local_find_block_payload_t payload;
+          payload.hash = desc->pending_fetch_hash;
+          payload.reply_to = &desc->stream.actor;
+          message_t msg;
+          msg.type = NETWORK_LOCAL_FIND_BLOCK;
+          msg.payload = &payload;
+          msg.payload_destroy = NULL;
+          actor_send(&desc->network->actor, &msg);
+          if (result->hash != NULL) {
+            DESTROY(result->hash, buffer);
+          }
+        } else {
+          /* Local-only: deactivate */
+          if (result->hash != NULL) {
+            DESTROY(result->hash, buffer);
+          }
+          stream_deactivate((stream_t*)desc, ERROR("Descriptor block not found"));
+          desc->stream.is_deactivated = 1;
         }
-        stream_deactivate((stream_t*)desc, ERROR("Descriptor block not found"));
-        desc->stream.is_deactivated = 1;
         break;
       }
 
@@ -239,7 +258,28 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
       }
       break;
     }
+    case NETWORK_FIND_BLOCK_RESULT: {
+      network_find_block_result_payload_t* result = (network_find_block_result_payload_t*)msg->payload;
+      if (result->found) {
+        /* Block found on network — re-issue cache_get */
+        block_cache_get(desc->bc, desc->pending_fetch_hash, &desc->stream.actor);
+        desc->state = DESCRIPTOR_FETCHING_BLOCK;
+      } else {
+        /* Block not found on network — deactivate */
+        stream_deactivate((stream_t*)desc, ERROR("Descriptor block not found on network"));
+        desc->stream.is_deactivated = 1;
+      }
+      if (desc->pending_fetch_hash != NULL) {
+        DESTROY(desc->pending_fetch_hash, buffer);
+        desc->pending_fetch_hash = NULL;
+      }
+      break;
+    }
     case CLOSE_STREAM: {
+      if (desc->pending_fetch_hash != NULL) {
+        DESTROY(desc->pending_fetch_hash, buffer);
+        desc->pending_fetch_hash = NULL;
+      }
       stream_notify((stream_t*)desc, close_event, NULL, NULL);
       desc->stream.is_deactivated = 1;
       break;
@@ -251,10 +291,13 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
 }
 
 readable_descriptor_t* readable_descriptor_create(
-    scheduler_pool_t* pool, block_cache_t* bc, ori_t* ori, size_t descriptor_pad) {
+    scheduler_pool_t* pool, block_cache_t* bc, ori_t* ori, size_t descriptor_pad,
+    network_t* network) {
   readable_descriptor_t* desc = get_clear_memory(sizeof(readable_descriptor_t));
   desc->bc = bc;
   desc->ori = ori;
+  desc->network = network;
+  desc->pending_fetch_hash = NULL;
   desc->block_size = _block_size_for_type(ori->block_type);
   desc->tuple_count = (ori->final_byte / desc->block_size) +
                       ((ori->final_byte % desc->block_size) > 0 ? 1 : 0);
@@ -266,6 +309,7 @@ readable_descriptor_t* readable_descriptor_create(
   desc->current_tuple = NULL;
   desc->offset_remainder = NULL;
   desc->next_descriptor_hash = NULL;
+  desc->state = DESCRIPTOR_FETCHING_BLOCK;
   desc->is_readable = 1;
 
   stream_init((stream_t*)desc, push, readable_stream, 0, pool,
@@ -293,6 +337,9 @@ void readable_descriptor_destroy(readable_descriptor_t* desc) {
     }
     if (desc->expected_hash != NULL) {
       DESTROY(desc->expected_hash, buffer);
+    }
+    if (desc->pending_fetch_hash != NULL) {
+      DESTROY(desc->pending_fetch_hash, buffer);
     }
     stream_deinit((stream_t*)desc);
     free(desc);

@@ -4,9 +4,11 @@
 
 #include "block_recipe.h"
 #include "../Util/allocator.h"
+#include "../Util/error.h"
 #include "../Actor/actor.h"
 #include "../Actor/message.h"
 #include "../Scheduler/scheduler.h"
+#include "../Network/network.h"
 #include <string.h>
 
 // --- Generic recipe pull ---
@@ -34,7 +36,7 @@ void new_blocks_recipe_dispatch(void* state, message_t* msg) {
         recipe->recipe.stream.is_deactivated = 1;
         break;
       }
-      block_cache_put(recipe->recipe.bc, block, NULL);
+      block_cache_put(recipe->recipe.bc, block, 0, NULL);
       stream_notify((stream_t*)recipe, data_event,
                     CONSUME(block, block_t), (void (*)(void*))block_destroy);
       break;
@@ -281,26 +283,44 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
       if (recipe->loading_descriptor) {
         /* Processing a descriptor block */
         if (result->block == NULL) {
-          /* Descriptor block not found — skip this ori */
-          if (result->hash != NULL) {
-            DESTROY(result->hash, buffer);
+          /* Descriptor block not found */
+          if (recipe->network != NULL) {
+            /* Network-aware: send NETWORK_LOCAL_FIND_BLOCK */
+            recipe->state = RECIPE_AWAITING_NETWORK;
+            recipe->pending_fetch_hash = REFERENCE(result->hash, buffer_t);
+            network_local_find_block_payload_t payload;
+            payload.hash = recipe->pending_fetch_hash;
+            payload.reply_to = &recipe->recipe.stream.actor;
+            message_t msg;
+            msg.type = NETWORK_LOCAL_FIND_BLOCK;
+            msg.payload = &payload;
+            msg.payload_destroy = NULL;
+            actor_send(&recipe->network->actor, &msg);
+            if (result->hash != NULL) {
+              DESTROY(result->hash, buffer);
+            }
+          } else {
+            /* Local-only: skip this ori */
+            if (result->hash != NULL) {
+              DESTROY(result->hash, buffer);
+            }
+            /* Clean up any partial front/back hashes */
+            for (int i = 0; i < recipe->front_hashes.length; i++) {
+              DESTROY(recipe->front_hashes.data[i], buffer);
+            }
+            vec_deinit(&recipe->front_hashes);
+            for (int i = 0; i < recipe->back_hashes.length; i++) {
+              DESTROY(recipe->back_hashes.data[i], buffer);
+            }
+            vec_deinit(&recipe->back_hashes);
+            if (recipe->next_descriptor_hash != NULL) {
+              DESTROY(recipe->next_descriptor_hash, buffer);
+              recipe->next_descriptor_hash = NULL;
+            }
+            recipe->ori_index++;
+            recipe->loading_descriptor = 0;
+            _start_descriptor_load(recipe);
           }
-          /* Clean up any partial front/back hashes */
-          for (int i = 0; i < recipe->front_hashes.length; i++) {
-            DESTROY(recipe->front_hashes.data[i], buffer);
-          }
-          vec_deinit(&recipe->front_hashes);
-          for (int i = 0; i < recipe->back_hashes.length; i++) {
-            DESTROY(recipe->back_hashes.data[i], buffer);
-          }
-          vec_deinit(&recipe->back_hashes);
-          if (recipe->next_descriptor_hash != NULL) {
-            DESTROY(recipe->next_descriptor_hash, buffer);
-            recipe->next_descriptor_hash = NULL;
-          }
-          recipe->ori_index++;
-          recipe->loading_descriptor = 0;
-          _start_descriptor_load(recipe);
           break;
         }
 
@@ -332,11 +352,30 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
                       CONSUME(result->block, block_t), (void (*)(void*))block_destroy);
         recipe->pending_pull--;
       } else {
-        if (result->hash != NULL) {
-          DESTROY(result->hash, buffer);
+        /* Data block not found */
+        if (recipe->network != NULL) {
+          /* Network-aware: send NETWORK_LOCAL_FIND_BLOCK */
+          recipe->state = RECIPE_AWAITING_NETWORK;
+          recipe->pending_fetch_hash = REFERENCE(result->hash, buffer_t);
+          network_local_find_block_payload_t payload;
+          payload.hash = recipe->pending_fetch_hash;
+          payload.reply_to = &recipe->recipe.stream.actor;
+          message_t msg;
+          msg.type = NETWORK_LOCAL_FIND_BLOCK;
+          msg.payload = &payload;
+          msg.payload_destroy = NULL;
+          actor_send(&recipe->network->actor, &msg);
+          if (result->hash != NULL) {
+            DESTROY(result->hash, buffer);
+          }
+        } else {
+          /* Local-only: deactivate */
+          if (result->hash != NULL) {
+            DESTROY(result->hash, buffer);
+          }
+          stream_deactivate((stream_t*)recipe, ERROR("Block not found"));
+          recipe->recipe.stream.is_deactivated = 1;
         }
-        stream_deactivate((stream_t*)recipe, ERROR("Block not found"));
-        recipe->recipe.stream.is_deactivated = 1;
         break;
       }
       if (result->hash != NULL) {
@@ -349,7 +388,48 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
       }
       break;
     }
+    case NETWORK_FIND_BLOCK_RESULT: {
+      network_find_block_result_payload_t* result = (network_find_block_result_payload_t*)msg->payload;
+      if (result->found) {
+        /* Block found on network — re-issue cache_get */
+        block_cache_get(recipe->recipe.bc, recipe->pending_fetch_hash, &recipe->recipe.stream.actor);
+        recipe->state = RECIPE_FETCHING_BLOCK;
+      } else {
+        /* Block not found on network */
+        if (recipe->loading_descriptor) {
+          /* Descriptor block not found on network — skip this ori */
+          for (int i = 0; i < recipe->front_hashes.length; i++) {
+            DESTROY(recipe->front_hashes.data[i], buffer);
+          }
+          vec_deinit(&recipe->front_hashes);
+          for (int i = 0; i < recipe->back_hashes.length; i++) {
+            DESTROY(recipe->back_hashes.data[i], buffer);
+          }
+          vec_deinit(&recipe->back_hashes);
+          if (recipe->next_descriptor_hash != NULL) {
+            DESTROY(recipe->next_descriptor_hash, buffer);
+            recipe->next_descriptor_hash = NULL;
+          }
+          recipe->ori_index++;
+          recipe->loading_descriptor = 0;
+          _start_descriptor_load(recipe);
+        } else {
+          /* Data block not found on network — deactivate */
+          stream_deactivate((stream_t*)recipe, ERROR("Block not found on network"));
+          recipe->recipe.stream.is_deactivated = 1;
+        }
+      }
+      if (recipe->pending_fetch_hash != NULL) {
+        DESTROY(recipe->pending_fetch_hash, buffer);
+        recipe->pending_fetch_hash = NULL;
+      }
+      break;
+    }
     case CLOSE_STREAM: {
+      if (recipe->pending_fetch_hash != NULL) {
+        DESTROY(recipe->pending_fetch_hash, buffer);
+        recipe->pending_fetch_hash = NULL;
+      }
       stream_notify((stream_t*)recipe, close_event, NULL, NULL);
       recipe->recipe.stream.is_deactivated = 1;
       break;
@@ -362,10 +442,13 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
 
 recycler_recipe_t* recycler_recipe_create(
     scheduler_pool_t* pool, block_cache_t* bc, block_size_e block_type,
-    vec_ori_t oris) {
+    vec_ori_t oris, network_t* network) {
   recycler_recipe_t* recipe = get_clear_memory(sizeof(recycler_recipe_t));
   recipe->recipe.bc = bc;
   recipe->recipe.block_type = block_type;
+  recipe->network = network;
+  recipe->pending_fetch_hash = NULL;
+  recipe->state = RECIPE_FETCHING_BLOCK;
 
   recipe->oris = oris;
   for (int i = 0; i < recipe->oris.length; i++) {
@@ -415,6 +498,9 @@ void recycler_recipe_destroy(recycler_recipe_t* recipe) {
     }
     if (recipe->next_descriptor_hash != NULL) {
       DESTROY(recipe->next_descriptor_hash, buffer);
+    }
+    if (recipe->pending_fetch_hash != NULL) {
+      DESTROY(recipe->pending_fetch_hash, buffer);
     }
 
     stream_deinit((stream_t*)recipe);

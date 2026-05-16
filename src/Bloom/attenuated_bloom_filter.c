@@ -97,7 +97,45 @@ cbor_item_t* attenuated_bloom_filter_encode(const attenuated_bloom_filter_t* abf
 }
 
 attenuated_bloom_filter_t* attenuated_bloom_filter_decode(cbor_item_t* item) {
-  // TODO: implement CBOR decode for ABF
-  (void)item;
-  return NULL;
+  if (item == NULL || !cbor_isa_array(item)) return NULL;
+  // [level_count, [level_0_ebf, level_1_ebf, ...]]
+  if (cbor_array_size(item) < 2) return NULL;
+
+  cbor_item_t* count_item = cbor_array_get(item, 0);
+  uint32_t level_count = cbor_get_uint32(count_item);
+  cbor_decref(&count_item);
+
+  cbor_item_t* levels_arr = cbor_array_get(item, 1);
+  if (!cbor_isa_array(levels_arr)) { cbor_decref(&levels_arr); return NULL; }
+
+  size_t actual_levels = cbor_array_size(levels_arr);
+  if (actual_levels < level_count) level_count = (uint32_t)actual_levels;
+
+  attenuated_bloom_filter_t* abf = get_clear_memory(sizeof(attenuated_bloom_filter_t));
+  if (abf == NULL) { cbor_decref(&levels_arr); return NULL; }
+  abf->level_count = level_count;
+  abf->levels = get_clear_memory(level_count * sizeof(elastic_bloom_filter_t*));
+  if (abf->levels == NULL) {
+    free(abf);
+    cbor_decref(&levels_arr);
+    return NULL;
+  }
+
+  for (uint32_t index = 0; index < level_count; index++) {
+    cbor_item_t* level_item = cbor_array_get(levels_arr, (size_t)index);
+    abf->levels[index] = elastic_bloom_filter_decode(level_item);
+    cbor_decref(&level_item);
+    if (abf->levels[index] == NULL) {
+      // If any level fails to decode, clean up and return NULL
+      for (uint32_t cleanup = 0; cleanup < index; cleanup++) {
+        elastic_bloom_filter_destroy(abf->levels[cleanup]);
+      }
+      free(abf->levels);
+      free(abf);
+      cbor_decref(&levels_arr);
+      return NULL;
+    }
+  }
+  cbor_decref(&levels_arr);
+  return abf;
 }

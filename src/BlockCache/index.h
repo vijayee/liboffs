@@ -8,10 +8,8 @@
 #include "fibonacci.h"
 #include <stdint.h>
 #include "../Buffer/buffer.h"
-#include "../Util/threadding.h"
 #include <hashmap.h>
 #include "../Util/vec.h"
-#include "fibonacci.h"
 #include <cbor.h>
 #include "wal.h"
 #include "../Timer/timer_actor.h"
@@ -19,7 +17,6 @@ uint8_t get_bit(buffer_t* buffer, size_t index);
 
 typedef struct {
   refcounter_t refcounter;
-  PLATFORMLOCKTYPE(lock);
   fibonacci_hit_counter_t counter;
   buffer_t* hash;
   size_t section_id;
@@ -55,9 +52,6 @@ index_node_t* cbor_to_index_node(cbor_item_t* cbor, size_t bucket_size);
 typedef HASHMAP(uint32_t, index_entry_vec_t) rank_map_t;
 typedef struct {
   refcounter_t refcounter;
-  uint32_t pre_lock_canary;
-  PLATFORMLOCKTYPE(lock);
-  uint32_t lock_canary;
   index_node_t* root;
   size_t bucket_size;
   rank_map_t ranks;
@@ -91,8 +85,5 @@ cbor_item_t* index_to_cbor(index_t* index);
 index_t* cbor_to_index(cbor_item_t* cbor, char* location, timer_actor_t* timer_actor, uint64_t wait, uint64_t max_wait, size_t max_snapshots, size_t max_wals);
 void index_set_entry_ejection(index_t* index, index_entry_t* entry, uint64_t date);
 int _sort_indexes(const void *str1, const void *str2);
-#define INDEX_LOCK_CANARY 0x494E4458u
-#define INDEX_PRE_LOCK_CANARY 0x5052454Cu
-void index_validate_lock(index_t* index, const char* func, int line);
 int index_to_crc(index_t* index, uint64_t* crc);
 #endif //OFFS_INDEX_H

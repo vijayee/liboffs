@@ -22,7 +22,7 @@ TEST(ReadableDescriptor, TestCreateDestroy) {
   ori->descriptor_offset = 0;
   ori->descriptor_hash = NULL;
 
-  readable_descriptor_t* desc = readable_descriptor_create(pool, bc, ori, 32);
+  readable_descriptor_t* desc = readable_descriptor_create(pool, bc, ori, 32, NULL);
   ASSERT_NE(desc, nullptr);
   EXPECT_EQ(desc->block_size, 128000u);
   EXPECT_EQ(desc->descriptor_pad, 32u);
@@ -57,7 +57,7 @@ TEST(ReadableDescriptor, TestOffsetCalculation) {
   ori->descriptor_offset = 0;
   ori->descriptor_hash = NULL;
 
-  readable_descriptor_t* desc = readable_descriptor_create(pool, bc, ori, 32);
+  readable_descriptor_t* desc = readable_descriptor_create(pool, bc, ori, 32, NULL);
   ASSERT_NE(desc, nullptr);
   EXPECT_EQ(desc->offset_tuple, 1u);
   EXPECT_EQ(desc->tuple_count, 2u);

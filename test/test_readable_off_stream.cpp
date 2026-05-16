@@ -27,7 +27,7 @@ TEST(ReadableOffStream, TestCreateDestroy) {
   ori->final_byte = 1024;
   ori->file_hash = REFERENCE(file_hash, buffer_t);
 
-  readable_off_stream_t* stream = readable_off_stream_create(pool, bc, tc, ori, 0);
+  readable_off_stream_t* stream = readable_off_stream_create(pool, bc, tc, ori, 0, NULL);
   ASSERT_NE(stream, nullptr);
 
   readable_off_stream_destroy(stream);

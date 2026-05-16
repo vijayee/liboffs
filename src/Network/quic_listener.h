@@ -10,15 +10,26 @@
 #include "../Scheduler/scheduler.h"
 #include "../Util/atomic_compat.h"
 #include "../Util/threadding.h"
+#include "../Util/allocator.h"
 #include <poll-dancer/poll-dancer.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <sys/socket.h>
 
 #ifdef HAS_MSQUIC
 #include <msquic.h>
 #endif
 
 typedef struct quic_connection_t quic_connection_t;
+
+// Payload for NETWORK_QUIC_DATA messages
+typedef struct quic_data_payload_t {
+  uint8_t* data;
+  size_t length;
+  struct sockaddr_storage peer_addr;  // Peer address for routing responses
+} quic_data_payload_t;
+
+void quic_data_payload_destroy(quic_data_payload_t* payload);
 
 typedef struct quic_listener_t {
   actor_t actor;

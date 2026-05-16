@@ -102,10 +102,12 @@ elastic_bloom_filter_t* elastic_bloom_filter_create(size_t size, uint32_t hash_c
 
 void elastic_bloom_filter_destroy(elastic_bloom_filter_t* ebf) {
   if (ebf == NULL) return;
-  for (size_t index = 0; index < ebf->bucket_count; index++) {
-    bucket_destroy(ebf->buckets[index]);
+  if (ebf->buckets != NULL) {
+    for (size_t index = 0; index < ebf->bucket_count; index++) {
+      bucket_destroy(ebf->buckets[index]);
+    }
+    free(ebf->buckets);
   }
-  free(ebf->buckets);
   bitset_destroy(ebf->bits);
   free(ebf);
 }
@@ -345,7 +347,85 @@ cbor_item_t* elastic_bloom_filter_encode(const elastic_bloom_filter_t* ebf) {
 }
 
 elastic_bloom_filter_t* elastic_bloom_filter_decode(cbor_item_t* item) {
-  // TODO: implement CBOR decode for EBF
-  (void)item;
-  return NULL;
+  if (item == NULL || !cbor_isa_array(item)) return NULL;
+  // [size, hash_count, fp_bits, seed_a, seed_b, bitset_bytes, num_occupied, bucket_entries...]
+  if (cbor_array_size(item) < 7) return NULL;
+
+  cbor_item_t* size_item = cbor_array_get(item, 0);
+  size_t size = (size_t)cbor_get_uint64(size_item);
+  cbor_decref(&size_item);
+
+  cbor_item_t* hash_count_item = cbor_array_get(item, 1);
+  uint32_t hash_count = cbor_get_uint32(hash_count_item);
+  cbor_decref(&hash_count_item);
+
+  cbor_item_t* fp_bits_item = cbor_array_get(item, 2);
+  uint32_t fp_bits = cbor_get_uint32(fp_bits_item);
+  cbor_decref(&fp_bits_item);
+
+  cbor_item_t* seed_a_item = cbor_array_get(item, 3);
+  uint64_t seed_a = cbor_get_uint64(seed_a_item);
+  cbor_decref(&seed_a_item);
+
+  cbor_item_t* seed_b_item = cbor_array_get(item, 4);
+  uint64_t seed_b = cbor_get_uint64(seed_b_item);
+  cbor_decref(&seed_b_item);
+
+  cbor_item_t* bitset_item = cbor_array_get(item, 5);
+  if (!cbor_isa_bytestring(bitset_item)) { cbor_decref(&bitset_item); return NULL; }
+  size_t bitset_len = cbor_bytestring_length(bitset_item);
+
+  // Create EBF with decoded parameters
+  elastic_bloom_filter_t* ebf = get_clear_memory(sizeof(elastic_bloom_filter_t));
+  if (ebf == NULL) { cbor_decref(&bitset_item); return NULL; }
+  ebf->bucket_count = size;
+  ebf->size = size;
+  ebf->hash_count = hash_count;
+  ebf->seed_a = seed_a;
+  ebf->seed_b = seed_b;
+  ebf->fp_bits = fp_bits == 0 ? EBF_DEFAULT_FP_BITS : fp_bits;
+  ebf->omega = 0.75f;
+  ebf->count = 0;
+  ebf->buckets = get_clear_memory(size * sizeof(ebf_bucket_entry_t*));
+  ebf->bits = bitset_create(bitset_len);
+  if (ebf->buckets == NULL || ebf->bits == NULL) {
+    elastic_bloom_filter_destroy(ebf);
+    cbor_decref(&bitset_item);
+    return NULL;
+  }
+  memcpy(ebf->bits->data, cbor_bytestring_handle(bitset_item), bitset_len);
+  cbor_decref(&bitset_item);
+
+  // Decode occupied buckets from index 7 onward
+  // Index 6 = num_occupied, index 7+ = bucket entries
+  for (size_t index = 7; index < cbor_array_size(item); index++) {
+    cbor_item_t* bucket_item = cbor_array_get(item, (size_t)index);
+    if (!cbor_isa_array(bucket_item) || cbor_array_size(bucket_item) < 2) {
+      cbor_decref(&bucket_item);
+      continue;
+    }
+    cbor_item_t* idx_item = cbor_array_get(bucket_item, 0);
+    size_t bucket_idx = (size_t)cbor_get_uint64(idx_item);
+    cbor_decref(&idx_item);
+
+    cbor_item_t* fp_count_item = cbor_array_get(bucket_item, 1);
+    uint32_t fp_count = cbor_get_uint32(fp_count_item);
+    cbor_decref(&fp_count_item);
+
+    if (bucket_idx >= ebf->bucket_count) {
+      cbor_decref(&bucket_item);
+      continue;
+    }
+
+    for (uint32_t fp_index = 0; fp_index < fp_count && fp_index + 2 < cbor_array_size(bucket_item); fp_index++) {
+      cbor_item_t* fp_item = cbor_array_get(bucket_item, 2 + (size_t)fp_index);
+      uint32_t fingerprint = cbor_get_uint32(fp_item);
+      cbor_decref(&fp_item);
+      ebf->buckets[bucket_idx] = bucket_insert(ebf->buckets[bucket_idx], fingerprint);
+    }
+    cbor_decref(&bucket_item);
+  }
+
+  rebuild_bitset(ebf);
+  return ebf;
 }

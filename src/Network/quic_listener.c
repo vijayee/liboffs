@@ -4,12 +4,18 @@
 
 #include "quic_listener.h"
 
+// Destroy helper for QUIC data payloads (used in both HAS_MSQUIC and stub builds)
+void quic_data_payload_destroy(quic_data_payload_t* payload) {
+  if (payload == NULL) return;
+  free(payload->data);
+  free(payload);
+}
+
 #ifdef HAS_MSQUIC
 
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include <msquic.h>
-#include <stdlib.h>
 #include <string.h>
 
 // Destroy stack for deferred watcher cleanup (mirrors HTTP server pattern)
@@ -111,9 +117,21 @@ static QUIC_STATUS QUIC_API quic_stream_callback(
       // Forward received data to network protocol actor via actor_send
       for (uint32_t index = 0; index < event->RECEIVE.BufferCount; index++) {
         QUIC_BUFFER* buffer = &event->RECEIVE.Buffers[index];
-        // TODO: Allocate payload struct and send NETWORK_QUIC_DATA message (OFFS-106)
-        (void)buffer;
-        (void)listener;
+        quic_data_payload_t* payload = get_clear_memory(sizeof(quic_data_payload_t));
+        if (payload == NULL) continue;
+        payload->length = buffer->Length;
+        payload->data = get_clear_memory(buffer->Length);
+        if (payload->data == NULL) {
+          free(payload);
+          continue;
+        }
+        memcpy(payload->data, buffer->Buffer, buffer->Length);
+
+        message_t msg;
+        msg.type = NETWORK_QUIC_DATA;
+        msg.payload = payload;
+        msg.payload_destroy = (void (*)(void*))quic_data_payload_destroy;
+        actor_send(&listener->network->actor, &msg);
       }
       break;
     }
