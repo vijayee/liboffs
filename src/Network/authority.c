@@ -7,7 +7,10 @@
 #include "hebbian.h"
 #include "ring_set.h"
 #include "net_node.h"
+#include "pem_key.h"
 #include "../Util/allocator.h"
+#include "../Util/log.h"
+#include "../Util/base58.h"
 #include <string.h>
 #include <stdio.h>
 #include <cbor.h>
@@ -49,6 +52,38 @@ void authority_destroy(authority_t* authority) {
   if (authority->node_key_path != NULL) free(authority->node_key_path);
   if (authority->relay_url != NULL) free(authority->relay_url);
   free(authority);
+}
+
+// --- Local ID initialization ---
+
+int authority_init_local_id(authority_t* authority) {
+  if (authority == NULL) return -1;
+
+  // If local_id is already set (e.g., from persistence), just regenerate .str
+  if (!node_id_is_null(&authority->local_id)) {
+    base58_encode(authority->local_id.hash, NODE_ID_HASH_SIZE,
+                  authority->local_id.str, NODE_ID_STRING_SIZE);
+    return 0;
+  }
+
+  // Derive node_id from certificate public key
+  if (authority->node_cert_path != NULL) {
+    size_t key_len = 0;
+    uint8_t* public_key = pem_extract_public_key(authority->node_cert_path, &key_len);
+    if (public_key != NULL && key_len > 0) {
+      int rc = node_id_from_public_key(public_key, key_len, &authority->local_id);
+      free(public_key);
+      if (rc == 0) {
+        return 0;
+      }
+    }
+    if (public_key != NULL) free(public_key);
+    log_error("authority_init_local_id: failed to derive node_id from cert, generating random");
+  }
+
+  // No cert or extraction failed — generate a random node_id
+  node_id_generate(&authority->local_id);
+  return 0;
 }
 
 // --- Config-only save/load ---
@@ -299,6 +334,8 @@ int authority_load_peers(authority_t* authority, network_t* network) {
         memcmp(cbor_string_handle(pair.key), "local_id", 9) == 0) {
       if (cbor_isa_bytestring(pair.value) && cbor_bytestring_length(pair.value) == NODE_ID_HASH_SIZE) {
         memcpy(authority->local_id.hash, cbor_bytestring_handle(pair.value), NODE_ID_HASH_SIZE);
+        base58_encode(authority->local_id.hash, NODE_ID_HASH_SIZE,
+                      authority->local_id.str, NODE_ID_STRING_SIZE);
       }
     }
   }

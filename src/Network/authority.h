@@ -48,6 +48,9 @@ typedef struct authority_t {
 authority_t* authority_create(config_t* config);
 void authority_destroy(authority_t* authority);
 
+// Generate local_id from certificate public key (or random if no cert)
+int authority_init_local_id(authority_t* authority);
+
 // Save/load config-only state (bootstrap peers, paths, local_id)
 int authority_save(const authority_t* authority);
 int authority_load(authority_t* authority);

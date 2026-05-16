@@ -123,6 +123,26 @@ peer_connection_t* connection_manager_lookup(const connection_manager_t* mgr,
   return NULL;
 }
 
+peer_connection_t* connection_manager_lookup_by_quic(const connection_manager_t* mgr,
+                                                      const void* quic_connection) {
+  if (mgr == NULL || quic_connection == NULL) {
+    return NULL;
+  }
+
+#ifdef HAS_MSQUIC
+  for (size_t index = 0; index < mgr->peer_count; index++) {
+    if (mgr->peers[index]->quic_connection == quic_connection) {
+      return mgr->peers[index];
+    }
+  }
+#else
+  (void)mgr;
+  (void)quic_connection;
+#endif
+
+  return NULL;
+}
+
 // Helper for qsort: compare peers by minimum hop level (ascending)
 typedef struct peer_match_t {
   peer_connection_t* peer;

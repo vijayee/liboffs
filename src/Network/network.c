@@ -58,6 +58,7 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
                           timer_actor_t* timer, scheduler_pool_t* pool) {
   network_t* network = get_clear_memory(sizeof(network_t));
   network->authority = authority;
+  authority_init_local_id(authority);
   network->block_cache = block_cache;
   network->timer = timer;
   network->pool = pool;
@@ -184,13 +185,8 @@ int network_connect_relay(network_t* network, const char* host, uint16_t port) {
 
 // --- Ping handler ---
 
-typedef struct {
-  uint64_t message_id;
-  uint64_t timestamp;
-} ping_payload_t;
-
 static void network_handle_ping(network_t* network, message_t* msg) {
-  ping_payload_t* ping = (ping_payload_t*)msg->payload;
+  wire_ping_t* ping = (wire_ping_t*)msg->payload;
   if (ping == NULL) return;
 
   // Build wire PingResponse with our capacity/phase and echo timestamp for RTT
@@ -200,13 +196,9 @@ static void network_handle_ping(network_t* network, message_t* msg) {
   response.echo_time = ping->timestamp;
   response.capacity = atomic_load(&network->authority->capacity);
   response.phase = atomic_load(&network->authority->phase);
+  memcpy(&response.sender_id, &network->authority->local_id, sizeof(node_id_t));
 
-  // Encode and send via QUIC to the sender's peer connection.
-  // Node_id tracking from QUIC connection metadata is deferred to Task 7.
-  // For now, use a zeroed node_id — responses will be dropped until then.
-  node_id_t sender_id;
-  node_id_clear(&sender_id);
-  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &ping->sender_id);
   if (peer != NULL) {
     cbor_item_t* cbor = wire_ping_response_encode(&response);
     conn_state_send(network, peer, cbor);
@@ -215,22 +207,18 @@ static void network_handle_ping(network_t* network, message_t* msg) {
 }
 
 static void network_handle_ping_response(network_t* network, message_t* msg) {
-  ping_payload_t* response = (ping_payload_t*)msg->payload;
+  wire_ping_response_t* response = (wire_ping_response_t*)msg->payload;
   if (response == NULL) return;
   // Calculate RTT from echo_time (the timestamp field holds the original send time)
   uint64_t now_ms = (uint64_t)time(NULL) * 1000;
   uint64_t rtt_ms = 0;
-  if (now_ms > response->timestamp) {
-    rtt_ms = now_ms - response->timestamp;
+  if (now_ms > response->echo_time) {
+    rtt_ms = now_ms - response->echo_time;
   }
   // Update latency cache with the measured RTT
-  // Use a zeroed node_id since PingResponse doesn't carry source yet;
-  // when QUIC connection metadata is available, this will use the actual sender ID
-  node_id_t sender_id;
-  node_id_clear(&sender_id);
-  latency_cache_insert(network->latency_cache, &sender_id, 0, 0, (float)rtt_ms);
+  latency_cache_insert(network->latency_cache, &response->sender_id, 0, 0, (float)rtt_ms);
   // Update the peer's RTT in the connection manager
-  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &response->sender_id);
   if (peer != NULL) {
     peer_update_rtt(peer, (double)rtt_ms);
   }
@@ -261,10 +249,9 @@ static void network_handle_ping_block(network_t* network, message_t* msg) {
     response.exists = 1;
     response.fib = entry->counter.fib;
     response.healthy = 1;
+    memcpy(&response.sender_id, &network->authority->local_id, sizeof(node_id_t));
 
-    node_id_t sender_id;
-    node_id_clear(&sender_id);
-    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &ping->sender_id);
     if (peer != NULL) {
       cbor_item_t* cbor = wire_ping_block_response_encode(&response);
       conn_state_send(network, peer, cbor);
@@ -279,10 +266,9 @@ static void network_handle_ping_block(network_t* network, message_t* msg) {
     response.exists = 0;
     response.fib = 0;
     response.healthy = 0;
+    memcpy(&response.sender_id, &network->authority->local_id, sizeof(node_id_t));
 
-    node_id_t sender_id;
-    node_id_clear(&sender_id);
-    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &ping->sender_id);
     if (peer != NULL) {
       cbor_item_t* cbor = wire_ping_block_response_encode(&response);
       conn_state_send(network, peer, cbor);
@@ -298,11 +284,9 @@ static void network_handle_ping_block_response(network_t* network, message_t* ms
 
   // On successful block existence confirmation, strengthen Hebbian weight
   if (response->exists) {
-    // Frequency rule: strengthen connection to the peer that confirmed
-    // The peer's node_id comes from the message source, not the response itself.
-    // When query tracking is wired up, this handler will receive the source peer
-    // and apply hebbian_frequency to that peer. For now, the Hebbian update is
-    // applied by the query tracking layer.
+    float delta_w = hebbian_compute_delta(GOSSIP_TIMEOUT_MS, HEBBIAN_FIND_BLOCK_MULTIPLIER);
+    hebbian_frequency(&network->hebbian, &response->sender_id, delta_w);
+    network_sync_hebbian_to_rings(network);
   }
 }
 
@@ -370,8 +354,8 @@ static void network_handle_ping_capacity(network_t* network, message_t* msg) {
   response.message_id = ping->message_id;
   response.capacity = atomic_load(&network->authority->capacity);
   response.phase = atomic_load(&network->authority->phase);
+  memcpy(&response.sender_id, &network->authority->local_id, sizeof(node_id_t));
 
-  // Encode and send via QUIC to the sender's peer connection.
   // ping->source carries the sender's node_id from the wire message.
   peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &ping->source);
   if (peer != NULL) {
@@ -390,18 +374,15 @@ static void network_handle_ping_capacity_response(network_t* network, message_t*
   float delta_w = hebbian_compute_delta(GOSSIP_TIMEOUT_MS, HEBBIAN_FIND_BLOCK_MULTIPLIER);
 
   // Update Hebbian weights: the peer that responded is the one we sent PingCapacity to.
-  // Use a zeroed node_id until QUIC connection metadata provides the actual sender ID.
   // Apply frequency rule: w_{self→peer} += delta_w
-  node_id_t peer_id;
-  node_id_clear(&peer_id);
-  hebbian_frequency(&network->hebbian, &peer_id, delta_w);
+  hebbian_frequency(&network->hebbian, &response->sender_id, delta_w);
   network_sync_hebbian_to_rings(network);
 
   // Update the peer's cached capacity/phase in the connection manager
-  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &peer_id);
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &response->sender_id);
   if (peer != NULL) {
     // Update the ring table node for this peer
-    net_node_t* node = ring_set_find_by_id(network->rings, &peer_id);
+    net_node_t* node = ring_set_find_by_id(network->rings, &response->sender_id);
     if (node != NULL) {
       node->capacity = response->capacity;
       node->phase = response->phase;
@@ -420,6 +401,7 @@ static void network_handle_find_node(network_t* network, message_t* msg) {
 
   wire_find_node_response_t* response = get_clear_memory(sizeof(wire_find_node_response_t));
   response->message_id = find->message_id;
+  memcpy(&response->sender_id, &network->authority->local_id, sizeof(node_id_t));
   response->closest_count = 0;
 
   // Walk rings from lowest latency to highest, collecting up to 8 closest nodes
@@ -434,11 +416,7 @@ static void network_handle_find_node(network_t* network, message_t* msg) {
     }
   }
 
-  // Encode and send FindNodeResponse via QUIC to the sender's peer connection.
-  // Node_id tracking from QUIC connection metadata is deferred to Task 7.
-  node_id_t sender_id;
-  node_id_clear(&sender_id);
-  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &find->sender_id);
   if (peer != NULL) {
     cbor_item_t* cbor = wire_find_node_response_encode(response);
     conn_state_send(network, peer, cbor);
@@ -980,6 +958,7 @@ static void network_handle_store_block_response(network_t* network, message_t* m
             memset(&recall, 0, sizeof(recall));
             recall.message_id = response->message_id;
             memcpy(recall.block_hash, response->block_hash, 32);
+            memcpy(&recall.sender_id, &network->authority->local_id, sizeof(node_id_t));
             cbor_item_t* cbor = wire_recall_block_encode(&recall);
             conn_state_send(network, peer, cbor);
             cbor_decref(&cbor);
@@ -1010,6 +989,7 @@ static void network_handle_seeking_blocks(network_t* network, message_t* msg) {
   wire_seeking_blocks_response_t* response = get_clear_memory(sizeof(wire_seeking_blocks_response_t));
   if (response == NULL) return;
   response->message_id = seeking->message_id;
+  memcpy(&response->sender_id, &network->authority->local_id, sizeof(node_id_t));
   response->offer_count = 0;
 
   // Walk the block index and select up to WIRE_MAX_OFFERS blocks,
@@ -1045,10 +1025,7 @@ static void network_handle_seeking_blocks(network_t* network, message_t* msg) {
   }
 
   // Encode and send SeekingBlocksResponse via QUIC to the sender's peer connection.
-  // Node_id tracking from QUIC connection metadata is deferred to Task 7.
-  node_id_t sender_id;
-  node_id_clear(&sender_id);
-  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &seeking->sender_id);
   if (peer != NULL) {
     cbor_item_t* cbor = wire_seeking_blocks_response_encode(response);
     conn_state_send(network, peer, cbor);
@@ -1203,12 +1180,9 @@ static void network_handle_recall_block(network_t* network, message_t* msg) {
     memset(&response, 0, sizeof(response));
     response.message_id = recall->message_id;
     memcpy(response.block_hash, recall->block_hash, 32);
+    memcpy(&response.sender_id, &network->authority->local_id, sizeof(node_id_t));
 
-    // Encode and send RecallAccept via QUIC to the sender's peer connection.
-    // Node_id tracking from QUIC connection metadata is deferred to Task 7.
-    node_id_t sender_id;
-    node_id_clear(&sender_id);
-    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &recall->sender_id);
     if (peer != NULL) {
       cbor_item_t* cbor = wire_recall_accept_encode(&response);
       conn_state_send(network, peer, cbor);
@@ -1220,12 +1194,9 @@ static void network_handle_recall_block(network_t* network, message_t* msg) {
     memset(&response, 0, sizeof(response));
     response.message_id = recall->message_id;
     memcpy(response.block_hash, recall->block_hash, 32);
+    memcpy(&response.sender_id, &network->authority->local_id, sizeof(node_id_t));
 
-    // Encode and send RecallDecline via QUIC to the sender's peer connection.
-    // Node_id tracking from QUIC connection metadata is deferred to Task 7.
-    node_id_t sender_id;
-    node_id_clear(&sender_id);
-    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &recall->sender_id);
     if (peer != NULL) {
       cbor_item_t* cbor = wire_recall_decline_encode(&response);
       conn_state_send(network, peer, cbor);
@@ -1245,11 +1216,7 @@ static void network_handle_recall_accept(network_t* network, message_t* msg) {
   index_entry_t* entry = index_peek(network->block_cache->index, hash_buf);
   if (entry != NULL) {
     // Block found locally — send StoreBlock with the block data to the requesting peer
-    // The requesting peer is identified by the QUIC connection; use zeroed node_id until
-    // QUIC connection metadata provides the actual sender ID
-    node_id_t sender_id;
-    node_id_clear(&sender_id);
-    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &accept->sender_id);
 
     if (peer != NULL) {
       wire_store_block_t store_msg;
@@ -1308,13 +1275,9 @@ static void network_handle_recall_decline(network_t* network, message_t* msg) {
   wire_recall_decline_t* decline = (wire_recall_decline_t*)msg->payload;
   if (decline == NULL) return;
 
-  // The sender's node_id comes from QUIC connection metadata.
-  // Until that's wired up, we use a zeroed node_id to look up the peer.
   // Remove the declined block hash from the sender's EABF to stop
   // sending recall requests for blocks the sender doesn't want.
-  node_id_t sender_id;
-  node_id_clear(&sender_id);
-  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &decline->sender_id);
   if (peer != NULL && peer->eabf != NULL) {
     // Unsubscribe the block hash from the peer's EABF so we stop
     // pushing this block to them in future exhale cycles.
@@ -1751,10 +1714,19 @@ void network_dispatch(void* state, message_t* msg) {
       break;
     }
     case NETWORK_QUIC_DISCONNECTED: {
-      // QUIC connection closed — mark peer disconnected in connection manager
-      // Node_id extraction from QUIC connection handle is deferred to Task 7.
-      // Without the node_id we can't remove the peer from the connection manager.
-      // Peers remain in the table as disconnected until Hebbian decay removes them.
+      quic_connected_payload_t* quic_conn = (quic_connected_payload_t*)msg->payload;
+      if (quic_conn != NULL) {
+        peer_connection_t* peer = connection_manager_lookup_by_quic(
+            &network->conn_mgr, quic_conn->connection);
+        if (peer != NULL) {
+          peer->connected = false;
+#ifdef HAS_MSQUIC
+          peer->quic_connection = NULL;
+          peer->quic_stream = NULL;
+#endif
+          connection_manager_remove(&network->conn_mgr, &peer->remote_node_id);
+        }
+      }
       break;
     }
     case CM_PEER_CONNECTED: {
@@ -1789,7 +1761,78 @@ void network_dispatch(void* state, message_t* msg) {
       network_local_store_block_payload_t* payload =
           (network_local_store_block_payload_t*)msg->payload;
       if (payload != NULL && payload->hash != NULL) {
-        // Full implementation in later tasks
+        // Build store_block_state for local block announcement
+        store_block_state_t state;
+        memset(&state, 0, sizeof(state));
+        state.message_id = (uint64_t)time(NULL) * 1000;
+        memcpy(state.block_hash, payload->hash->data, 32);
+        state.block_fib = payload->fib;
+        state.replicas_needed = STORE_BLOCK_FORWARD_FANOUT;
+        state.max_hops = STORE_BLOCK_MAX_HOPS;
+        state.visited_count = 0;
+        memcpy(&state.path[0], &network->authority->local_id, sizeof(node_id_t));
+        state.path_len = 1;
+        state.start_time_ms = (uint64_t)time(NULL) * 1000;
+        state.carry_data = 0;
+
+        float local_capacity = atomic_load(&network->authority->capacity);
+        node_phase_e local_phase = atomic_load(&network->authority->phase);
+
+        net_node_t* next_hops[STORE_BLOCK_FORWARD_FANOUT];
+        size_t next_hop_count = 0;
+
+        store_block_result_e result = store_block_execute(
+            &network->eabf_table,
+            &network->conn_mgr,
+            network->rings,
+            &network->authority->local_id,
+            local_capacity,
+            local_phase,
+            &state,
+            next_hops,
+            &next_hop_count);
+
+        if (result == STORE_BLOCK_ACCEPTED || result == STORE_BLOCK_FORWARDING) {
+          for (size_t hop_idx = 0; hop_idx < next_hop_count; hop_idx++) {
+            peer_connection_t* peer = connection_manager_lookup(
+                &network->conn_mgr, &next_hops[hop_idx]->id);
+            if (peer != NULL) {
+              wire_store_block_t forward;
+              memset(&forward, 0, sizeof(forward));
+              forward.message_id = state.message_id;
+              memcpy(forward.block_hash, state.block_hash, 32);
+              forward.block_fib = state.block_fib;
+              forward.replicas_needed = state.replicas_needed;
+              forward.max_hops = state.max_hops;
+              memcpy(forward.visited_bloom, state.visited_bloom, STORE_BLOCK_MAX_VISITED_BLOOM);
+              forward.visited_count = state.visited_count;
+              memcpy(forward.path, state.path, state.path_len * sizeof(node_id_t));
+              forward.path_len = state.path_len;
+              forward.start_time = state.start_time_ms;
+              forward.carry_data = 0;
+
+              cbor_item_t* cbor = wire_store_block_encode(&forward);
+              conn_state_send(network, peer, cbor);
+              cbor_decref(&cbor);
+            }
+          }
+        }
+
+        // Notify the stream actor if a reply_to was provided
+        if (result == STORE_BLOCK_ACCEPTED && payload->reply_to != NULL) {
+          network_store_block_result_payload_t* result_payload =
+              get_clear_memory(sizeof(network_store_block_result_payload_t));
+          if (result_payload != NULL) {
+            result_payload->accepted = 1;
+            result_payload->replicas = (uint32_t)next_hop_count;
+            result_payload->reply_to = NULL;
+            message_t result_msg = {0};
+            result_msg.type = NETWORK_STORE_BLOCK_RESULT;
+            result_msg.payload = result_payload;
+            result_msg.payload_destroy = free;
+            actor_send(payload->reply_to, &result_msg);
+          }
+        }
       }
       break;
     }

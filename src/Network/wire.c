@@ -54,10 +54,14 @@ uint8_t wire_get_type(cbor_item_t* item) {
 // --- Ping ---
 
 cbor_item_t* wire_ping_encode(const wire_ping_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(4);
+  cbor_item_t* array = cbor_new_definite_array(5);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_PING);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
@@ -77,16 +81,20 @@ cbor_item_t* wire_ping_encode(const wire_ping_t* msg) {
 }
 
 int wire_ping_decode(cbor_item_t* item, wire_ping_t* msg) {
-  if (cbor_array_size(item) < 4) return -1;
+  if (cbor_array_size(item) < 5) return -1;
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_PING) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
-  cbor_item_t* id_hi = cbor_array_get(item, 1);
-  cbor_item_t* id_lo = cbor_array_get(item, 2);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
   msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
-  cbor_item_t* ts = cbor_array_get(item, 3);
+  cbor_item_t* ts = cbor_array_get(item, 4);
   msg->timestamp = cbor_get_uint64(ts);
   cbor_decref(&ts);
   return 0;
@@ -95,10 +103,14 @@ int wire_ping_decode(cbor_item_t* item, wire_ping_t* msg) {
 // --- PingResponse ---
 
 cbor_item_t* wire_ping_response_encode(const wire_ping_response_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(6);
+  cbor_item_t* array = cbor_new_definite_array(7);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_PING_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
@@ -127,22 +139,26 @@ cbor_item_t* wire_ping_response_encode(const wire_ping_response_t* msg) {
 }
 
 int wire_ping_response_decode(cbor_item_t* item, wire_ping_response_t* msg) {
-  if (cbor_array_size(item) < 6) return -1;
+  if (cbor_array_size(item) < 7) return -1;
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_PING_RESPONSE) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
-  cbor_item_t* id_hi = cbor_array_get(item, 1);
-  cbor_item_t* id_lo = cbor_array_get(item, 2);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
   msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
-  cbor_item_t* echo = cbor_array_get(item, 3);
+  cbor_item_t* echo = cbor_array_get(item, 4);
   msg->echo_time = cbor_get_uint64(echo);
   cbor_decref(&echo);
-  cbor_item_t* cap = cbor_array_get(item, 4);
+  cbor_item_t* cap = cbor_array_get(item, 5);
   msg->capacity = (float)cbor_float_get_float8(cap);
   cbor_decref(&cap);
-  cbor_item_t* phase = cbor_array_get(item, 5);
+  cbor_item_t* phase = cbor_array_get(item, 6);
   msg->phase = (node_phase_e)cbor_get_uint8(phase);
   cbor_decref(&phase);
   return 0;
@@ -151,10 +167,14 @@ int wire_ping_response_decode(cbor_item_t* item, wire_ping_response_t* msg) {
 // --- PingBlock ---
 
 cbor_item_t* wire_ping_block_encode(const wire_ping_block_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(3);
+  cbor_item_t* array = cbor_new_definite_array(4);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_PING_BLOCK);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
@@ -176,11 +196,15 @@ cbor_item_t* wire_ping_block_encode(const wire_ping_block_t* msg) {
 }
 
 int wire_ping_block_decode(cbor_item_t* item, wire_ping_block_t* msg) {
-  if (cbor_array_size(item) < 3) return -1;
+  if (cbor_array_size(item) < 4) return -1;
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_PING_BLOCK) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
-  cbor_item_t* id_arr = cbor_array_get(item, 1);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_arr = cbor_array_get(item, 2);
   if (cbor_array_size(id_arr) < 2) { cbor_decref(&id_arr); return -1; }
   cbor_item_t* id_hi = cbor_array_get(id_arr, 0);
   cbor_item_t* id_lo = cbor_array_get(id_arr, 1);
@@ -188,7 +212,7 @@ int wire_ping_block_decode(cbor_item_t* item, wire_ping_block_t* msg) {
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_decref(&id_arr);
-  cbor_item_t* hash_item = cbor_array_get(item, 2);
+  cbor_item_t* hash_item = cbor_array_get(item, 3);
   if (cbor_bytestring_length(hash_item) != 32) { cbor_decref(&hash_item); return -1; }
   memcpy(msg->block_hash, cbor_bytestring_handle(hash_item), 32);
   cbor_decref(&hash_item);
@@ -198,10 +222,14 @@ int wire_ping_block_decode(cbor_item_t* item, wire_ping_block_t* msg) {
 // --- PingBlockResponse ---
 
 cbor_item_t* wire_ping_block_response_encode(const wire_ping_block_response_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(6);
+  cbor_item_t* array = cbor_new_definite_array(7);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_PING_BLOCK_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
@@ -229,22 +257,26 @@ cbor_item_t* wire_ping_block_response_encode(const wire_ping_block_response_t* m
 }
 
 int wire_ping_block_response_decode(cbor_item_t* item, wire_ping_block_response_t* msg) {
-  if (cbor_array_size(item) < 6) return -1;
+  if (cbor_array_size(item) < 7) return -1;
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_PING_BLOCK_RESPONSE) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
-  cbor_item_t* id_hi = cbor_array_get(item, 1);
-  cbor_item_t* id_lo = cbor_array_get(item, 2);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
   msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
-  cbor_item_t* exists = cbor_array_get(item, 3);
+  cbor_item_t* exists = cbor_array_get(item, 4);
   msg->exists = cbor_get_uint8(exists);
   cbor_decref(&exists);
-  cbor_item_t* fib = cbor_array_get(item, 4);
+  cbor_item_t* fib = cbor_array_get(item, 5);
   msg->fib = cbor_get_uint32(fib);
   cbor_decref(&fib);
-  cbor_item_t* healthy = cbor_array_get(item, 5);
+  cbor_item_t* healthy = cbor_array_get(item, 6);
   msg->healthy = cbor_get_uint8(healthy);
   cbor_decref(&healthy);
   return 0;
@@ -253,10 +285,14 @@ int wire_ping_block_response_decode(cbor_item_t* item, wire_ping_block_response_
 // --- FindNode ---
 
 cbor_item_t* wire_find_node_encode(const wire_find_node_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(4);
+  cbor_item_t* array = cbor_new_definite_array(5);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_FIND_NODE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
@@ -276,16 +312,20 @@ cbor_item_t* wire_find_node_encode(const wire_find_node_t* msg) {
 }
 
 int wire_find_node_decode(cbor_item_t* item, wire_find_node_t* msg) {
-  if (cbor_array_size(item) < 4) return -1;
+  if (cbor_array_size(item) < 5) return -1;
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_FIND_NODE) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
-  cbor_item_t* id_hi = cbor_array_get(item, 1);
-  cbor_item_t* id_lo = cbor_array_get(item, 2);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
   msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
-  cbor_item_t* target = cbor_array_get(item, 3);
+  cbor_item_t* target = cbor_array_get(item, 4);
   int rc = _node_id_decode(target, &msg->target_id);
   cbor_decref(&target);
   return rc;
@@ -294,10 +334,14 @@ int wire_find_node_decode(cbor_item_t* item, wire_find_node_t* msg) {
 // --- FindNodeResponse ---
 
 cbor_item_t* wire_find_node_response_encode(const wire_find_node_response_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(4);
+  cbor_item_t* array = cbor_new_definite_array(5);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_FIND_NODE_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
@@ -322,16 +366,20 @@ cbor_item_t* wire_find_node_response_encode(const wire_find_node_response_t* msg
 }
 
 int wire_find_node_response_decode(cbor_item_t* item, wire_find_node_response_t* msg) {
-  if (cbor_array_size(item) < 4) return -1;
+  if (cbor_array_size(item) < 5) return -1;
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_FIND_NODE_RESPONSE) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
-  cbor_item_t* id_hi = cbor_array_get(item, 1);
-  cbor_item_t* id_lo = cbor_array_get(item, 2);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
   msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
-  cbor_item_t* nodes = cbor_array_get(item, 3);
+  cbor_item_t* nodes = cbor_array_get(item, 4);
   size_t count = cbor_array_size(nodes);
   if (count > 8) count = 8;
   msg->closest_count = (uint8_t)count;
@@ -405,10 +453,14 @@ int wire_rank_block_decode(cbor_item_t* item, wire_rank_block_t* msg) {
 // --- RecallBlock ---
 
 cbor_item_t* wire_recall_block_encode(const wire_recall_block_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(4);
+  cbor_item_t* array = cbor_new_definite_array(5);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_RECALL_BLOCK);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
@@ -428,16 +480,20 @@ cbor_item_t* wire_recall_block_encode(const wire_recall_block_t* msg) {
 }
 
 int wire_recall_block_decode(cbor_item_t* item, wire_recall_block_t* msg) {
-  if (cbor_array_size(item) < 4) return -1;
+  if (cbor_array_size(item) < 5) return -1;
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_RECALL_BLOCK) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
-  cbor_item_t* id_hi = cbor_array_get(item, 1);
-  cbor_item_t* id_lo = cbor_array_get(item, 2);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
   msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
-  cbor_item_t* hash_item = cbor_array_get(item, 3);
+  cbor_item_t* hash_item = cbor_array_get(item, 4);
   if (cbor_bytestring_length(hash_item) != 32) { cbor_decref(&hash_item); return -1; }
   memcpy(msg->block_hash, cbor_bytestring_handle(hash_item), 32);
   cbor_decref(&hash_item);
@@ -448,11 +504,15 @@ int wire_recall_block_decode(cbor_item_t* item, wire_recall_block_t* msg) {
 
 cbor_item_t* wire_recall_accept_encode(const wire_recall_accept_t* msg) {
   int has_block_data = msg->block_data != NULL && msg->block_data_len > 0;
-  int num_elements = has_block_data ? 7 : 4;
+  int num_elements = has_block_data ? 8 : 5;
   cbor_item_t* array = cbor_new_definite_array(num_elements);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_RECALL_ACCEPT);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
@@ -487,24 +547,28 @@ cbor_item_t* wire_recall_accept_encode(const wire_recall_accept_t* msg) {
 
 int wire_recall_accept_decode(cbor_item_t* item, wire_recall_accept_t* msg) {
   size_t array_size = cbor_array_size(item);
-  if (array_size < 4) return -1;
+  if (array_size < 5) return -1;
   msg->block_data = NULL;
   msg->block_data_len = 0;
   msg->block_fib = 0;
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_RECALL_ACCEPT) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
-  cbor_item_t* id_hi = cbor_array_get(item, 1);
-  cbor_item_t* id_lo = cbor_array_get(item, 2);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
   msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
-  cbor_item_t* hash = cbor_array_get(item, 3);
+  cbor_item_t* hash = cbor_array_get(item, 4);
   if (cbor_bytestring_length(hash) != 32) { cbor_decref(&hash); return -1; }
   memcpy(msg->block_hash, cbor_bytestring_handle(hash), 32);
   cbor_decref(&hash);
-  if (array_size >= 7) {
-    cbor_item_t* data = cbor_array_get(item, 4);
+  if (array_size >= 8) {
+    cbor_item_t* data = cbor_array_get(item, 5);
     if (cbor_isa_bytestring(data) && cbor_bytestring_length(data) > 0) {
       msg->block_data_len = cbor_bytestring_length(data);
       msg->block_data = get_clear_memory(msg->block_data_len);
@@ -513,10 +577,10 @@ int wire_recall_accept_decode(cbor_item_t* item, wire_recall_accept_t* msg) {
       }
     }
     cbor_decref(&data);
-    cbor_item_t* data_len = cbor_array_get(item, 5);
+    cbor_item_t* data_len = cbor_array_get(item, 6);
     msg->block_data_len = (size_t)cbor_get_uint64(data_len);
     cbor_decref(&data_len);
-    cbor_item_t* bfib = cbor_array_get(item, 6);
+    cbor_item_t* bfib = cbor_array_get(item, 7);
     msg->block_fib = cbor_get_uint32(bfib);
     cbor_decref(&bfib);
   }
@@ -524,10 +588,14 @@ int wire_recall_accept_decode(cbor_item_t* item, wire_recall_accept_t* msg) {
 }
 
 cbor_item_t* wire_recall_decline_encode(const wire_recall_decline_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(4);
+  cbor_item_t* array = cbor_new_definite_array(5);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_RECALL_DECLINE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
@@ -547,17 +615,21 @@ cbor_item_t* wire_recall_decline_encode(const wire_recall_decline_t* msg) {
 }
 
 int wire_recall_decline_decode(cbor_item_t* item, wire_recall_decline_t* msg) {
-  if (cbor_array_size(item) < 4) return -1;
+  if (cbor_array_size(item) < 5) return -1;
   memset(msg, 0, sizeof(*msg));
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_RECALL_DECLINE) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
-  cbor_item_t* id_hi = cbor_array_get(item, 1);
-  cbor_item_t* id_lo = cbor_array_get(item, 2);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
   msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
-  cbor_item_t* hash = cbor_array_get(item, 3);
+  cbor_item_t* hash = cbor_array_get(item, 4);
   if (cbor_isa_bytestring(hash) && cbor_bytestring_length(hash) == 32) {
     memcpy(msg->block_hash, cbor_bytestring_handle(hash), 32);
   }
@@ -568,10 +640,14 @@ int wire_recall_decline_decode(cbor_item_t* item, wire_recall_decline_t* msg) {
 // --- RateLimited ---
 
 cbor_item_t* wire_rate_limited_encode(const wire_rate_limited_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(6);
+  cbor_item_t* array = cbor_new_definite_array(7);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_RATE_LIMITED);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
@@ -600,22 +676,26 @@ cbor_item_t* wire_rate_limited_encode(const wire_rate_limited_t* msg) {
 }
 
 int wire_rate_limited_decode(cbor_item_t* item, wire_rate_limited_t* msg) {
-  if (cbor_array_size(item) < 6) return -1;
+  if (cbor_array_size(item) < 7) return -1;
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_RATE_LIMITED) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
-  cbor_item_t* id_hi = cbor_array_get(item, 1);
-  cbor_item_t* id_lo = cbor_array_get(item, 2);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
   msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
-  cbor_item_t* rpc_type = cbor_array_get(item, 3);
+  cbor_item_t* rpc_type = cbor_array_get(item, 4);
   msg->type = cbor_get_uint8(rpc_type);
   cbor_decref(&rpc_type);
-  cbor_item_t* retry = cbor_array_get(item, 4);
+  cbor_item_t* retry = cbor_array_get(item, 5);
   msg->retry_after_ms = cbor_get_uint32(retry);
   cbor_decref(&retry);
-  cbor_item_t* limit = cbor_array_get(item, 5);
+  cbor_item_t* limit = cbor_array_get(item, 6);
   msg->current_limit = (float)cbor_float_get_float8(limit);
   cbor_decref(&limit);
   return 0;
@@ -681,10 +761,14 @@ int wire_ping_capacity_decode(cbor_item_t* item, wire_ping_capacity_t* msg) {
 // --- PingCapacityResponse ---
 
 cbor_item_t* wire_ping_capacity_response_encode(const wire_ping_capacity_response_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(5);
+  cbor_item_t* array = cbor_new_definite_array(6);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_PING_CAPACITY_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
@@ -709,19 +793,23 @@ cbor_item_t* wire_ping_capacity_response_encode(const wire_ping_capacity_respons
 }
 
 int wire_ping_capacity_response_decode(cbor_item_t* item, wire_ping_capacity_response_t* msg) {
-  if (cbor_array_size(item) < 5) return -1;
+  if (cbor_array_size(item) < 6) return -1;
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_PING_CAPACITY_RESPONSE) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
-  cbor_item_t* id_hi = cbor_array_get(item, 1);
-  cbor_item_t* id_lo = cbor_array_get(item, 2);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
   msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
-  cbor_item_t* cap = cbor_array_get(item, 3);
+  cbor_item_t* cap = cbor_array_get(item, 4);
   msg->capacity = (float)cbor_float_get_float8(cap);
   cbor_decref(&cap);
-  cbor_item_t* phase = cbor_array_get(item, 4);
+  cbor_item_t* phase = cbor_array_get(item, 5);
   msg->phase = (node_phase_e)cbor_get_uint8(phase);
   cbor_decref(&phase);
   return 0;
@@ -1184,10 +1272,14 @@ int wire_store_block_response_decode(cbor_item_t* item, wire_store_block_respons
 // --- SeekingBlocks ---
 
 cbor_item_t* wire_seeking_blocks_encode(const wire_seeking_blocks_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(5);
+  cbor_item_t* array = cbor_new_definite_array(6);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_SEEKING_BLOCKS);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
@@ -1217,19 +1309,23 @@ cbor_item_t* wire_seeking_blocks_encode(const wire_seeking_blocks_t* msg) {
 }
 
 int wire_seeking_blocks_decode(cbor_item_t* item, wire_seeking_blocks_t* msg) {
-  if (cbor_array_size(item) < 5) return -1;
+  if (cbor_array_size(item) < 6) return -1;
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_SEEKING_BLOCKS) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
-  cbor_item_t* id_hi = cbor_array_get(item, 1);
-  cbor_item_t* id_lo = cbor_array_get(item, 2);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
   msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
-  cbor_item_t* cap = cbor_array_get(item, 3);
+  cbor_item_t* cap = cbor_array_get(item, 4);
   msg->capacity = (float)cbor_float_get_float8(cap);
   cbor_decref(&cap);
-  cbor_item_t* excludes = cbor_array_get(item, 4);
+  cbor_item_t* excludes = cbor_array_get(item, 5);
   size_t count = cbor_array_size(excludes);
   if (count > WIRE_MAX_OFFERS) count = WIRE_MAX_OFFERS;
   msg->exclude_count = 0;
@@ -1256,10 +1352,14 @@ int wire_seeking_blocks_decode(cbor_item_t* item, wire_seeking_blocks_t* msg) {
 // --- SeekingBlocksResponse ---
 
 cbor_item_t* wire_seeking_blocks_response_encode(const wire_seeking_blocks_response_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(4);
+  cbor_item_t* array = cbor_new_definite_array(5);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_SEEKING_BLOCKS_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
@@ -1293,16 +1393,20 @@ cbor_item_t* wire_seeking_blocks_response_encode(const wire_seeking_blocks_respo
 }
 
 int wire_seeking_blocks_response_decode(cbor_item_t* item, wire_seeking_blocks_response_t* msg) {
-  if (cbor_array_size(item) < 4) return -1;
+  if (cbor_array_size(item) < 5) return -1;
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_SEEKING_BLOCKS_RESPONSE) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
-  cbor_item_t* id_hi = cbor_array_get(item, 1);
-  cbor_item_t* id_lo = cbor_array_get(item, 2);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
   msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
-  cbor_item_t* offers_arr = cbor_array_get(item, 3);
+  cbor_item_t* offers_arr = cbor_array_get(item, 4);
   size_t count = cbor_array_size(offers_arr);
   if (count > WIRE_MAX_OFFERS) count = WIRE_MAX_OFFERS;
   msg->offer_count = 0;

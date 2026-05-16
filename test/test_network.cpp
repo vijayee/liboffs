@@ -1951,8 +1951,8 @@ TEST(WireRecallAcceptTest, EncodeDecodeWithoutBlockData) {
   cbor_item_t* encoded = wire_recall_accept_encode(&original);
   ASSERT_NE(encoded, nullptr);
 
-  // Should produce 4 elements (no block data)
-  EXPECT_EQ(cbor_array_size(encoded), (size_t)4);
+  // Should produce 5 elements (sender_id + 4 base, no block data)
+  EXPECT_EQ(cbor_array_size(encoded), (size_t)5);
 
   unsigned char* buf = NULL;
   size_t buf_len = 0;
@@ -1991,8 +1991,8 @@ TEST(WireRecallAcceptTest, EncodeDecodeWithBlockData) {
   cbor_item_t* encoded = wire_recall_accept_encode(&original);
   ASSERT_NE(encoded, nullptr);
 
-  // Should produce 7 elements (4 base + 3 block data)
-  EXPECT_EQ(cbor_array_size(encoded), (size_t)7);
+  // Should produce 8 elements (sender_id + 4 base + 3 block data)
+  EXPECT_EQ(cbor_array_size(encoded), (size_t)8);
 
   unsigned char* buf = NULL;
   size_t buf_len = 0;

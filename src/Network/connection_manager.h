@@ -32,6 +32,8 @@ peer_connection_t* connection_manager_add(connection_manager_t* mgr,
 int connection_manager_remove(connection_manager_t* mgr, const node_id_t* remote_id);
 peer_connection_t* connection_manager_lookup(const connection_manager_t* mgr,
                                              const node_id_t* remote_id);
+peer_connection_t* connection_manager_lookup_by_quic(const connection_manager_t* mgr,
+                                                      const void* quic_connection);
 
 // Gravity well search: find peers whose EABF matches topic at lowest level
 // Returns array of peer_connection_t* sorted by gravity well strength (lowest level first)

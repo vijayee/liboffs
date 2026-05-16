@@ -49,6 +49,7 @@
 
 typedef struct {
   uint64_t message_id;
+  node_id_t sender_id;
   uint64_t timestamp;
 } wire_ping_t;
 
@@ -56,6 +57,7 @@ typedef struct {
 
 typedef struct {
   uint64_t message_id;
+  node_id_t sender_id;
   uint64_t echo_time;
   float capacity;
   node_phase_e phase;
@@ -80,6 +82,7 @@ typedef struct {
 
 typedef struct {
   uint64_t message_id;
+  node_id_t sender_id;
   float capacity;
   node_phase_e phase;
 } wire_ping_capacity_response_t;
@@ -88,6 +91,7 @@ typedef struct {
 
 typedef struct {
   uint64_t message_id;
+  node_id_t sender_id;
   uint8_t block_hash[32];
 } wire_ping_block_t;
 
@@ -95,6 +99,7 @@ typedef struct {
 
 typedef struct {
   uint64_t message_id;
+  node_id_t sender_id;
   uint8_t exists;
   uint32_t fib;
   uint8_t healthy;
@@ -134,6 +139,7 @@ typedef struct {
 
 typedef struct {
   uint64_t message_id;
+  node_id_t sender_id;
   node_id_t target_id;
 } wire_find_node_t;
 
@@ -141,6 +147,7 @@ typedef struct {
 
 typedef struct {
   uint64_t message_id;
+  node_id_t sender_id;
   node_id_t closest_nodes[8];
   uint8_t closest_count;
 } wire_find_node_response_t;
@@ -181,6 +188,7 @@ typedef struct {
 
 typedef struct {
   uint64_t message_id;
+  node_id_t sender_id;
   float capacity;
   uint8_t** exclude_hashes;
   size_t exclude_count;
@@ -196,6 +204,7 @@ typedef struct {
 
 typedef struct {
   uint64_t message_id;
+  node_id_t sender_id;
   wire_block_offer_t offers[WIRE_MAX_OFFERS];
   uint8_t offer_count;
 } wire_seeking_blocks_response_t;
@@ -214,6 +223,7 @@ typedef struct {
 
 typedef struct {
   uint64_t message_id;
+  node_id_t sender_id;
   uint8_t block_hash[32];
 } wire_recall_block_t;
 
@@ -221,6 +231,7 @@ typedef struct {
 
 typedef struct {
   uint64_t message_id;
+  node_id_t sender_id;
   uint8_t block_hash[32];
   uint8_t* block_data;       /* the requested block's data */
   size_t   block_data_len;  /* length of block data */
@@ -229,6 +240,7 @@ typedef struct {
 
 typedef struct {
   uint64_t message_id;
+  node_id_t sender_id;
   uint8_t block_hash[32];  // hash of the block that was declined
 } wire_recall_decline_t;
 
@@ -236,6 +248,7 @@ typedef struct {
 
 typedef struct {
   uint64_t message_id;
+  node_id_t sender_id;
   uint8_t type;
   uint32_t retry_after_ms;
   float current_limit;
