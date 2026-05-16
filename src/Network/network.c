@@ -11,6 +11,7 @@
 #include "peer_connection.h"
 #include "timing_wheel.h"
 #include "topology_metrics.h"
+#include "wanted_list.h"
 #include "../Timer/timer_actor.h"
 #include "../Bloom/elastic_bloom_filter.h"
 #include "../Util/allocator.h"
@@ -33,6 +34,7 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   network->latency_cache = latency_cache_create(0);
   eabf_table_init(&network->eabf_table, 16);
   eabf_ttl_table_init(&network->eabf_ttl, 64);
+  network->wanted_list = wanted_list_create();
   hebbian_table_init(&network->hebbian, 32);
   rate_limit_table_init(&network->rate_limits, 32);
   connection_manager_init(&network->conn_mgr, 16, NULL);
@@ -77,6 +79,7 @@ void network_destroy(network_t* network) {
   latency_cache_destroy(network->latency_cache);
   eabf_table_deinit(&network->eabf_table);
   eabf_ttl_table_deinit(&network->eabf_ttl);
+  wanted_list_destroy(network->wanted_list);
   hebbian_table_deinit(&network->hebbian);
   rate_limit_table_deinit(&network->rate_limits);
   connection_manager_deinit(&network->conn_mgr);
@@ -1090,6 +1093,34 @@ void network_dispatch(void* state, message_t* msg) {
           peer_eabf_tick(network->conn_mgr.peers[index]);
         }
       }
+      break;
+    }
+    case NETWORK_LOCAL_FIND_BLOCK: {
+      // Stream requests block from network — add to wanted list and dispatch FindBlock
+      network_local_find_block_payload_t* payload =
+          (network_local_find_block_payload_t*)msg->payload;
+      if (payload != NULL && payload->hash != NULL) {
+        wanted_list_add(network->wanted_list, payload->hash, payload->reply_to);
+      }
+      break;
+    }
+    case NETWORK_FIND_BLOCK_RESULT: {
+      // Network returns FindBlock result to stream
+      // Handled by stream actor — dispatch routes to reply_to
+      break;
+    }
+    case NETWORK_LOCAL_STORE_BLOCK: {
+      // Stream announces new block to network
+      network_local_store_block_payload_t* payload =
+          (network_local_store_block_payload_t*)msg->payload;
+      if (payload != NULL && payload->hash != NULL) {
+        // Full implementation in later tasks
+      }
+      break;
+    }
+    case NETWORK_STORE_BLOCK_RESULT: {
+      // Network returns StoreBlock result to stream
+      // Handled by stream actor — dispatch routes to reply_to
       break;
     }
     default:

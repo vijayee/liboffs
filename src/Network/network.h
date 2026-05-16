@@ -18,6 +18,7 @@
 #include "connection_manager.h"
 #include "rate_limit.h"
 #include "node_id.h"
+#include "wanted_list.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -34,6 +35,7 @@ typedef struct network_t {
   latency_cache_t* latency_cache;
   eabf_table_t eabf_table;
   eabf_ttl_table_t eabf_ttl;
+  wanted_list_t* wanted_list;
   hebbian_table_t hebbian;
   rate_limit_table_t rate_limits;
   connection_manager_t conn_mgr;

@@ -7,6 +7,10 @@
 
 #include <stdint.h>
 
+/* Forward declarations for payload structs — avoids circular include with actor.h */
+typedef struct buffer_t buffer_t;
+typedef struct actor_t actor_t;
+
 typedef enum message_type_e {
   SECTION_WRITE = 0,
   SECTION_READ,
@@ -128,7 +132,38 @@ typedef enum message_type_e {
   CM_GET_PEERS_FOR_TOPIC,
   /* Topology metrics messages */
   TOPOLOGY_METRICS_UPDATE,
+  /* Local stream-to-network messages (distinct from wire-level NETWORK_FIND_BLOCK etc.) */
+  NETWORK_LOCAL_FIND_BLOCK,        /* Stream sends this to network actor on cache miss */
+  NETWORK_FIND_BLOCK_RESULT,      /* Network actor sends this back to stream */
+  NETWORK_LOCAL_STORE_BLOCK,      /* Stream sends this to network actor on CACHE_PUT_NEW */
+  NETWORK_STORE_BLOCK_RESULT,     /* Network actor sends this back to stream */
 } message_type_e;
+
+/* Stream-to-network: request block from peers */
+typedef struct {
+  buffer_t* hash;       /* block hash to find */
+  actor_t*  reply_to;   /* stream actor to notify */
+} network_local_find_block_payload_t;
+
+/* Network-to-stream: result of FindBlock */
+typedef struct {
+  buffer_t* hash;       /* same hash from the request */
+  int       found;      /* 1 = found (block now in cache), 0 = not found */
+} network_find_block_result_payload_t;
+
+/* Stream-to-network: announce new block to peers */
+typedef struct {
+  buffer_t* hash;       /* block hash */
+  uint32_t  fib;        /* FIB counter for the block */
+  actor_t*  reply_to;   /* stream actor to notify (NULL = fire-and-forget) */
+} network_local_store_block_payload_t;
+
+/* Network-to-stream: result of StoreBlock */
+typedef struct {
+  int       accepted;   /* 1 = accepted by network, 0 = declined */
+  uint32_t  replicas;   /* number of replicas stored */
+  actor_t*  reply_to;   /* NULL for fire-and-forget */
+} network_store_block_result_payload_t;
 
 typedef struct message_t {
   uint32_t type;
