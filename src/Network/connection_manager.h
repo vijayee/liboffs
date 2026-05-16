@@ -30,10 +30,17 @@ peer_connection_t* connection_manager_add(connection_manager_t* mgr,
                                           const struct sockaddr_storage* peer_addr,
                                           scheduler_pool_t* pool);
 int connection_manager_remove(connection_manager_t* mgr, const node_id_t* remote_id);
+int connection_manager_remove_peer(connection_manager_t* mgr, peer_connection_t* peer);
 peer_connection_t* connection_manager_lookup(const connection_manager_t* mgr,
                                              const node_id_t* remote_id);
 peer_connection_t* connection_manager_lookup_by_quic(const connection_manager_t* mgr,
                                                       const void* quic_connection);
+
+// Learn peer identity: look up peer by quic_connection, and if found with
+// zeroed remote_node_id, update it with sender_id. Returns the peer.
+peer_connection_t* connection_manager_learn_identity(connection_manager_t* mgr,
+                                                     const node_id_t* sender_id,
+                                                     const void* quic_connection);
 
 // Gravity well search: find peers whose EABF matches topic at lowest level
 // Returns array of peer_connection_t* sorted by gravity well strength (lowest level first)

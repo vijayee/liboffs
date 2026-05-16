@@ -183,6 +183,82 @@ int network_connect_relay(network_t* network, const char* host, uint16_t port) {
   return 0;
 }
 
+// Learn peer identity from sender_id in wire messages.
+// When a QUIC connection is established, the peer is added with a zeroed node_id.
+// The first wire message from that peer carries their identity, which we use
+// to update the peer's remote_node_id so subsequent lookups succeed.
+static void _network_learn_quic_peer(network_t* network, message_t* dispatch_msg,
+                                      void* quic_connection) {
+  if (quic_connection == NULL) return;
+
+  node_id_t sender_id;
+  node_id_clear(&sender_id);
+
+  switch (dispatch_msg->type) {
+    case WIRE_PING:
+      memcpy(&sender_id, &((wire_ping_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
+      break;
+    case WIRE_PING_RESPONSE:
+      memcpy(&sender_id, &((wire_ping_response_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
+      break;
+    case WIRE_PING_CAPACITY:
+      memcpy(&sender_id, &((wire_ping_capacity_t*)dispatch_msg->payload)->source, sizeof(node_id_t));
+      break;
+    case WIRE_PING_CAPACITY_RESPONSE:
+      memcpy(&sender_id, &((wire_ping_capacity_response_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
+      break;
+    case WIRE_PING_BLOCK:
+      memcpy(&sender_id, &((wire_ping_block_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
+      break;
+    case WIRE_PING_BLOCK_RESPONSE:
+      memcpy(&sender_id, &((wire_ping_block_response_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
+      break;
+    case WIRE_FIND_BLOCK:
+      memcpy(&sender_id, &((wire_find_block_t*)dispatch_msg->payload)->original_source, sizeof(node_id_t));
+      break;
+    case WIRE_FIND_NODE:
+      memcpy(&sender_id, &((wire_find_node_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
+      break;
+    case WIRE_FIND_NODE_RESPONSE:
+      memcpy(&sender_id, &((wire_find_node_response_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
+      break;
+    case WIRE_STORE_BLOCK: {
+      wire_store_block_t* store = (wire_store_block_t*)dispatch_msg->payload;
+      if (store->path_len > 0) {
+        memcpy(&sender_id, &store->path[0], sizeof(node_id_t));
+      }
+      break;
+    }
+    case WIRE_SEEKING_BLOCKS:
+      memcpy(&sender_id, &((wire_seeking_blocks_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
+      break;
+    case WIRE_SEEKING_BLOCKS_RESPONSE:
+      memcpy(&sender_id, &((wire_seeking_blocks_response_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
+      break;
+    case WIRE_RANK_BLOCK:
+      memcpy(&sender_id, &((wire_rank_block_t*)dispatch_msg->payload)->origin, sizeof(node_id_t));
+      break;
+    case WIRE_RECALL_BLOCK:
+      memcpy(&sender_id, &((wire_recall_block_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
+      break;
+    case WIRE_RECALL_ACCEPT:
+      memcpy(&sender_id, &((wire_recall_accept_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
+      break;
+    case WIRE_RECALL_DECLINE:
+      memcpy(&sender_id, &((wire_recall_decline_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
+      break;
+    case WIRE_RATE_LIMITED:
+      memcpy(&sender_id, &((wire_rate_limited_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
+      break;
+    default:
+      return;
+  }
+
+  if (node_id_is_null(&sender_id)) return;
+
+  connection_manager_learn_identity(&network->conn_mgr, &sender_id, quic_connection);
+}
+
 // --- Ping handler ---
 
 static void network_handle_ping(network_t* network, message_t* msg) {
@@ -1598,6 +1674,7 @@ void network_dispatch(void* state, message_t* msg) {
             wire_ping_t* payload = get_clear_memory(sizeof(wire_ping_t));
             if (wire_ping_decode(wire_msg, payload) == 0) {
               dispatch_msg.payload = payload;
+              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
               network_handle_ping(network, &dispatch_msg);
             } else {
               free(payload);
@@ -1608,6 +1685,7 @@ void network_dispatch(void* state, message_t* msg) {
             wire_ping_capacity_t* payload = get_clear_memory(sizeof(wire_ping_capacity_t));
             if (wire_ping_capacity_decode(wire_msg, payload) == 0) {
               dispatch_msg.payload = payload;
+              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
               network_handle_ping_capacity(network, &dispatch_msg);
             } else {
               free(payload);
@@ -1618,6 +1696,7 @@ void network_dispatch(void* state, message_t* msg) {
             wire_ping_block_t* payload = get_clear_memory(sizeof(wire_ping_block_t));
             if (wire_ping_block_decode(wire_msg, payload) == 0) {
               dispatch_msg.payload = payload;
+              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
               network_handle_ping_block(network, &dispatch_msg);
             } else {
               free(payload);
@@ -1628,6 +1707,7 @@ void network_dispatch(void* state, message_t* msg) {
             wire_find_block_t* payload = get_clear_memory(sizeof(wire_find_block_t));
             if (wire_find_block_decode(wire_msg, payload) == 0) {
               dispatch_msg.payload = payload;
+              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
               network_handle_find_block(network, &dispatch_msg);
             } else {
               free(payload);
@@ -1638,6 +1718,7 @@ void network_dispatch(void* state, message_t* msg) {
             wire_find_node_t* payload = get_clear_memory(sizeof(wire_find_node_t));
             if (wire_find_node_decode(wire_msg, payload) == 0) {
               dispatch_msg.payload = payload;
+              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
               network_handle_find_node(network, &dispatch_msg);
             } else {
               free(payload);
@@ -1649,6 +1730,7 @@ void network_dispatch(void* state, message_t* msg) {
             if (wire_store_block_decode(wire_msg, payload) == 0) {
               dispatch_msg.payload = payload;
               dispatch_msg.payload_destroy = (void (*)(void*))wire_store_block_destroy;
+              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
               network_handle_store_block(network, &dispatch_msg);
             } else {
               wire_store_block_destroy(payload);
@@ -1660,6 +1742,7 @@ void network_dispatch(void* state, message_t* msg) {
             if (wire_seeking_blocks_decode(wire_msg, payload) == 0) {
               dispatch_msg.payload = payload;
               dispatch_msg.payload_destroy = (void (*)(void*))wire_seeking_blocks_destroy;
+              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
               network_handle_seeking_blocks(network, &dispatch_msg);
             } else {
               wire_seeking_blocks_destroy(payload);
@@ -1670,6 +1753,7 @@ void network_dispatch(void* state, message_t* msg) {
             wire_rank_block_t* payload = get_clear_memory(sizeof(wire_rank_block_t));
             if (wire_rank_block_decode(wire_msg, payload) == 0) {
               dispatch_msg.payload = payload;
+              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
               network_handle_rank_block(network, &dispatch_msg);
             } else {
               free(payload);
@@ -1680,6 +1764,7 @@ void network_dispatch(void* state, message_t* msg) {
             wire_recall_block_t* payload = get_clear_memory(sizeof(wire_recall_block_t));
             if (wire_recall_block_decode(wire_msg, payload) == 0) {
               dispatch_msg.payload = payload;
+              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
               network_handle_recall_block(network, &dispatch_msg);
             } else {
               free(payload);
@@ -1724,7 +1809,7 @@ void network_dispatch(void* state, message_t* msg) {
           peer->quic_connection = NULL;
           peer->quic_stream = NULL;
 #endif
-          connection_manager_remove(&network->conn_mgr, &peer->remote_node_id);
+          connection_manager_remove_peer(&network->conn_mgr, peer);
         }
       }
       break;

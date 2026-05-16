@@ -53,10 +53,13 @@ peer_connection_t* connection_manager_add(connection_manager_t* mgr,
     return NULL;
   }
 
-  // Check if peer already exists
-  peer_connection_t* existing = connection_manager_lookup(mgr, remote_id);
-  if (existing != NULL) {
-    return existing;
+  // Check if peer already exists (skip dedup for null node_ids —
+  // newly connected QUIC peers haven't identified themselves yet)
+  if (!node_id_is_null(remote_id)) {
+    peer_connection_t* existing = connection_manager_lookup(mgr, remote_id);
+    if (existing != NULL) {
+      return existing;
+    }
   }
 
   // Check max connections
@@ -108,6 +111,24 @@ int connection_manager_remove(connection_manager_t* mgr, const node_id_t* remote
   return -1;
 }
 
+int connection_manager_remove_peer(connection_manager_t* mgr, peer_connection_t* peer) {
+  if (mgr == NULL || peer == NULL) {
+    return -1;
+  }
+
+  for (size_t index = 0; index < mgr->peer_count; index++) {
+    if (mgr->peers[index] == peer) {
+      peer_connection_destroy(mgr->peers[index]);
+      memmove(&mgr->peers[index], &mgr->peers[index + 1],
+              (mgr->peer_count - index - 1) * sizeof(peer_connection_t*));
+      mgr->peer_count--;
+      return 0;
+    }
+  }
+
+  return -1;
+}
+
 peer_connection_t* connection_manager_lookup(const connection_manager_t* mgr,
                                              const node_id_t* remote_id) {
   if (mgr == NULL || remote_id == NULL) {
@@ -141,6 +162,24 @@ peer_connection_t* connection_manager_lookup_by_quic(const connection_manager_t*
 #endif
 
   return NULL;
+}
+
+peer_connection_t* connection_manager_learn_identity(connection_manager_t* mgr,
+                                                     const node_id_t* sender_id,
+                                                     const void* quic_connection) {
+  if (mgr == NULL || sender_id == NULL) return NULL;
+
+  // First try exact lookup by sender_id
+  peer_connection_t* peer = connection_manager_lookup(mgr, sender_id);
+  if (peer != NULL) return peer;
+
+  // Not found — try lookup by quic_connection and learn the identity
+  peer = connection_manager_lookup_by_quic(mgr, quic_connection);
+  if (peer != NULL && node_id_is_null(&peer->remote_node_id) && !node_id_is_null(sender_id)) {
+    memcpy(&peer->remote_node_id, sender_id, sizeof(node_id_t));
+  }
+
+  return peer;
 }
 
 // Helper for qsort: compare peers by minimum hop level (ascending)

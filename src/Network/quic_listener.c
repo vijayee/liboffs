@@ -71,10 +71,17 @@ static void _destroy_stack_destroy(quic_listener_t* listener) {
   platform_lock_destroy(&listener->destroy_lock);
 }
 
+// Per-stream context carrying the parent connection handle
+typedef struct quic_stream_context_t {
+  quic_listener_t* listener;
+  HQUIC connection;
+  QUIC_ADDR peer_addr;
+} quic_stream_context_t;
+
 // QUIC stream callback — receives data and forwards to network actor
 static QUIC_STATUS QUIC_API quic_stream_callback(
     HQUIC stream, void* context, QUIC_STREAM_EVENT* event) {
-  quic_listener_t* listener = (quic_listener_t*)context;
+  quic_stream_context_t* stream_ctx = (quic_stream_context_t*)context;
   switch (event->Type) {
     case QUIC_STREAM_EVENT_RECEIVE: {
       // Forward received data to network protocol actor via actor_send
@@ -89,18 +96,21 @@ static QUIC_STATUS QUIC_API quic_stream_callback(
           continue;
         }
         memcpy(payload->data, buffer->Buffer, buffer->Length);
+        memcpy(&payload->peer_addr, &stream_ctx->peer_addr, sizeof(QUIC_ADDR));
+        payload->quic_connection = stream_ctx->connection;
 
         message_t msg;
         msg.type = NETWORK_QUIC_DATA;
         msg.payload = payload;
         msg.payload_destroy = (void (*)(void*))quic_data_payload_destroy;
-        actor_send(&listener->network->actor, &msg);
+        actor_send(&stream_ctx->listener->network->actor, &msg);
       }
       break;
     }
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
       break;
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
+      free(stream_ctx);
       break;
     default:
       break;
@@ -153,11 +163,23 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
       break;
     }
     case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
-      // Accept the peer's stream, set our callback
+      // Allocate per-stream context with connection handle and peer address
+      quic_stream_context_t* stream_ctx = get_clear_memory(sizeof(quic_stream_context_t));
+      if (stream_ctx == NULL) {
+        log_error("quic_listener: failed to allocate stream context, rejecting stream");
+        return QUIC_STATUS_ABORTED;
+      }
+      stream_ctx->listener = listener;
+      stream_ctx->connection = connection;
+      // Retrieve peer address from the connection for the stream context
+      uint32_t addr_len = sizeof(stream_ctx->peer_addr);
+      listener->msquic->GetParam(connection, QUIC_PARAM_CONN_REMOTE_ADDRESS,
+                                  &addr_len, &stream_ctx->peer_addr);
+      // Accept the peer's stream, set our callback with stream context
       listener->msquic->SetCallbackHandler(
           event->PEER_STREAM_STARTED.Stream,
           (void*)quic_stream_callback,
-          listener);
+          stream_ctx);
       break;
     }
     default:

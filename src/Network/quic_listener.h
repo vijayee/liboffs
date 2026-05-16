@@ -28,6 +28,7 @@ typedef struct quic_data_payload_t {
   uint8_t* data;
   size_t length;
   struct sockaddr_storage peer_addr;  // Peer address for routing responses
+  void* quic_connection;              // HQUIC connection handle for peer lookup
 } quic_data_payload_t;
 
 void quic_data_payload_destroy(quic_data_payload_t* payload);
