@@ -84,12 +84,7 @@ TEST(TestWantedList, RemoveReturnsRequesters) {
      but the entry is gone so check still returns true for bloom false-positive) */
   EXPECT_FALSE(wanted_list_find(wl, hash) != nullptr);
   /* Free requesters */
-  wanted_requester_t* req = requesters;
-  while (req != nullptr) {
-    wanted_requester_t* next = req->next;
-    free(req);
-    req = next;
-  }
+  wanted_requester_list_destroy(requesters);
   wanted_list_destroy(wl);
   buffer_destroy(hash);
 }
@@ -110,12 +105,7 @@ TEST(TestWantedList, ClearRequestersKeepsBloom) {
   wanted_entry_t* entry = wanted_list_find(wl, hash);
   EXPECT_EQ(entry, nullptr);
   /* Free requesters */
-  wanted_requester_t* req = requesters;
-  while (req != nullptr) {
-    wanted_requester_t* next = req->next;
-    free(req);
-    req = next;
-  }
+  wanted_requester_list_destroy(requesters);
   wanted_list_destroy(wl);
   buffer_destroy(hash);
 }
@@ -133,7 +123,7 @@ TEST(TestWantedList, RetryAfterFailure) {
   wanted_list_add(wl, hash, &actor1);
   /* Fail: clear requesters but keep bloom */
   wanted_requester_t* reqs = wanted_list_clear_requesters(wl, hash);
-  free(reqs);
+  wanted_requester_list_destroy(reqs);
   /* Bloom hit but no entry -> fresh request */
   EXPECT_TRUE(wanted_list_check(wl, hash));
   EXPECT_EQ(wanted_list_find(wl, hash), nullptr);

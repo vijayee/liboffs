@@ -38,5 +38,6 @@ wanted_entry_t* wanted_list_find(wanted_list_t* wl, buffer_t* hash);
 void wanted_list_add(wanted_list_t* wl, buffer_t* hash, actor_t* actor);
 wanted_requester_t* wanted_list_remove(wanted_list_t* wl, buffer_t* hash);
 wanted_requester_t* wanted_list_clear_requesters(wanted_list_t* wl, buffer_t* hash);
+void wanted_requester_list_destroy(wanted_requester_t* requesters);
 
 #endif // OFFS_WANTED_LIST_H

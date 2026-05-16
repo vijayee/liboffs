@@ -39,10 +39,12 @@ void wanted_list_destroy(wanted_list_t* wl) {
 }
 
 bool wanted_list_check(wanted_list_t* wl, buffer_t* hash) {
+  if (wl == NULL) return false;
   return bloom_filter_contains(wl->bloom, hash->data, hash->size);
 }
 
 wanted_entry_t* wanted_list_find(wanted_list_t* wl, buffer_t* hash) {
+  if (wl == NULL) return NULL;
   wanted_entry_t* entry = wl->entries;
   while (entry != NULL) {
     if (buffer_compare(entry->hash, hash) == 0) return entry;
@@ -112,4 +114,12 @@ wanted_requester_t* wanted_list_clear_requesters(wanted_list_t* wl, buffer_t* ha
     current = &(*current)->next;
   }
   return NULL;
+}
+
+void wanted_requester_list_destroy(wanted_requester_t* requesters) {
+  while (requesters != NULL) {
+    wanted_requester_t* next = requesters->next;
+    free(requesters);
+    requesters = next;
+  }
 }
