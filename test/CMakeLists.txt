@@ -36,12 +36,14 @@ if (BUILD_TESTING)
             test_stream_network.cpp
             test_stream_framer.cpp
             test_nat_detect.cpp
-            test_conn_state.cpp)
+            test_conn_state.cpp
+            test_quic_integration.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
     add_dependencies(testliboffs http-parser)
     target_link_libraries(testliboffs PRIVATE -Wl,--whole-archive offs -Wl,--no-whole-archive)
+    target_link_libraries(testliboffs PRIVATE ssl crypto)
     target_link_libraries(testliboffs PRIVATE blake3)
     target_link_libraries(testliboffs PRIVATE hashmap)
     target_link_libraries(testliboffs PRIVATE http-parser)
@@ -49,6 +51,13 @@ if (BUILD_TESTING)
     target_link_libraries(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../poll-dancer/build/libpoll_dancer.a)
     target_link_libraries(testliboffs PRIVATE GTest::gtest_main)
     target_link_libraries(testliboffs PRIVATE GTest::gmock)
+    # Must match HAS_MSQUIC definition from parent CMakeLists.txt so
+    # struct layouts (peer_connection_t etc.) are consistent with the library.
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../../deps/msquic/CMakeLists.txt)
+      target_compile_definitions(testliboffs PRIVATE HAS_MSQUIC)
+      target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../deps/msquic/src/inc)
+      target_link_libraries(testliboffs PRIVATE msquic::msquic msquic::platform)
+    endif()
     target_include_directories(testliboffs PUBLIC ${C_INC})
     target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
     target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../poll-dancer/include)
@@ -56,7 +65,8 @@ if (BUILD_TESTING)
 
     include(GoogleTest)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-    # Finds all the Google tests associated with the executable
-    gtest_discover_tests(testliboffs)
+    # Use gtest_add_tests instead of gtest_discover_tests because msquic init
+    # errors at runtime cause discover_tests to fail during build.
+    gtest_add_tests(TARGET testliboffs TEST_LIST test_list)
     file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/test.pdf DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 endif()

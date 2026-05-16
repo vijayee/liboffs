@@ -138,9 +138,7 @@ http_server_t* http_server_create_ssl(scheduler_pool_t* pool, const char* host, 
     return NULL;
   }
 
-  SSL_load_error_strings();
-  SSL_library_init();
-  OpenSSL_add_all_algorithms();
+  OPENSSL_init_ssl(0, NULL);
 
   server->ssl_ctx = SSL_CTX_new(TLS_server_method());
   if (server->ssl_ctx == NULL) {

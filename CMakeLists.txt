@@ -9,6 +9,7 @@ set(hashmap_SOURCE_DIR deps/hashmap)
 set(cbor_ROOT_DIR ${CMAKE_BINARY_DIR}/deps/libcbor)
 
 file(GLOB_RECURSE C_SRC "src/*/*.c")
+list(FILTER C_SRC EXCLUDE REGEX "relay_server_main\\.c$")
 file(GLOB_RECURSE C_INC "src/*/*.h")
 
 include(CTest)
