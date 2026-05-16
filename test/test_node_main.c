@@ -565,9 +565,8 @@ static void handle_fetch_file(int client_fd, const char* args) {
 
   if (!completed) {
     send_response(client_fd, CTRL_RESP_ERROR " FETCH_FILE timed out");
-    /* Close descriptor to trigger pipeline completion and callback cleanup */
+    /* Deactivate descriptor to trigger pipeline completion and callback cleanup */
     if (pipeline->desc != NULL) {
-      readable_descriptor_push(pipeline->desc);
       stream_deactivate((stream_t*)pipeline->desc, NULL);
     }
     struct timespec cleanup_timeout;
