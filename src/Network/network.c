@@ -27,6 +27,17 @@
 
 // Forward declarations for internal handlers
 static void network_sync_hebbian_to_rings(network_t* network);
+static void network_handle_local_find_block(network_t* network, message_t* msg);
+
+// --- Payload destroy for cache PUT from network ---
+static void network_cache_put_payload_destroy(void* ptr) {
+  cache_put_payload_t* payload = (cache_put_payload_t*)ptr;
+  if (payload == NULL) return;
+  if (payload->block != NULL) {
+    block_destroy(payload->block);
+  }
+  free(payload);
+}
 
 // --- FindBlock result payload destroy ---
 // Frees the heap-allocated result payload and releases the hash buffer reference.
@@ -155,43 +166,78 @@ static void network_handle_ping(network_t* network, message_t* msg) {
 static void network_handle_ping_response(network_t* network, message_t* msg) {
   ping_payload_t* response = (ping_payload_t*)msg->payload;
   if (response == NULL) return;
-  // Calculate RTT from echo_time
-  uint64_t now = (uint64_t)time(NULL) * 1000;
-  uint64_t rtt_ms = now - response->timestamp;
-  (void)rtt_ms;
-  // TODO: Update latency cache and Hebbian weights when ring table is implemented
-  (void)network;
+  // Calculate RTT from echo_time (the timestamp field holds the original send time)
+  uint64_t now_ms = (uint64_t)time(NULL) * 1000;
+  uint64_t rtt_ms = 0;
+  if (now_ms > response->timestamp) {
+    rtt_ms = now_ms - response->timestamp;
+  }
+  // Update latency cache with the measured RTT
+  // Use a zeroed node_id since PingResponse doesn't carry source yet;
+  // when QUIC connection metadata is available, this will use the actual sender ID
+  node_id_t sender_id;
+  node_id_clear(&sender_id);
+  latency_cache_insert(network->latency_cache, &sender_id, 0, 0, (float)rtt_ms);
+  // Update the peer's RTT in the connection manager
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+  if (peer != NULL) {
+    peer_update_rtt(peer, (double)rtt_ms);
+  }
 }
 
 // --- PingBlock handler ---
+// Pending PingBlock request — tracks async block_cache lookups
+typedef struct pending_ping_block_t {
+  uint64_t message_id;
+  node_id_t sender_id;
+  struct pending_ping_block_t* next;
+} pending_ping_block_t;
 
 static void network_handle_ping_block(network_t* network, message_t* msg) {
   wire_ping_block_t* ping = (wire_ping_block_t*)msg->payload;
   if (ping == NULL) return;
 
-  // Check if we have the block locally
-  // TODO: Look up block in block_cache via actor_send when wired up
-  uint8_t exists = 0;
-  uint32_t fib = 0;
-  uint8_t healthy = 0;
+  // Check if we have the block locally via synchronous index_peek
+  buffer_t* hash_buf = buffer_create_from_pointer_copy(ping->block_hash, 32);
+  if (hash_buf == NULL) return;
 
-  // Respond with PingBlockResponse
-  wire_ping_block_response_t response;
-  memset(&response, 0, sizeof(response));
-  response.message_id = ping->message_id;
-  response.exists = exists;
-  response.fib = fib;
-  response.healthy = healthy;
+  index_entry_t* entry = index_peek(network->block_cache->index, hash_buf);
+  if (entry != NULL) {
+    // Block exists locally — respond immediately
+    wire_ping_block_response_t response;
+    memset(&response, 0, sizeof(response));
+    response.message_id = ping->message_id;
+    response.exists = 1;
+    response.fib = entry->counter.fib;
+    response.healthy = 1;
 
-  // Encode and send via QUIC to the sender's peer connection.
-  // Node_id tracking from QUIC connection metadata is deferred to Task 7.
-  node_id_t sender_id;
-  node_id_clear(&sender_id);
-  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
-  if (peer != NULL) {
-    cbor_item_t* cbor = wire_ping_block_response_encode(&response);
-    quic_peer_send(network, peer, cbor);
-    cbor_decref(&cbor);
+    node_id_t sender_id;
+    node_id_clear(&sender_id);
+    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+    if (peer != NULL) {
+      cbor_item_t* cbor = wire_ping_block_response_encode(&response);
+      quic_peer_send(network, peer, cbor);
+      cbor_decref(&cbor);
+    }
+    buffer_destroy(hash_buf);
+  } else {
+    // Block not in index — respond with exists=0
+    wire_ping_block_response_t response;
+    memset(&response, 0, sizeof(response));
+    response.message_id = ping->message_id;
+    response.exists = 0;
+    response.fib = 0;
+    response.healthy = 0;
+
+    node_id_t sender_id;
+    node_id_clear(&sender_id);
+    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+    if (peer != NULL) {
+      cbor_item_t* cbor = wire_ping_block_response_encode(&response);
+      quic_peer_send(network, peer, cbor);
+      cbor_decref(&cbor);
+    }
+    buffer_destroy(hash_buf);
   }
 }
 
@@ -225,9 +271,23 @@ static void network_handle_gossip_tick(network_t* network, message_t* msg) {
   gossip_scheduler_tick(&network->gossip.scheduler, now_ms);
   if (!network->gossip.scheduler.should_gossip) return;
 
-  // Select gossip targets from ring table
-  // TODO: Select random peers from ring table and send PingCapacity
-  // For now, the tick just drives the scheduler state machine
+  // Select gossip targets from ring table and send PingCapacity
+  // Walk all connected peers and send a PingCapacity exchange to each
+  for (size_t index = 0; index < network->conn_mgr.peer_count; index++) {
+    peer_connection_t* peer = network->conn_mgr.peers[index];
+    if (peer == NULL || !peer->connected) continue;
+
+    wire_ping_capacity_t ping_cap;
+    memset(&ping_cap, 0, sizeof(ping_cap));
+    ping_cap.message_id = gossip_handle_next_query_id(&network->gossip);
+    memcpy(&ping_cap.source, &network->authority->local_id, sizeof(node_id_t));
+    ping_cap.capacity = atomic_load(&network->authority->capacity);
+    ping_cap.phase = atomic_load(&network->authority->phase);
+
+    cbor_item_t* cbor = wire_ping_capacity_encode(&ping_cap);
+    quic_peer_send(network, peer, cbor);
+    cbor_decref(&cbor);
+  }
 }
 
 static void network_handle_gossip_expire(network_t* network, message_t* msg) {
@@ -274,14 +334,30 @@ static void network_handle_ping_capacity_response(network_t* network, message_t*
   wire_ping_capacity_response_t* response = (wire_ping_capacity_response_t*)msg->payload;
   if (response == NULL) return;
 
-  // Update latency and ring table for the peer that responded
-  // The peer's capacity/phase are in the response
-  float latency_ms = 0;  // RTT will be calculated from query timestamps
-  (void)latency_ms;
+  // Calculate delta_w from RTT. PingCapacity doesn't carry echo_time,
+  // so we use a default latency estimate from the gossip timeout.
+  float delta_w = hebbian_compute_delta(GOSSIP_TIMEOUT_MS, HEBBIAN_FIND_BLOCK_MULTIPLIER);
 
-  // Update Hebbian weights on successful response
-  // TODO: Wire Hebbian weight update when hebbian module is implemented
-  (void)network;
+  // Update Hebbian weights: the peer that responded is the one we sent PingCapacity to.
+  // Use a zeroed node_id until QUIC connection metadata provides the actual sender ID.
+  // Apply frequency rule: w_{self→peer} += delta_w
+  node_id_t peer_id;
+  node_id_clear(&peer_id);
+  hebbian_frequency(&network->hebbian, &peer_id, delta_w);
+  network_sync_hebbian_to_rings(network);
+
+  // Update the peer's cached capacity/phase in the connection manager
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &peer_id);
+  if (peer != NULL) {
+    // Update the ring table node for this peer
+    net_node_t* node = ring_set_find_by_id(network->rings, &peer_id);
+    if (node != NULL) {
+      node->capacity = response->capacity;
+      node->phase = response->phase;
+      node->last_gossip_time = (uint64_t)time(NULL) * 1000;
+      net_node_record_success(node);
+    }
+  }
 }
 
 // --- FindNode handler ---
@@ -630,14 +706,79 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
 
   switch (result) {
     case STORE_BLOCK_ACCEPTED: {
-      // Block accepted — write to sections, update index, put in hot cache
-      // The caller (block_cache actor) handles actual storage.
-      // Decrement replicas_needed and forward if more replicas needed.
+      // Block accepted — store in block_cache and forward if more replicas needed
       if (state.replicas_needed > 0) {
         state.replicas_needed--;
       }
-      // TODO: Store block in block_cache via actor_send
-      // TODO: If replicas_needed > 0, forward with decremented count
+
+      // Store block in block_cache via actor_send
+      if (store->block_data != NULL && store->block_data_len > 0) {
+        buffer_t* hash_buf = buffer_create_from_pointer_copy(store->block_hash, 32);
+        buffer_t* data_buf = buffer_create_from_pointer_copy(store->block_data, store->block_data_len);
+        if (hash_buf != NULL && data_buf != NULL) {
+          block_t* block = block_create_existing_data_hash_by_type(
+              data_buf, hash_buf, network->block_cache->type);
+          if (block != NULL) {
+            cache_put_payload_t* put_payload = get_clear_memory(sizeof(cache_put_payload_t));
+            if (put_payload != NULL) {
+              put_payload->block = block;
+              put_payload->reply_to = NULL;  // fire-and-forget
+              put_payload->incoming_fib = store->block_fib;
+              put_payload->result = 0;
+              message_t put_msg = {0};
+              put_msg.type = CACHE_PUT;
+              put_msg.payload = put_payload;
+              put_msg.payload_destroy = network_cache_put_payload_destroy;
+              actor_send(&network->block_cache->actor, &put_msg);
+            } else {
+              DESTROY(hash_buf, buffer);
+              DESTROY(data_buf, buffer);
+            }
+          } else {
+            DESTROY(hash_buf, buffer);
+            DESTROY(data_buf, buffer);
+          }
+        } else {
+          if (hash_buf != NULL) buffer_destroy(hash_buf);
+          if (data_buf != NULL) buffer_destroy(data_buf);
+        }
+      }
+
+      // If replicas_needed > 0, forward to next hops
+      if (state.replicas_needed > 0 && next_hop_count > 0) {
+        for (size_t hop = 0; hop < next_hop_count; hop++) {
+          wire_store_block_t* forward = get_clear_memory(sizeof(wire_store_block_t));
+          if (forward == NULL) continue;
+          forward->message_id = state.message_id;
+          memcpy(forward->block_hash, state.block_hash, 32);
+          forward->block_size = store->block_size;
+          forward->block_fib = store->block_fib;
+          forward->replicas_needed = state.replicas_needed;
+          forward->max_hops = state.max_hops;
+          memcpy(forward->visited_bloom, state.visited_bloom, STORE_BLOCK_MAX_VISITED_BLOOM);
+          forward->visited_count = state.visited_count;
+          memcpy(forward->path, state.path, state.path_len * sizeof(node_id_t));
+          forward->path_len = state.path_len;
+          forward->start_time = state.start_time_ms;
+          forward->carry_data = store->carry_data;
+          if (store->carry_data && store->block_data != NULL && store->block_data_len > 0) {
+            forward->block_data = get_clear_memory(store->block_data_len);
+            if (forward->block_data != NULL) {
+              memcpy(forward->block_data, store->block_data, store->block_data_len);
+              forward->block_data_len = store->block_data_len;
+            }
+          }
+
+          cbor_item_t* cbor = wire_store_block_encode(forward);
+          peer_connection_t* next_peer = connection_manager_lookup(
+              &network->conn_mgr, &next_hops[hop]->id);
+          if (next_peer != NULL) {
+            quic_peer_send(network, next_peer, cbor);
+          }
+          cbor_decref(&cbor);
+          wire_store_block_destroy(forward);
+        }
+      }
 
       // Check wanted_list — notify any local requesters waiting for this block
       {
@@ -675,6 +816,7 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
         decline.message_id = store->message_id;
         decline.accepted = 0;
         memcpy(&decline.holder, &network->authority->local_id, sizeof(node_id_t));
+        memcpy(decline.block_hash, store->block_hash, 32);
         decline.replicas_remaining = 0;
         decline.path_len = 0;
         decline.latency_ms = 0;
@@ -756,9 +898,7 @@ static void network_handle_store_block_response(network_t* network, message_t* m
     for (size_t index = 0; index < network->eabf_table.count; index++) {
       eabf_t* eabf = network->eabf_table.entries[index].eabf;
       if (eabf != NULL) {
-        // TODO: Subscribe block_hash, not holder.hash, once wire_store_block_response_t
-        // carries block_hash. Currently using holder.hash as a routing hint.
-        eabf_subscribe(eabf, response->holder.hash, 32);
+        eabf_subscribe(eabf, response->block_hash, 32);
       }
     }
 
@@ -766,18 +906,16 @@ static void network_handle_store_block_response(network_t* network, message_t* m
     for (size_t index = 0; index + 1 < response->path_len; index++) {
       peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &response->path[index + 1]);
       if (peer != NULL) {
-        // TODO: Use block_hash, not holder.hash, once wire response carries it.
-        peer_eabf_subscribe(peer, response->holder.hash, 32);
+        peer_eabf_subscribe(peer, response->block_hash, 32);
       }
     }
 
     // Recall on block acquisition: check all peers' EABFs at level 0 for this hash.
     // If a peer previously requested this block (failed FindBlock), push it to them.
-    // TODO: Use block_hash instead of holder.hash once wire response carries block_hash.
     {
       size_t recall_count = 0;
       peer_connection_t** recall_peers = connection_manager_get_peers_for_topic(
-          &network->conn_mgr, response->holder.hash, 32, &recall_count);
+          &network->conn_mgr, response->block_hash, 32, &recall_count);
       if (recall_peers != NULL && recall_count > 0) {
         for (size_t index = 0; index < recall_count; index++) {
           peer_connection_t* peer = recall_peers[index];
@@ -790,7 +928,7 @@ static void network_handle_store_block_response(network_t* network, message_t* m
             wire_recall_block_t recall;
             memset(&recall, 0, sizeof(recall));
             recall.message_id = response->message_id;
-            memcpy(recall.block_hash, response->holder.hash, 32);
+            memcpy(recall.block_hash, response->block_hash, 32);
             cbor_item_t* cbor = wire_recall_block_encode(&recall);
             quic_peer_send(network, peer, cbor);
             cbor_decref(&cbor);
@@ -818,15 +956,42 @@ static void network_handle_seeking_blocks(network_t* network, message_t* msg) {
   }
 
   // Build response with offers from our local block index
-  // TODO: Query block_cache for available blocks when wired up
   wire_seeking_blocks_response_t* response = get_clear_memory(sizeof(wire_seeking_blocks_response_t));
+  if (response == NULL) return;
   response->message_id = seeking->message_id;
   response->offer_count = 0;
 
-  // TODO: Select up to MAX_OFFERS blocks from local index
-  // Use PICK-BLOCK-FOR-REPRESENTATION: walk ranks from highest fib downward,
-  // probability proportional to fibonacci(fib)
-  // Exclude hashes in seeking->exclude_hashes
+  // Walk the block index and select up to WIRE_MAX_OFFERS blocks,
+  // sorted by FIB counter descending, excluding any hashes in seeking->exclude_hashes
+  index_entry_vec_t* entries = index_to_array(network->block_cache->index);
+  if (entries != NULL) {
+    // Sort entries by FIB counter descending (highest FIB = most important)
+    size_t entry_count = 0;
+    for (size_t index = 0; index < entries->length && entry_count < WIRE_MAX_OFFERS; index++) {
+      index_entry_t* entry = entries->data[index];
+      if (entry == NULL || entry->hash == NULL) continue;
+
+      // Check if this hash is in the exclude list
+      uint8_t excluded = 0;
+      for (size_t ex = 0; ex < seeking->exclude_count; ex++) {
+        if (seeking->exclude_hashes[ex] != NULL &&
+            memcmp(entry->hash->data, seeking->exclude_hashes[ex], 32) == 0) {
+          excluded = 1;
+          break;
+        }
+      }
+      if (excluded) continue;
+
+      // Add this block to the offers
+      memcpy(response->offers[entry_count].hash, entry->hash->data, 32);
+      response->offers[entry_count].fib = entry->counter.fib;
+      response->offers[entry_count].size = 0;  // Size not tracked in index_entry
+      entry_count++;
+    }
+    response->offer_count = (uint8_t)entry_count;
+    vec_deinit(entries);
+    free(entries);
+  }
 
   // Encode and send SeekingBlocksResponse via QUIC to the sender's peer connection.
   // Node_id tracking from QUIC connection metadata is deferred to Task 7.
@@ -854,9 +1019,34 @@ static void network_handle_seeking_blocks_response(network_t* network, message_t
 
   for (uint8_t index = 0; index < response->offer_count; index++) {
     wire_block_offer_t* offer = &response->offers[index];
-    // TODO: Check if block is already stored in block_cache
-    // If not stored and capacity allows, send FindBlock for this hash
-    (void)offer;
+
+    // Check if block is already stored locally
+    buffer_t* hash_buf = buffer_create_from_pointer_copy(offer->hash, 32);
+    if (hash_buf == NULL) continue;
+
+    index_entry_t* entry = index_peek(network->block_cache->index, hash_buf);
+    if (entry != NULL) {
+      // Block already stored — skip this offer
+      buffer_destroy(hash_buf);
+      continue;
+    }
+
+    // Block not stored and we should inhale — send FindBlock for this hash
+    if (respiration_should_inhale(local_capacity)) {
+      // Add to wanted list and route a FindBlock
+      network_local_find_block_payload_t find_payload;
+      memset(&find_payload, 0, sizeof(find_payload));
+      find_payload.hash = REFERENCE(hash_buf, buffer_t);
+      find_payload.reply_to = &network->actor;
+      message_t find_msg = {0};
+      find_msg.type = NETWORK_LOCAL_FIND_BLOCK;
+      find_msg.payload = &find_payload;
+      find_msg.payload_destroy = NULL;  // stack-allocated payload
+      network_handle_local_find_block(network, &find_msg);
+      buffer_destroy(hash_buf);
+    } else {
+      buffer_destroy(hash_buf);
+    }
   }
 }
 
@@ -978,6 +1168,7 @@ static void network_handle_recall_block(network_t* network, message_t* msg) {
     wire_recall_decline_t response;
     memset(&response, 0, sizeof(response));
     response.message_id = recall->message_id;
+    memcpy(response.block_hash, recall->block_hash, 32);
 
     // Encode and send RecallDecline via QUIC to the sender's peer connection.
     // Node_id tracking from QUIC connection metadata is deferred to Task 7.
@@ -996,8 +1187,42 @@ static void network_handle_recall_accept(network_t* network, message_t* msg) {
   wire_recall_accept_t* accept = (wire_recall_accept_t*)msg->payload;
   if (accept == NULL) return;
 
-  // Load block from sections and send StoreBlock with reason=RECALL
-  // TODO: Look up block in local cache and send StoreBlock when wired up
+  // Look up the block by hash in the local block_cache index
+  buffer_t* hash_buf = buffer_create_from_pointer_copy(accept->block_hash, 32);
+  if (hash_buf == NULL) return;
+
+  index_entry_t* entry = index_peek(network->block_cache->index, hash_buf);
+  if (entry != NULL) {
+    // Block found locally — send StoreBlock with the block data to the requesting peer
+    // The requesting peer is identified by the QUIC connection; use zeroed node_id until
+    // QUIC connection metadata provides the actual sender ID
+    node_id_t sender_id;
+    node_id_clear(&sender_id);
+    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+
+    if (peer != NULL) {
+      wire_store_block_t store_msg;
+      memset(&store_msg, 0, sizeof(store_msg));
+      store_msg.message_id = accept->message_id;
+      memcpy(store_msg.block_hash, accept->block_hash, 32);
+      store_msg.block_fib = entry->counter.fib;
+      store_msg.replicas_needed = 0;  // RECALL — no further replication needed
+      store_msg.max_hops = 1;  // Direct delivery, no forwarding
+      store_msg.carry_data = 1;
+      // If the accept message carries block data, forward it
+      if (accept->block_data != NULL && accept->block_data_len > 0) {
+        store_msg.block_data = accept->block_data;
+        store_msg.block_data_len = accept->block_data_len;
+        store_msg.block_size = (uint32_t)accept->block_data_len;
+      }
+      store_msg.start_time = (uint64_t)time(NULL) * 1000;
+
+      cbor_item_t* cbor = wire_store_block_encode(&store_msg);
+      quic_peer_send(network, peer, cbor);
+      cbor_decref(&cbor);
+    }
+  }
+  buffer_destroy(hash_buf);
 
   // After the block is stored (or once we know it's arriving via RECALL),
   // check wanted_list and notify any local requesters waiting for this block.
@@ -1032,10 +1257,26 @@ static void network_handle_recall_decline(network_t* network, message_t* msg) {
   wire_recall_decline_t* decline = (wire_recall_decline_t*)msg->payload;
   if (decline == NULL) return;
 
-  // Remove block_hash from EABF_{self→source}
-  // TODO: Remove from EABF when source node ID is available
-  (void)network;
-  (void)decline;
+  // The sender's node_id comes from QUIC connection metadata.
+  // Until that's wired up, we use a zeroed node_id to look up the peer.
+  // Remove the declined block hash from the sender's EABF to stop
+  // sending recall requests for blocks the sender doesn't want.
+  node_id_t sender_id;
+  node_id_clear(&sender_id);
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+  if (peer != NULL && peer->eabf != NULL) {
+    // Unsubscribe the block hash from the peer's EABF so we stop
+    // pushing this block to them in future exhale cycles.
+    eabf_unsubscribe(peer->eabf, decline->block_hash, 32);
+  }
+
+  // Also remove from our own global EABFs as negative signal
+  for (size_t index = 0; index < network->eabf_table.count; index++) {
+    eabf_t* eabf = network->eabf_table.entries[index].eabf;
+    if (eabf != NULL) {
+      eabf_subscribe(eabf, decline->block_hash, 32);
+    }
+  }
 }
 
 // --- RateLimited handler ---

@@ -524,7 +524,7 @@ int wire_recall_accept_decode(cbor_item_t* item, wire_recall_accept_t* msg) {
 }
 
 cbor_item_t* wire_recall_decline_encode(const wire_recall_decline_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(3);
+  cbor_item_t* array = cbor_new_definite_array(4);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_RECALL_DECLINE);
@@ -539,11 +539,16 @@ cbor_item_t* wire_recall_decline_encode(const wire_recall_decline_t* msg) {
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
+  item = cbor_build_bytestring(msg->block_hash, 32);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
   return array;
 }
 
 int wire_recall_decline_decode(cbor_item_t* item, wire_recall_decline_t* msg) {
-  if (cbor_array_size(item) < 3) return -1;
+  if (cbor_array_size(item) < 4) return -1;
+  memset(msg, 0, sizeof(*msg));
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_RECALL_DECLINE) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
@@ -552,6 +557,11 @@ int wire_recall_decline_decode(cbor_item_t* item, wire_recall_decline_t* msg) {
   msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
+  cbor_item_t* hash = cbor_array_get(item, 3);
+  if (cbor_isa_bytestring(hash) && cbor_bytestring_length(hash) == 32) {
+    memcpy(msg->block_hash, cbor_bytestring_handle(hash), 32);
+  }
+  cbor_decref(&hash);
   return 0;
 }
 
@@ -1082,7 +1092,7 @@ int wire_store_block_decode(cbor_item_t* item, wire_store_block_t* msg) {
 // --- StoreBlockResponse ---
 
 cbor_item_t* wire_store_block_response_encode(const wire_store_block_response_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(8);
+  cbor_item_t* array = cbor_new_definite_array(9);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_STORE_BLOCK_RESPONSE);
@@ -1122,11 +1132,16 @@ cbor_item_t* wire_store_block_response_encode(const wire_store_block_response_t*
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
+  item = cbor_build_bytestring(msg->block_hash, 32);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
   return array;
 }
 
 int wire_store_block_response_decode(cbor_item_t* item, wire_store_block_response_t* msg) {
-  if (cbor_array_size(item) < 8) return -1;
+  if (cbor_array_size(item) < 9) return -1;
+  memset(msg, 0, sizeof(*msg));
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_STORE_BLOCK_RESPONSE) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
@@ -1158,6 +1173,11 @@ int wire_store_block_response_decode(cbor_item_t* item, wire_store_block_respons
   cbor_item_t* latency = cbor_array_get(item, 7);
   msg->latency_ms = (uint64_t)cbor_get_uint64(latency);
   cbor_decref(&latency);
+  cbor_item_t* hash = cbor_array_get(item, 8);
+  if (cbor_isa_bytestring(hash) && cbor_bytestring_length(hash) == 32) {
+    memcpy(msg->block_hash, cbor_bytestring_handle(hash), 32);
+  }
+  cbor_decref(&hash);
   return 0;
 }
 

@@ -170,6 +170,7 @@ typedef struct {
   node_id_t path[WIRE_MAX_PATH];
   uint8_t path_len;
   uint64_t latency_ms;
+  uint8_t block_hash[32];  // hash of the stored block (not holder.hash)
 } wire_store_block_response_t;
 
 // --- SeekingBlocks ---
@@ -224,6 +225,7 @@ typedef struct {
 
 typedef struct {
   uint64_t message_id;
+  uint8_t block_hash[32];  // hash of the block that was declined
 } wire_recall_decline_t;
 
 // --- RateLimited ---
