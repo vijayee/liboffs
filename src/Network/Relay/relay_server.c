@@ -590,8 +590,15 @@ int relay_server_start(relay_server_t* server, const char* host, uint16_t port) 
 
   QUIC_CREDENTIAL_CONFIG cred_config = {0};
   QUIC_CERTIFICATE_FILE cert_file = {0};
-  cred_config.CertificateFile = &cert_file;
-  cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+  if (server->cert_path && server->key_path) {
+    cert_file.CertificateFile = server->cert_path;
+    cert_file.PrivateKeyFile = server->key_path;
+    cred_config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
+    cred_config.CertificateFile = &cert_file;
+    cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+  } else {
+    cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+  }
 
   if (QUIC_FAILED(status = server->msquic->ConfigurationLoadCredential(
           server->configuration,

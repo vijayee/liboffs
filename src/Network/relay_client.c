@@ -366,11 +366,18 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
     return -1;
   }
 
-  // Load credentials — self-signed/no-cert for development (matches relay server)
+  // Load credentials — use cert/key if configured, otherwise self-signed/no-cert
   QUIC_CREDENTIAL_CONFIG cred_config = {0};
   QUIC_CERTIFICATE_FILE cert_file = {0};
-  cred_config.CertificateFile = &cert_file;
-  cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+  if (client->cert_path && client->key_path) {
+    cert_file.CertificateFile = client->cert_path;
+    cert_file.PrivateKeyFile = client->key_path;
+    cred_config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
+    cred_config.CertificateFile = &cert_file;
+    cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+  } else {
+    cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+  }
 
   if (QUIC_FAILED(status = client->msquic->ConfigurationLoadCredential(
           client->configuration,

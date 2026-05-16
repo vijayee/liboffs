@@ -55,6 +55,8 @@ typedef struct relay_client_t {
   relay_client_destroy_node_t* destroy_head;
 
   struct sockaddr_storage relay_addr;
+  char* cert_path;
+  char* key_path;
 } relay_client_t;
 
 relay_client_t* relay_client_create(network_t* network, scheduler_pool_t* pool);

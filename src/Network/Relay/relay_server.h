@@ -46,6 +46,8 @@ typedef struct relay_server_t {
   void* listener_handle;
 #endif
   uint16_t listen_port;
+  char* cert_path;
+  char* key_path;
   relay_client_entry_t clients[RELAY_MAX_CLIENTS];
   size_t num_clients;
   uint32_t next_endpoint_id;

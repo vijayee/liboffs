@@ -292,23 +292,15 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
   // Load credentials
   authority_t* authority = listener->network->authority;
   QUIC_CREDENTIAL_CONFIG cred_config = {0};
+  QUIC_CERTIFICATE_FILE cert_file = {0};
   if (authority != NULL && authority->node_cert_path != NULL && authority->node_key_path != NULL) {
-    // Use X.509 certificate for TLS
-    QUIC_CERTIFICATE_FILE cert_file = {
-      .CertificateFile = authority->node_cert_path,
-      .PrivateKeyFile = authority->node_key_path
-    };
+    cert_file.CertificateFile = authority->node_cert_path;
+    cert_file.PrivateKeyFile = authority->node_key_path;
+    cred_config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
     cred_config.CertificateFile = &cert_file;
-    cred_config.Flags = QUIC_CREDENTIAL_FLAG_NONE;
-    if (authority->ca_cert_path == NULL) {
-      // No CA cert — skip peer verification
-      cred_config.Flags |= QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
-    }
+    cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
   } else {
-    // No certificate — use self-signed
-    // No certificate configured — accept any peer (development mode)
-    QUIC_CERTIFICATE_FILE self_signed = {0};
-    cred_config.CertificateFile = &self_signed;
+    cred_config.CertificateFile = &cert_file;
     cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
   }
 

@@ -90,6 +90,8 @@ typedef struct {
   uint16_t control_port;
   char* relay_host;
   uint16_t relay_port;
+  char* cert_path;
+  char* key_path;
   volatile int running;
   /* Control socket */
   int control_fd;
@@ -116,6 +118,12 @@ static void node_state_destroy(node_state_t* state) {
   }
   if (state->relay_host) {
     free(state->relay_host);
+  }
+  if (state->cert_path) {
+    free(state->cert_path);
+  }
+  if (state->key_path) {
+    free(state->key_path);
   }
 }
 
@@ -591,11 +599,12 @@ static void handle_command(int client_fd, char* line) {
       send_response(client_fd, CTRL_RESP_ERROR " invalid PEER_ADD format");
       return;
     }
+    /* Direct peer connection initiation requires an outbound QUIC connect
+       API which is not yet available in the network stack. Relay-mediated
+       connections work via CONNECT_RELAY. */
     (void)host;
     (void)port;
-    /* Peer adding via control socket is a future integration point.
-       For now, acknowledge the command. */
-    send_response(client_fd, CTRL_RESP_OK);
+    send_response(client_fd, CTRL_RESP_ERROR " direct peer connect not yet supported");
   } else if (strncmp(line, CTRL_CONNECT_RELAY " ", strlen(CTRL_CONNECT_RELAY) + 1) == 0) {
     const char* relay_addr = line + strlen(CTRL_CONNECT_RELAY) + 1;
     char host[256];
@@ -773,6 +782,10 @@ static void parse_args(int argc, char* argv[]) {
       g_node.relay_port = (uint16_t)atoi(argv[++idx]);
     } else if (strcmp(argv[idx], "--cache-dir") == 0 && idx + 1 < argc) {
       g_node.cache_dir = strdup(argv[++idx]);
+    } else if (strcmp(argv[idx], "--cert") == 0 && idx + 1 < argc) {
+      g_node.cert_path = strdup(argv[++idx]);
+    } else if (strcmp(argv[idx], "--key") == 0 && idx + 1 < argc) {
+      g_node.key_path = strdup(argv[++idx]);
     }
   }
 }
@@ -807,6 +820,10 @@ int node_main(int argc, char* argv[]) {
     scheduler_pool_destroy(g_node.pool);
     node_state_destroy(&g_node);
     return 1;
+  }
+  if (g_node.cert_path && g_node.key_path) {
+    g_node.authority->node_cert_path = strdup(g_node.cert_path);
+    g_node.authority->node_key_path = strdup(g_node.key_path);
   }
 
   g_node.timer = timer_actor_create();

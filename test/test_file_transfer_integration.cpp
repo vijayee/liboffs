@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
+#include <linux/limits.h>
 #include <string.h>
 
 #include <string>
@@ -21,6 +22,30 @@
 
 extern "C" int node_main(int argc, char* argv[]);
 
+static std::string get_self_path() {
+  char path[PATH_MAX];
+  ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
+  if (len > 0) {
+    path[len] = '\0';
+    return std::string(path);
+  }
+  return "./test_file_transfer_integration";
+}
+
+static std::string get_relay_path() {
+  char self_path[PATH_MAX];
+  ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
+  if (len > 0) {
+    self_path[len] = '\0';
+    std::string sp(self_path);
+    auto pos = sp.rfind('/');
+    if (pos != std::string::npos) {
+      return sp.substr(0, pos) + "/../src/Network/Relay/meridian_relay";
+    }
+  }
+  return "./meridian_relay";
+}
+
 static std::atomic<uint16_t> next_base_port{15000};
 
 struct Process {
@@ -32,10 +57,12 @@ struct Process {
 
 class FileTransferIntegrationTest : public ::testing::Test {
 protected:
-  Process relay_proc;
+  std::vector<Process> relays;
   std::vector<Process> nodes;
   uint16_t base_port;
   std::string test_dir;
+  std::string cert_path;
+  std::string key_path;
 
   void SetUp() override {
     base_port = next_base_port.fetch_add(100);
@@ -43,6 +70,7 @@ protected:
     dir_stream << "/tmp/test_fft_" << getpid() << "_" << base_port;
     test_dir = dir_stream.str();
     std::filesystem::create_directories(test_dir);
+    generate_test_certs();
   }
 
   void TearDown() override {
@@ -73,26 +101,38 @@ protected:
     }
     nodes.clear();
 
-    if (relay_proc.pid > 0) {
-      kill(relay_proc.pid, SIGTERM);
-      int status = 0;
-      for (int attempt = 0; attempt < 10; attempt++) {
-        if (waitpid(relay_proc.pid, &status, WNOHANG) != 0) {
-          relay_proc.pid = -1;
-          break;
+    for (auto& relay : relays) {
+      if (relay.pid > 0) {
+        kill(relay.pid, SIGTERM);
+        int status = 0;
+        for (int attempt = 0; attempt < 10; attempt++) {
+          if (waitpid(relay.pid, &status, WNOHANG) != 0) {
+            relay.pid = -1;
+            break;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      }
-      if (relay_proc.pid > 0) {
-        kill(relay_proc.pid, SIGKILL);
-        waitpid(relay_proc.pid, &status, 0);
-        relay_proc.pid = -1;
+        if (relay.pid > 0) {
+          kill(relay.pid, SIGKILL);
+          waitpid(relay.pid, &status, 0);
+          relay.pid = -1;
+        }
       }
     }
+    relays.clear();
 
     if (!test_dir.empty()) {
       std::filesystem::remove_all(test_dir);
     }
+  }
+
+  void generate_test_certs() {
+    cert_path = test_dir + "/test_cert.pem";
+    key_path = test_dir + "/test_key.pem";
+    std::string cmd = "openssl req -x509 -newkey rsa:2048 -keyout " + key_path +
+                      " -out " + cert_path +
+                      " -days 1 -nodes -subj '/CN=liboffs-test' 2>/dev/null";
+    ASSERT_EQ(system(cmd.c_str()), 0) << "Failed to generate test certificates";
   }
 
   void start_relay(uint16_t port) {
@@ -100,11 +140,15 @@ protected:
     ASSERT_NE(pid, -1) << "fork failed: " << strerror(errno);
     if (pid == 0) {
       std::string port_str = std::to_string(port);
-      execl("./relay_server", "relay_server", "--port", port_str.c_str(), nullptr);
+      std::string relay_path = get_relay_path();
+      execl(relay_path.c_str(), "meridian_relay", "--port", port_str.c_str(),
+            "--cert", cert_path.c_str(), "--key", key_path.c_str(), nullptr);
       _exit(1);
     }
-    relay_proc.pid = pid;
-    relay_proc.control_port = port;
+    Process proc;
+    proc.pid = pid;
+    proc.control_port = port;
+    relays.push_back(proc);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
 
@@ -116,7 +160,8 @@ protected:
       std::string np = std::to_string(node_port);
       std::string cp = std::to_string(control_port);
       std::string rp = std::to_string(relay_port);
-      execl("./test_file_transfer_integration",
+      std::string self = get_self_path();
+      execl(self.c_str(),
             "test_file_transfer_integration",
             "--mode=node",
             "--port", np.c_str(),
@@ -124,6 +169,8 @@ protected:
             "--cache-dir", cache_dir.c_str(),
             "--relay-host", "127.0.0.1",
             "--relay-port", rp.c_str(),
+            "--cert", cert_path.c_str(),
+            "--key", key_path.c_str(),
             nullptr);
       _exit(1);
     }
@@ -133,13 +180,15 @@ protected:
     proc.control_port = control_port;
     proc.cache_dir = cache_dir;
 
+    nodes.push_back(proc);
+
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     int fd = connect_control_socket(control_port);
-    ASSERT_GE(fd, 0) << "Failed to connect to node control socket on port " << control_port;
-    proc.control_fd = fd;
-
-    nodes.push_back(proc);
+    if (fd < 0) {
+      return;
+    }
+    nodes.back().control_fd = fd;
   }
 
   void start_node_no_relay(uint16_t node_port, uint16_t control_port,
@@ -149,12 +198,15 @@ protected:
     if (pid == 0) {
       std::string np = std::to_string(node_port);
       std::string cp = std::to_string(control_port);
-      execl("./test_file_transfer_integration",
+      std::string self = get_self_path();
+      execl(self.c_str(),
             "test_file_transfer_integration",
             "--mode=node",
             "--port", np.c_str(),
             "--control-port", cp.c_str(),
             "--cache-dir", cache_dir.c_str(),
+            "--cert", cert_path.c_str(),
+            "--key", key_path.c_str(),
             nullptr);
       _exit(1);
     }
@@ -164,13 +216,15 @@ protected:
     proc.control_port = control_port;
     proc.cache_dir = cache_dir;
 
+    nodes.push_back(proc);
+
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     int fd = connect_control_socket(control_port);
-    ASSERT_GE(fd, 0) << "Failed to connect to node control socket on port " << control_port;
-    proc.control_fd = fd;
-
-    nodes.push_back(proc);
+    if (fd < 0) {
+      return;
+    }
+    nodes.back().control_fd = fd;
   }
 
   std::string send_command(int control_fd, const std::string& cmd) {

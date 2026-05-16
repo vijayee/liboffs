@@ -63,7 +63,9 @@ void wanted_list_add(wanted_list_t* wl, buffer_t* hash, actor_t* actor) {
     entry->requesters = req;
   } else {
     /* New entry */
-    bloom_filter_add(wl->bloom, hash->data, hash->size);
+    if (hash != NULL && hash->data != NULL && hash->size > 0) {
+      bloom_filter_add(wl->bloom, hash->data, hash->size);
+    }
     entry = get_clear_memory(sizeof(wanted_entry_t));
     entry->hash = REFERENCE(hash, buffer_t);
     wanted_requester_t* req = get_clear_memory(sizeof(wanted_requester_t));

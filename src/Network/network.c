@@ -164,6 +164,12 @@ int network_connect_relay(network_t* network, const char* host, uint16_t port) {
     return -1;
   }
 
+  // Propagate cert paths from authority to relay client
+  if (network->authority && network->authority->node_cert_path && network->authority->node_key_path) {
+    network->relay->cert_path = strdup(network->authority->node_cert_path);
+    network->relay->key_path = strdup(network->authority->node_key_path);
+  }
+
   // Connect to relay server
   if (relay_client_connect(network->relay, host, port) != 0) {
     log_error("network_connect_relay: failed to connect to relay");
@@ -1965,8 +1971,5 @@ void network_dispatch(void* state, message_t* msg) {
     }
     default:
       break;
-  }
-  if (msg->payload != NULL && msg->payload_destroy != NULL) {
-    msg->payload_destroy(msg->payload);
   }
 }

@@ -207,13 +207,13 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
           /* Network-aware: send NETWORK_LOCAL_FIND_BLOCK */
           stream->state = OFF_STREAM_AWAITING_NETWORK;
           stream->pending_fetch_hash = REFERENCE(result->hash, buffer_t);
-          network_local_find_block_payload_t payload;
-          payload.hash = stream->pending_fetch_hash;
-          payload.reply_to = &stream->stream.actor;
+          network_local_find_block_payload_t* payload = get_clear_memory(sizeof(network_local_find_block_payload_t));
+          payload->hash = stream->pending_fetch_hash;
+          payload->reply_to = &stream->stream.actor;
           message_t msg;
           msg.type = NETWORK_LOCAL_FIND_BLOCK;
-          msg.payload = &payload;
-          msg.payload_destroy = NULL;
+          msg.payload = payload;
+          msg.payload_destroy = free;
           actor_send(&stream->network->actor, &msg);
           if (result->hash != NULL) {
             DESTROY(result->hash, buffer);

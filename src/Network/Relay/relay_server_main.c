@@ -22,6 +22,8 @@ static void _relay_signal_handler(int signum) {
 int main(int argc, char* argv[]) {
   uint16_t port = 14000;
   const char* host = NULL;
+  const char* cert_path = NULL;
+  const char* key_path = NULL;
 
   for (int index = 1; index < argc; index++) {
     if (strcmp(argv[index], "--port") == 0 && index + 1 < argc) {
@@ -29,6 +31,12 @@ int main(int argc, char* argv[]) {
       index++;
     } else if (strcmp(argv[index], "--host") == 0 && index + 1 < argc) {
       host = argv[index + 1];
+      index++;
+    } else if (strcmp(argv[index], "--cert") == 0 && index + 1 < argc) {
+      cert_path = argv[index + 1];
+      index++;
+    } else if (strcmp(argv[index], "--key") == 0 && index + 1 < argc) {
+      key_path = argv[index + 1];
       index++;
     } else if (strcmp(argv[index], "--help") == 0 || strcmp(argv[index], "-h") == 0) {
       printf("Usage: meridian_relay [--port PORT] [--host HOST]\n");
@@ -53,6 +61,11 @@ int main(int argc, char* argv[]) {
     scheduler_pool_stop(pool);
     scheduler_pool_destroy(pool);
     return 1;
+  }
+
+  if (cert_path && key_path) {
+    server->cert_path = strdup(cert_path);
+    server->key_path = strdup(key_path);
   }
 
   if (relay_server_start(server, host, port) != 0) {
