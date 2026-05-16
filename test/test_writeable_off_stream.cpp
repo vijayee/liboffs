@@ -23,7 +23,7 @@ TEST(WriteableOffStream, TestCreateDestroy) {
   vec_push(&recipes, (block_recipe_t*)recipe);
 
   writeable_off_stream_t* stream = writeable_off_stream_create(
-      pool, bc, tc, standard, 3, 32, recipes);
+      pool, bc, tc, standard, 3, 32, recipes, NULL);
   ASSERT_NE(stream, nullptr);
   EXPECT_EQ(stream->block_size, 128000u);
   EXPECT_EQ(stream->tuple_size, 3u);

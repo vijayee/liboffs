@@ -17,7 +17,7 @@ TEST(WriteableDescriptor, TestCreateDestroy) {
       "/tmp/test_wdesc_bc", standard, NULL, NULL);
 
   writeable_descriptor_t* desc = writeable_descriptor_create(
-      pool, bc, standard, 32, 3, 256000);
+      pool, bc, standard, 32, 3, 256000, NULL);
   ASSERT_NE(desc, nullptr);
   EXPECT_EQ(desc->block_size, 128000u);
   EXPECT_EQ(desc->tuple_size, 3u);

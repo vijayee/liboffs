@@ -20,6 +20,14 @@ static size_t _block_size_for_type(block_size_e type) {
   return 128000;
 }
 
+static void _network_store_block_payload_destroy(void* ptr) {
+  network_local_store_block_payload_t* payload = (network_local_store_block_payload_t*)ptr;
+  if (payload->hash != NULL) {
+    DESTROY(payload->hash, buffer);
+  }
+  free(payload);
+}
+
 static void _build_descriptor_blocks(writeable_descriptor_t* desc) {
   size_t chunk_size = desc->cut_point - desc->descriptor_pad;
 
@@ -89,7 +97,9 @@ static void _build_descriptor_blocks(writeable_descriptor_t* desc) {
       return;
     }
 
-    block_cache_put(desc->bc, block, NULL);
+    /* Store block in cache — announce to network if this is a new block */
+    actor_t* reply_to = (desc->network != NULL) ? &desc->stream.actor : NULL;
+    block_cache_put(desc->bc, block, 0, reply_to);
     if (prior_hash != NULL) {
       DESTROY(prior_hash, buffer);
     }
@@ -152,6 +162,22 @@ void writeable_descriptor_dispatch(void* state, message_t* msg) {
       msg->payload = NULL;
       break;
     }
+    case CACHE_PUT_RESULT: {
+      cache_put_result_payload_t* result = (cache_put_result_payload_t*)msg->payload;
+      if (result->result == CACHE_PUT_NEW && desc->network != NULL) {
+        /* New block stored — announce to network */
+        network_local_store_block_payload_t* net_payload = get_clear_memory(sizeof(network_local_store_block_payload_t));
+        net_payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)result->hash);
+        net_payload->fib = result->fib;
+        net_payload->reply_to = NULL; /* fire-and-forget for now */
+        message_t net_msg;
+        net_msg.type = NETWORK_LOCAL_STORE_BLOCK;
+        net_msg.payload = net_payload;
+        net_msg.payload_destroy = _network_store_block_payload_destroy;
+        actor_send(&desc->network->actor, &net_msg);
+      }
+      break;
+    }
     case CLOSE_STREAM: {
       if (desc->stream.is_deactivated) {
         break;
@@ -172,9 +198,11 @@ void writeable_descriptor_dispatch(void* state, message_t* msg) {
 
 writeable_descriptor_t* writeable_descriptor_create(
     scheduler_pool_t* pool, block_cache_t* bc, block_size_e block_type,
-    size_t descriptor_pad, size_t tuple_size, size_t data_length) {
+    size_t descriptor_pad, size_t tuple_size, size_t data_length,
+    network_t* network) {
   writeable_descriptor_t* desc = get_clear_memory(sizeof(writeable_descriptor_t));
   desc->bc = bc;
+  desc->network = network;
   desc->block_type = block_type;
   desc->block_size = _block_size_for_type(block_type);
   desc->tuple_size = tuple_size;

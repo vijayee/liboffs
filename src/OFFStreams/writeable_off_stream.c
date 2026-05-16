@@ -87,10 +87,12 @@ static void _create_tuple(writeable_off_stream_t* stream, off_stream_tuple_entry
   }
   tuple_push(tuple, off_block->hash);
 
+  /* Store blocks in cache — announce to network if this is a new block */
+  actor_t* reply_to = (stream->network != NULL) ? &stream->stream.actor : NULL;
   for (int i = 0; i < entry->random_blocks.length; i++) {
-    block_cache_put(stream->bc, entry->random_blocks.data[i], NULL);
+    block_cache_put(stream->bc, entry->random_blocks.data[i], 0, reply_to);
   }
-  block_cache_put(stream->bc, off_block, NULL);
+  block_cache_put(stream->bc, off_block, 0, reply_to);
 
   tuple_cache_put(stream->tc, tuple, origin_data);
 
@@ -160,6 +162,14 @@ static void _unregister_recipe(writeable_off_stream_t* stream) {
   stream_unsubscribe((stream_t*)stream->current_recipe, data_event, stream->recipe_data_sub_id);
   stream_unsubscribe((stream_t*)stream->current_recipe, close_event, stream->recipe_close_sub_id);
   stream_unsubscribe((stream_t*)stream->current_recipe, error_event, stream->recipe_error_sub_id);
+}
+
+static void _network_store_block_payload_destroy(void* ptr) {
+  network_local_store_block_payload_t* payload = (network_local_store_block_payload_t*)ptr;
+  if (payload->hash != NULL) {
+    DESTROY(payload->hash, buffer);
+  }
+  free(payload);
 }
 
 void writeable_off_stream_dispatch(void* state, message_t* msg) {
@@ -293,6 +303,22 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
       }
       break;
     }
+    case CACHE_PUT_RESULT: {
+      cache_put_result_payload_t* result = (cache_put_result_payload_t*)msg->payload;
+      if (result->result == CACHE_PUT_NEW && stream->network != NULL) {
+        /* New block stored — announce to network */
+        network_local_store_block_payload_t* net_payload = get_clear_memory(sizeof(network_local_store_block_payload_t));
+        net_payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)result->hash);
+        net_payload->fib = result->fib;
+        net_payload->reply_to = NULL; /* fire-and-forget for now */
+        message_t net_msg;
+        net_msg.type = NETWORK_LOCAL_STORE_BLOCK;
+        net_msg.payload = net_payload;
+        net_msg.payload_destroy = _network_store_block_payload_destroy;
+        actor_send(&stream->network->actor, &net_msg);
+      }
+      break;
+    }
     case CLOSE_STREAM: {
       stream_notify((stream_t*)stream, close_event, NULL, NULL);
       stream->stream.is_deactivated = 1;
@@ -312,11 +338,12 @@ static void _writeable_off_stream_on_write(stream_t* stream, void* data) {
 writeable_off_stream_t* writeable_off_stream_create(
     scheduler_pool_t* pool, block_cache_t* bc, tuple_cache_t* tc,
     block_size_e block_type, size_t tuple_size, size_t digest_size,
-    vec_block_recipe_t recipes) {
+    vec_block_recipe_t recipes, network_t* network) {
   (void)digest_size;
   writeable_off_stream_t* stream = get_clear_memory(sizeof(writeable_off_stream_t));
   stream->bc = bc;
   stream->tc = tc;
+  stream->network = network;
   stream->block_type = block_type;
   stream->block_size = _block_size_for_type(block_type);
   stream->tuple_size = tuple_size;

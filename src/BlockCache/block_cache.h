@@ -39,12 +39,19 @@ index_entry_t* block_lru_cache_put(block_lru_cache_t* lru, block_t* block, index
 uint8_t block_lru_cache_contains(block_lru_cache_t* lru, buffer_t* hash);
 index_entry_t* block_lru_cache_peek_entry(block_lru_cache_t* lru, buffer_t* hash);
 
+/* CACHE_PUT result codes */
+#define CACHE_PUT_NEW         0   /* Block was newly stored */
+#define CACHE_PUT_EXISTS      1   /* Block already existed, no-op */
+#define CACHE_PUT_ERROR      -1   /* sections_write failed */
+
 /* Payload for CACHE_PUT message.
    When reply_to is NULL (sync), result is filled by dispatch.
-   When reply_to is set (async), a completion message is sent back. */
+   When reply_to is set (async), a completion message is sent back.
+   incoming_fib: FIB counter from network (0 for local puts). */
 typedef struct {
   block_t* block;
   actor_t* reply_to;
+  uint32_t incoming_fib;
   int result;
 } cache_put_payload_t;
 
@@ -80,7 +87,6 @@ typedef struct block_cache_t {
   sections_t* sections;
   index_t* index;
   block_size_e type;
-  uint32_t canary;
   struct scheduler_pool_t* pool;
   actor_t actor;
   pending_get_t* pending_gets;
@@ -95,7 +101,9 @@ typedef struct {
 
 /* Result payload for CACHE_PUT_RESULT */
 typedef struct {
-  int result;
+  int result;          /* CACHE_PUT_NEW, CACHE_PUT_EXISTS, or CACHE_PUT_ERROR */
+  uint32_t fib;        /* Final FIB counter after max(local, incoming) */
+  buffer_t* hash;      /* Hash of the stored block (referenced) */
   actor_t* reply_to;
 } cache_put_result_payload_t;
 
@@ -112,10 +120,7 @@ void block_cache_dispatch(void* state, message_t* msg);
 
 /* Async API — send message and inject actor into scheduler */
 void block_cache_get(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
-void block_cache_put(block_cache_t* block_cache, block_t* block, actor_t* reply_to);
+void block_cache_put(block_cache_t* block_cache, block_t* block, uint32_t incoming_fib, actor_t* reply_to);
 void block_cache_remove(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
-
-#define BLOCK_CACHE_CANARY 0x424B4348u
-void block_cache_validate(block_cache_t* block_cache, const char* func, int line);
 
 #endif //OFFS_BLOCK_CACHE_H

@@ -191,8 +191,8 @@ static void _pipeline_on_rs_close(void* ctx, void* unused) {
 static void _setup_stream_pipeline(http_response_t* response, scheduler_pool_t* pool,
                                    block_cache_t* bc, tuple_cache_t* tc, ori_t* stream_ori,
                                    size_t descriptor_pad) {
-    readable_off_stream_t* rs = readable_off_stream_create(pool, bc, tc, stream_ori, descriptor_pad);
-    readable_descriptor_t* desc = readable_descriptor_create(pool, bc, stream_ori, descriptor_pad);
+    readable_off_stream_t* rs = readable_off_stream_create(pool, bc, tc, stream_ori, descriptor_pad, NULL);
+    readable_descriptor_t* desc = readable_descriptor_create(pool, bc, stream_ori, descriptor_pad, NULL);
 
     get_pipeline_t* pipeline = get_clear_memory(sizeof(get_pipeline_t));
     pipeline->desc = desc;
@@ -659,10 +659,10 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
     vec_push(&recipes, (block_recipe_t*)recipe);
 
     writeable_off_stream_t* ws = writeable_off_stream_create(
-        ctx->pool, ctx->bc, ctx->tc, standard, 3, 32, recipes);
+        ctx->pool, ctx->bc, ctx->tc, standard, 3, 32, recipes, NULL);
 
     writeable_descriptor_t* desc = writeable_descriptor_create(
-        ctx->pool, ctx->bc, standard, 32, 3, stream_length);
+        ctx->pool, ctx->bc, standard, 32, 3, stream_length, NULL);
 
     put_context_t* put_ctx = get_clear_memory(sizeof(put_context_t));
     put_ctx->response = response;
@@ -741,10 +741,10 @@ static int _off_put_headers_complete(http_connection_t* connection,
     vec_push(&recipes, (block_recipe_t*)recipe);
 
     writeable_off_stream_t* ws = writeable_off_stream_create(
-        routes_ctx->pool, routes_ctx->bc, routes_ctx->tc, standard, 3, 32, recipes);
+        routes_ctx->pool, routes_ctx->bc, routes_ctx->tc, standard, 3, 32, recipes, NULL);
 
     writeable_descriptor_t* desc = writeable_descriptor_create(
-        routes_ctx->pool, routes_ctx->bc, standard, 32, 3, stream_length);
+        routes_ctx->pool, routes_ctx->bc, standard, 32, 3, stream_length, NULL);
 
     put_context_t* put_ctx = get_clear_memory(sizeof(put_context_t));
     put_ctx->response = response;

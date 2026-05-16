@@ -12,6 +12,7 @@
 #include "block_recipe.h"
 #include "../BlockCache/block_cache.h"
 #include "../BlockCache/block.h"
+#include "../Network/network.h"
 
 typedef struct {
   block_t* origin;
@@ -23,6 +24,7 @@ typedef struct {
   stream_t stream;
   block_cache_t* bc;
   tuple_cache_t* tc;
+  network_t* network;               /* NULL = local-only mode */
   block_size_e block_type;
   size_t block_size;
   size_t tuple_size;
@@ -44,7 +46,7 @@ typedef struct {
 writeable_off_stream_t* writeable_off_stream_create(
     scheduler_pool_t* pool, block_cache_t* bc, tuple_cache_t* tc,
     block_size_e block_type, size_t tuple_size, size_t digest_size,
-    vec_block_recipe_t recipes);
+    vec_block_recipe_t recipes, network_t* network);
 void writeable_off_stream_destroy(writeable_off_stream_t* stream);
 void writeable_off_stream_dispatch(void* state, message_t* msg);
 void writeable_off_stream_write(writeable_off_stream_t* stream, buffer_t* data);

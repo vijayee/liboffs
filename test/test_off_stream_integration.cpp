@@ -86,7 +86,7 @@ TEST(OffStreamIntegration, WriteableOffStreamEncodesData) {
   vec_push(&recipes, (block_recipe_t*)recipe);
 
   writeable_off_stream_t* stream = writeable_off_stream_create(
-      pool, bc, tc, standard, 3, 32, recipes);
+      pool, bc, tc, standard, 3, 32, recipes, NULL);
 
   TupleCollector collector;
   stream_subscribe((stream_t*)stream, data_event, &collector,
@@ -162,10 +162,10 @@ TEST(OffStreamIntegration, ReadableOffStreamDecodesBlock) {
   DESTROY(xored2, buffer);
   ASSERT_NE(off_block, nullptr);
 
-  block_cache_put(bc, origin_block, NULL);
-  block_cache_put(bc, random1, NULL);
-  block_cache_put(bc, random2, NULL);
-  block_cache_put(bc, off_block, NULL);
+  block_cache_put(bc, origin_block, 0, NULL);
+  block_cache_put(bc, random1, 0, NULL);
+  block_cache_put(bc, random2, 0, NULL);
+  block_cache_put(bc, off_block, 0, NULL);
 
   ori_t* ori = ori_create(128000);
   ori->block_type = standard;
@@ -175,7 +175,7 @@ TEST(OffStreamIntegration, ReadableOffStreamDecodesBlock) {
   ori->descriptor_hash = NULL;
 
   readable_off_stream_t* stream = readable_off_stream_create(
-      pool, bc, tc, ori, 32);
+      pool, bc, tc, ori, 32, NULL);
 
   BufferCollector collector;
   stream_subscribe((stream_t*)stream, data_event, &collector,

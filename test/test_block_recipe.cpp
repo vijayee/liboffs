@@ -167,7 +167,7 @@ TEST(RecyclerRecipe, CreateDestroy) {
   vec_ori_t oris;
   vec_init(&oris);
 
-  recycler_recipe_t* recipe = recycler_recipe_create(pool, NULL, standard, oris);
+  recycler_recipe_t* recipe = recycler_recipe_create(pool, NULL, standard, oris, NULL);
   ASSERT_NE(recipe, nullptr);
   EXPECT_EQ(recipe->recipe.block_type, standard);
   EXPECT_EQ(recipe->oris.length, 0);
@@ -201,9 +201,9 @@ TEST(RecyclerRecipe, PullFromDescriptor) {
   ASSERT_NE(random2, nullptr);
   ASSERT_NE(off_block, nullptr);
 
-  block_cache_put(bc, random1, NULL);
-  block_cache_put(bc, random2, NULL);
-  block_cache_put(bc, off_block, NULL);
+  block_cache_put(bc, random1, 0, NULL);
+  block_cache_put(bc, random2, 0, NULL);
+  block_cache_put(bc, off_block, 0, NULL);
 
   // Build a descriptor block containing the hashes
   // Format: [hash0][hash1][hash2] where hash0,hash1 are random (front) and hash2 is off (back)
@@ -222,7 +222,7 @@ TEST(RecyclerRecipe, PullFromDescriptor) {
   block_t* desc_block = block_create_existing_data_by_type(desc_data, standard);
   DESTROY(desc_data, buffer);
   ASSERT_NE(desc_block, nullptr);
-  block_cache_put(bc, desc_block, NULL);
+  block_cache_put(bc, desc_block, 0, NULL);
 
   // Create ORI pointing to the descriptor block
   ori_t* ori = ori_create(128000);
@@ -237,7 +237,7 @@ TEST(RecyclerRecipe, PullFromDescriptor) {
   vec_init(&oris);
   vec_push(&oris, ori);
 
-  recycler_recipe_t* recipe = recycler_recipe_create(pool, bc, standard, oris);
+  recycler_recipe_t* recipe = recycler_recipe_create(pool, bc, standard, oris, NULL);
 
   // Use DataAwaiter to wait for 2 blocks (async — can't use CLOSE_STREAM immediately)
   DataAwaiter awaiter(2);
@@ -341,7 +341,7 @@ TEST(BlockRecipeIntegration, WriteableOffStreamWithNewBlocksRecipe) {
   vec_push(&recipes, (block_recipe_t*)recipe);
 
   writeable_off_stream_t* stream = writeable_off_stream_create(
-      pool, bc, tc, standard, 3, 32, recipes);
+      pool, bc, tc, standard, 3, 32, recipes, NULL);
 
   TupleCollector collector;
   stream_subscribe((stream_t*)stream, data_event, &collector,

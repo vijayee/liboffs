@@ -22,6 +22,14 @@ static void cache_put_payload_destroy(void* ptr) {
   free(payload);
 }
 
+static void cache_put_result_payload_destroy(void* ptr) {
+  cache_put_result_payload_t* payload = (cache_put_result_payload_t*)ptr;
+  if (payload->hash != NULL) {
+    DESTROY(payload->hash, buffer);
+  }
+  free(payload);
+}
+
 static void cache_remove_payload_destroy(void* ptr) {
   cache_remove_payload_t* payload = (cache_remove_payload_t*)ptr;
   if (payload->hash != NULL) {
@@ -36,21 +44,6 @@ static void cache_get_payload_destroy(void* ptr) {
     DESTROY(payload->hash, buffer);
   }
   free(payload);
-}
-
-void block_cache_validate(block_cache_t* block_cache, const char* func, int line) {
-  if (block_cache == NULL) {
-    log_error("block_cache_validate: block_cache is NULL at %s:%d", func, line);
-    abort();
-  }
-  if (block_cache->canary != BLOCK_CACHE_CANARY) {
-    log_error("block_cache_validate: CANARY CORRUPTED at %s:%d! Expected 0x%X, got 0x%X, block_cache=%p lru=%p index=%p",
-              func, line, BLOCK_CACHE_CANARY, block_cache->canary, (void*)block_cache, (void*)block_cache->lru, (void*)block_cache->index);
-    abort();
-  }
-  if (block_cache->index != NULL) {
-    index_validate_lock(block_cache->index, func, line);
-  }
 }
 
 void block_lru_cache_move(block_lru_cache_t* lru, block_lru_node_t* node);
@@ -294,10 +287,15 @@ void block_cache_dispatch(void* state, message_t* msg) {
     case CACHE_PUT: {
       cache_put_payload_t* p = (cache_put_payload_t*)msg->payload;
       int is_async = (msg->payload_destroy != NULL);
-      p->result = -1;
+      p->result = CACHE_PUT_ERROR;
+      uint32_t result_fib = 0;
+      /* Save hash reference before block is destroyed in async path */
+      buffer_t* result_hash = (buffer_t*)refcounter_reference((refcounter_t*)p->block->hash);
       index_entry_t* entry = index_peek(block_cache->index, p->block->hash);
       if (entry == NULL) {
         entry = index_entry_create(p->block->hash);
+        /* Set incoming FIB on new entry (0 for local puts, network-provided for remote) */
+        entry->counter.fib = p->incoming_fib;
         sections_write_payload_t write_payload;
         write_payload.data = p->block->data;
         write_payload.reply_to = NULL;
@@ -309,14 +307,17 @@ void block_cache_dispatch(void* state, message_t* msg) {
         sections_msg.payload = &write_payload;
         sections_msg.payload_destroy = NULL;
         sections_dispatch(block_cache->sections, &sections_msg);
-        int result = write_payload.result;
-        if (result) {
+        int write_result = write_payload.result;
+        if (write_result) {
           log_error("CACHE_PUT: sections_write FAILED result=%d hash=%02x%02x%02x%02x...",
-                    result, p->block->hash->data[0], p->block->hash->data[1],
+                    write_result, p->block->hash->data[0], p->block->hash->data[1],
                     p->block->hash->data[2], p->block->hash->data[3]);
           index_entry_destroy(entry);
+          entry = NULL;
           if (is_async) { block_destroy(p->block); p->block = NULL; }
-          p->result = result;
+          DESTROY(result_hash, buffer);
+          result_hash = NULL;
+          p->result = CACHE_PUT_ERROR;
         } else {
           entry->section_id = write_payload.section_id;
           entry->section_index = write_payload.section_index;
@@ -329,24 +330,35 @@ void block_cache_dispatch(void* state, message_t* msg) {
           if (is_async) { block_destroy(p->block); p->block = NULL; }
           refcounter_yield((refcounter_t*) entry);
           index_add(block_cache->index, entry);
-          p->result = 0;
+          result_fib = entry->counter.fib;
+          p->result = CACHE_PUT_NEW;
         }
       } else {
-        /* Block already exists */
-        /* Block already exists — release the async reference if taken */
+        /* Block already exists — update FIB to max(local, incoming) */
+        if (p->incoming_fib > entry->counter.fib) {
+          entry->counter.fib = p->incoming_fib;
+        }
+        result_fib = entry->counter.fib;
         if (is_async) { block_destroy(p->block); p->block = NULL; }
-        p->result = 0;
+        p->result = CACHE_PUT_EXISTS;
       }
       /* Async: send result back if reply_to is set */
       if (p->reply_to != NULL) {
         cache_put_result_payload_t* result = get_clear_memory(sizeof(cache_put_result_payload_t));
         result->result = p->result;
+        result->fib = result_fib;
+        result->hash = result_hash;
         result->reply_to = NULL;
         message_t reply;
         reply.type = CACHE_PUT_RESULT;
         reply.payload = result;
-        reply.payload_destroy = free;
+        reply.payload_destroy = cache_put_result_payload_destroy;
         actor_send(p->reply_to, &reply);
+      } else {
+        /* No reply_to — clean up hash reference */
+        if (result_hash != NULL) {
+          DESTROY(result_hash, buffer);
+        }
       }
       break;
     }
@@ -509,7 +521,6 @@ void block_cache_dispatch(void* state, message_t* msg) {
 block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool) {
   block_cache_t* block_cache = get_clear_memory(sizeof(block_cache_t));
   refcounter_init_actor((refcounter_t*) block_cache);
-  block_cache->canary = BLOCK_CACHE_CANARY;
   block_cache->type = type;
   block_cache->pool = pool;
   char* folder;
@@ -575,11 +586,12 @@ void block_cache_get(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_
   actor_send(&block_cache->actor, &msg);
 }
 
-void block_cache_put(block_cache_t* block_cache, block_t* block, actor_t* reply_to) {
+void block_cache_put(block_cache_t* block_cache, block_t* block, uint32_t incoming_fib, actor_t* reply_to) {
   cache_put_payload_t* payload = get_clear_memory(sizeof(cache_put_payload_t));
   payload->block = (block_t*)refcounter_reference((refcounter_t*)block);
+  payload->incoming_fib = incoming_fib;
   payload->reply_to = reply_to;
-  payload->result = -1;
+  payload->result = CACHE_PUT_ERROR;
 
   message_t msg;
   msg.type = CACHE_PUT;
