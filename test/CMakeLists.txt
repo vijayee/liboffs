@@ -32,7 +32,8 @@ if (BUILD_TESTING)
             test_ofd_cache.cpp
             test_off_routes.cpp
             test_network.cpp
-            test_wanted_list.cpp)
+            test_wanted_list.cpp
+            test_stream_network.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
