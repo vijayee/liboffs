@@ -14,6 +14,10 @@
 #include "wanted_list.h"
 #include "../Timer/timer_actor.h"
 #include "../Bloom/elastic_bloom_filter.h"
+#include "../BlockCache/block_cache.h"
+#include "../BlockCache/index.h"
+#include "../Buffer/buffer.h"
+#include "../RefCounter/refcounter.h"
 #include "../Util/allocator.h"
 #include <cbor.h>
 #include <string.h>
@@ -21,6 +25,18 @@
 
 // Forward declarations for internal handlers
 static void network_sync_hebbian_to_rings(network_t* network);
+
+// --- FindBlock result payload destroy ---
+// Frees the heap-allocated result payload and releases the hash buffer reference.
+
+static void network_find_block_result_destroy(void* ptr) {
+  if (ptr == NULL) return;
+  network_find_block_result_payload_t* result = (network_find_block_result_payload_t*)ptr;
+  if (result->hash != NULL) {
+    buffer_destroy(result->hash);
+  }
+  free(ptr);
+}
 
 network_t* network_create(authority_t* authority, block_cache_t* block_cache,
                           timer_actor_t* timer, scheduler_pool_t* pool) {
@@ -433,11 +449,7 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
     for (size_t index = 0; index < network->eabf_table.count; index++) {
       eabf_t* eabf = network->eabf_table.entries[index].eabf;
       if (eabf != NULL) {
-        // TODO: Subscribe block_hash, not holder.hash, once wire_find_block_response_t
-        // carries block_hash. Currently using holder.hash as a routing hint for
-        // the node that holds the block, but this should be the content hash for
-        // proper content-based routing.
-        eabf_subscribe(eabf, response->holder.hash, 32);
+        eabf_subscribe(eabf, response->block_hash, 32);
       }
     }
 
@@ -447,13 +459,62 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
     for (size_t index = 0; index + 1 < response->path_len; index++) {
       peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &response->path[index + 1]);
       if (peer != NULL) {
-        // TODO: Use block_hash, not holder.hash, once wire response carries it.
-        peer_eabf_subscribe(peer, response->holder.hash, 32);
+        peer_eabf_subscribe(peer, response->block_hash, 32);
+      }
+    }
+
+    // Check wanted_list — notify any local requesters waiting for this block
+    {
+      buffer_t* hash_buf = buffer_create_from_pointer_copy(response->block_hash, 32);
+      if (hash_buf != NULL) {
+        wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, hash_buf);
+        if (requesters != NULL) {
+          wanted_requester_t* req = requesters;
+          while (req != NULL) {
+            network_find_block_result_payload_t* result =
+                get_clear_memory(sizeof(network_find_block_result_payload_t));
+            result->hash = REFERENCE(hash_buf, buffer_t);
+            result->found = 1;
+            message_t result_msg = {0};
+            result_msg.type = NETWORK_FIND_BLOCK_RESULT;
+            result_msg.payload = result;
+            result_msg.payload_destroy = network_find_block_result_destroy;
+            actor_send(req->actor, &result_msg);
+            req = req->next;
+          }
+          wanted_requester_list_destroy(requesters);
+        }
+        buffer_destroy(hash_buf);
       }
     }
   } else {
     // Block not found — subscribe block_hash in EABFs as negative info
     // This is handled by TTL_EXPIRED in the forwarding path
+
+    // Check wanted_list — notify any local requesters that the block was not found
+    {
+      buffer_t* hash_buf = buffer_create_from_pointer_copy(response->block_hash, 32);
+      if (hash_buf != NULL) {
+        wanted_requester_t* requesters = wanted_list_clear_requesters(network->wanted_list, hash_buf);
+        if (requesters != NULL) {
+          wanted_requester_t* req = requesters;
+          while (req != NULL) {
+            network_find_block_result_payload_t* result =
+                get_clear_memory(sizeof(network_find_block_result_payload_t));
+            result->hash = REFERENCE(hash_buf, buffer_t);
+            result->found = 0;
+            message_t result_msg = {0};
+            result_msg.type = NETWORK_FIND_BLOCK_RESULT;
+            result_msg.payload = result;
+            result_msg.payload_destroy = network_find_block_result_destroy;
+            actor_send(req->actor, &result_msg);
+            req = req->next;
+          }
+          wanted_requester_list_destroy(requesters);
+        }
+        buffer_destroy(hash_buf);
+      }
+    }
   }
 }
 
@@ -523,6 +584,31 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
       }
       // TODO: Store block in block_cache via actor_send
       // TODO: If replicas_needed > 0, forward with decremented count
+
+      // Check wanted_list — notify any local requesters waiting for this block
+      {
+        buffer_t* hash_buf = buffer_create_from_pointer_copy(store->block_hash, 32);
+        if (hash_buf != NULL) {
+          wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, hash_buf);
+          if (requesters != NULL) {
+            wanted_requester_t* req = requesters;
+            while (req != NULL) {
+              network_find_block_result_payload_t* result =
+                  get_clear_memory(sizeof(network_find_block_result_payload_t));
+              result->hash = REFERENCE(hash_buf, buffer_t);
+              result->found = 1;
+              message_t result_msg = {0};
+              result_msg.type = NETWORK_FIND_BLOCK_RESULT;
+              result_msg.payload = result;
+              result_msg.payload_destroy = network_find_block_result_destroy;
+              actor_send(req->actor, &result_msg);
+              req = req->next;
+            }
+            wanted_requester_list_destroy(requesters);
+          }
+          buffer_destroy(hash_buf);
+        }
+      }
       break;
     }
 
@@ -798,8 +884,34 @@ static void network_handle_recall_accept(network_t* network, message_t* msg) {
 
   // Load block from sections and send StoreBlock with reason=RECALL
   // TODO: Look up block in local cache and send StoreBlock when wired up
-  (void)network;
-  (void)accept;
+
+  // After the block is stored (or once we know it's arriving via RECALL),
+  // check wanted_list and notify any local requesters waiting for this block.
+  // Note: The actual block storage is still TODO, but we check wanted_list here
+  // so the integration is in place for when storage is implemented.
+  {
+    buffer_t* hash_buf = buffer_create_from_pointer_copy(accept->block_hash, 32);
+    if (hash_buf != NULL) {
+      wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, hash_buf);
+      if (requesters != NULL) {
+        wanted_requester_t* req = requesters;
+        while (req != NULL) {
+          network_find_block_result_payload_t* result =
+              get_clear_memory(sizeof(network_find_block_result_payload_t));
+          result->hash = REFERENCE(hash_buf, buffer_t);
+          result->found = 1;
+          message_t result_msg = {0};
+          result_msg.type = NETWORK_FIND_BLOCK_RESULT;
+          result_msg.payload = result;
+          result_msg.payload_destroy = network_find_block_result_destroy;
+          actor_send(req->actor, &result_msg);
+          req = req->next;
+        }
+        wanted_requester_list_destroy(requesters);
+      }
+      buffer_destroy(hash_buf);
+    }
+  }
 }
 
 static void network_handle_recall_decline(network_t* network, message_t* msg) {
@@ -872,6 +984,155 @@ static void network_handle_eabf_expire(network_t* network, message_t* msg) {
     }
   }
   (void)network;
+}
+
+// --- Local FindBlock handler ---
+// Handles stream-originated FindBlock requests (NETWORK_LOCAL_FIND_BLOCK).
+// Checks local cache first, then wanted_list for dedup, then routes via FindBlock.
+
+static void network_handle_local_find_block(network_t* network, message_t* msg) {
+  network_local_find_block_payload_t* payload =
+      (network_local_find_block_payload_t*)msg->payload;
+  if (payload == NULL || payload->hash == NULL) return;
+
+  // Step 1: Check local block_cache first
+  index_entry_t* entry = index_peek(network->block_cache->index, payload->hash);
+  if (entry != NULL) {
+    // Block found locally — send result immediately
+    network_find_block_result_payload_t* result =
+        get_clear_memory(sizeof(network_find_block_result_payload_t));
+    result->hash = REFERENCE(payload->hash, buffer_t);
+    result->found = 1;
+    message_t result_msg = {0};
+    result_msg.type = NETWORK_FIND_BLOCK_RESULT;
+    result_msg.payload = result;
+    result_msg.payload_destroy = network_find_block_result_destroy;
+    actor_send(payload->reply_to, &result_msg);
+    return;
+  }
+
+  // Step 2: Check wanted list for dedup — if entry exists, just add this requester
+  wanted_entry_t* existing = wanted_list_find(network->wanted_list, payload->hash);
+  if (existing != NULL) {
+    wanted_requester_t* requester = get_clear_memory(sizeof(wanted_requester_t));
+    requester->actor = payload->reply_to;
+    requester->next = existing->requesters;
+    existing->requesters = requester;
+    return;
+  }
+
+  // Step 3: New request — add to wanted list
+  wanted_list_add(network->wanted_list, payload->hash, payload->reply_to);
+
+  // Step 4: Execute FindBlock routing
+  find_block_state_t state;
+  memset(&state, 0, sizeof(state));
+  state.message_id = (uint64_t)time(NULL) * 1000;
+  memcpy(state.block_hash, payload->hash->data, 32);
+  state.ttl = FIND_BLOCK_FORWARD_FANOUT;
+  state.start_time_ms = (uint64_t)time(NULL) * 1000;
+  memcpy(&state.original_source, &network->authority->local_id, sizeof(node_id_t));
+
+  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  find_block_result_e result = find_block_execute(
+      &network->eabf_table,
+      &network->eabf_ttl,
+      &network->conn_mgr,
+      network->rings,
+      &network->authority->local_id,
+      &state,
+      next_hops,
+      &next_hop_count);
+
+  switch (result) {
+    case FIND_BLOCK_FOUND: {
+      // Block is local (shouldn't happen since we checked cache, but handle it)
+      wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, payload->hash);
+      if (requesters != NULL) {
+        wanted_requester_t* req = requesters;
+        while (req != NULL) {
+          network_find_block_result_payload_t* fb_result =
+              get_clear_memory(sizeof(network_find_block_result_payload_t));
+          fb_result->hash = REFERENCE(payload->hash, buffer_t);
+          fb_result->found = 1;
+          message_t fb_msg = {0};
+          fb_msg.type = NETWORK_FIND_BLOCK_RESULT;
+          fb_msg.payload = fb_result;
+          fb_msg.payload_destroy = network_find_block_result_destroy;
+          actor_send(req->actor, &fb_msg);
+          req = req->next;
+        }
+        wanted_requester_list_destroy(requesters);
+      }
+      break;
+    }
+
+    case FIND_BLOCK_NOT_FOUND:
+    case FIND_BLOCK_TTL_EXPIRED: {
+      // On TTL expiry, subscribe block_hash in our EABFs as negative info
+      if (result == FIND_BLOCK_TTL_EXPIRED) {
+        for (size_t index = 0; index < network->eabf_table.count; index++) {
+          eabf_t* eabf = network->eabf_table.entries[index].eabf;
+          if (eabf != NULL) {
+            eabf_subscribe(eabf, state.block_hash, 32);
+          }
+        }
+      }
+
+      // Block not found — notify all requesters
+      wanted_requester_t* requesters = wanted_list_clear_requesters(network->wanted_list, payload->hash);
+      if (requesters != NULL) {
+        wanted_requester_t* req = requesters;
+        while (req != NULL) {
+          network_find_block_result_payload_t* fb_result =
+              get_clear_memory(sizeof(network_find_block_result_payload_t));
+          fb_result->hash = REFERENCE(payload->hash, buffer_t);
+          fb_result->found = 0;
+          message_t fb_msg = {0};
+          fb_msg.type = NETWORK_FIND_BLOCK_RESULT;
+          fb_msg.payload = fb_result;
+          fb_msg.payload_destroy = network_find_block_result_destroy;
+          actor_send(req->actor, &fb_msg);
+          req = req->next;
+        }
+        wanted_requester_list_destroy(requesters);
+      }
+      break;
+    }
+
+    case FIND_BLOCK_FORWARDING: {
+      // Add self to path
+      if (state.path_len < FIND_BLOCK_MAX_PATH) {
+        memcpy(&state.path[state.path_len], &network->authority->local_id, sizeof(node_id_t));
+        state.path_len++;
+      }
+      // Add self to visited bloom
+      find_block_add_visited(state.visited_bloom, &state.visited_count, network->authority->local_id.hash);
+      // Decrement TTL
+      state.ttl--;
+
+      // Forward to each selected next-hop
+      for (size_t hop = 0; hop < next_hop_count; hop++) {
+        wire_find_block_t* forward = get_clear_memory(sizeof(wire_find_block_t));
+        if (forward == NULL) continue;
+        forward->message_id = state.message_id;
+        memcpy(forward->block_hash, state.block_hash, 32);
+        forward->ttl = state.ttl;
+        memcpy(forward->visited_bloom, state.visited_bloom, WIRE_MAX_VISITED_BLOOM);
+        forward->visited_count = state.visited_count;
+        memcpy(forward->path, state.path, state.path_len * sizeof(node_id_t));
+        forward->path_len = state.path_len;
+        forward->start_time = state.start_time_ms;
+        memcpy(&forward->original_source, &state.original_source, sizeof(node_id_t));
+
+        // TODO: Send forward to next_hops[hop] via QUIC when wired up
+        free(forward);
+      }
+      break;
+    }
+  }
 }
 
 // --- Network dispatch ---
@@ -1096,12 +1357,8 @@ void network_dispatch(void* state, message_t* msg) {
       break;
     }
     case NETWORK_LOCAL_FIND_BLOCK: {
-      // Stream requests block from network — add to wanted list and dispatch FindBlock
-      network_local_find_block_payload_t* payload =
-          (network_local_find_block_payload_t*)msg->payload;
-      if (payload != NULL && payload->hash != NULL) {
-        wanted_list_add(network->wanted_list, payload->hash, payload->reply_to);
-      }
+      // Stream requests block from network — check cache, dedup via wanted_list, route
+      network_handle_local_find_block(network, msg);
       break;
     }
     case NETWORK_FIND_BLOCK_RESULT: {

@@ -114,6 +114,7 @@ typedef struct {
 
 typedef struct {
   uint64_t message_id;
+  uint8_t block_hash[32];
   uint8_t found;
   node_id_t holder;
   uint32_t fib;
@@ -212,6 +213,7 @@ typedef struct {
 
 typedef struct {
   uint64_t message_id;
+  uint8_t block_hash[32];
 } wire_recall_accept_t;
 
 typedef struct {
@@ -271,5 +273,11 @@ int wire_rate_limited_decode(cbor_item_t* item, wire_rate_limited_t* msg);
 
 // Helper: extract type byte from CBOR item
 uint8_t wire_get_type(cbor_item_t* item);
+
+// Destroy helpers for wire types with nested allocations
+// Frees block_data and the struct itself
+void wire_store_block_destroy(wire_store_block_t* msg);
+// Frees exclude_hashes array and each hash pointer, then the struct itself
+void wire_seeking_blocks_destroy(wire_seeking_blocks_t* msg);
 
 #endif // OFFS_WIRE_H
