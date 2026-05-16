@@ -156,9 +156,12 @@ public:
   void TearDown() override {
     if (server != NULL) {
       http_server_stop(server);
+    }
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    if (server != NULL) {
       http_server_destroy(server);
     }
-    scheduler_pool_stop(pool);
     scheduler_pool_destroy(pool);
   }
 };

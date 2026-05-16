@@ -9,6 +9,7 @@
 #include "../Util/allocator.h"
 #include "../Util/threadding.h"
 #include "../Actor/message.h"
+#include "../Actor/message_queue.h"
 #include <poll-dancer/poll-dancer.h>
 #include <string.h>
 #include <stdio.h>
@@ -185,7 +186,9 @@ void http_server_destroy(http_server_t* server) {
   if (server->listen_fd >= 0) {
     close(server->listen_fd);
   }
-  /* Mark all connections as closing and close their fds so actors drain quickly. */
+  /* Mark all connections as closing, close their fds so actors drain quickly,
+   * and null out the server pointer so connection callbacks won't send
+   * messages to the server actor. */
   for (int i = 0; i < server->connections.length; i++) {
     http_connection_t* conn = server->connections.data[i];
     conn->is_closing = 1;
@@ -195,12 +198,60 @@ void http_server_destroy(http_server_t* server) {
     }
     conn->server = NULL;
   }
-  /* Wait for all connection actors to finish processing pending messages. */
-  scheduler_pool_wait_for_idle(server->pool);
-  /* Safe to destroy connections now — no actor is running them. */
+  /* Mark all connection actors as destroyed so the scheduler skips them
+   * and actor_send drops any new messages. This MUST happen before
+   * scheduler_pool_wait_for_idle, otherwise a worker thread could still
+   * be dispatching on a connection when we free it below. */
+  for (int i = 0; i < server->connections.length; i++) {
+    http_connection_t* conn = server->connections.data[i];
+    atomic_fetch_or(&conn->actor.flags, ACTOR_FLAG_DESTROY);
+  }
+  /* If the scheduler pool is still running, wait for all workers to go idle
+   * so no worker is dispatching on a connection actor. If the pool is
+   * already stopped (workers joined), no workers are running so it's safe
+   * to skip this. */
+  if (!atomic_load_explicit(&server->pool->terminate, memory_order_acquire)) {
+    scheduler_pool_wait_for_idle(server->pool);
+  }
+  /* Drain each connection's message queue and free its resources.
+   * We must NOT call actor_destroy here because it triggers
+   * backpressure_release which wakes worker threads — those workers
+   * could then access the connection actor's memory via actor_send,
+   * causing a use-after-free. Since ACTOR_FLAG_DESTROY is already set,
+   * actor_send will drop any queued messages, so we only need to
+   * free the queue nodes. The backpressure senders will remain muted
+   * until the scheduler pool is stopped, which is fine during shutdown. */
   for (int i = server->connections.length - 1; i >= 0; i--) {
     http_connection_t* conn = server->connections.data[i];
-    DESTROY(conn, http_connection);
+    /* Drain and free the actor's message queue without triggering
+     * backpressure_release (which would wake workers). */
+    message_queue_destroy(&conn->actor.queue);
+    /* Clean up the watcher — the I/O thread is already stopped so we
+     * can stop and destroy it directly on the main thread. */
+    if (ATOMIC_LOAD(&conn->watcher) != NULL) {
+      pd_watcher_t* watcher = ATOMIC_EXCHANGE(&conn->watcher, NULL);
+      if (watcher != NULL) {
+        pd_watcher_stop(watcher);
+        pd_watcher_destroy(watcher);
+      }
+    }
+    if (conn->request != NULL) {
+      DESTROY(conn->request, http_request);
+    }
+    if (conn->write_buffer != NULL) {
+      DESTROY(conn->write_buffer, buffer);
+    }
+    if (conn->header_field != NULL) {
+      free(conn->header_field);
+    }
+    if (conn->header_value != NULL) {
+      free(conn->header_value);
+    }
+    if (conn->ssl != NULL) {
+      SSL_free(conn->ssl);
+    }
+    atomic_fetch_sub(&server->active_connections, 1);
+    free(conn);
   }
   vec_deinit(&server->connections);
   for (int i = 0; i < server->middlewares.length; i++) {
