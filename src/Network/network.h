@@ -19,6 +19,7 @@
 #include "rate_limit.h"
 #include "node_id.h"
 #include "wanted_list.h"
+#include "conn_state.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -27,6 +28,8 @@
 #endif
 
 typedef struct block_cache_t block_cache_t;
+typedef struct relay_client_t relay_client_t;
+typedef struct nat_detect_t nat_detect_t;
 
 typedef struct network_t {
   actor_t actor;
@@ -49,6 +52,10 @@ typedef struct network_t {
   uint64_t metrics_push_timer_id;
   ATOMIC(uint8_t) running;
 
+  relay_client_t* relay;          /* Connected relay client (or NULL) */
+  nat_detect_t* nat_detect;       /* NAT detection module */
+  nat_type_e local_nat_type;      /* Detected NAT type */
+
 #ifdef HAS_MSQUIC
   const struct QUIC_API_TABLE* msquic;
 #endif
@@ -58,5 +65,6 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
                           timer_actor_t* timer, scheduler_pool_t* pool);
 void network_destroy(network_t* network);
 void network_dispatch(void* state, message_t* msg);
+int network_connect_relay(network_t* network, const char* host, uint16_t port);
 
 #endif // OFFS_NETWORK_H

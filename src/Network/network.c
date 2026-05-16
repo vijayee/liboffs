@@ -5,7 +5,6 @@
 #include "network.h"
 #include "wire.h"
 #include "quic_listener.h"
-#include "quic_peer_send.h"
 #include "find_block.h"
 #include "store_block.h"
 #include "respiration.h"
@@ -13,6 +12,9 @@
 #include "timing_wheel.h"
 #include "topology_metrics.h"
 #include "wanted_list.h"
+#include "relay_client.h"
+#include "nat_detect.h"
+#include "conn_state.h"
 #include "msquic_singleton.h"
 #include "../Timer/timer_actor.h"
 #include "../Bloom/elastic_bloom_filter.h"
@@ -21,6 +23,7 @@
 #include "../Buffer/buffer.h"
 #include "../RefCounter/refcounter.h"
 #include "../Util/allocator.h"
+#include "../Util/log.h"
 #include <cbor.h>
 #include <string.h>
 #include <time.h>
@@ -69,6 +72,9 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   connection_manager_init(&network->conn_mgr, 16, NULL);
   network->hebbian_decay_timer_id = 0;
   network->metrics_push_timer_id = 0;
+  network->relay = NULL;
+  network->nat_detect = NULL;
+  network->local_nat_type = NAT_TYPE_UNKNOWN;
 
 #ifdef HAS_MSQUIC
   network->msquic = offs_msquic_open();
@@ -122,6 +128,14 @@ void network_destroy(network_t* network) {
   if (network->metrics_push_timer_id != 0) {
     timer_actor_cancel(network->timer, network->metrics_push_timer_id);
   }
+  if (network->relay != NULL) {
+    relay_client_destroy(network->relay);
+    network->relay = NULL;
+  }
+  if (network->nat_detect != NULL) {
+    nat_detect_destroy(network->nat_detect);
+    network->nat_detect = NULL;
+  }
 #ifdef HAS_MSQUIC
   if (network->msquic != NULL) {
     offs_msquic_close();
@@ -129,6 +143,37 @@ void network_destroy(network_t* network) {
 #endif
   actor_destroy(&network->actor);
   free(network);
+}
+
+int network_connect_relay(network_t* network, const char* host, uint16_t port) {
+  if (network == NULL || host == NULL) return -1;
+
+  // Create NAT detection module
+  network->nat_detect = nat_detect_create(network, network->pool);
+  if (network->nat_detect == NULL) {
+    log_error("network_connect_relay: failed to create NAT detection");
+    return -1;
+  }
+
+  // Create relay client
+  network->relay = relay_client_create(network, network->pool);
+  if (network->relay == NULL) {
+    log_error("network_connect_relay: failed to create relay client");
+    nat_detect_destroy(network->nat_detect);
+    network->nat_detect = NULL;
+    return -1;
+  }
+
+  // Connect to relay server
+  if (relay_client_connect(network->relay, host, port) != 0) {
+    log_error("network_connect_relay: failed to connect to relay");
+    relay_client_destroy(network->relay);
+    network->relay = NULL;
+    // nat_detect stays — it will be used when relay_b is configured
+    return -1;
+  }
+
+  return 0;
 }
 
 // --- Ping handler ---
@@ -158,7 +203,7 @@ static void network_handle_ping(network_t* network, message_t* msg) {
   peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
   if (peer != NULL) {
     cbor_item_t* cbor = wire_ping_response_encode(&response);
-    quic_peer_send(network, peer, cbor);
+    conn_state_send(network, peer, cbor);
     cbor_decref(&cbor);
   }
 }
@@ -216,7 +261,7 @@ static void network_handle_ping_block(network_t* network, message_t* msg) {
     peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
     if (peer != NULL) {
       cbor_item_t* cbor = wire_ping_block_response_encode(&response);
-      quic_peer_send(network, peer, cbor);
+      conn_state_send(network, peer, cbor);
       cbor_decref(&cbor);
     }
     buffer_destroy(hash_buf);
@@ -234,7 +279,7 @@ static void network_handle_ping_block(network_t* network, message_t* msg) {
     peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
     if (peer != NULL) {
       cbor_item_t* cbor = wire_ping_block_response_encode(&response);
-      quic_peer_send(network, peer, cbor);
+      conn_state_send(network, peer, cbor);
       cbor_decref(&cbor);
     }
     buffer_destroy(hash_buf);
@@ -285,7 +330,7 @@ static void network_handle_gossip_tick(network_t* network, message_t* msg) {
     ping_cap.phase = atomic_load(&network->authority->phase);
 
     cbor_item_t* cbor = wire_ping_capacity_encode(&ping_cap);
-    quic_peer_send(network, peer, cbor);
+    conn_state_send(network, peer, cbor);
     cbor_decref(&cbor);
   }
 }
@@ -325,7 +370,7 @@ static void network_handle_ping_capacity(network_t* network, message_t* msg) {
   peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &ping->source);
   if (peer != NULL) {
     cbor_item_t* cbor = wire_ping_capacity_response_encode(&response);
-    quic_peer_send(network, peer, cbor);
+    conn_state_send(network, peer, cbor);
     cbor_decref(&cbor);
   }
 }
@@ -390,7 +435,7 @@ static void network_handle_find_node(network_t* network, message_t* msg) {
   peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
   if (peer != NULL) {
     cbor_item_t* cbor = wire_find_node_response_encode(response);
-    quic_peer_send(network, peer, cbor);
+    conn_state_send(network, peer, cbor);
     cbor_decref(&cbor);
   }
   free(response);
@@ -497,7 +542,7 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         peer_connection_t* reply_peer = connection_manager_lookup(&network->conn_mgr, reply_to);
         if (reply_peer != NULL) {
           cbor_item_t* cbor = wire_find_block_response_encode(&not_found);
-          quic_peer_send(network, reply_peer, cbor);
+          conn_state_send(network, reply_peer, cbor);
           cbor_decref(&cbor);
         }
       }
@@ -548,7 +593,7 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         peer_connection_t* next_peer = connection_manager_lookup(
             &network->conn_mgr, &next_hops[hop]->id);
         if (next_peer != NULL) {
-          quic_peer_send(network, next_peer, cbor);
+          conn_state_send(network, next_peer, cbor);
         }
         cbor_decref(&cbor);
         free(forward);
@@ -773,7 +818,7 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
           peer_connection_t* next_peer = connection_manager_lookup(
               &network->conn_mgr, &next_hops[hop]->id);
           if (next_peer != NULL) {
-            quic_peer_send(network, next_peer, cbor);
+            conn_state_send(network, next_peer, cbor);
           }
           cbor_decref(&cbor);
           wire_store_block_destroy(forward);
@@ -828,7 +873,7 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
         peer_connection_t* reply_peer = connection_manager_lookup(&network->conn_mgr, reply_to);
         if (reply_peer != NULL) {
           cbor_item_t* cbor = wire_store_block_response_encode(&decline);
-          quic_peer_send(network, reply_peer, cbor);
+          conn_state_send(network, reply_peer, cbor);
           cbor_decref(&cbor);
         }
       }
@@ -873,7 +918,7 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
         peer_connection_t* next_peer = connection_manager_lookup(
             &network->conn_mgr, &next_hops[hop]->id);
         if (next_peer != NULL) {
-          quic_peer_send(network, next_peer, cbor);
+          conn_state_send(network, next_peer, cbor);
         }
         cbor_decref(&cbor);
         wire_store_block_destroy(forward);
@@ -930,7 +975,7 @@ static void network_handle_store_block_response(network_t* network, message_t* m
             recall.message_id = response->message_id;
             memcpy(recall.block_hash, response->block_hash, 32);
             cbor_item_t* cbor = wire_recall_block_encode(&recall);
-            quic_peer_send(network, peer, cbor);
+            conn_state_send(network, peer, cbor);
             cbor_decref(&cbor);
           }
         }
@@ -1000,7 +1045,7 @@ static void network_handle_seeking_blocks(network_t* network, message_t* msg) {
   peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
   if (peer != NULL) {
     cbor_item_t* cbor = wire_seeking_blocks_response_encode(response);
-    quic_peer_send(network, peer, cbor);
+    conn_state_send(network, peer, cbor);
     cbor_decref(&cbor);
   }
   free(response);
@@ -1127,7 +1172,7 @@ static void network_handle_rank_block(network_t* network, message_t* msg) {
         peer_connection_t* candidate_peer = connection_manager_lookup(
             &network->conn_mgr, &candidates[hop]->id);
         if (candidate_peer != NULL) {
-          quic_peer_send(network, candidate_peer, cbor);
+          conn_state_send(network, candidate_peer, cbor);
         }
         cbor_decref(&cbor);
       }
@@ -1160,7 +1205,7 @@ static void network_handle_recall_block(network_t* network, message_t* msg) {
     peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
     if (peer != NULL) {
       cbor_item_t* cbor = wire_recall_accept_encode(&response);
-      quic_peer_send(network, peer, cbor);
+      conn_state_send(network, peer, cbor);
       cbor_decref(&cbor);
     }
   } else {
@@ -1177,7 +1222,7 @@ static void network_handle_recall_block(network_t* network, message_t* msg) {
     peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
     if (peer != NULL) {
       cbor_item_t* cbor = wire_recall_decline_encode(&response);
-      quic_peer_send(network, peer, cbor);
+      conn_state_send(network, peer, cbor);
       cbor_decref(&cbor);
     }
   }
@@ -1218,7 +1263,7 @@ static void network_handle_recall_accept(network_t* network, message_t* msg) {
       store_msg.start_time = (uint64_t)time(NULL) * 1000;
 
       cbor_item_t* cbor = wire_store_block_encode(&store_msg);
-      quic_peer_send(network, peer, cbor);
+      conn_state_send(network, peer, cbor);
       cbor_decref(&cbor);
     }
   }
@@ -1487,7 +1532,7 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
         peer_connection_t* next_peer = connection_manager_lookup(
             &network->conn_mgr, &next_hops[hop]->id);
         if (next_peer != NULL) {
-          quic_peer_send(network, next_peer, cbor);
+          conn_state_send(network, next_peer, cbor);
         }
         cbor_decref(&cbor);
         free(forward);
@@ -1685,19 +1730,17 @@ void network_dispatch(void* state, message_t* msg) {
       // New QUIC connection — add peer to connection manager
       quic_connected_payload_t* quic_conn = (quic_connected_payload_t*)msg->payload;
       if (quic_conn != NULL) {
-        // Node_id extraction from TLS certificate is deferred to Task 7.
-        // Using zeroed node_id means only one QUIC-connected peer can exist
-        // at a time — all subsequent connects will match the first via
-        // connection_manager_lookup.
         node_id_t peer_id;
         node_id_clear(&peer_id);
         peer_connection_t* peer = connection_manager_add(
             &network->conn_mgr, &peer_id, &quic_conn->peer_addr, network->pool);
-#ifdef HAS_MSQUIC
         if (peer != NULL) {
+#ifdef HAS_MSQUIC
           peer->quic_connection = quic_conn->connection;
-        }
 #endif
+          // Direct QUIC connection established — set state to DIRECT
+          conn_state_on_direct_connected(peer);
+        }
       }
       break;
     }
@@ -1747,6 +1790,177 @@ void network_dispatch(void* state, message_t* msg) {
     case NETWORK_STORE_BLOCK_RESULT: {
       // Network returns StoreBlock result to stream
       // Handled by stream actor — dispatch routes to reply_to
+      break;
+    }
+    case NETWORK_RELAY_RECEIVED: {
+      // Message received via relay — decode CBOR wire message and re-dispatch
+      wire_relay_received_t* relay_payload = (wire_relay_received_t*)msg->payload;
+      if (relay_payload == NULL || relay_payload->payload == NULL || relay_payload->payload_len == 0) break;
+
+      cbor_item_t* wire_msg = cbor_load(relay_payload->payload, relay_payload->payload_len, NULL);
+      if (wire_msg == NULL) break;
+
+      if (cbor_isa_array(wire_msg) && cbor_array_size(wire_msg) >= 1) {
+        uint8_t type = wire_get_type(wire_msg);
+        message_t dispatch_msg;
+        memset(&dispatch_msg, 0, sizeof(dispatch_msg));
+        dispatch_msg.type = type;
+        dispatch_msg.payload_destroy = free;
+        switch (type) {
+          case WIRE_PING: {
+            wire_ping_t* payload = get_clear_memory(sizeof(wire_ping_t));
+            if (payload != NULL) {
+              if (wire_ping_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_ping(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_PING_CAPACITY: {
+            wire_ping_capacity_t* payload = get_clear_memory(sizeof(wire_ping_capacity_t));
+            if (payload != NULL) {
+              if (wire_ping_capacity_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_ping_capacity(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_PING_BLOCK: {
+            wire_ping_block_t* payload = get_clear_memory(sizeof(wire_ping_block_t));
+            if (payload != NULL) {
+              if (wire_ping_block_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_ping_block(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_FIND_BLOCK: {
+            wire_find_block_t* payload = get_clear_memory(sizeof(wire_find_block_t));
+            if (payload != NULL) {
+              if (wire_find_block_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                dispatch_msg.payload_destroy = free;
+                network_handle_find_block(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_FIND_NODE: {
+            wire_find_node_t* payload = get_clear_memory(sizeof(wire_find_node_t));
+            if (payload != NULL) {
+              if (wire_find_node_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_find_node(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_STORE_BLOCK: {
+            wire_store_block_t* payload = get_clear_memory(sizeof(wire_store_block_t));
+            if (payload != NULL) {
+              if (wire_store_block_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                dispatch_msg.payload_destroy = (void (*)(void*))wire_store_block_destroy;
+                network_handle_store_block(network, &dispatch_msg);
+              } else {
+                wire_store_block_destroy(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_SEEKING_BLOCKS: {
+            wire_seeking_blocks_t* payload = get_clear_memory(sizeof(wire_seeking_blocks_t));
+            if (payload != NULL) {
+              if (wire_seeking_blocks_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                dispatch_msg.payload_destroy = (void (*)(void*))wire_seeking_blocks_destroy;
+                network_handle_seeking_blocks(network, &dispatch_msg);
+              } else {
+                wire_seeking_blocks_destroy(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_RANK_BLOCK: {
+            wire_rank_block_t* payload = get_clear_memory(sizeof(wire_rank_block_t));
+            if (payload != NULL) {
+              if (wire_rank_block_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_rank_block(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_RECALL_BLOCK: {
+            wire_recall_block_t* payload = get_clear_memory(sizeof(wire_recall_block_t));
+            if (payload != NULL) {
+              if (wire_recall_block_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_recall_block(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          default:
+            // Response types and relay-specific messages are handled elsewhere
+            break;
+        }
+      }
+      cbor_decref(&wire_msg);
+      break;
+    }
+    case CONN_STATE_DIRECT_CONNECTED: {
+      peer_connection_t* peer = (peer_connection_t*)msg->payload;
+      if (peer != NULL) {
+        conn_state_on_direct_connected(peer);
+      }
+      break;
+    }
+    case CONN_STATE_DIRECT_FAILED: {
+      peer_connection_t* peer = (peer_connection_t*)msg->payload;
+      if (peer != NULL) {
+        conn_state_on_direct_failed(peer);
+      }
+      break;
+    }
+    case CONN_STATE_TRY_DIRECT: {
+      peer_connection_t* peer = (peer_connection_t*)msg->payload;
+      if (peer != NULL) {
+        conn_state_upgrade_to_direct(peer);
+      }
+      break;
+    }
+    case RELAY_CLIENT_SEND: {
+      // Forward relay messages from conn_state_send to the relay client actor.
+      // Transfer payload ownership to the relay client by nulling out
+      // msg's payload/payload_destroy so network_dispatch doesn't double-free.
+      if (network->relay != NULL) {
+        message_t relay_msg;
+        memset(&relay_msg, 0, sizeof(relay_msg));
+        relay_msg.type = msg->type;
+        relay_msg.payload = msg->payload;
+        relay_msg.payload_destroy = msg->payload_destroy;
+        msg->payload = NULL;
+        msg->payload_destroy = NULL;
+        actor_send(&network->relay->actor, &relay_msg);
+      }
       break;
     }
     default:

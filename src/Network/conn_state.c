@@ -87,7 +87,7 @@ int conn_state_send(network_t* network, peer_connection_t* peer,
       message_t msg;
       msg.type = RELAY_CLIENT_SEND;
       msg.payload = relay_send;
-      msg.payload_destroy = wire_relay_send_destroy;
+      msg.payload_destroy = (void (*)(void*))wire_relay_send_destroy;
 
       /* Send the message to the network actor which will forward it
        * to the appropriate relay client.
