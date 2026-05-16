@@ -324,6 +324,8 @@ void relay_client_destroy(relay_client_t* client) {
   if (client->loop != NULL) {
     pd_loop_destroy(client->loop);
   }
+  if (client->cert_path != NULL) { free(client->cert_path); client->cert_path = NULL; }
+  if (client->key_path != NULL) { free(client->key_path); client->key_path = NULL; }
   _destroy_stack_destroy(client);
   actor_destroy(&client->actor);
   free(client);

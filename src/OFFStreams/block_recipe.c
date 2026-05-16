@@ -288,13 +288,13 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
             /* Network-aware: send NETWORK_LOCAL_FIND_BLOCK */
             recipe->state = RECIPE_AWAITING_NETWORK;
             recipe->pending_fetch_hash = REFERENCE(result->hash, buffer_t);
-            network_local_find_block_payload_t payload;
-            payload.hash = recipe->pending_fetch_hash;
-            payload.reply_to = &recipe->recipe.stream.actor;
+            network_local_find_block_payload_t* payload = get_clear_memory(sizeof(network_local_find_block_payload_t));
+            payload->hash = recipe->pending_fetch_hash;
+            payload->reply_to = &recipe->recipe.stream.actor;
             message_t msg;
             msg.type = NETWORK_LOCAL_FIND_BLOCK;
-            msg.payload = &payload;
-            msg.payload_destroy = NULL;
+            msg.payload = payload;
+            msg.payload_destroy = free;
             actor_send(&recipe->network->actor, &msg);
             if (result->hash != NULL) {
               DESTROY(result->hash, buffer);
@@ -357,13 +357,13 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
           /* Network-aware: send NETWORK_LOCAL_FIND_BLOCK */
           recipe->state = RECIPE_AWAITING_NETWORK;
           recipe->pending_fetch_hash = REFERENCE(result->hash, buffer_t);
-          network_local_find_block_payload_t payload;
-          payload.hash = recipe->pending_fetch_hash;
-          payload.reply_to = &recipe->recipe.stream.actor;
+          network_local_find_block_payload_t* payload = get_clear_memory(sizeof(network_local_find_block_payload_t));
+          payload->hash = recipe->pending_fetch_hash;
+          payload->reply_to = &recipe->recipe.stream.actor;
           message_t msg;
           msg.type = NETWORK_LOCAL_FIND_BLOCK;
-          msg.payload = &payload;
-          msg.payload_destroy = NULL;
+          msg.payload = payload;
+          msg.payload_destroy = free;
           actor_send(&recipe->network->actor, &msg);
           if (result->hash != NULL) {
             DESTROY(result->hash, buffer);

@@ -220,13 +220,13 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
           /* Network-aware: send NETWORK_LOCAL_FIND_BLOCK */
           desc->state = DESCRIPTOR_AWAITING_NETWORK;
           desc->pending_fetch_hash = REFERENCE(result->hash, buffer_t);
-          network_local_find_block_payload_t payload;
-          payload.hash = desc->pending_fetch_hash;
-          payload.reply_to = &desc->stream.actor;
+          network_local_find_block_payload_t* payload = get_clear_memory(sizeof(network_local_find_block_payload_t));
+          payload->hash = desc->pending_fetch_hash;
+          payload->reply_to = &desc->stream.actor;
           message_t msg;
           msg.type = NETWORK_LOCAL_FIND_BLOCK;
-          msg.payload = &payload;
-          msg.payload_destroy = NULL;
+          msg.payload = payload;
+          msg.payload_destroy = free;
           actor_send(&desc->network->actor, &msg);
           if (result->hash != NULL) {
             DESTROY(result->hash, buffer);

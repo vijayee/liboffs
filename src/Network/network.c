@@ -1087,7 +1087,7 @@ static void network_handle_seeking_blocks_response(network_t* network, message_t
       // Add to wanted list and route a FindBlock
       network_local_find_block_payload_t find_payload;
       memset(&find_payload, 0, sizeof(find_payload));
-      find_payload.hash = REFERENCE(hash_buf, buffer_t);
+      find_payload.hash = hash_buf;
       find_payload.reply_to = &network->actor;
       message_t find_msg = {0};
       find_msg.type = NETWORK_LOCAL_FIND_BLOCK;

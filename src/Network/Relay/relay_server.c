@@ -547,6 +547,8 @@ void relay_server_destroy(relay_server_t* server) {
   if (server->loop != NULL) {
     pd_loop_destroy(server->loop);
   }
+  if (server->cert_path != NULL) { free(server->cert_path); server->cert_path = NULL; }
+  if (server->key_path != NULL) { free(server->key_path); server->key_path = NULL; }
   _destroy_stack_destroy(server);
   platform_lock_destroy(&server->clients_lock);
   actor_destroy(&server->actor);
