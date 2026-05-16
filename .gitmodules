@@ -16,3 +16,6 @@
 [submodule "deps/http-parser"]
 	path = deps/http-parser
 	url = https://github.com/nodejs/http-parser.git
+[submodule "deps/msquic"]
+	path = deps/msquic
+	url = https://github.com/microsoft/msquic.git

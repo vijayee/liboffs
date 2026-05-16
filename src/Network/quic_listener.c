@@ -2,6 +2,7 @@
 // Created by victor on 5/14/25.
 //
 
+#include "msquic_singleton.h"
 #include "quic_listener.h"
 
 // Destroy helper for QUIC data payloads (used in both HAS_MSQUIC and stub builds)
@@ -56,56 +57,6 @@ static void _destroy_stack_drain(quic_listener_t* listener) {
 static void _destroy_stack_destroy(quic_listener_t* listener) {
   _destroy_stack_drain(listener);
   platform_lock_destroy(&listener->destroy_lock);
-}
-
-// msquic singleton — reference-counted process-wide QUIC API
-static const struct QUIC_API_TABLE* g_msquic = NULL;
-static uint32_t g_msquic_refcount = 0;
-static PLATFORMLOCKTYPE(g_msquic_lock);
-static bool g_msquic_lock_initialized = false;
-
-static void ensure_msquic_lock_initialized(void) {
-  if (!g_msquic_lock_initialized) {
-    platform_lock_init(&g_msquic_lock);
-    g_msquic_lock_initialized = true;
-  }
-}
-
-static const struct QUIC_API_TABLE* msquic_open(void) {
-  ensure_msquic_lock_initialized();
-  platform_lock(&g_msquic_lock);
-  if (g_msquic == NULL) {
-    const struct QUIC_API_TABLE* table = NULL;
-    QUIC_STATUS status;
-    if (QUIC_FAILED(status = MsQuicOpen2(&table))) {
-      log_error("MsQuicOpen2 failed: 0x%x", status);
-      platform_unlock(&g_msquic_lock);
-      return NULL;
-    }
-    g_msquic = table;
-    g_msquic_refcount = 1;
-    platform_unlock(&g_msquic_lock);
-    return g_msquic;
-  }
-  g_msquic_refcount++;
-  const struct QUIC_API_TABLE* result = g_msquic;
-  platform_unlock(&g_msquic_lock);
-  return result;
-}
-
-static void msquic_close(void) {
-  ensure_msquic_lock_initialized();
-  platform_lock(&g_msquic_lock);
-  if (g_msquic == NULL || g_msquic_refcount == 0) {
-    platform_unlock(&g_msquic_lock);
-    return;
-  }
-  g_msquic_refcount--;
-  if (g_msquic_refcount == 0) {
-    MsQuicClose(g_msquic);
-    g_msquic = NULL;
-  }
-  platform_unlock(&g_msquic_lock);
 }
 
 // QUIC stream callback — receives data and forwards to network actor
@@ -231,7 +182,7 @@ quic_listener_t* quic_listener_create(network_t* network, scheduler_pool_t* pool
     return NULL;
   }
 
-  listener->msquic = msquic_open();
+  listener->msquic = offs_msquic_open();
   if (listener->msquic == NULL) {
     pd_loop_destroy(listener->loop);
     free(listener);
@@ -256,7 +207,7 @@ void quic_listener_destroy(quic_listener_t* listener) {
   if (listener->registration != NULL) {
     listener->msquic->RegistrationClose(listener->registration);
   }
-  msquic_close();
+  offs_msquic_close();
   if (listener->loop != NULL) {
     pd_loop_destroy(listener->loop);
   }
