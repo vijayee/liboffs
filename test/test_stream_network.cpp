@@ -361,6 +361,7 @@ protected:
   network_t* network;
   char* path;
   vec_block_recipe_t recipes;
+  new_blocks_recipe_t* recipe;
 
   void SetUp() override {
     // Create pool but do NOT start — we dispatch directly without worker threads
@@ -385,7 +386,7 @@ protected:
     network->wanted_list = wanted_list_create();
 
     // Create a minimal block recipe
-    new_blocks_recipe_t* recipe = new_blocks_recipe_create(pool, bc, standard);
+    recipe = new_blocks_recipe_create(pool, bc, standard);
     vec_init(&recipes);
     vec_push(&recipes, (block_recipe_t*)recipe);
 
@@ -395,9 +396,12 @@ protected:
 
   void TearDown() override {
     writeable_off_stream_destroy(stream);
-    // Note: writeable_off_stream_destroy already frees the recipes via stream->recipes
-    // (which is a shallow copy of our recipes vec), so we must NOT call
-    // vec_deinit(&recipes) or new_blocks_recipe_destroy — that would double-free.
+    // writeable_off_stream_destroy releases the references it added (one per
+    // vec entry + one for current_recipe), but the creation reference from
+    // new_blocks_recipe_create is still held. Release it now.
+    new_blocks_recipe_destroy(recipe);
+    // Do NOT call vec_deinit(&recipes) — writeable_off_stream_destroy already
+    // freed the underlying array via vec_deinit(&stream->recipes).
     wanted_list_destroy(network->wanted_list);
     actor_destroy(&network->actor);
     free(network);
@@ -438,7 +442,8 @@ TEST_F(WriteableOffStreamNetworkTest, CachePutNewWithNetworkDoesNotCrash) {
   // Stream should still be valid (not deactivated)
   EXPECT_EQ(stream->stream.is_deactivated, 0);
 
-  // Clean up
+  // Clean up — release the reference from REFERENCE(hash, buffer_t)
+  DESTROY(result.hash, buffer);
   DESTROY(hash, buffer);
 }
 
@@ -469,7 +474,8 @@ TEST_F(WriteableOffStreamNetworkTest, CachePutExistsNoAnnounce) {
   // Stream should still be valid (not deactivated)
   EXPECT_EQ(stream->stream.is_deactivated, 0);
 
-  // Clean up
+  // Clean up — release the reference from REFERENCE(hash, buffer_t)
+  DESTROY(result.hash, buffer);
   DESTROY(hash, buffer);
 }
 
@@ -499,7 +505,8 @@ TEST_F(WriteableOffStreamNetworkTest, CachePutErrorNoCrash) {
   // Stream should still be valid (not deactivated)
   EXPECT_EQ(stream->stream.is_deactivated, 0);
 
-  // Clean up
+  // Clean up — release the reference from REFERENCE(hash, buffer_t)
+  DESTROY(result.hash, buffer);
   DESTROY(hash, buffer);
 }
 
@@ -539,11 +546,15 @@ TEST_F(WriteableOffStreamNetworkTest, CachePutNewLocalOnlyNoCrash) {
 
   EXPECT_EQ(local_stream->stream.is_deactivated, 0);
 
-  // Cleanup — writeable_off_stream_destroy already frees the recipe via refcount
+  // Cleanup — writeable_off_stream_destroy releases the references it added
+  // (one per vec entry + one for current_recipe), but the creation reference
+  // from new_blocks_recipe_create is still held. Release it now.
+  DESTROY(result.hash, buffer);
   DESTROY(hash, buffer);
   writeable_off_stream_destroy(local_stream);
-  // Note: local_recipes vec data was copied by writeable_off_stream_create,
-  // so writeable_off_stream_destroy already freed it. Do NOT call vec_deinit.
+  new_blocks_recipe_destroy(recipe);
+  // Do NOT call vec_deinit(&local_recipes) — writeable_off_stream_destroy
+  // already freed the underlying array via vec_deinit(&stream->recipes).
 }
 
 // ========================================================================

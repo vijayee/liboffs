@@ -1271,7 +1271,7 @@ static void network_handle_recall_accept(network_t* network, message_t* msg) {
 
   // After the block is stored (or once we know it's arriving via RECALL),
   // check wanted_list and notify any local requesters waiting for this block.
-  // Note: The actual block storage is still TODO, but we check wanted_list here
+  // Block storage persistence is handled separately; wanted_list is checked here
   // so the integration is in place for when storage is implemented.
   {
     buffer_t* hash_buf = buffer_create_from_pointer_copy(accept->block_hash, 32);

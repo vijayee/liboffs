@@ -610,17 +610,17 @@ TEST(QuicIntegration, NetworkCreateDestroy) {
   authority_t* authority = authority_create(&config);
   ASSERT_NE(authority, nullptr);
 
-  block_cache_t* cache = block_cache_create(1024 * 1024);
-  ASSERT_NE(cache, nullptr);
-
-  timer_actor_t* timer = timer_actor_create(pool);
+  timer_actor_t* timer = timer_actor_create();
   ASSERT_NE(timer, nullptr);
+
+  block_cache_t* cache = block_cache_create(config, (char*)"/tmp/test_quic_bc", standard, timer, pool);
+  ASSERT_NE(cache, nullptr);
 
   network_t* network = network_create(authority, cache, timer, pool);
   // network_create may return nullptr if msquic initialization fails
   if (network == nullptr) {
-    timer_actor_destroy(timer);
     block_cache_destroy(cache);
+    timer_actor_destroy(timer);
     authority_destroy(authority);
     scheduler_pool_stop(pool);
     scheduler_pool_destroy(pool);
@@ -630,8 +630,8 @@ TEST(QuicIntegration, NetworkCreateDestroy) {
   EXPECT_NE(network, nullptr);
 
   network_destroy(network);
-  timer_actor_destroy(timer);
   block_cache_destroy(cache);
+  timer_actor_destroy(timer);
   authority_destroy(authority);
   scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
@@ -654,11 +654,11 @@ TEST(QuicIntegration, QuicListenerStartStop) {
   authority_t* authority = authority_create(&config);
   ASSERT_NE(authority, nullptr);
 
-  block_cache_t* cache = block_cache_create(1024 * 1024);
-  ASSERT_NE(cache, nullptr);
-
-  timer_actor_t* timer = timer_actor_create(pool);
+  timer_actor_t* timer = timer_actor_create();
   ASSERT_NE(timer, nullptr);
+
+  block_cache_t* cache = block_cache_create(config, (char*)"/tmp/test_quic_bc2", standard, timer, pool);
+  ASSERT_NE(cache, nullptr);
 
   network_t* network = network_create(authority, cache, timer, pool);
   if (network == nullptr) {

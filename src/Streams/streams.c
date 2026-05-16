@@ -345,6 +345,14 @@ void stream_notify(stream_t* stream, stream_event_e event, void* payload, void (
 
 /* ---- stream operations ---- */
 
+static void _stream_notify_payload_destroy(void* ptr) {
+  stream_notify_payload_t* payload = (stream_notify_payload_t*)ptr;
+  if (payload->payload_destroy != NULL && payload->payload != NULL) {
+    payload->payload_destroy(payload->payload);
+  }
+  free(payload);
+}
+
 void stream_deactivate(stream_t* stream, async_error_t* error) {
   stream->is_deactivated = 1;
   stream_notify_payload_t* error_payload = get_clear_memory(sizeof(stream_notify_payload_t));
@@ -354,7 +362,7 @@ void stream_deactivate(stream_t* stream, async_error_t* error) {
   message_t error_msg;
   error_msg.type = STREAM_NOTIFY;
   error_msg.payload = error_payload;
-  error_msg.payload_destroy = (void (*)(void*)) free;
+  error_msg.payload_destroy = _stream_notify_payload_destroy;
   actor_send(&stream->actor, &error_msg);
 
   stream_notify_payload_t* close_payload = get_clear_memory(sizeof(stream_notify_payload_t));

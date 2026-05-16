@@ -53,9 +53,9 @@ if (BUILD_TESTING)
     target_link_libraries(testliboffs PRIVATE GTest::gmock)
     # Must match HAS_MSQUIC definition from parent CMakeLists.txt so
     # struct layouts (peer_connection_t etc.) are consistent with the library.
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../../deps/msquic/CMakeLists.txt)
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/CMakeLists.txt)
       target_compile_definitions(testliboffs PRIVATE HAS_MSQUIC)
-      target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../deps/msquic/src/inc)
+      target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/src/inc)
       target_link_libraries(testliboffs PRIVATE msquic::msquic msquic::platform)
     endif()
     target_include_directories(testliboffs PUBLIC ${C_INC})
