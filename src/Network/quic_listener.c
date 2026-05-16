@@ -355,7 +355,11 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
 
   // Start I/O thread
   ATOMIC_STORE(&listener->running, 1);
-  pthread_create(&listener->thread, NULL, _quic_listener_thread, listener);
+  if (pthread_create(&listener->thread, NULL, _quic_listener_thread, listener) != 0) {
+    ATOMIC_STORE(&listener->running, 0);
+    log_error("quic_listener: pthread_create failed");
+    return -1;
+  }
 
   return 0;
 }

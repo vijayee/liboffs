@@ -39,9 +39,11 @@ int main(int argc, char* argv[]) {
       key_path = argv[index + 1];
       index++;
     } else if (strcmp(argv[index], "--help") == 0 || strcmp(argv[index], "-h") == 0) {
-      printf("Usage: meridian_relay [--port PORT] [--host HOST]\n");
+      printf("Usage: meridian_relay [--port PORT] [--host HOST] [--cert PATH] [--key PATH]\n");
       printf("  --port PORT   Listen port (default: 14000)\n");
       printf("  --host HOST   Bind host (default: all interfaces)\n");
+      printf("  --cert PATH   TLS certificate file path\n");
+      printf("  --key PATH    TLS private key file path\n");
       return 0;
     }
   }

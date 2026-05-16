@@ -123,7 +123,7 @@ static QUIC_STATUS _relay_send_on_stream(
   send_ctx->buffer.Length = (uint32_t)framed_len;
 
   QUIC_STATUS status = server->msquic->StreamSend(
-      stream, &send_ctx->buffer, 1, QUIC_SEND_FLAG_FIN, send_ctx);
+      stream, &send_ctx->buffer, 1, QUIC_SEND_FLAG_NONE, send_ctx);
   if (QUIC_FAILED(status)) {
     log_error("relay: StreamSend failed: 0x%x", status);
     free(framed);
@@ -652,7 +652,11 @@ int relay_server_start(relay_server_t* server, const char* host, uint16_t port) 
   server->listen_port = port;
 
   ATOMIC_STORE(&server->running, 1);
-  pthread_create(&server->thread, NULL, _relay_server_thread, server);
+  if (pthread_create(&server->thread, NULL, _relay_server_thread, server) != 0) {
+    ATOMIC_STORE(&server->running, 0);
+    log_error("relay: pthread_create failed");
+    return -1;
+  }
 
   log_info("relay: listening on port %u", port);
   return 0;

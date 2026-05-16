@@ -351,7 +351,23 @@ static void handle_store_file(int client_fd, const char* args) {
 
   if (!put_ctx->complete) {
     send_response(client_fd, CTRL_RESP_ERROR " STORE_FILE timed out");
-    /* put_ctx is cleaned up by deferred destructors when streams close */
+    /* Close streams to trigger deferred cleanup, then wait for completion */
+    if (put_ctx->desc != NULL) {
+      writeable_descriptor_close(put_ctx->desc);
+    }
+    /* Wait for descriptor close callback to signal completion */
+    struct timespec cleanup_timeout;
+    clock_gettime(CLOCK_REALTIME, &cleanup_timeout);
+    cleanup_timeout.tv_sec += 5;
+    pthread_mutex_lock(&g_node.state_lock);
+    while (!put_ctx->complete) {
+      int wait_result = pthread_cond_timedwait(&g_node.state_cond, &g_node.state_lock, &cleanup_timeout);
+      if (wait_result == ETIMEDOUT) break;
+    }
+    pthread_mutex_unlock(&g_node.state_lock);
+    if (put_ctx->file_hash) buffer_destroy(put_ctx->file_hash);
+    if (put_ctx->descriptor_hash) buffer_destroy(put_ctx->descriptor_hash);
+    free(put_ctx);
     return;
   }
 
@@ -449,11 +465,12 @@ static void node_get_v2_on_rs_close(void* ctx, void* unused) {
 
   stream_deferred_deref((stream_t*)pipeline->rs);
   DESTROY(pipeline->ori, ori);
-  free(pipeline);
 
   pthread_mutex_lock(&node->state_lock);
   pthread_cond_signal(&node->state_cond);
   pthread_mutex_unlock(&node->state_lock);
+
+  free(pipeline);
 }
 
 static void handle_fetch_file(int client_fd, const char* args) {

@@ -459,7 +459,11 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
 
   // Start I/O thread
   ATOMIC_STORE(&client->running, 1);
-  pthread_create(&client->thread, NULL, _relay_client_thread, client);
+  if (pthread_create(&client->thread, NULL, _relay_client_thread, client) != 0) {
+    ATOMIC_STORE(&client->running, 0);
+    log_error("relay_client: pthread_create failed");
+    return -1;
+  }
 
   log_info("relay_client: connecting to %s:%u", host != NULL ? host : "127.0.0.1", port);
   return 0;

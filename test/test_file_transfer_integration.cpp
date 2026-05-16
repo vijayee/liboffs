@@ -186,6 +186,7 @@ protected:
 
     int fd = connect_control_socket(control_port);
     if (fd < 0) {
+      ADD_FAILURE() << "Failed to connect control socket on port " << control_port;
       return;
     }
     nodes.back().control_fd = fd;
@@ -222,6 +223,7 @@ protected:
 
     int fd = connect_control_socket(control_port);
     if (fd < 0) {
+      ADD_FAILURE() << "Failed to connect control socket (no relay) on port " << control_port;
       return;
     }
     nodes.back().control_fd = fd;
