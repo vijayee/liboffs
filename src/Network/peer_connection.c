@@ -3,6 +3,7 @@
 //
 
 #include "peer_connection.h"
+#include "stream_framer.h"
 #include "../Util/allocator.h"
 #include <string.h>
 #include <time.h>
@@ -36,6 +37,17 @@ peer_connection_t* peer_connection_create(const node_id_t* remote_id,
 
   timing_wheel_init(&peer->eabf_wheel, 64, 60000);
 
+#ifdef HAS_MSQUIC
+  peer->quic_connection = NULL;
+  peer->quic_stream = NULL;
+  peer->framer = stream_framer_create();
+  if (peer->framer == NULL) {
+    eabf_destroy(peer->eabf);
+    free(peer);
+    return NULL;
+  }
+#endif
+
   if (pool != NULL) {
     actor_init(&peer->actor, peer, peer_connection_dispatch, pool);
   } else {
@@ -50,6 +62,14 @@ void peer_connection_destroy(peer_connection_t* peer) {
   if (peer == NULL) {
     return;
   }
+
+#ifdef HAS_MSQUIC
+  if (peer->framer != NULL) {
+    stream_framer_destroy(peer->framer);
+  }
+  /* quic_connection and quic_stream handles are owned by the QUIC listener,
+   * NOT by peer_connection — do NOT close/free them here. */
+#endif
 
   if (peer->eabf != NULL) {
     eabf_destroy(peer->eabf);

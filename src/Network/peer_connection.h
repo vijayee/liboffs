@@ -33,6 +33,12 @@ typedef struct peer_connection_t {
   node_id_t remote_node_id;
   struct sockaddr_storage peer_addr;
 
+#ifdef HAS_MSQUIC
+  void* quic_connection;           /* HQUIC connection handle (opaque to avoid msquic header dependency) */
+  void* quic_stream;               /* HQUIC stream handle */
+  struct stream_framer_t* framer;  /* Accumulator for inbound framed messages */
+#endif
+
   eabf_t* eabf;
   timing_wheel_t eabf_wheel;
 

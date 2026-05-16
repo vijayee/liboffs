@@ -3,12 +3,13 @@
 //
 
 #include "msquic_singleton.h"
-#include <stddef.h>
 
 #ifdef HAS_MSQUIC
 
 #include "../Util/log.h"
 #include "../Util/threadding.h"
+#include <stdint.h>
+#include <stdbool.h>
 
 static const struct QUIC_API_TABLE* g_msquic = NULL;
 static uint32_t g_msquic_refcount = 0;

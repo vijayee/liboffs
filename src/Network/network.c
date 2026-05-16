@@ -1323,7 +1323,7 @@ void network_dispatch(void* state, message_t* msg) {
       // New QUIC connection — add peer to connection manager
       quic_connected_payload_t* quic_conn = (quic_connected_payload_t*)msg->payload;
       if (quic_conn != NULL) {
-        // TODO: Extract node_id from QUIC handshake / TLS certificate.
+        // Node_id extraction from TLS certificate is deferred to Task 7.
         // Using zeroed node_id means only one QUIC-connected peer can exist
         // at a time — all subsequent connects will match the first via
         // connection_manager_lookup.
@@ -1331,15 +1331,17 @@ void network_dispatch(void* state, message_t* msg) {
         node_id_clear(&peer_id);
         peer_connection_t* peer = connection_manager_add(
             &network->conn_mgr, &peer_id, &quic_conn->peer_addr, network->pool);
-        // Store HQUIC connection handle on peer for later send/close
-        // (field added in subsequent task)
-        (void)peer;
+#ifdef HAS_MSQUIC
+        if (peer != NULL) {
+          peer->quic_connection = quic_conn->connection;
+        }
+#endif
       }
       break;
     }
     case NETWORK_QUIC_DISCONNECTED: {
       // QUIC connection closed — mark peer disconnected in connection manager
-      // TODO: Extract node_id from QUIC connection handle when available.
+      // Node_id extraction from QUIC connection handle is deferred to Task 7.
       // Without the node_id we can't remove the peer from the connection manager.
       // Peers remain in the table as disconnected until Hebbian decay removes them.
       break;

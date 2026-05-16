@@ -395,8 +395,7 @@ void quic_listener_dispatch(void* state, message_t* msg) {
         break;
       }
 
-      // TODO: Use peer->quic_connection (Task 5) to find a stream and
-      // call StreamSend. For now, log that send is not yet wired.
+      // Stream send requires peer->quic_stream (added in Task 5)
       (void)peer;
       log_error("QUIC_LISTENER_SEND: stream send not yet implemented");
       break;
@@ -412,9 +411,7 @@ void quic_listener_dispatch(void* state, message_t* msg) {
         break;
       }
 
-      // TODO: Use peer->quic_connection (Task 5) to open a bidirectional
-      // stream via StreamOpen + StreamStart. For now, log that this is not
-      // yet wired.
+      // Stream open requires peer->quic_connection (added in Task 5)
       (void)peer;
       log_error("QUIC_LISTENER_OPEN_STREAM: stream open not yet implemented");
       break;
@@ -430,9 +427,7 @@ void quic_listener_dispatch(void* state, message_t* msg) {
         break;
       }
 
-      // TODO: Use peer->quic_connection (Task 5) to gracefully shut down
-      // the QUIC connection via ConnectionShutdown. For now, log that this
-      // is not yet wired.
+      // Connection close requires peer->quic_connection (added in Task 5)
       (void)peer;
       log_error("QUIC_LISTENER_CLOSE_CONNECTION: close not yet implemented");
       break;
