@@ -469,8 +469,6 @@ static void node_get_v2_on_rs_close(void* ctx, void* unused) {
   pthread_mutex_lock(&node->state_lock);
   pthread_cond_signal(&node->state_cond);
   pthread_mutex_unlock(&node->state_lock);
-
-  free(pipeline);
 }
 
 static void handle_fetch_file(int client_fd, const char* args) {
@@ -567,9 +565,24 @@ static void handle_fetch_file(int client_fd, const char* args) {
 
   if (!completed) {
     send_response(client_fd, CTRL_RESP_ERROR " FETCH_FILE timed out");
-    /* Pipeline will be cleaned up via deferred destructors when streams close */
+    /* Close descriptor to trigger pipeline completion and callback cleanup */
+    if (pipeline->desc != NULL) {
+      readable_descriptor_push(pipeline->desc);
+      stream_deactivate((stream_t*)pipeline->desc, NULL);
+    }
+    struct timespec cleanup_timeout;
+    clock_gettime(CLOCK_REALTIME, &cleanup_timeout);
+    cleanup_timeout.tv_sec += 3;
+    pthread_mutex_lock(&g_node.state_lock);
+    while (!pipeline->complete) {
+      if (pthread_cond_timedwait(&g_node.state_cond, &g_node.state_lock, &cleanup_timeout) == ETIMEDOUT) break;
+    }
+    pthread_mutex_unlock(&g_node.state_lock);
+    free(pipeline);
     return;
   }
+
+  free(pipeline);
 
   /* Format DATA response */
   char checksum_hex[65];
