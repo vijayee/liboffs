@@ -130,6 +130,10 @@ typedef enum message_type_e {
   PEER_GET_METRICS,
   PEER_CLOSE,
   PEER_EABF_TICK,
+  /* Connection state messages */
+  CONN_STATE_DIRECT_CONNECTED,
+  CONN_STATE_DIRECT_FAILED,
+  CONN_STATE_TRY_DIRECT,
   /* Connection manager messages */
   CM_PEER_CONNECTED,
   CM_PEER_DISCONNECTED,

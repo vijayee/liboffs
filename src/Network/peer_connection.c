@@ -26,6 +26,11 @@ peer_connection_t* peer_connection_create(const node_id_t* remote_id,
   }
 
   peer->hebbian_weight = initial_weight;
+  peer->conn_state = CONN_STATE_RELAY;
+  peer->direct_path.active = 0;
+  peer->relay_path.active = 0;
+  peer->peer_nat_type = NAT_TYPE_UNKNOWN;
+  peer->direct_attempts = 0;
   peer->connected = true;
   peer->connected_at_ms = (int64_t)time(NULL) * 1000;
 
@@ -111,6 +116,18 @@ void peer_connection_dispatch(void* state, message_t* msg) {
     }
     case PEER_CLOSE: {
       peer->connected = false;
+      break;
+    }
+    case CONN_STATE_DIRECT_CONNECTED: {
+      conn_state_on_direct_connected(peer);
+      break;
+    }
+    case CONN_STATE_DIRECT_FAILED: {
+      conn_state_on_direct_failed(peer);
+      break;
+    }
+    case CONN_STATE_TRY_DIRECT: {
+      conn_state_upgrade_to_direct(peer);
       break;
     }
     default:

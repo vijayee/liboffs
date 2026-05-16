@@ -10,6 +10,7 @@
 #include "hebbian_config.h"
 #include "node_id.h"
 #include "timing_wheel.h"
+#include "conn_state.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -43,6 +44,13 @@ typedef struct peer_connection_t {
   timing_wheel_t eabf_wheel;
 
   float hebbian_weight;
+
+  /* Connection state machine for direct/relay path selection */
+  conn_state_e conn_state;
+  conn_path_t direct_path;
+  conn_path_t relay_path;
+  nat_type_e peer_nat_type;
+  uint32_t direct_attempts;
 
   uint64_t rpc_count[PEER_RPC_TYPE_COUNT];
   uint64_t rpc_success[PEER_RPC_TYPE_COUNT];

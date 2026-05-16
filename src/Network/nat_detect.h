@@ -8,18 +8,10 @@
 #include "../Actor/actor.h"
 #include "../Scheduler/scheduler.h"
 #include "../Util/atomic_compat.h"
+#include "conn_state.h"
 #include "relay_client.h"
 #include <stdint.h>
 #include <stddef.h>
-
-typedef enum {
-  NAT_TYPE_UNKNOWN,
-  NAT_TYPE_OPEN,                  /* Not behind NAT */
-  NAT_TYPE_FULL_CONE,
-  NAT_TYPE_RESTRICTED_CONE,
-  NAT_TYPE_PORT_RESTRICTED_CONE,
-  NAT_TYPE_SYMMETRIC
-} nat_type_e;
 
 typedef struct nat_detect_t {
   actor_t actor;
