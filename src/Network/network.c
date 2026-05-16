@@ -5,6 +5,7 @@
 #include "network.h"
 #include "wire.h"
 #include "quic_listener.h"
+#include "quic_peer_send.h"
 #include "find_block.h"
 #include "store_block.h"
 #include "respiration.h"
@@ -12,6 +13,7 @@
 #include "timing_wheel.h"
 #include "topology_metrics.h"
 #include "wanted_list.h"
+#include "msquic_singleton.h"
 #include "../Timer/timer_actor.h"
 #include "../Bloom/elastic_bloom_filter.h"
 #include "../BlockCache/block_cache.h"
@@ -56,6 +58,10 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   connection_manager_init(&network->conn_mgr, 16, NULL);
   network->hebbian_decay_timer_id = 0;
   network->metrics_push_timer_id = 0;
+
+#ifdef HAS_MSQUIC
+  network->msquic = offs_msquic_open();
+#endif
 
   gossip_handle_init(&network->gossip,
                      GOSSIP_INIT_INTERVAL_S,
@@ -105,6 +111,11 @@ void network_destroy(network_t* network) {
   if (network->metrics_push_timer_id != 0) {
     timer_actor_cancel(network->timer, network->metrics_push_timer_id);
   }
+#ifdef HAS_MSQUIC
+  if (network->msquic != NULL) {
+    offs_msquic_close();
+  }
+#endif
   actor_destroy(&network->actor);
   free(network);
 }
@@ -119,20 +130,26 @@ typedef struct {
 static void network_handle_ping(network_t* network, message_t* msg) {
   ping_payload_t* ping = (ping_payload_t*)msg->payload;
   if (ping == NULL) return;
-  // Respond with cached capacity and phase, echo timestamp for RTT
-  ping_payload_t* response = get_clear_memory(sizeof(ping_payload_t));
-  response->message_id = ping->message_id;
-  response->timestamp = ping->timestamp;
-  // Send response back via actor_send (reply_to will be set by the caller)
-  message_t response_msg;
-  response_msg.type = NETWORK_PING_RESPONSE;
-  response_msg.payload = response;
-  response_msg.payload_destroy = free;
-  // If the ping came from a known peer, send response to that peer's actor
-  // For now, we echo back through whatever channel sent the ping
-  (void)network;
-  // TODO: Send response to peer connection when QUIC is wired up
-  free(response);
+
+  // Build wire PingResponse with our capacity/phase and echo timestamp for RTT
+  wire_ping_response_t response;
+  memset(&response, 0, sizeof(response));
+  response.message_id = ping->message_id;
+  response.echo_time = ping->timestamp;
+  response.capacity = atomic_load(&network->authority->capacity);
+  response.phase = atomic_load(&network->authority->phase);
+
+  // Encode and send via QUIC to the sender's peer connection.
+  // Node_id tracking from QUIC connection metadata is deferred to Task 7.
+  // For now, use a zeroed node_id — responses will be dropped until then.
+  node_id_t sender_id;
+  node_id_clear(&sender_id);
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+  if (peer != NULL) {
+    cbor_item_t* cbor = wire_ping_response_encode(&response);
+    quic_peer_send(network, peer, cbor);
+    cbor_decref(&cbor);
+  }
 }
 
 static void network_handle_ping_response(network_t* network, message_t* msg) {
@@ -159,19 +176,23 @@ static void network_handle_ping_block(network_t* network, message_t* msg) {
   uint8_t healthy = 0;
 
   // Respond with PingBlockResponse
-  wire_ping_block_response_t* response = get_clear_memory(sizeof(wire_ping_block_response_t));
-  response->message_id = ping->message_id;
-  response->exists = exists;
-  response->fib = fib;
-  response->healthy = healthy;
+  wire_ping_block_response_t response;
+  memset(&response, 0, sizeof(response));
+  response.message_id = ping->message_id;
+  response.exists = exists;
+  response.fib = fib;
+  response.healthy = healthy;
 
-  message_t response_msg;
-  response_msg.type = NETWORK_PING_BLOCK_RESPONSE;
-  response_msg.payload = response;
-  response_msg.payload_destroy = free;
-  // TODO: Send response to peer connection when QUIC is wired up
-  free(response);
-  (void)network;
+  // Encode and send via QUIC to the sender's peer connection.
+  // Node_id tracking from QUIC connection metadata is deferred to Task 7.
+  node_id_t sender_id;
+  node_id_clear(&sender_id);
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+  if (peer != NULL) {
+    cbor_item_t* cbor = wire_ping_block_response_encode(&response);
+    quic_peer_send(network, peer, cbor);
+    cbor_decref(&cbor);
+  }
 }
 
 static void network_handle_ping_block_response(network_t* network, message_t* msg) {
@@ -233,18 +254,20 @@ static void network_handle_ping_capacity(network_t* network, message_t* msg) {
   }
 
   // Build response with our own capacity/phase
-  wire_ping_capacity_response_t* response = get_clear_memory(sizeof(wire_ping_capacity_response_t));
-  response->message_id = ping->message_id;
-  response->capacity = atomic_load(&network->authority->capacity);
-  response->phase = atomic_load(&network->authority->phase);
+  wire_ping_capacity_response_t response;
+  memset(&response, 0, sizeof(response));
+  response.message_id = ping->message_id;
+  response.capacity = atomic_load(&network->authority->capacity);
+  response.phase = atomic_load(&network->authority->phase);
 
-  message_t response_msg;
-  response_msg.type = NETWORK_PING_CAPACITY_RESPONSE;
-  response_msg.payload = response;
-  response_msg.payload_destroy = free;
-  // TODO: Send response to peer connection when QUIC is wired up
-  free(response);
-  (void)response_msg;
+  // Encode and send via QUIC to the sender's peer connection.
+  // ping->source carries the sender's node_id from the wire message.
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &ping->source);
+  if (peer != NULL) {
+    cbor_item_t* cbor = wire_ping_capacity_response_encode(&response);
+    quic_peer_send(network, peer, cbor);
+    cbor_decref(&cbor);
+  }
 }
 
 static void network_handle_ping_capacity_response(network_t* network, message_t* msg) {
@@ -284,13 +307,17 @@ static void network_handle_find_node(network_t* network, message_t* msg) {
     }
   }
 
-  message_t response_msg;
-  response_msg.type = NETWORK_FIND_NODE_RESPONSE;
-  response_msg.payload = response;
-  response_msg.payload_destroy = free;
-  // TODO: Send response to peer connection when QUIC is wired up
+  // Encode and send FindNodeResponse via QUIC to the sender's peer connection.
+  // Node_id tracking from QUIC connection metadata is deferred to Task 7.
+  node_id_t sender_id;
+  node_id_clear(&sender_id);
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+  if (peer != NULL) {
+    cbor_item_t* cbor = wire_find_node_response_encode(response);
+    quic_peer_send(network, peer, cbor);
+    cbor_decref(&cbor);
+  }
   free(response);
-  (void)response_msg;
 }
 
 static void network_handle_find_node_response(network_t* network, message_t* msg) {
@@ -377,7 +404,27 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
       }
 
       // Send NOT_FOUND response back along the path
-      // TODO: Send response via QUIC when wired up
+      {
+        wire_find_block_response_t not_found;
+        memset(&not_found, 0, sizeof(not_found));
+        not_found.message_id = state.message_id;
+        memcpy(not_found.block_hash, state.block_hash, 32);
+        not_found.found = 0;
+        memcpy(&not_found.holder, &network->authority->local_id, sizeof(node_id_t));
+        not_found.path_len = 0;
+        not_found.latency_ms = 0;
+        // Reply to the sender: last node in the path, or original_source
+        const node_id_t* reply_to = &state.original_source;
+        if (state.path_len > 0) {
+          reply_to = &state.path[state.path_len - 1];
+        }
+        peer_connection_t* reply_peer = connection_manager_lookup(&network->conn_mgr, reply_to);
+        if (reply_peer != NULL) {
+          cbor_item_t* cbor = wire_find_block_response_encode(&not_found);
+          quic_peer_send(network, reply_peer, cbor);
+          cbor_decref(&cbor);
+        }
+      }
       break;
     }
 
@@ -420,7 +467,14 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         forward->start_time = state.start_time_ms;
         memcpy(&forward->original_source, &state.original_source, sizeof(node_id_t));
 
-        // TODO: Send forward to next_hops[hop] via QUIC when wired up
+        // Encode and send FindBlock to next_hops[hop] via QUIC
+        cbor_item_t* cbor = wire_find_block_encode(forward);
+        peer_connection_t* next_peer = connection_manager_lookup(
+            &network->conn_mgr, &next_hops[hop]->id);
+        if (next_peer != NULL) {
+          quic_peer_send(network, next_peer, cbor);
+        }
+        cbor_decref(&cbor);
         free(forward);
       }
       break;
@@ -614,8 +668,28 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
 
     case STORE_BLOCK_DECLINED:
     case STORE_BLOCK_MAX_HOPS_REACHED: {
-      // Decline — respond with not accepted
-      // TODO: Send StoreBlockResponse(accepted=false) via QUIC when wired up
+      // Decline — respond with StoreBlockResponse(accepted=false)
+      {
+        wire_store_block_response_t decline;
+        memset(&decline, 0, sizeof(decline));
+        decline.message_id = store->message_id;
+        decline.accepted = 0;
+        memcpy(&decline.holder, &network->authority->local_id, sizeof(node_id_t));
+        decline.replicas_remaining = 0;
+        decline.path_len = 0;
+        decline.latency_ms = 0;
+        // Reply to sender: last node in path, or original_source
+        const node_id_t* reply_to = &store->path[0];
+        if (store->path_len > 0) {
+          reply_to = &store->path[store->path_len - 1];
+        }
+        peer_connection_t* reply_peer = connection_manager_lookup(&network->conn_mgr, reply_to);
+        if (reply_peer != NULL) {
+          cbor_item_t* cbor = wire_store_block_response_encode(&decline);
+          quic_peer_send(network, reply_peer, cbor);
+          cbor_decref(&cbor);
+        }
+      }
       break;
     }
 
@@ -652,7 +726,14 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
           }
         }
 
-        // TODO: Send forward to next_hops[hop] via QUIC when wired up
+        // Encode and send StoreBlock to next_hops[hop] via QUIC
+        cbor_item_t* cbor = wire_store_block_encode(forward);
+        peer_connection_t* next_peer = connection_manager_lookup(
+            &network->conn_mgr, &next_hops[hop]->id);
+        if (next_peer != NULL) {
+          quic_peer_send(network, next_peer, cbor);
+        }
+        cbor_decref(&cbor);
         wire_store_block_destroy(forward);
       }
       break;
@@ -702,7 +783,18 @@ static void network_handle_store_block_response(network_t* network, message_t* m
           peer_connection_t* peer = recall_peers[index];
           // Apply amplified Hebbian reinforcement for recall
           peer_hebbian_update(peer, network->conn_mgr.hebbian.recall_reward);
-          // TODO: Send StoreBlock(reason=RECALL) to peer via QUIC when wired up
+          // Send RecallBlock to peer via QUIC — full StoreBlock RECALL
+          // will be wired when block data streaming is implemented.
+          // For now, send a RecallBlock request so the peer can re-request.
+          {
+            wire_recall_block_t recall;
+            memset(&recall, 0, sizeof(recall));
+            recall.message_id = response->message_id;
+            memcpy(recall.block_hash, response->holder.hash, 32);
+            cbor_item_t* cbor = wire_recall_block_encode(&recall);
+            quic_peer_send(network, peer, cbor);
+            cbor_decref(&cbor);
+          }
         }
         free(recall_peers);
       }
@@ -736,13 +828,17 @@ static void network_handle_seeking_blocks(network_t* network, message_t* msg) {
   // probability proportional to fibonacci(fib)
   // Exclude hashes in seeking->exclude_hashes
 
-  message_t response_msg;
-  response_msg.type = NETWORK_SEEKING_BLOCKS_RESPONSE;
-  response_msg.payload = response;
-  response_msg.payload_destroy = free;
-  // TODO: Send response via QUIC when wired up
+  // Encode and send SeekingBlocksResponse via QUIC to the sender's peer connection.
+  // Node_id tracking from QUIC connection metadata is deferred to Task 7.
+  node_id_t sender_id;
+  node_id_clear(&sender_id);
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+  if (peer != NULL) {
+    cbor_item_t* cbor = wire_seeking_blocks_response_encode(response);
+    quic_peer_send(network, peer, cbor);
+    cbor_decref(&cbor);
+  }
   free(response);
-  (void)response_msg;
 }
 
 static void network_handle_seeking_blocks_response(network_t* network, message_t* msg) {
@@ -835,7 +931,16 @@ static void network_handle_rank_block(network_t* network, message_t* msg) {
       forward_msg.type = NETWORK_RANK_BLOCK;
       forward_msg.payload = forward;
       forward_msg.payload_destroy = free;
-      // Forward via QUIC when wired up
+      // Encode and send RankBlock to candidate peer via QUIC
+      {
+        cbor_item_t* cbor = wire_rank_block_encode(forward);
+        peer_connection_t* candidate_peer = connection_manager_lookup(
+            &network->conn_mgr, &candidates[hop]->id);
+        if (candidate_peer != NULL) {
+          quic_peer_send(network, candidate_peer, cbor);
+        }
+        cbor_decref(&cbor);
+      }
       free(forward);
       (void)forward_msg;
     }
@@ -850,31 +955,40 @@ static void network_handle_recall_block(network_t* network, message_t* msg) {
 
   float local_capacity = atomic_load(&network->authority->capacity);
 
-  // If capacity < 50% → accept recall, otherwise decline
+  // If capacity < 50% -> accept recall, otherwise decline
   if (local_capacity < RESPIRATION_INHALE_THRESHOLD) {
     // Send RecallAccept
-    wire_recall_accept_t* response = get_clear_memory(sizeof(wire_recall_accept_t));
-    response->message_id = recall->message_id;
+    wire_recall_accept_t response;
+    memset(&response, 0, sizeof(response));
+    response.message_id = recall->message_id;
+    memcpy(response.block_hash, recall->block_hash, 32);
 
-    message_t response_msg;
-    response_msg.type = NETWORK_RECALL_ACCEPT;
-    response_msg.payload = response;
-    response_msg.payload_destroy = free;
-    // TODO: Send response via QUIC when wired up
-    free(response);
-    (void)response_msg;
+    // Encode and send RecallAccept via QUIC to the sender's peer connection.
+    // Node_id tracking from QUIC connection metadata is deferred to Task 7.
+    node_id_t sender_id;
+    node_id_clear(&sender_id);
+    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+    if (peer != NULL) {
+      cbor_item_t* cbor = wire_recall_accept_encode(&response);
+      quic_peer_send(network, peer, cbor);
+      cbor_decref(&cbor);
+    }
   } else {
     // Send RecallDecline
-    wire_recall_decline_t* response = get_clear_memory(sizeof(wire_recall_decline_t));
-    response->message_id = recall->message_id;
+    wire_recall_decline_t response;
+    memset(&response, 0, sizeof(response));
+    response.message_id = recall->message_id;
 
-    message_t response_msg;
-    response_msg.type = NETWORK_RECALL_DECLINE;
-    response_msg.payload = response;
-    response_msg.payload_destroy = free;
-    // TODO: Send response via QUIC when wired up
-    free(response);
-    (void)response_msg;
+    // Encode and send RecallDecline via QUIC to the sender's peer connection.
+    // Node_id tracking from QUIC connection metadata is deferred to Task 7.
+    node_id_t sender_id;
+    node_id_clear(&sender_id);
+    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &sender_id);
+    if (peer != NULL) {
+      cbor_item_t* cbor = wire_recall_decline_encode(&response);
+      quic_peer_send(network, peer, cbor);
+      cbor_decref(&cbor);
+    }
   }
 }
 
@@ -1127,7 +1241,14 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
         forward->start_time = state.start_time_ms;
         memcpy(&forward->original_source, &state.original_source, sizeof(node_id_t));
 
-        // TODO: Send forward to next_hops[hop] via QUIC when wired up
+        // Encode and send FindBlock to next_hops[hop] via QUIC
+        cbor_item_t* cbor = wire_find_block_encode(forward);
+        peer_connection_t* next_peer = connection_manager_lookup(
+            &network->conn_mgr, &next_hops[hop]->id);
+        if (next_peer != NULL) {
+          quic_peer_send(network, next_peer, cbor);
+        }
+        cbor_decref(&cbor);
         free(forward);
       }
       break;

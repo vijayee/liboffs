@@ -22,6 +22,10 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#ifdef HAS_MSQUIC
+#include <msquic.h>
+#endif
+
 typedef struct block_cache_t block_cache_t;
 
 typedef struct network_t {
@@ -44,6 +48,10 @@ typedef struct network_t {
   uint64_t hebbian_decay_timer_id;
   uint64_t metrics_push_timer_id;
   ATOMIC(uint8_t) running;
+
+#ifdef HAS_MSQUIC
+  const struct QUIC_API_TABLE* msquic;
+#endif
 } network_t;
 
 network_t* network_create(authority_t* authority, block_cache_t* block_cache,
