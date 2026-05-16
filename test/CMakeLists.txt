@@ -33,7 +33,8 @@ if (BUILD_TESTING)
             test_off_routes.cpp
             test_network.cpp
             test_wanted_list.cpp
-            test_stream_network.cpp)
+            test_stream_network.cpp
+            test_stream_framer.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
