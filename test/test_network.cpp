@@ -1232,6 +1232,76 @@ TEST_F(RateLimitTest, RemovePeer) {
   EXPECT_EQ(table.count, 0u);
 }
 
+TEST_F(RateLimitTest, FindReturnsExistingEntry) {
+  node_id_t id = {};
+  memset(id.hash, 0xFF, NODE_ID_HASH_SIZE);
+  rate_limit_table_get(&table, &id);  // create entry
+  const peer_rate_limits_t* found = rate_limit_table_find(&table, &id);
+  ASSERT_NE(found, nullptr);
+  node_id_t missing_id = {};
+  memset(missing_id.hash, 0x00, NODE_ID_HASH_SIZE);
+  const peer_rate_limits_t* missing = rate_limit_table_find(&table, &missing_id);
+  EXPECT_EQ(missing, nullptr);
+}
+
+TEST_F(RateLimitTest, SetPeerCount) {
+  EXPECT_EQ(table.peer_count, 0u);
+  EXPECT_EQ(table.reference_peer_count, REFERENCE_PEER_COUNT);
+  rate_limit_table_set_peer_count(&table, 8);
+  EXPECT_EQ(table.peer_count, 8u);
+  rate_limit_table_set_peer_count(&table, 32);
+  EXPECT_EQ(table.peer_count, 32u);
+}
+
+TEST_F(RateLimitTest, EffectiveRateInverseScaling) {
+  // At reference count (32), rates should be base rates
+  rate_limit_table_set_peer_count(&table, 32);
+  float rate_32 = rate_limit_effective_rate(&table, RPC_TYPE_FIND_BLOCK);
+  EXPECT_FLOAT_EQ(rate_32, 50.0f);  // base max_rate for FIND_BLOCK
+
+  // At 4 peers, rate should be (32/4)*3 = 24x base
+  rate_limit_table_set_peer_count(&table, 4);
+  float rate_4 = rate_limit_effective_rate(&table, RPC_TYPE_FIND_BLOCK);
+  EXPECT_FLOAT_EQ(rate_4, 1200.0f);  // 50 * 24
+
+  // At 16 peers, rate should be (32/16)*3 = 6x base
+  rate_limit_table_set_peer_count(&table, 16);
+  float rate_16 = rate_limit_effective_rate(&table, RPC_TYPE_FIND_BLOCK);
+  EXPECT_FLOAT_EQ(rate_16, 300.0f);  // 50 * 6
+
+  // At 0 peers (not yet connected), use base rate
+  rate_limit_table_set_peer_count(&table, 0);
+  float rate_0 = rate_limit_effective_rate(&table, RPC_TYPE_FIND_BLOCK);
+  EXPECT_FLOAT_EQ(rate_0, 50.0f);
+}
+
+TEST_F(RateLimitTest, InverseScalingCheckAllowsMore) {
+  node_id_t peer = {};
+  memset(peer.hash, 0xCC, NODE_ID_HASH_SIZE);
+
+  // With 4 peers (24x multiplier), should allow many more requests than base
+  rate_limit_table_set_peer_count(&table, 4);
+  int allowed_count = 0;
+  for (int request = 0; request < 200; request++) {
+    if (rate_limit_check(&table, &peer, RPC_TYPE_FIND_BLOCK, 1000)) {
+      allowed_count++;
+    }
+  }
+  // Burst size at 4 peers: 20 * 24 = 480 tokens, so should allow all 200 requests
+  EXPECT_EQ(allowed_count, 200);  // All allowed within burst
+}
+
+TEST_F(RateLimitTest, EffectiveRateDifferentTypes) {
+  rate_limit_table_set_peer_count(&table, 4);
+  // STORE_BLOCK: base max_rate = 5, multiplier = (32/4)*3 = 24
+  float store_rate = rate_limit_effective_rate(&table, RPC_TYPE_STORE_BLOCK);
+  EXPECT_FLOAT_EQ(store_rate, 120.0f);  // 5 * 24
+
+  // PING: base max_rate = 10, multiplier = 24
+  float ping_rate = rate_limit_effective_rate(&table, RPC_TYPE_PING);
+  EXPECT_FLOAT_EQ(ping_rate, 240.0f);  // 10 * 24
+}
+
 // === Authority persistence tests ===
 
 class AuthorityPeerStoreTest : public ::testing::Test {
@@ -1570,7 +1640,7 @@ TEST_F(PeerConnectionTest, MetricsSnapshot) {
   peer_update_rtt(peer, 20.0);
   peer_metrics_snapshot_t snapshot;
   memset(&snapshot, 0, sizeof(snapshot));
-  peer_get_metrics(peer, &snapshot);
+  peer_get_metrics(peer, NULL, &snapshot);
   EXPECT_FLOAT_EQ(snapshot.hebbian_weight, 0.6f);
   EXPECT_DOUBLE_EQ(snapshot.rtt_ewma_ms, 20.0);
   EXPECT_TRUE(snapshot.connected);
@@ -2069,4 +2139,130 @@ TEST(WireDestroyTest, RecallAcceptDestroyNullBlockData) {
 TEST(WireDestroyTest, DestroyNullPointerIsSafe) {
   wire_find_block_response_destroy(NULL);
   wire_recall_accept_destroy(NULL);
+  wire_salutation_destroy(NULL);
+}
+
+// --- Salutation round-trip tests ---
+
+TEST(WireSalutationTest, EncodeDecodeWithPublicKey) {
+  wire_salutation_t original = {};
+  node_id_generate(&original.sender_id);
+  uint8_t test_key[] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                         0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+                         0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+                         0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20};
+  original.public_key = test_key;
+  original.public_key_len = sizeof(test_key);
+
+  cbor_item_t* encoded = wire_salutation_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+  EXPECT_EQ(cbor_array_size(encoded), (size_t)4);
+
+  unsigned char* buf = NULL;
+  size_t buf_len = 0;
+  int rc = wire_encode_decode_roundtrip(encoded, &buf, &buf_len);
+  cbor_decref(&encoded);
+  ASSERT_EQ(rc, 0);
+  ASSERT_NE(buf, nullptr);
+
+  struct cbor_load_result load_result;
+  cbor_item_t* decoded = cbor_load(buf, buf_len, &load_result);
+  free(buf);
+  ASSERT_NE(decoded, nullptr);
+  ASSERT_EQ(load_result.error.code, CBOR_ERR_NONE);
+
+  wire_salutation_t result = {};
+  rc = wire_salutation_decode(decoded, &result);
+  cbor_decref(&decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(node_id_equals(&result.sender_id, &original.sender_id), true);
+  EXPECT_NE(result.public_key, nullptr);
+  EXPECT_EQ(result.public_key_len, original.public_key_len);
+  EXPECT_EQ(memcmp(result.public_key, original.public_key, original.public_key_len), 0);
+
+  free(result.public_key);
+}
+
+TEST(WireSalutationTest, EncodeDecodeWithNullPublicKey) {
+  wire_salutation_t original = {};
+  node_id_generate(&original.sender_id);
+  original.public_key = NULL;
+  original.public_key_len = 0;
+
+  cbor_item_t* encoded = wire_salutation_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  unsigned char* buf = NULL;
+  size_t buf_len = 0;
+  int rc = wire_encode_decode_roundtrip(encoded, &buf, &buf_len);
+  cbor_decref(&encoded);
+  ASSERT_EQ(rc, 0);
+  ASSERT_NE(buf, nullptr);
+
+  struct cbor_load_result load_result;
+  cbor_item_t* decoded = cbor_load(buf, buf_len, &load_result);
+  free(buf);
+  ASSERT_NE(decoded, nullptr);
+  ASSERT_EQ(load_result.error.code, CBOR_ERR_NONE);
+
+  wire_salutation_t result = {};
+  rc = wire_salutation_decode(decoded, &result);
+  cbor_decref(&decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(node_id_equals(&result.sender_id, &original.sender_id), true);
+  EXPECT_EQ(result.public_key, nullptr);
+  EXPECT_EQ(result.public_key_len, (size_t)0);
+}
+
+TEST(WireSalutationTest, DestroyFreesPublicKey) {
+  wire_salutation_t* msg = (wire_salutation_t*)get_clear_memory(sizeof(wire_salutation_t));
+  ASSERT_NE(msg, nullptr);
+  uint8_t key[] = {0xAA, 0xBB, 0xCC, 0xDD};
+  msg->public_key = (uint8_t*)malloc(sizeof(key));
+  memcpy(msg->public_key, key, sizeof(key));
+  msg->public_key_len = sizeof(key);
+
+  wire_salutation_destroy(msg);
+}
+
+TEST(WireSalutationTest, DestroyNullPublicKeyIsSafe) {
+  wire_salutation_t* msg = (wire_salutation_t*)get_clear_memory(sizeof(wire_salutation_t));
+  ASSERT_NE(msg, nullptr);
+  msg->public_key = NULL;
+  msg->public_key_len = 0;
+
+  wire_salutation_destroy(msg);
+}
+
+TEST(WireSalutationTest, NodeIdFromPublicKeyVerification) {
+  // Generate a random node_id, then verify that node_id_from_public_key
+  // produces the same hash when given the same key bytes
+  uint8_t test_key[32];
+  for (int idx = 0; idx < 32; idx++) {
+    test_key[idx] = (uint8_t)(idx * 7 + 13);
+  }
+
+  node_id_t computed_id;
+  int rc = node_id_from_public_key(test_key, sizeof(test_key), &computed_id);
+  ASSERT_EQ(rc, 0);
+
+  // Verify the computed node_id is not null/zeroed
+  EXPECT_EQ(node_id_is_null(&computed_id), false);
+
+  // Calling again with the same key must produce the same node_id
+  node_id_t second_id;
+  rc = node_id_from_public_key(test_key, sizeof(test_key), &second_id);
+  ASSERT_EQ(rc, 0);
+  EXPECT_EQ(node_id_equals(&computed_id, &second_id), true);
+
+  // Different key must produce different node_id
+  uint8_t different_key[32];
+  memcpy(different_key, test_key, 32);
+  different_key[0] = ~different_key[0];
+  node_id_t different_id;
+  rc = node_id_from_public_key(different_key, sizeof(different_key), &different_id);
+  ASSERT_EQ(rc, 0);
+  EXPECT_EQ(node_id_equals(&computed_id, &different_id), false);
 }

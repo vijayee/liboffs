@@ -31,6 +31,7 @@
 #define WIRE_RECALL_ACCEPT       17
 #define WIRE_RECALL_DECLINE      18
 #define WIRE_RATE_LIMITED        19
+#define WIRE_SALUTATION          20
 #define WIRE_RELAY_SEND          30
 #define WIRE_RELAY_RECEIVED      31
 #define WIRE_ADDR_REQUEST        32
@@ -254,6 +255,14 @@ typedef struct {
   float current_limit;
 } wire_rate_limited_t;
 
+// --- Salutation (identity handshake) ---
+
+typedef struct {
+  node_id_t sender_id;
+  uint8_t* public_key;
+  size_t    public_key_len;
+} wire_salutation_t;
+
 // --- RelaySend ---
 
 typedef struct wire_relay_send_t {
@@ -306,6 +315,7 @@ cbor_item_t* wire_recall_block_encode(const wire_recall_block_t* msg);
 cbor_item_t* wire_recall_accept_encode(const wire_recall_accept_t* msg);
 cbor_item_t* wire_recall_decline_encode(const wire_recall_decline_t* msg);
 cbor_item_t* wire_rate_limited_encode(const wire_rate_limited_t* msg);
+cbor_item_t* wire_salutation_encode(const wire_salutation_t* msg);
 cbor_item_t* wire_relay_send_encode(const wire_relay_send_t* msg);
 cbor_item_t* wire_relay_received_encode(const wire_relay_received_t* msg);
 cbor_item_t* wire_addr_request_encode(const wire_addr_request_t* msg);
@@ -331,6 +341,7 @@ int wire_recall_block_decode(cbor_item_t* item, wire_recall_block_t* msg);
 int wire_recall_accept_decode(cbor_item_t* item, wire_recall_accept_t* msg);
 int wire_recall_decline_decode(cbor_item_t* item, wire_recall_decline_t* msg);
 int wire_rate_limited_decode(cbor_item_t* item, wire_rate_limited_t* msg);
+int wire_salutation_decode(cbor_item_t* item, wire_salutation_t* msg);
 int wire_relay_send_decode(cbor_item_t* item, wire_relay_send_t* msg);
 int wire_relay_received_decode(cbor_item_t* item, wire_relay_received_t* msg);
 int wire_addr_request_decode(cbor_item_t* item, wire_addr_request_t* msg);
@@ -338,6 +349,7 @@ int wire_addr_response_decode(cbor_item_t* item, wire_addr_response_t* msg);
 
 // Helper: extract type byte from CBOR item
 uint8_t wire_get_type(cbor_item_t* item);
+int wire_extract_sender_id(cbor_item_t* item, node_id_t* sender_id);
 
 // Destroy helpers for wire types with nested allocations
 // Frees block_data and the struct itself
@@ -350,6 +362,8 @@ void wire_recall_accept_destroy(wire_recall_accept_t* msg);
 void wire_seeking_blocks_destroy(wire_seeking_blocks_t* msg);
 // Frees payload and the struct itself
 void wire_relay_send_destroy(wire_relay_send_t* msg);
+// Frees public_key and the struct itself
+void wire_salutation_destroy(wire_salutation_t* msg);
 // Frees payload and the struct itself
 void wire_relay_received_destroy(wire_relay_received_t* msg);
 

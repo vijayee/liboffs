@@ -383,8 +383,10 @@ void stream_deactivate(stream_t* stream, async_error_t* error) {
 }
 
 void stream_deferred_deref(stream_t* stream) {
-  refcounter_dereference((refcounter_t*)stream);
+  // Reference first to prevent premature free, then dereference so the
+  // drain's refcounter_dereference_is_zero brings the net count down by one.
   scheduler_pool_defer_cleanup(stream->pool, stream, (void (*)(void*))stream->destructor);
+  refcounter_dereference((refcounter_t*)stream);
 }
 
 void stream_unsubscribe_pipe_notifiers(stream_t* stream) {

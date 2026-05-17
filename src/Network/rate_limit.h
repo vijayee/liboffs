@@ -31,6 +31,10 @@ typedef struct token_bucket_config_t {
 // Default rate configurations from Network Design spec
 extern const token_bucket_config_t RATE_LIMIT_DEFAULTS[RPC_TYPE_COUNT];
 
+// Inverse scaling constants
+#define REFERENCE_PEER_COUNT 32   // Network size at which base rates apply as-is
+#define LOW_NETWORK_MULTIPLIER 3.0f  // Multiplier for small networks (triples scaled-up rate)
+
 // Token bucket state
 typedef struct token_bucket_t {
   float tokens;           // current token count
@@ -51,6 +55,8 @@ typedef struct rate_limit_table_t {
   peer_rate_limits_t* entries;
   size_t capacity;
   size_t count;
+  size_t peer_count;              // Current network peer count for inverse scaling
+  size_t reference_peer_count;    // Network size at which base rates apply as-is (default 32)
 } rate_limit_table_t;
 
 // Initialize/deinitialize rate limit table
@@ -60,8 +66,17 @@ void rate_limit_table_deinit(rate_limit_table_t* table);
 // Look up or create per-peer rate limits
 peer_rate_limits_t* rate_limit_table_get(rate_limit_table_t* table, const node_id_t* peer_id);
 
+// Read-only lookup (returns NULL if peer not found, does NOT create entry)
+const peer_rate_limits_t* rate_limit_table_find(const rate_limit_table_t* table, const node_id_t* peer_id);
+
 // Remove a peer's rate limits
 int rate_limit_table_remove(rate_limit_table_t* table, const node_id_t* peer_id);
+
+// Update peer count for inverse scaling
+void rate_limit_table_set_peer_count(rate_limit_table_t* table, size_t peer_count);
+
+// Compute effective rate for a given RPC type at current network size
+float rate_limit_effective_rate(const rate_limit_table_t* table, rpc_type_e type);
 
 // Refill tokens based on elapsed time
 void token_bucket_refill(token_bucket_t* bucket, const token_bucket_config_t* config,

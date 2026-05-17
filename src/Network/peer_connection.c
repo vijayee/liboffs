@@ -4,6 +4,7 @@
 
 #include "peer_connection.h"
 #include "stream_framer.h"
+#include "rate_limit.h"
 #include "../Util/allocator.h"
 #include <string.h>
 #include <time.h>
@@ -110,7 +111,7 @@ void peer_connection_dispatch(void* state, message_t* msg) {
     case PEER_GET_METRICS: {
       if (msg->payload != NULL) {
         peer_metrics_snapshot_t* snapshot = (peer_metrics_snapshot_t*)msg->payload;
-        peer_get_metrics(peer, snapshot);
+        peer_get_metrics(peer, NULL, snapshot);
       }
       break;
     }
@@ -201,7 +202,9 @@ void peer_hebbian_decay(peer_connection_t* peer, float decay_rate) {
   }
 }
 
-void peer_get_metrics(const peer_connection_t* peer, peer_metrics_snapshot_t* snapshot) {
+void peer_get_metrics(const peer_connection_t* peer,
+                      const rate_limit_table_t* rate_limits,
+                      peer_metrics_snapshot_t* snapshot) {
   if (peer == NULL || snapshot == NULL) {
     return;
   }
@@ -213,6 +216,28 @@ void peer_get_metrics(const peer_connection_t* peer, peer_metrics_snapshot_t* sn
   memcpy(snapshot->rpc_failure, peer->rpc_failure, sizeof(peer->rpc_failure));
   snapshot->connected = peer->connected;
   snapshot->connected_at_ms = peer->connected_at_ms;
+
+  // Populate rate limit snapshot
+  const peer_rate_limits_t* limits = rate_limit_table_find(rate_limits, &peer->remote_node_id);
+  if (limits != NULL) {
+    for (int type = 0; type < RPC_TYPE_COUNT; type++) {
+      snapshot->rate_limit_tokens[type] = limits->buckets[type].tokens;
+      snapshot->rate_limit_accepted[type] = limits->buckets[type].total_accepted;
+      snapshot->rate_limit_rejected[type] = limits->buckets[type].total_rejected;
+    }
+  } else {
+    memset(snapshot->rate_limit_tokens, 0, sizeof(snapshot->rate_limit_tokens));
+    memset(snapshot->rate_limit_accepted, 0, sizeof(snapshot->rate_limit_accepted));
+    memset(snapshot->rate_limit_rejected, 0, sizeof(snapshot->rate_limit_rejected));
+  }
+  // Populate effective rates (inverse-scaled)
+  if (rate_limits != NULL) {
+    for (int type = 0; type < RPC_TYPE_COUNT; type++) {
+      snapshot->rate_limit_effective_rate[type] = rate_limit_effective_rate(rate_limits, type);
+    }
+  } else {
+    memset(snapshot->rate_limit_effective_rate, 0, sizeof(snapshot->rate_limit_effective_rate));
+  }
 }
 
 void peer_update_rtt(peer_connection_t* peer, double rtt_ms) {

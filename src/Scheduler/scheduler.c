@@ -4,6 +4,7 @@
 
 #include "scheduler.h"
 #include "../Actor/actor.h"
+#include "../RefCounter/refcounter.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include "../Util/threadding.h"
@@ -247,6 +248,9 @@ void scheduler_inject(scheduler_pool_t* pool, actor_t* actor) {
 }
 
 void scheduler_pool_defer_cleanup(scheduler_pool_t* pool, void* object, void (*destructor)(void*)) {
+  if (object == NULL) return;
+  // Hold a reference so the object can't be freed before the drain runs
+  refcounter_reference((refcounter_t*)object);
   pending_deref_node_t* node = get_clear_memory(sizeof(pending_deref_node_t));
   node->object = object;
   node->destructor = destructor;

@@ -36,6 +36,7 @@ void quic_data_payload_destroy(quic_data_payload_t* payload);
 // Payload for NETWORK_QUIC_CONNECTED messages
 typedef struct quic_connected_payload_t {
   void* connection;               /* HQUIC connection handle */
+  void* stream;                   /* HQUIC persistent bidirectional stream handle */
   struct sockaddr_storage peer_addr;
 } quic_connected_payload_t;
 
@@ -49,6 +50,11 @@ typedef struct quic_send_payload_t {
 } quic_send_payload_t;
 
 void quic_send_payload_destroy(quic_send_payload_t* payload);
+
+// Payload for QUIC_LISTENER_SEND_SALUTATION messages
+typedef struct quic_salutation_payload_t {
+  void* stream;  // HQUIC stream handle to send salutation on
+} quic_salutation_payload_t;
 
 typedef struct quic_listener_t {
   actor_t actor;
@@ -82,6 +88,7 @@ quic_listener_t* quic_listener_create(network_t* network, scheduler_pool_t* pool
 void quic_listener_destroy(quic_listener_t* listener);
 int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t port);
 void quic_listener_stop(quic_listener_t* listener);
+int quic_listener_connect(quic_listener_t* listener, const char* host, uint16_t port);
 
 void quic_listener_dispatch(void* state, message_t* msg);
 

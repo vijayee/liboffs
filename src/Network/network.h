@@ -30,6 +30,15 @@
 typedef struct block_cache_t block_cache_t;
 typedef struct relay_client_t relay_client_t;
 typedef struct nat_detect_t nat_detect_t;
+typedef struct quic_listener_t quic_listener_t;
+
+// Pending QUIC connections awaiting salutation identity handshake
+typedef struct pending_quic_t {
+  void* quic_connection;           // HQUIC handle
+  void* quic_stream;                // HQUIC persistent bidirectional stream handle
+  struct sockaddr_storage peer_addr;
+  struct pending_quic_t* next;
+} pending_quic_t;
 
 typedef struct network_t {
   actor_t actor;
@@ -45,6 +54,7 @@ typedef struct network_t {
   wanted_list_t* wanted_list;
   hebbian_table_t hebbian;
   rate_limit_table_t rate_limits;
+  topology_metrics_t* topology_metrics;
   connection_manager_t conn_mgr;
   uint64_t gossip_timer_id;
   uint64_t eabf_maintenance_timer_id;
@@ -56,6 +66,10 @@ typedef struct network_t {
   nat_detect_t* nat_detect;       /* NAT detection module */
   nat_type_e local_nat_type;      /* Detected NAT type */
 
+  pending_quic_t* pending_connections;  /* QUIC connections awaiting salutation */
+
+  quic_listener_t* quic_listener;      /* QUIC listener for direct P2P connections */
+
 #ifdef HAS_MSQUIC
   const struct QUIC_API_TABLE* msquic;
 #endif
@@ -66,5 +80,6 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
 void network_destroy(network_t* network);
 void network_dispatch(void* state, message_t* msg);
 int network_connect_relay(network_t* network, const char* host, uint16_t port);
+int network_connect_peer(network_t* network, const char* host, uint16_t port);
 
 #endif // OFFS_NETWORK_H

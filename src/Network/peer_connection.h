@@ -9,6 +9,7 @@
 #include "eabf.h"
 #include "hebbian_config.h"
 #include "node_id.h"
+#include "rate_limit.h"
 #include "timing_wheel.h"
 #include "conn_state.h"
 #include <stdint.h>
@@ -27,6 +28,11 @@ typedef struct peer_metrics_snapshot_t {
   uint64_t rpc_failure[PEER_RPC_TYPE_COUNT];
   bool connected;
   int64_t connected_at_ms;
+  // Rate limit snapshot per RPC type
+  float rate_limit_tokens[RPC_TYPE_COUNT];         // Current token count
+  uint64_t rate_limit_accepted[RPC_TYPE_COUNT];     // Total accepted requests
+  uint64_t rate_limit_rejected[RPC_TYPE_COUNT];     // Total rejected requests
+  float rate_limit_effective_rate[RPC_TYPE_COUNT];  // Effective rate (after inverse scaling)
 } peer_metrics_snapshot_t;
 
 typedef struct peer_connection_t {
@@ -49,6 +55,7 @@ typedef struct peer_connection_t {
   conn_state_e conn_state;
   conn_path_t direct_path;
   conn_path_t relay_path;
+  uint32_t relay_endpoint_id;    /* Remote peer's endpoint ID on the relay server */
   nat_type_e peer_nat_type;
   uint32_t direct_attempts;
 
@@ -80,7 +87,9 @@ void peer_eabf_tick(peer_connection_t* peer);
 void peer_hebbian_update(peer_connection_t* peer, float delta);
 void peer_hebbian_decay(peer_connection_t* peer, float decay_rate);
 
-void peer_get_metrics(const peer_connection_t* peer, peer_metrics_snapshot_t* snapshot);
+void peer_get_metrics(const peer_connection_t* peer,
+                      const rate_limit_table_t* rate_limits,
+                      peer_metrics_snapshot_t* snapshot);
 void peer_update_rtt(peer_connection_t* peer, double rtt_ms);
 
 #endif // OFFS_PEER_CONNECTION_H

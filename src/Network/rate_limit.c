@@ -6,6 +6,9 @@
 #include "../Util/allocator.h"
 #include <string.h>
 
+// Forward declaration
+static peer_rate_limits_t* rate_limit_find(rate_limit_table_t* table, const node_id_t* peer_id);
+
 // Default rate configurations from Network Design spec
 const token_bucket_config_t RATE_LIMIT_DEFAULTS[RPC_TYPE_COUNT] = {
   { 5.0f,   50.0f,  20.0f, 1.0f },   // FIND_BLOCK
@@ -22,6 +25,8 @@ void rate_limit_table_init(rate_limit_table_t* table, size_t capacity) {
   table->entries = get_clear_memory(capacity * sizeof(peer_rate_limits_t));
   table->capacity = capacity;
   table->count = 0;
+  table->peer_count = 0;
+  table->reference_peer_count = REFERENCE_PEER_COUNT;
 }
 
 void rate_limit_table_deinit(rate_limit_table_t* table) {
@@ -34,7 +39,12 @@ void rate_limit_table_deinit(rate_limit_table_t* table) {
 
 // --- Lookup and mutation ---
 
-static peer_rate_limits_t* rate_limit_find(rate_limit_table_t* table, const node_id_t* peer_id) {
+const peer_rate_limits_t* rate_limit_table_find(const rate_limit_table_t* table, const node_id_t* peer_id) {
+  if (table == NULL || peer_id == NULL) return NULL;
+  return rate_limit_find((rate_limit_table_t*)table, peer_id);
+}
+
+peer_rate_limits_t* rate_limit_find(rate_limit_table_t* table, const node_id_t* peer_id) {
   for (size_t index = 0; index < table->count; index++) {
     if (node_id_equals(&table->entries[index].peer_id, peer_id)) {
       return &table->entries[index];
@@ -64,9 +74,14 @@ peer_rate_limits_t* rate_limit_table_get(rate_limit_table_t* table, const node_i
   memcpy(&entry->peer_id, peer_id, sizeof(node_id_t));
   entry->weight = 0.0f;
 
-  // Initialize all token buckets with default burst size
+  // Initialize all token buckets with effective burst size (scaled for small networks)
   for (int type = 0; type < RPC_TYPE_COUNT; type++) {
-    entry->buckets[type].tokens = RATE_LIMIT_DEFAULTS[type].burst_size;
+    float effective_burst = RATE_LIMIT_DEFAULTS[type].burst_size;
+    if (table->peer_count > 0 && table->peer_count < table->reference_peer_count) {
+      float multiplier = ((float)table->reference_peer_count / (float)table->peer_count) * LOW_NETWORK_MULTIPLIER;
+      effective_burst = RATE_LIMIT_DEFAULTS[type].burst_size * multiplier;
+    }
+    entry->buckets[type].tokens = effective_burst;
     entry->buckets[type].last_refill = 0;
     entry->buckets[type].total_accepted = 0;
     entry->buckets[type].total_rejected = 0;
@@ -125,12 +140,20 @@ bool rate_limit_check(rate_limit_table_t* table, const node_id_t* peer_id,
   token_bucket_t* bucket = &entry->buckets[type];
   const token_bucket_config_t* config = &RATE_LIMIT_DEFAULTS[type];
 
-  // Refill tokens based on elapsed time
-  token_bucket_refill(bucket, config, now_ms);
+  // Compute effective config with inverse scaling + low-network multiplier
+  token_bucket_config_t effective_config = *config;
+  if (table->peer_count > 0 && table->peer_count < table->reference_peer_count) {
+    float multiplier = ((float)table->reference_peer_count / (float)table->peer_count) * LOW_NETWORK_MULTIPLIER;
+    effective_config.max_rate = config->max_rate * multiplier;
+    effective_config.burst_size = config->burst_size * multiplier;
+  }
+
+  // Refill tokens using effective rate
+  token_bucket_refill(bucket, &effective_config, now_ms);
 
   // Check if we have enough tokens
-  if (bucket->tokens >= config->cost) {
-    bucket->tokens -= config->cost;
+  if (bucket->tokens >= effective_config.cost) {
+    bucket->tokens -= effective_config.cost;
     bucket->total_accepted++;
     return true;
   }
@@ -174,4 +197,21 @@ float rate_limit_capacity_multiplier(float capacity, rpc_type_e type) {
     }
   }
   return 1.0f;
+}
+
+// --- Peer count and effective rate ---
+
+void rate_limit_table_set_peer_count(rate_limit_table_t* table, size_t peer_count) {
+  if (table == NULL) return;
+  table->peer_count = peer_count;
+}
+
+float rate_limit_effective_rate(const rate_limit_table_t* table, rpc_type_e type) {
+  if (table == NULL || type < 0 || type >= RPC_TYPE_COUNT) return 0.0f;
+  float base_rate = RATE_LIMIT_DEFAULTS[type].max_rate;
+  if (table->peer_count == 0 || table->peer_count >= table->reference_peer_count) {
+    return base_rate;
+  }
+  float multiplier = ((float)table->reference_peer_count / (float)table->peer_count) * LOW_NETWORK_MULTIPLIER;
+  return base_rate * multiplier;
 }

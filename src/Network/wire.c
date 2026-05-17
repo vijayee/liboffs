@@ -51,6 +51,15 @@ uint8_t wire_get_type(cbor_item_t* item) {
   return type;
 }
 
+int wire_extract_sender_id(cbor_item_t* item, node_id_t* sender_id) {
+  if (item == NULL || sender_id == NULL) return -1;
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int result = _node_id_decode(sender, sender_id);
+  cbor_decref(&sender);
+  return result;
+}
+
 // --- Ping ---
 
 cbor_item_t* wire_ping_encode(const wire_ping_t* msg) {
@@ -699,6 +708,74 @@ int wire_rate_limited_decode(cbor_item_t* item, wire_rate_limited_t* msg) {
   msg->current_limit = (float)cbor_float_get_float8(limit);
   cbor_decref(&limit);
   return 0;
+}
+
+// --- Salutation ---
+
+cbor_item_t* wire_salutation_encode(const wire_salutation_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(4);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(WIRE_SALUTATION);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  if (msg->public_key != NULL && msg->public_key_len > 0) {
+    item = cbor_build_bytestring(msg->public_key, msg->public_key_len);
+  } else {
+    item = cbor_build_bytestring((const unsigned char*)"", 0);
+  }
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->public_key_len);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int wire_salutation_decode(cbor_item_t* item, wire_salutation_t* msg) {
+  if (cbor_array_size(item) < 4) return -1;
+  msg->public_key = NULL;
+  msg->public_key_len = 0;
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (cbor_get_uint8(type_item) != WIRE_SALUTATION) { cbor_decref(&type_item); return -1; }
+  cbor_decref(&type_item);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* key_data = cbor_array_get(item, 2);
+  if (cbor_isa_bytestring(key_data) && cbor_bytestring_length(key_data) > 0) {
+    msg->public_key_len = cbor_bytestring_length(key_data);
+    msg->public_key = get_clear_memory(msg->public_key_len);
+    if (msg->public_key != NULL) {
+      memcpy(msg->public_key, cbor_bytestring_handle(key_data), msg->public_key_len);
+    }
+  }
+  cbor_decref(&key_data);
+  cbor_item_t* key_len = cbor_array_get(item, 3);
+  size_t declared_len = (size_t)cbor_get_uint64(key_len);
+  cbor_decref(&key_len);
+  // If declared length disagrees with actual bytestring length, trust the bytestring
+  if (msg->public_key_len != 0 && declared_len != msg->public_key_len) {
+    free(msg->public_key);
+    msg->public_key = NULL;
+    msg->public_key_len = 0;
+    return -1;
+  }
+  return 0;
+}
+
+void wire_salutation_destroy(wire_salutation_t* msg) {
+  if (msg == NULL) return;
+  free(msg->public_key);
+  free(msg);
 }
 
 // --- PingCapacity ---

@@ -83,6 +83,29 @@ void topology_metrics_update_peers(topology_metrics_t* metrics,
     }
   }
   metrics->avg_hebbian_weight = count > 0 ? total_weight / (float)count : 0.0f;
+
+  // Aggregate rate limit stats
+  memset(metrics->total_rate_limit_accepted, 0, sizeof(metrics->total_rate_limit_accepted));
+  memset(metrics->total_rate_limit_rejected, 0, sizeof(metrics->total_rate_limit_rejected));
+  memset(metrics->avg_rate_limit_tokens, 0, sizeof(metrics->avg_rate_limit_tokens));
+
+  for (size_t index = 0; index < count; index++) {
+    for (size_t rpc = 0; rpc < RPC_TYPE_COUNT; rpc++) {
+      metrics->total_rate_limit_accepted[rpc] += snapshots[index].rate_limit_accepted[rpc];
+      metrics->total_rate_limit_rejected[rpc] += snapshots[index].rate_limit_rejected[rpc];
+      metrics->avg_rate_limit_tokens[rpc] += snapshots[index].rate_limit_tokens[rpc];
+    }
+  }
+  if (count > 0) {
+    for (size_t rpc = 0; rpc < RPC_TYPE_COUNT; rpc++) {
+      metrics->avg_rate_limit_tokens[rpc] /= (float)count;
+    }
+  }
+  // Copy effective rates from first snapshot (all peers in same network see same rates)
+  if (count > 0) {
+    memcpy(metrics->effective_rate, snapshots[0].rate_limit_effective_rate,
+           sizeof(metrics->effective_rate));
+  }
 }
 
 void topology_metrics_update_rings(topology_metrics_t* metrics,

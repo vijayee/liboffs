@@ -449,7 +449,8 @@ static void node_get_v2_on_desc_error(void* ctx, void* error) {
   (void)error;
   node_get_pipeline_v2_t* pipeline = (node_get_pipeline_v2_t*)ctx;
   stream_deactivate((stream_t*)pipeline->rs, NULL);
-  stream_deferred_deref((stream_t*)pipeline->desc);
+  // Don't defer-deref desc here — stream_deactivate sends close_event too,
+  // and node_get_v2_on_desc_close will handle the deref.
 }
 
 static void node_get_v2_on_rs_close(void* ctx, void* unused) {
@@ -628,12 +629,16 @@ static void handle_command(int client_fd, char* line) {
       send_response(client_fd, CTRL_RESP_ERROR " invalid PEER_ADD format");
       return;
     }
-    /* Direct peer connection initiation requires an outbound QUIC connect
-       API which is not yet available in the network stack. Relay-mediated
-       connections work via CONNECT_RELAY. */
-    (void)host;
-    (void)port;
-    send_response(client_fd, CTRL_RESP_ERROR " direct peer connect not yet supported");
+    if (g_node.network != NULL) {
+      int result = network_connect_peer(g_node.network, host, port);
+      if (result == 0) {
+        send_response(client_fd, CTRL_RESP_OK);
+      } else {
+        send_response(client_fd, CTRL_RESP_ERROR " peer connect failed");
+      }
+    } else {
+      send_response(client_fd, CTRL_RESP_ERROR " no network");
+    }
   } else if (strncmp(line, CTRL_CONNECT_RELAY " ", strlen(CTRL_CONNECT_RELAY) + 1) == 0) {
     const char* relay_addr = line + strlen(CTRL_CONNECT_RELAY) + 1;
     char host[256];
@@ -909,6 +914,7 @@ int node_main(int argc, char* argv[]) {
       if (start_result != 0) {
         fprintf(stderr, "node: quic_listener_start failed\n");
       }
+      g_node.network->quic_listener = g_node.listener;
     }
   }
 #endif

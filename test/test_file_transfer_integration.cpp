@@ -470,6 +470,13 @@ TEST_F(FileTransferIntegrationTest, RelaySmallFileTransfer) {
     ASSERT_GT(nodes[1].pid, 0);
     ASSERT_GE(nodes[1].control_fd, 0);
 
+    // Nodes must discover each other before file transfer can work.
+    // On localhost, direct QUIC connection succeeds — conn_state will
+    // prefer the direct path and fall back to relay if it fails.
+    std::string peer_cmd = std::string(CTRL_PEER_ADD) + " 127.0.0.1:" + std::to_string(port_b);
+    send_command(nodes[0].control_fd, peer_cmd);
+    send_command(nodes[0].control_fd, std::string(CTRL_WAIT_FOR_PEER) + " 1");
+
     std::string resp = send_command(nodes[0].control_fd, std::string(CTRL_STORE_FILE) + " 100000 2 3");
     ASSERT_NE(resp.find(CTRL_RESP_HASH), std::string::npos) << "STORE: " << resp;
 
@@ -511,6 +518,11 @@ TEST_F(FileTransferIntegrationTest, RelayLargeFileTransfer) {
     start_node(port_b, ctrl_b, relay_port, test_dir + "/cache_b");
     ASSERT_GT(nodes[1].pid, 0);
     ASSERT_GE(nodes[1].control_fd, 0);
+
+    // Nodes must discover each other before file transfer can work.
+    std::string peer_cmd = std::string(CTRL_PEER_ADD) + " 127.0.0.1:" + std::to_string(port_b);
+    send_command(nodes[0].control_fd, peer_cmd);
+    send_command(nodes[0].control_fd, std::string(CTRL_WAIT_FOR_PEER) + " 1");
 
     std::string resp = send_command(nodes[0].control_fd, std::string(CTRL_STORE_FILE) + " 640000 2 3");
     ASSERT_NE(resp.find(CTRL_RESP_HASH), std::string::npos) << "STORE: " << resp;
@@ -561,6 +573,11 @@ TEST_F(FileTransferIntegrationTest, RelayLateJoin) {
     start_node(port_b, ctrl_b, relay_port, test_dir + "/cache_b");
     ASSERT_GT(nodes[1].pid, 0);
     ASSERT_GE(nodes[1].control_fd, 0);
+
+    // Node B must discover node A before it can fetch.
+    std::string peer_cmd_b = std::string(CTRL_PEER_ADD) + " 127.0.0.1:" + std::to_string(port_a);
+    send_command(nodes[1].control_fd, peer_cmd_b);
+    send_command(nodes[1].control_fd, std::string(CTRL_WAIT_FOR_PEER) + " 1");
 
     std::string fetch_cmd = std::string(CTRL_FETCH_FILE) + " " + desc_hash_hex + " " +
                             file_hash_hex + " " + std::to_string(final_byte) + " 2 3";

@@ -28,6 +28,8 @@
 #include <string.h>
 #include <time.h>
 
+#define TOPOLOGY_METRICS_PUSH_INTERVAL_MS 300000  // 5 minutes
+
 // Forward declarations for internal handlers
 static void network_sync_hebbian_to_rings(network_t* network);
 static void network_handle_local_find_block(network_t* network, message_t* msg);
@@ -82,6 +84,7 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   network->wanted_list = wanted_list_create();
   hebbian_table_init(&network->hebbian, 32);
   rate_limit_table_init(&network->rate_limits, 32);
+  network->topology_metrics = topology_metrics_create(pool);
   connection_manager_init(&network->conn_mgr, 16, NULL);
   network->hebbian_decay_timer_id = 0;
   network->metrics_push_timer_id = 0;
@@ -115,6 +118,13 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
       &network->actor,
       NETWORK_EABF_EXPIRE);
 
+  // Start metrics push timer: recurring 5-minute collection
+  network->metrics_push_timer_id = timer_actor_set(timer,
+      TOPOLOGY_METRICS_PUSH_INTERVAL_MS,
+      TOPOLOGY_METRICS_PUSH_INTERVAL_MS,
+      &network->actor,
+      NETWORK_METRICS_PUSH);
+
   return network;
 }
 
@@ -134,6 +144,7 @@ void network_destroy(network_t* network) {
   wanted_list_destroy(network->wanted_list);
   hebbian_table_deinit(&network->hebbian);
   rate_limit_table_deinit(&network->rate_limits);
+  topology_metrics_destroy(network->topology_metrics);
   connection_manager_deinit(&network->conn_mgr);
   if (network->hebbian_decay_timer_id != 0) {
     timer_actor_cancel(network->timer, network->hebbian_decay_timer_id);
@@ -1793,6 +1804,26 @@ void network_dispatch(void* state, message_t* msg) {
     case NETWORK_GOSSIP_EXPIRE:
       network_handle_gossip_expire(network, msg);
       break;
+    case NETWORK_METRICS_PUSH: {
+      size_t peer_count = connection_manager_count(&network->conn_mgr);
+      rate_limit_table_set_peer_count(&network->rate_limits, peer_count);
+      if (peer_count > 0) {
+        peer_metrics_snapshot_t* snapshots = get_clear_memory(peer_count * sizeof(peer_metrics_snapshot_t));
+        if (snapshots != NULL) {
+          size_t index = 0;
+          for (size_t peer_index = 0; peer_index < network->conn_mgr.peer_capacity && index < peer_count; peer_index++) {
+            peer_connection_t* peer = network->conn_mgr.peers[peer_index];
+            if (peer != NULL && peer->connected) {
+              peer_get_metrics(peer, &network->rate_limits, &snapshots[index]);
+              index++;
+            }
+          }
+          topology_metrics_update_peers(network->topology_metrics, snapshots, index);
+          free(snapshots);
+        }
+      }
+      break;
+    }
     case NETWORK_QUIC_DATA: {
       quic_data_payload_t* quic_data = (quic_data_payload_t*)msg->payload;
       if (quic_data == NULL) break;
@@ -2147,6 +2178,31 @@ void network_dispatch(void* state, message_t* msg) {
       if (wire_msg == NULL) break;
 
       if (cbor_isa_array(wire_msg) && cbor_array_size(wire_msg) >= 1) {
+        // Extract sender_id from wire message and add to connection_manager
+        // and ring set if not already known — relay peers must be reachable
+        // for find_block_execute routing.
+        node_id_t sender_id;
+        memset(&sender_id, 0, sizeof(node_id_t));
+        if (wire_extract_sender_id(wire_msg, &sender_id) == 0) {
+          peer_connection_t* existing = connection_manager_lookup(&network->conn_mgr, &sender_id);
+          if (existing == NULL) {
+            existing = connection_manager_add(&network->conn_mgr, &sender_id, NULL, network->pool);
+          }
+          // Store the relay endpoint ID so we can route messages back
+          if (existing != NULL && relay_payload->src_endpoint_id != 0) {
+            existing->relay_endpoint_id = relay_payload->src_endpoint_id;
+          }
+          // Also ensure the sender is in the ring set for routing
+          net_node_t* ring_node = ring_set_find_by_id(network->rings, &sender_id);
+          if (ring_node == NULL) {
+            net_node_t* node = net_node_create(&sender_id, 0, 0);
+            if (node != NULL) {
+              node->weight = FIND_BLOCK_MIN_WEIGHT;
+              ring_set_insert(network->rings, node, 0);
+            }
+          }
+        }
+
         uint8_t type = wire_get_type(wire_msg);
         message_t dispatch_msg;
         memset(&dispatch_msg, 0, sizeof(dispatch_msg));

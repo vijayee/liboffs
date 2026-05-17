@@ -51,6 +51,7 @@ void authority_destroy(authority_t* authority) {
   if (authority->node_cert_path != NULL) free(authority->node_cert_path);
   if (authority->node_key_path != NULL) free(authority->node_key_path);
   if (authority->relay_url != NULL) free(authority->relay_url);
+  if (authority->public_key != NULL) free(authority->public_key);
   free(authority);
 }
 
@@ -66,22 +67,25 @@ int authority_init_local_id(authority_t* authority) {
     return 0;
   }
 
-  // Derive node_id from certificate public key
+  // Derive node_id from certificate public key and cache the key
   if (authority->node_cert_path != NULL) {
     size_t key_len = 0;
     uint8_t* public_key = pem_extract_public_key(authority->node_cert_path, &key_len);
     if (public_key != NULL && key_len > 0) {
       int rc = node_id_from_public_key(public_key, key_len, &authority->local_id);
-      free(public_key);
       if (rc == 0) {
+        authority->public_key = public_key;
+        authority->public_key_len = key_len;
         return 0;
       }
+      free(public_key);
     }
-    if (public_key != NULL) free(public_key);
     log_error("authority_init_local_id: failed to derive node_id from cert, generating random");
   }
 
   // No cert or extraction failed — generate a random node_id
+  authority->public_key = NULL;
+  authority->public_key_len = 0;
   node_id_generate(&authority->local_id);
   return 0;
 }

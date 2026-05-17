@@ -8,6 +8,7 @@
 #include "../Actor/actor.h"
 #include "peer_connection.h"
 #include "node_id.h"
+#include "rate_limit.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -34,6 +35,12 @@ typedef struct topology_metrics_t {
   size_t total_connections;
   float avg_hebbian_weight;
   uint64_t total_rpc_calls[PEER_RPC_TYPE_COUNT];
+
+  // Aggregated rate limit stats across all peers
+  uint64_t total_rate_limit_accepted[RPC_TYPE_COUNT];
+  uint64_t total_rate_limit_rejected[RPC_TYPE_COUNT];
+  float avg_rate_limit_tokens[RPC_TYPE_COUNT];
+  float effective_rate[RPC_TYPE_COUNT];  // Inverse-scaled effective rate at current network size
 
   uint64_t collect_interval_ms;
 } topology_metrics_t;

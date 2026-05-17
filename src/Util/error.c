@@ -21,6 +21,7 @@ async_error_t* error_create(char* message, char* file, char* function, int line)
   return error;
 }
 void error_destroy(async_error_t* error) {
+  if (error == NULL) return;
   if (refcounter_dereference_is_zero((refcounter_t*) error)) {
     free(error->message);
     free(error->file);

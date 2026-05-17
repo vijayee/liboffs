@@ -79,8 +79,8 @@ int conn_state_send(network_t* network, peer_connection_t* peer,
         return -1;
       }
 
-      relay_send->src_endpoint_id = 0;
-      relay_send->dest_endpoint_id = 0;
+      relay_send->src_endpoint_id = network->relay ? network->relay->local_endpoint_id : 0;
+      relay_send->dest_endpoint_id = peer->relay_endpoint_id;
       relay_send->payload = cbor_data;
       relay_send->payload_len = cbor_len;
 

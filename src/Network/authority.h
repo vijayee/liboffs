@@ -39,6 +39,9 @@ typedef struct authority_t {
 
   node_id_t local_id;
 
+  uint8_t* public_key;      // Raw public key for salutation (NULL if random node_id)
+  size_t   public_key_len;  // Length of public_key
+
   ATOMIC(float) capacity;
   ATOMIC(node_phase_e) phase;
 
