@@ -1512,17 +1512,15 @@ static void network_handle_rate_limited(network_t* network, message_t* msg) {
   wire_rate_limited_t* limited = (wire_rate_limited_t*)msg->payload;
   if (limited == NULL) return;
 
-  // A peer is telling us we've been rate limited for a specific RPC type.
-  // The peer's node_id would come from the QUIC connection metadata.
-  // For now, we can't look up the specific peer without a connection table,
-  // so we log the backoff. When QUIC connections are tracked, this handler
-  // will use the peer's node_id to call rate_limit_table_get and drain tokens.
-  (void)network;
-
-  // The rate limit information is available for future use:
-  // limited->type — which RPC type was rate limited
-  // limited->retry_after_ms — how long to wait before retrying
-  // limited->current_limit — the peer's current rate limit for this type
+  // Look up the peer's rate limit entry and drain tokens for the specified RPC type.
+  // This ensures we respect the peer's backoff signal and don't immediately retry.
+  peer_rate_limits_t* limits = rate_limit_table_get(&network->rate_limits, &limited->sender_id);
+  if (limits != NULL && limited->type < RPC_TYPE_COUNT) {
+    token_bucket_t* bucket = &limits->buckets[limited->type];
+    // Drain all tokens to enforce the backoff — the peer told us to stop sending
+    bucket->tokens = 0;
+    bucket->last_refill = (uint64_t)time(NULL) * 1000;
+  }
 }
 
 // --- EABF expire handler ---
