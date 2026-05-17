@@ -167,9 +167,8 @@ TEST_F(ReadableOffStreamNetworkTest, FindBlockResultFoundReissuesCacheGet) {
                           0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99};
   buffer_t* hash = make_hash(hash_data, 32);
 
-  // Simulate the stream being in AWAITING_NETWORK state with a pending hash
+  // Simulate the stream being in AWAITING_NETWORK state
   stream->state = OFF_STREAM_AWAITING_NETWORK;
-  stream->pending_fetch_hash = REFERENCE(hash, buffer_t);
 
   // Craft and dispatch NETWORK_FIND_BLOCK_RESULT with found=1
   network_find_block_result_payload_t result;
@@ -186,8 +185,7 @@ TEST_F(ReadableOffStreamNetworkTest, FindBlockResultFoundReissuesCacheGet) {
   // Verify: state should transition back to FETCHING_BLOCKS
   EXPECT_EQ(stream->state, OFF_STREAM_FETCHING_BLOCKS);
 
-  // Verify: pending_fetch_hash should be cleared
-  EXPECT_EQ(stream->pending_fetch_hash, nullptr);
+  // Verify: pending_fetch_hash no longer used (hash comes from result payload)
 
   // Clean up our references (result.hash holds a reference we need to release)
   DESTROY(result.hash, buffer);
@@ -209,9 +207,8 @@ TEST_F(ReadableOffStreamNetworkTest, FindBlockResultNotFoundDeactivates) {
   stream->pending_tuple = REFERENCE(pending, tuple_t);
   DESTROY(h1, buffer);
 
-  // Simulate the stream being in AWAITING_NETWORK state with a pending hash
+  // Simulate the stream being in AWAITING_NETWORK state
   stream->state = OFF_STREAM_AWAITING_NETWORK;
-  stream->pending_fetch_hash = REFERENCE(hash, buffer_t);
 
   // Craft and dispatch NETWORK_FIND_BLOCK_RESULT with found=0
   network_find_block_result_payload_t result;
@@ -228,8 +225,7 @@ TEST_F(ReadableOffStreamNetworkTest, FindBlockResultNotFoundDeactivates) {
   // Verify: stream should be deactivated (stream_deactivate sets this immediately)
   EXPECT_EQ(stream->stream.is_deactivated, 1);
 
-  // Verify: pending_fetch_hash should be cleared
-  EXPECT_EQ(stream->pending_fetch_hash, nullptr);
+  // Verify: pending_fetch_hash no longer used (hash comes from result payload)
 
   // Clean up our references
   DESTROY(result.hash, buffer);
@@ -300,7 +296,7 @@ TEST_F(ReadableOffStreamNetworkTest, LocalOnlyDeactivatesOnCacheMiss) {
 // Test: ReadableOffStream with network sends NETWORK_LOCAL_FIND_BLOCK on cache miss
 TEST_F(ReadableOffStreamNetworkTest, NetworkFetchOnCacheMiss) {
   // The stream has a network, so on cache miss it should transition to
-  // OFF_STREAM_AWAITING_NETWORK and set pending_fetch_hash
+  // OFF_STREAM_AWAITING_NETWORK and send NETWORK_LOCAL_FIND_BLOCK
   uint8_t hash_data[] = {0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,0x00,0x11,
                           0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,
                           0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,0x00,0x11,
@@ -334,10 +330,8 @@ TEST_F(ReadableOffStreamNetworkTest, NetworkFetchOnCacheMiss) {
   // Verify: stream should be in AWAITING_NETWORK state
   EXPECT_EQ(stream->state, OFF_STREAM_AWAITING_NETWORK);
 
-  // Verify: pending_fetch_hash should be set (matching the hash from the cache miss)
-  ASSERT_NE(stream->pending_fetch_hash, nullptr);
-  EXPECT_EQ(stream->pending_fetch_hash->size, 32u);
-  EXPECT_EQ(memcmp(stream->pending_fetch_hash->data, hash_data, 32), 0);
+  // Verify: stream should be in AWAITING_NETWORK state (network request sent)
+  // The network's wanted_list deduplicates requests; pending_fetches tracks the blocks
 
   // Verify: stream should NOT be deactivated (waiting for network response)
   EXPECT_EQ(stream->stream.is_deactivated, 0);

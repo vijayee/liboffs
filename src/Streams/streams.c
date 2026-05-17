@@ -291,13 +291,16 @@ void stream_notify(stream_t* stream, stream_event_e event, void* payload, void (
   size_t count = list->count;
   if (count == 0) {
     if (event == error_event) {
-      log_error("No error event handler defined");
       async_error_t* error = (async_error_t*) payload;
-      log_error(error->message);
+      if (error != NULL && error->message != NULL) {
+        log_error("Unhandled stream error: %s", error->message);
+      } else {
+        log_error("Unhandled stream error: (null)");
+      }
       if (payload_destroy != NULL) {
         payload_destroy(payload);
       }
-      abort();
+      return;
     }
     if (payload_destroy != NULL) {
       payload_destroy(payload);
@@ -308,13 +311,16 @@ void stream_notify(stream_t* stream, stream_event_e event, void* payload, void (
   stream_event_handler_list_node_t* current = list->first;
   if ((event == error_event) && (current == NULL)) {
     free(handlers);
-    log_error("No error event handler defined");
     async_error_t* error = (async_error_t*) payload;
-    log_error(error->message);
+    if (error != NULL && error->message != NULL) {
+      log_error("Unhandled stream error: %s", error->message);
+    } else {
+      log_error("Unhandled stream error: (null)");
+    }
     if (payload_destroy != NULL) {
       payload_destroy(payload);
     }
-    abort();
+    return;
   }
   /* Hold a reference to the payload so no handler can free it mid-dispatch */
   if (payload != NULL) {
@@ -377,6 +383,7 @@ void stream_deactivate(stream_t* stream, async_error_t* error) {
 }
 
 void stream_deferred_deref(stream_t* stream) {
+  refcounter_dereference((refcounter_t*)stream);
   scheduler_pool_defer_cleanup(stream->pool, stream, (void (*)(void*))stream->destructor);
 }
 

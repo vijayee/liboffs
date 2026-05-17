@@ -204,17 +204,17 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
       if (result->block == NULL) {
         /* Block not found in cache */
         if (stream->network != NULL) {
-          /* Network-aware: send NETWORK_LOCAL_FIND_BLOCK */
+          /* Network-aware: send NETWORK_LOCAL_FIND_BLOCK for this specific hash.
+           * Use result->hash directly — the network's wanted_list deduplicates. */
           stream->state = OFF_STREAM_AWAITING_NETWORK;
-          stream->pending_fetch_hash = REFERENCE(result->hash, buffer_t);
           network_local_find_block_payload_t* payload = get_clear_memory(sizeof(network_local_find_block_payload_t));
-          payload->hash = stream->pending_fetch_hash;
+          payload->hash = REFERENCE(result->hash, buffer_t);
           payload->reply_to = &stream->stream.actor;
-          message_t msg;
-          msg.type = NETWORK_LOCAL_FIND_BLOCK;
-          msg.payload = payload;
-          msg.payload_destroy = free;
-          actor_send(&stream->network->actor, &msg);
+          message_t net_msg;
+          net_msg.type = NETWORK_LOCAL_FIND_BLOCK;
+          net_msg.payload = payload;
+          net_msg.payload_destroy = network_local_find_block_payload_destroy;
+          actor_send(&stream->network->actor, &net_msg);
           if (result->hash != NULL) {
             DESTROY(result->hash, buffer);
           }
@@ -258,8 +258,12 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
     case NETWORK_FIND_BLOCK_RESULT: {
       network_find_block_result_payload_t* result = (network_find_block_result_payload_t*)msg->payload;
       if (result->found) {
-        /* Block found on network — re-issue cache_get (it should now be in cache) */
-        block_cache_get(stream->bc, stream->pending_fetch_hash, &stream->stream.actor);
+        /* Block found on network — re-issue cache_get with the result's hash.
+         * Find the matching pending_fetch entry and use its hash. */
+        buffer_t* fetch_hash = result->hash;
+        if (fetch_hash != NULL) {
+          block_cache_get(stream->bc, fetch_hash, &stream->stream.actor);
+        }
         stream->state = OFF_STREAM_FETCHING_BLOCKS;
       } else {
         /* Block not found on network — deactivate */
@@ -271,20 +275,12 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
         stream->pending_tuple = NULL;
         stream_deactivate((stream_t*)stream, ERROR("Block not found on network"));
       }
-      if (stream->pending_fetch_hash != NULL) {
-        DESTROY(stream->pending_fetch_hash, buffer);
-        stream->pending_fetch_hash = NULL;
-      }
       break;
     }
     case CLOSE_STREAM: {
       if (stream->pending_tuple != NULL) {
         DESTROY(stream->pending_tuple, tuple);
         stream->pending_tuple = NULL;
-      }
-      if (stream->pending_fetch_hash != NULL) {
-        DESTROY(stream->pending_fetch_hash, buffer);
-        stream->pending_fetch_hash = NULL;
       }
       if (stream->xor_accumulator != NULL) {
         DESTROY(stream->xor_accumulator, buffer);
@@ -329,7 +325,6 @@ readable_off_stream_t* readable_off_stream_create(
   stream->tc = tc;
   stream->ori = ori;
   stream->network = network;
-  stream->pending_fetch_hash = NULL;
   stream->descriptor_pad = descriptor_pad;
   stream->offset_applied = 0;
   stream->state = OFF_STREAM_FETCHING_BLOCKS;
@@ -359,9 +354,6 @@ void readable_off_stream_destroy(readable_off_stream_t* stream) {
     }
     if (stream->pending_tuple != NULL) {
       DESTROY(stream->pending_tuple, tuple);
-    }
-    if (stream->pending_fetch_hash != NULL) {
-      DESTROY(stream->pending_fetch_hash, buffer);
     }
     stream_deinit((stream_t*)stream);
     free(stream);

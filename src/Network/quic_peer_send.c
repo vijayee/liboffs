@@ -16,9 +16,13 @@
 #include <msquic.h>
 #endif
 
-/* SEND_COMPLETE callback context — frees the frame buffer after msquic completes */
+/* SEND_COMPLETE callback context — frees the frame buffer and QUIC_BUFFER
+ * after msquic completes. The QUIC_BUFFER must be heap-allocated because
+ * msquic stores a pointer to it and reads from it asynchronously in the
+ * worker thread. */
 typedef struct {
   uint8_t* frame;
+  QUIC_BUFFER buf;
 } send_complete_context_t;
 
 #ifdef HAS_MSQUIC
@@ -46,7 +50,6 @@ int quic_peer_send(network_t* network, peer_connection_t* peer, cbor_item_t* cbo
     log_error("quic_peer_send: peer has no QUIC stream");
     return -1;
   }
-
   /* Serialize CBOR to bytes */
   unsigned char* cbor_data = NULL;
   size_t cbor_len = 0;
@@ -66,7 +69,10 @@ int quic_peer_send(network_t* network, peer_connection_t* peer, cbor_item_t* cbo
     return -1;
   }
 
-  /* Create the SEND_COMPLETE context to free the frame buffer later */
+  /* Create the SEND_COMPLETE context to free the frame buffer later.
+   * The QUIC_BUFFER is included in the context struct so it remains
+   * heap-allocated until SEND_COMPLETE fires — msquic stores a pointer
+   * to the QUIC_BUFFER and reads from it asynchronously. */
   send_complete_context_t* send_ctx = get_clear_memory(sizeof(send_complete_context_t));
   if (send_ctx == NULL) {
     free(frame);
@@ -74,11 +80,8 @@ int quic_peer_send(network_t* network, peer_connection_t* peer, cbor_item_t* cbo
     return -1;
   }
   send_ctx->frame = frame;
-
-  /* Build QUIC_BUFFER and send */
-  QUIC_BUFFER buf;
-  buf.Buffer = frame;
-  buf.Length = (uint32_t)frame_len;
+  send_ctx->buf.Buffer = frame;
+  send_ctx->buf.Length = (uint32_t)frame_len;
 
   const struct QUIC_API_TABLE* msquic = offs_msquic_open();
   if (msquic == NULL) {
@@ -90,7 +93,7 @@ int quic_peer_send(network_t* network, peer_connection_t* peer, cbor_item_t* cbo
 
   QUIC_STATUS status = msquic->StreamSend(
       (HQUIC)peer->quic_stream,
-      &buf,
+      &send_ctx->buf,
       1,
       QUIC_SEND_FLAG_NONE,
       send_ctx);

@@ -38,7 +38,6 @@ typedef struct {
   tuple_cache_t* tc;
   ori_t* ori;
   network_t* network;               /* NULL = local-only mode */
-  buffer_t* pending_fetch_hash;     /* hash we're fetching from network */
   size_t descriptor_pad;
   size_t sent_bytes;
   size_t offset_remainder;

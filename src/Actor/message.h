@@ -116,6 +116,7 @@ typedef enum message_type_e {
   QUIC_LISTENER_SEND,
   QUIC_LISTENER_OPEN_STREAM,
   QUIC_LISTENER_CLOSE_CONNECTION,
+  QUIC_LISTENER_SEND_SALUTATION,
   RELAY_CLIENT_SEND,
   RELAY_CLIENT_ADDR_REQUEST,
   NETWORK_RELAY_RECEIVED,
@@ -154,6 +155,9 @@ typedef struct {
   buffer_t* hash;       /* block hash to find */
   actor_t*  reply_to;   /* stream actor to notify */
 } network_local_find_block_payload_t;
+
+/* Destroy function for network_local_find_block_payload_t — releases hash reference */
+void network_local_find_block_payload_destroy(void* ptr);
 
 /* Network-to-stream: result of FindBlock */
 typedef struct {

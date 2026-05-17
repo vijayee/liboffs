@@ -217,16 +217,16 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
       if (result->block == NULL) {
         /* Block not found */
         if (desc->network != NULL) {
-          /* Network-aware: send NETWORK_LOCAL_FIND_BLOCK */
+          /* Network-aware: send NETWORK_LOCAL_FIND_BLOCK.
+           * Use result->hash directly — the network's wanted_list deduplicates. */
           desc->state = DESCRIPTOR_AWAITING_NETWORK;
-          desc->pending_fetch_hash = REFERENCE(result->hash, buffer_t);
           network_local_find_block_payload_t* payload = get_clear_memory(sizeof(network_local_find_block_payload_t));
-          payload->hash = desc->pending_fetch_hash;
+          payload->hash = REFERENCE(result->hash, buffer_t);
           payload->reply_to = &desc->stream.actor;
           message_t msg;
           msg.type = NETWORK_LOCAL_FIND_BLOCK;
           msg.payload = payload;
-          msg.payload_destroy = free;
+          msg.payload_destroy = network_local_find_block_payload_destroy;
           actor_send(&desc->network->actor, &msg);
           if (result->hash != NULL) {
             DESTROY(result->hash, buffer);
@@ -261,25 +261,19 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
     case NETWORK_FIND_BLOCK_RESULT: {
       network_find_block_result_payload_t* result = (network_find_block_result_payload_t*)msg->payload;
       if (result->found) {
-        /* Block found on network — re-issue cache_get */
-        block_cache_get(desc->bc, desc->pending_fetch_hash, &desc->stream.actor);
+        /* Block found on network — re-issue cache_get with the result's hash */
+        if (result->hash != NULL) {
+          block_cache_get(desc->bc, result->hash, &desc->stream.actor);
+        }
         desc->state = DESCRIPTOR_FETCHING_BLOCK;
       } else {
         /* Block not found on network — deactivate */
         stream_deactivate((stream_t*)desc, ERROR("Descriptor block not found on network"));
         desc->stream.is_deactivated = 1;
       }
-      if (desc->pending_fetch_hash != NULL) {
-        DESTROY(desc->pending_fetch_hash, buffer);
-        desc->pending_fetch_hash = NULL;
-      }
       break;
     }
     case CLOSE_STREAM: {
-      if (desc->pending_fetch_hash != NULL) {
-        DESTROY(desc->pending_fetch_hash, buffer);
-        desc->pending_fetch_hash = NULL;
-      }
       stream_notify((stream_t*)desc, close_event, NULL, NULL);
       desc->stream.is_deactivated = 1;
       break;
@@ -297,7 +291,6 @@ readable_descriptor_t* readable_descriptor_create(
   desc->bc = bc;
   desc->ori = ori;
   desc->network = network;
-  desc->pending_fetch_hash = NULL;
   desc->block_size = _block_size_for_type(ori->block_type);
   desc->tuple_count = (ori->final_byte / desc->block_size) +
                       ((ori->final_byte % desc->block_size) > 0 ? 1 : 0);
@@ -337,9 +330,6 @@ void readable_descriptor_destroy(readable_descriptor_t* desc) {
     }
     if (desc->expected_hash != NULL) {
       DESTROY(desc->expected_hash, buffer);
-    }
-    if (desc->pending_fetch_hash != NULL) {
-      DESTROY(desc->pending_fetch_hash, buffer);
     }
     stream_deinit((stream_t*)desc);
     free(desc);

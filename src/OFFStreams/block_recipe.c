@@ -294,7 +294,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
             message_t msg;
             msg.type = NETWORK_LOCAL_FIND_BLOCK;
             msg.payload = payload;
-            msg.payload_destroy = free;
+            msg.payload_destroy = network_local_find_block_payload_destroy;
             actor_send(&recipe->network->actor, &msg);
             if (result->hash != NULL) {
               DESTROY(result->hash, buffer);
@@ -363,7 +363,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
           message_t msg;
           msg.type = NETWORK_LOCAL_FIND_BLOCK;
           msg.payload = payload;
-          msg.payload_destroy = free;
+          msg.payload_destroy = network_local_find_block_payload_destroy;
           actor_send(&recipe->network->actor, &msg);
           if (result->hash != NULL) {
             DESTROY(result->hash, buffer);

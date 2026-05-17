@@ -24,7 +24,6 @@ typedef struct {
   block_cache_t* bc;
   ori_t* ori;
   network_t* network;               /* NULL = local-only mode */
-  buffer_t* pending_fetch_hash;     /* hash we're fetching from network */
   size_t block_size;
   size_t cut_point;
   size_t tuple_count;

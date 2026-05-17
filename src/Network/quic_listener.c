@@ -14,7 +14,7 @@ void quic_data_payload_destroy(quic_data_payload_t* payload) {
 
 void quic_connected_payload_destroy(quic_connected_payload_t* payload) {
   if (payload == NULL) return;
-  // connection handle is owned by msquic — do not close it here
+  // connection and stream handles are owned by msquic — do not close them here
   free(payload);
 }
 
@@ -28,8 +28,11 @@ void quic_send_payload_destroy(quic_send_payload_t* payload) {
 
 #include "../Util/allocator.h"
 #include "../Util/log.h"
+#include "wire.h"
+#include "stream_framer.h"
 #include <msquic.h>
 #include <string.h>
+#include <cbor.h>
 
 // Destroy stack for deferred watcher cleanup (mirrors HTTP server pattern)
 typedef struct quic_destroy_node_t {
@@ -71,51 +74,185 @@ static void _destroy_stack_destroy(quic_listener_t* listener) {
   platform_lock_destroy(&listener->destroy_lock);
 }
 
-// Per-stream context carrying the parent connection handle
+// Per-stream context carrying the parent connection handle and a framer
+// for deframing received data into complete messages.
 typedef struct quic_stream_context_t {
   quic_listener_t* listener;
   HQUIC connection;
+  HQUIC persistent_stream;  // non-NULL if this is the persistent bidi stream
   QUIC_ADDR peer_addr;
+  stream_framer_t* framer;
 } quic_stream_context_t;
 
-// QUIC stream callback — receives data and forwards to network actor
+// Send-complete context — frees frame buffer and QUIC_BUFFER after msquic completes the send.
+// The QUIC_BUFFER must be heap-allocated because msquic stores a pointer to it
+// and reads from it asynchronously in the worker thread.
+typedef struct {
+  uint8_t* frame;
+  QUIC_BUFFER buf;
+} send_complete_context_t;
+
+// Process a single deframed message — decode CBOR and dispatch to network actor
+static void _quic_process_deframed(quic_stream_context_t* stream_ctx,
+                                    uint8_t* msg_data, size_t msg_len) {
+  quic_data_payload_t* payload = get_clear_memory(sizeof(quic_data_payload_t));
+  if (payload == NULL) return;
+  payload->length = msg_len;
+  payload->data = msg_data;
+  memcpy(&payload->peer_addr, &stream_ctx->peer_addr, sizeof(QUIC_ADDR));
+  payload->quic_connection = stream_ctx->connection;
+
+  message_t msg;
+  msg.type = NETWORK_QUIC_DATA;
+  msg.payload = payload;
+  msg.payload_destroy = (void (*)(void*))quic_data_payload_destroy;
+  actor_send(&stream_ctx->listener->network->actor, &msg);
+}
+
+// QUIC stream callback — receives framed data, deframes, and forwards to network actor
 static QUIC_STATUS QUIC_API quic_stream_callback(
     HQUIC stream, void* context, QUIC_STREAM_EVENT* event) {
   quic_stream_context_t* stream_ctx = (quic_stream_context_t*)context;
   switch (event->Type) {
     case QUIC_STREAM_EVENT_RECEIVE: {
-      // Forward received data to network protocol actor via actor_send
-      for (uint32_t index = 0; index < event->RECEIVE.BufferCount; index++) {
-        const QUIC_BUFFER* buffer = &event->RECEIVE.Buffers[index];
-        quic_data_payload_t* payload = get_clear_memory(sizeof(quic_data_payload_t));
-        if (payload == NULL) continue;
-        payload->length = buffer->Length;
-        payload->data = get_clear_memory(buffer->Length);
-        if (payload->data == NULL) {
-          free(payload);
-          continue;
+      if (stream_ctx->framer != NULL) {
+        // Feed received bytes into the framer and extract complete frames
+        for (uint32_t index = 0; index < event->RECEIVE.BufferCount; index++) {
+          const QUIC_BUFFER* buffer = &event->RECEIVE.Buffers[index];
+          stream_framer_feed(stream_ctx->framer, buffer->Buffer, buffer->Length);
         }
-        memcpy(payload->data, buffer->Buffer, buffer->Length);
-        memcpy(&payload->peer_addr, &stream_ctx->peer_addr, sizeof(QUIC_ADDR));
-        payload->quic_connection = stream_ctx->connection;
-
-        message_t msg;
-        msg.type = NETWORK_QUIC_DATA;
-        msg.payload = payload;
-        msg.payload_destroy = (void (*)(void*))quic_data_payload_destroy;
-        actor_send(&stream_ctx->listener->network->actor, &msg);
+        size_t msg_len = 0;
+        uint8_t* msg_data = NULL;
+        while ((msg_data = stream_framer_next(stream_ctx->framer, &msg_len)) != NULL) {
+          _quic_process_deframed(stream_ctx, msg_data, msg_len);
+        }
+      } else {
+        // No framer (shouldn't happen) — forward raw data as fallback
+        for (uint32_t index = 0; index < event->RECEIVE.BufferCount; index++) {
+          const QUIC_BUFFER* buffer = &event->RECEIVE.Buffers[index];
+          uint8_t* copy = get_clear_memory(buffer->Length);
+          if (copy == NULL) continue;
+          memcpy(copy, buffer->Buffer, buffer->Length);
+          _quic_process_deframed(stream_ctx, copy, buffer->Length);
+        }
       }
       break;
     }
-    case QUIC_STREAM_EVENT_SEND_COMPLETE:
+    case QUIC_STREAM_EVENT_SEND_COMPLETE: {
+      send_complete_context_t* send_ctx =
+          (send_complete_context_t*)event->SEND_COMPLETE.ClientContext;
+      if (send_ctx != NULL) {
+        free(send_ctx->frame);
+        free(send_ctx);
+      }
       break;
+    }
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
+      if (stream_ctx->framer != NULL) {
+        stream_framer_destroy(stream_ctx->framer);
+        stream_ctx->framer = NULL;
+      }
       free(stream_ctx);
       break;
     default:
       break;
   }
   return QUIC_STATUS_SUCCESS;
+}
+
+// Build and send a salutation frame on an already-opened stream
+static void _send_salutation_on_stream(quic_listener_t* listener, HQUIC stream) {
+  authority_t* authority = listener->network->authority;
+  if (authority == NULL || authority->public_key == NULL) return;
+
+  wire_salutation_t salut;
+  memset(&salut, 0, sizeof(salut));
+  memcpy(&salut.sender_id, &authority->local_id, sizeof(node_id_t));
+  salut.public_key = authority->public_key;
+  salut.public_key_len = authority->public_key_len;
+
+  cbor_item_t* cbor = wire_salutation_encode(&salut);
+  if (cbor == NULL) return;
+
+  unsigned char* cbor_data = NULL;
+  size_t cbor_len = 0;
+  size_t serialized = cbor_serialize_alloc(cbor, &cbor_data, &cbor_len);
+  cbor_decref(&cbor);
+  if (cbor_data == NULL || serialized == 0) return;
+
+  size_t frame_len = 0;
+  uint8_t* frame = stream_frame_encode(cbor_data, cbor_len, &frame_len);
+  free(cbor_data);
+  if (frame == NULL) return;
+
+  send_complete_context_t* send_ctx =
+      get_clear_memory(sizeof(send_complete_context_t));
+  if (send_ctx == NULL) {
+    free(frame);
+    return;
+  }
+  send_ctx->frame = frame;
+  send_ctx->buf.Buffer = frame;
+  send_ctx->buf.Length = (uint32_t)frame_len;
+  QUIC_STATUS status = listener->msquic->StreamSend(
+      stream, &send_ctx->buf, 1, QUIC_SEND_FLAG_NONE, send_ctx);
+  if (QUIC_FAILED(status)) {
+    log_error("quic_listener: salutation StreamSend failed: 0x%x", status);
+    free(frame);
+    free(send_ctx);
+  }
+}
+
+// Open a persistent bidirectional stream for ongoing data exchange.
+// The salutation is sent via a deferred actor message to avoid calling
+// StreamSend in the same callback as StreamStart (which crashes msquic).
+static HQUIC _open_persistent_stream(quic_listener_t* listener, HQUIC connection,
+                                      const QUIC_ADDR* peer_addr) {
+  // Allocate context before StreamOpen so we can pass it directly as the callback context
+  quic_stream_context_t* stream_ctx = get_clear_memory(sizeof(quic_stream_context_t));
+  if (stream_ctx == NULL) return NULL;
+  stream_ctx->listener = listener;
+  stream_ctx->connection = connection;
+  memcpy(&stream_ctx->peer_addr, peer_addr, sizeof(QUIC_ADDR));
+  stream_ctx->framer = stream_framer_create();
+
+  HQUIC stream = NULL;
+  QUIC_STATUS status = listener->msquic->StreamOpen(
+      connection, QUIC_STREAM_OPEN_FLAG_NONE,
+      quic_stream_callback, stream_ctx, &stream);
+  if (QUIC_FAILED(status) || stream == NULL) {
+    log_error("quic_listener: persistent StreamOpen failed: 0x%x", status);
+    stream_framer_destroy(stream_ctx->framer);
+    free(stream_ctx);
+    return NULL;
+  }
+
+  stream_ctx->persistent_stream = stream;
+
+  status = listener->msquic->StreamStart(stream, QUIC_STREAM_START_FLAG_NONE);
+  if (QUIC_FAILED(status)) {
+    log_error("quic_listener: persistent StreamStart failed: 0x%x", status);
+    // stream_ctx will be freed in the SHUTDOWN_COMPLETE callback
+    listener->msquic->StreamClose(stream);
+    return NULL;
+  }
+
+  // Defer salutation send to next actor dispatch — msquic needs time
+  // to fully initialize the stream's internal send buffer before
+  // StreamSend can be called safely.
+  quic_salutation_payload_t* salut_payload =
+      get_clear_memory(sizeof(quic_salutation_payload_t));
+  if (salut_payload != NULL) {
+    salut_payload->stream = stream;
+    message_t salut_msg;
+    memset(&salut_msg, 0, sizeof(salut_msg));
+    salut_msg.type = QUIC_LISTENER_SEND_SALUTATION;
+    salut_msg.payload = salut_payload;
+    salut_msg.payload_destroy = free;
+    actor_send(&listener->actor, &salut_msg);
+  }
+
+  return stream;
 }
 
 // QUIC connection callback — handles new connections
@@ -133,10 +270,15 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
           &peer_addr_len,
           &peer_addr);
 
-      // Build payload with connection handle and peer address
+      // Open a persistent bidirectional stream — salutation is sent as
+      // the first framed message on this same stream
+      HQUIC persistent_stream = _open_persistent_stream(listener, connection, &peer_addr);
+
+      // Build payload with connection handle, persistent stream handle, and peer address
       quic_connected_payload_t* payload = get_clear_memory(sizeof(quic_connected_payload_t));
       if (payload != NULL) {
         payload->connection = connection;
+        payload->stream = persistent_stream;
         memcpy(&payload->peer_addr, &peer_addr, sizeof(peer_addr));
       }
 
@@ -152,6 +294,7 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
       quic_connected_payload_t* payload = get_clear_memory(sizeof(quic_connected_payload_t));
       if (payload != NULL) {
         payload->connection = connection;
+        payload->stream = NULL;
         memset(&payload->peer_addr, 0, sizeof(payload->peer_addr));
       }
 
@@ -175,6 +318,8 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
       uint32_t addr_len = sizeof(stream_ctx->peer_addr);
       listener->msquic->GetParam(connection, QUIC_PARAM_CONN_REMOTE_ADDRESS,
                                   &addr_len, &stream_ctx->peer_addr);
+      // Each peer-started stream gets its own framer for deframing
+      stream_ctx->framer = stream_framer_create();
       // Accept the peer's stream, set our callback with stream context
       listener->msquic->SetCallbackHandler(
           event->PEER_STREAM_STARTED.Stream,
@@ -396,58 +541,52 @@ void quic_listener_stop(quic_listener_t* listener) {
   }
 }
 
+int quic_listener_connect(quic_listener_t* listener, const char* host, uint16_t port) {
+  if (listener == NULL || listener->msquic == NULL) return -1;
+  if (listener->registration == NULL || listener->configuration == NULL) return -1;
+
+  QUIC_STATUS status;
+
+  // Open a client connection — same callback handles CONNECTED/SHUTDOWN/PEER_STREAM_STARTED
+  HQUIC connection = NULL;
+  status = listener->msquic->ConnectionOpen(
+      listener->registration,
+      quic_connection_callback,
+      listener,
+      &connection);
+  if (QUIC_FAILED(status)) {
+    log_error("quic_listener: ConnectionOpen failed: 0x%x", status);
+    return -1;
+  }
+
+  // Set the configuration
+  listener->msquic->ConnectionSetConfiguration(connection, listener->configuration);
+
+  // Start the connection to the remote peer
+  status = listener->msquic->ConnectionStart(
+      connection,
+      listener->configuration,
+      QUIC_ADDRESS_FAMILY_INET,
+      host != NULL ? host : "127.0.0.1",
+      port);
+  if (QUIC_FAILED(status)) {
+    log_error("quic_listener: ConnectionStart failed: 0x%x", status);
+    listener->msquic->ConnectionClose(connection);
+    return -1;
+  }
+
+  return 0;
+}
+
 void quic_listener_dispatch(void* state, message_t* msg) {
   quic_listener_t* listener = (quic_listener_t*)state;
   if (msg == NULL) return;
 
   switch (msg->type) {
-    case QUIC_LISTENER_SEND: {
-      quic_send_payload_t* payload = (quic_send_payload_t*)msg->payload;
-      if (payload == NULL) break;
-
-      // Look up the peer connection by node_id
-      peer_connection_t* peer = connection_manager_lookup(
-          &listener->network->conn_mgr, &payload->dest);
-      if (peer == NULL) {
-        log_error("QUIC_LISTENER_SEND: no peer for node_id");
-        break;
-      }
-
-      // Stream send requires peer->quic_stream (added in Task 5)
-      (void)peer;
-      log_error("QUIC_LISTENER_SEND: stream send not yet implemented");
-      break;
-    }
-    case QUIC_LISTENER_OPEN_STREAM: {
-      quic_send_payload_t* payload = (quic_send_payload_t*)msg->payload;
-      if (payload == NULL) break;
-
-      peer_connection_t* peer = connection_manager_lookup(
-          &listener->network->conn_mgr, &payload->dest);
-      if (peer == NULL) {
-        log_error("QUIC_LISTENER_OPEN_STREAM: no peer for node_id");
-        break;
-      }
-
-      // Stream open requires peer->quic_connection (added in Task 5)
-      (void)peer;
-      log_error("QUIC_LISTENER_OPEN_STREAM: stream open not yet implemented");
-      break;
-    }
-    case QUIC_LISTENER_CLOSE_CONNECTION: {
-      quic_send_payload_t* payload = (quic_send_payload_t*)msg->payload;
-      if (payload == NULL) break;
-
-      peer_connection_t* peer = connection_manager_lookup(
-          &listener->network->conn_mgr, &payload->dest);
-      if (peer == NULL) {
-        log_error("QUIC_LISTENER_CLOSE_CONNECTION: no peer for node_id");
-        break;
-      }
-
-      // Connection close requires peer->quic_connection (added in Task 5)
-      (void)peer;
-      log_error("QUIC_LISTENER_CLOSE_CONNECTION: close not yet implemented");
+    case QUIC_LISTENER_SEND_SALUTATION: {
+      quic_salutation_payload_t* payload = (quic_salutation_payload_t*)msg->payload;
+      if (payload == NULL || payload->stream == NULL) break;
+      _send_salutation_on_stream(listener, (HQUIC)payload->stream);
       break;
     }
     default:
@@ -478,6 +617,13 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
 
 void quic_listener_stop(quic_listener_t* listener) {
   (void)listener;
+}
+
+int quic_listener_connect(quic_listener_t* listener, const char* host, uint16_t port) {
+  (void)listener;
+  (void)host;
+  (void)port;
+  return -1;
 }
 
 void quic_listener_dispatch(void* state, message_t* msg) {

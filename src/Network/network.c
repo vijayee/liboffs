@@ -42,6 +42,18 @@ static void network_cache_put_payload_destroy(void* ptr) {
   free(payload);
 }
 
+// --- Local FindBlock payload destroy ---
+// Frees the heap-allocated payload and releases the hash buffer reference.
+
+void network_local_find_block_payload_destroy(void* ptr) {
+  if (ptr == NULL) return;
+  network_local_find_block_payload_t* payload = (network_local_find_block_payload_t*)ptr;
+  if (payload->hash != NULL) {
+    buffer_destroy(payload->hash);
+  }
+  free(payload);
+}
+
 // --- FindBlock result payload destroy ---
 // Frees the heap-allocated result payload and releases the hash buffer reference.
 
@@ -137,6 +149,14 @@ void network_destroy(network_t* network) {
     nat_detect_destroy(network->nat_detect);
     network->nat_detect = NULL;
   }
+  // Free any remaining pending QUIC connections (never saluted)
+  pending_quic_t* pending = network->pending_connections;
+  while (pending != NULL) {
+    pending_quic_t* next = pending->next;
+    free(pending);
+    pending = next;
+  }
+  network->pending_connections = NULL;
 #ifdef HAS_MSQUIC
   if (network->msquic != NULL) {
     offs_msquic_close();
@@ -183,80 +203,126 @@ int network_connect_relay(network_t* network, const char* host, uint16_t port) {
   return 0;
 }
 
-// Learn peer identity from sender_id in wire messages.
-// When a QUIC connection is established, the peer is added with a zeroed node_id.
-// The first wire message from that peer carries their identity, which we use
-// to update the peer's remote_node_id so subsequent lookups succeed.
-static void _network_learn_quic_peer(network_t* network, message_t* dispatch_msg,
-                                      void* quic_connection) {
-  if (quic_connection == NULL) return;
+int network_connect_peer(network_t* network, const char* host, uint16_t port) {
+  if (network == NULL || host == NULL) return -1;
 
-  node_id_t sender_id;
-  node_id_clear(&sender_id);
+#ifdef HAS_MSQUIC
+  quic_listener_t* listener = network->quic_listener;
+  if (listener == NULL) {
+    log_error("network_connect_peer: no QUIC listener available");
+    return -1;
+  }
+  return quic_listener_connect(listener, host, port);
+#else
+  (void)port;
+  log_error("network_connect_peer: QUIC not available (HAS_MSQUIC not defined)");
+  return -1;
+#endif
+}
 
-  switch (dispatch_msg->type) {
-    case WIRE_PING:
-      memcpy(&sender_id, &((wire_ping_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
-      break;
-    case WIRE_PING_RESPONSE:
-      memcpy(&sender_id, &((wire_ping_response_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
-      break;
-    case WIRE_PING_CAPACITY:
-      memcpy(&sender_id, &((wire_ping_capacity_t*)dispatch_msg->payload)->source, sizeof(node_id_t));
-      break;
-    case WIRE_PING_CAPACITY_RESPONSE:
-      memcpy(&sender_id, &((wire_ping_capacity_response_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
-      break;
-    case WIRE_PING_BLOCK:
-      memcpy(&sender_id, &((wire_ping_block_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
-      break;
-    case WIRE_PING_BLOCK_RESPONSE:
-      memcpy(&sender_id, &((wire_ping_block_response_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
-      break;
-    case WIRE_FIND_BLOCK:
-      memcpy(&sender_id, &((wire_find_block_t*)dispatch_msg->payload)->original_source, sizeof(node_id_t));
-      break;
-    case WIRE_FIND_NODE:
-      memcpy(&sender_id, &((wire_find_node_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
-      break;
-    case WIRE_FIND_NODE_RESPONSE:
-      memcpy(&sender_id, &((wire_find_node_response_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
-      break;
-    case WIRE_STORE_BLOCK: {
-      wire_store_block_t* store = (wire_store_block_t*)dispatch_msg->payload;
-      if (store->path_len > 0) {
-        memcpy(&sender_id, &store->path[0], sizeof(node_id_t));
-      }
-      break;
+// --- Pending QUIC connection helpers ---
+
+static pending_quic_t* pending_quic_find(network_t* network, void* quic_connection);
+
+static void pending_quic_add(network_t* network, void* quic_connection,
+                             void* quic_stream,
+                             const struct sockaddr_storage* peer_addr) {
+  // Avoid duplicates
+  if (pending_quic_find(network, quic_connection) != NULL) return;
+  pending_quic_t* entry = get_clear_memory(sizeof(pending_quic_t));
+  if (entry == NULL) return;
+  entry->quic_connection = quic_connection;
+  entry->quic_stream = quic_stream;
+  if (peer_addr != NULL) {
+    memcpy(&entry->peer_addr, peer_addr, sizeof(struct sockaddr_storage));
+  }
+  entry->next = network->pending_connections;
+  network->pending_connections = entry;
+}
+
+static pending_quic_t* pending_quic_find(network_t* network, void* quic_connection) {
+  pending_quic_t* current = network->pending_connections;
+  while (current != NULL) {
+    if (current->quic_connection == quic_connection) return current;
+    current = current->next;
+  }
+  return NULL;
+}
+
+static pending_quic_t* pending_quic_remove(network_t* network, void* quic_connection) {
+  pending_quic_t** indirect = &network->pending_connections;
+  while (*indirect != NULL) {
+    if ((*indirect)->quic_connection == quic_connection) {
+      pending_quic_t* found = *indirect;
+      *indirect = found->next;
+      return found;
     }
-    case WIRE_SEEKING_BLOCKS:
-      memcpy(&sender_id, &((wire_seeking_blocks_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
-      break;
-    case WIRE_SEEKING_BLOCKS_RESPONSE:
-      memcpy(&sender_id, &((wire_seeking_blocks_response_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
-      break;
-    case WIRE_RANK_BLOCK:
-      memcpy(&sender_id, &((wire_rank_block_t*)dispatch_msg->payload)->origin, sizeof(node_id_t));
-      break;
-    case WIRE_RECALL_BLOCK:
-      memcpy(&sender_id, &((wire_recall_block_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
-      break;
-    case WIRE_RECALL_ACCEPT:
-      memcpy(&sender_id, &((wire_recall_accept_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
-      break;
-    case WIRE_RECALL_DECLINE:
-      memcpy(&sender_id, &((wire_recall_decline_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
-      break;
-    case WIRE_RATE_LIMITED:
-      memcpy(&sender_id, &((wire_rate_limited_t*)dispatch_msg->payload)->sender_id, sizeof(node_id_t));
-      break;
-    default:
-      return;
+    indirect = &(*indirect)->next;
+  }
+  return NULL;
+}
+
+// --- Salutation handler ---
+
+static void network_handle_salutation(network_t* network, message_t* msg,
+                                       void* quic_connection) {
+  wire_salutation_t* salut = (wire_salutation_t*)msg->payload;
+  if (salut == NULL) return;
+
+  // Verify: BLAKE3(public_key) must match sender_id.hash
+  if (salut->public_key == NULL || salut->public_key_len == 0) {
+    log_error("salutation: missing public_key, cannot verify identity");
+    wire_salutation_destroy(salut);
+    return;
   }
 
-  if (node_id_is_null(&sender_id)) return;
+  node_id_t computed_id;
+  if (node_id_from_public_key(salut->public_key, salut->public_key_len,
+                              &computed_id) != 0) {
+    log_error("salutation: failed to derive node_id from public_key");
+    wire_salutation_destroy(salut);
+    return;
+  }
+  if (!node_id_equals(&computed_id, &salut->sender_id)) {
+    log_error("salutation: public_key hash does not match sender_id");
+    wire_salutation_destroy(salut);
+    return;
+  }
 
-  connection_manager_learn_identity(&network->conn_mgr, &sender_id, quic_connection);
+  // Find the pending QUIC connection
+  pending_quic_t* pending = pending_quic_remove(network, quic_connection);
+  if (pending == NULL) {
+    log_error("salutation: no pending connection for quic handle");
+    wire_salutation_destroy(salut);
+    return;
+  }
+
+  // Add peer to connection manager with verified identity
+  peer_connection_t* peer = connection_manager_add(
+      &network->conn_mgr, &salut->sender_id, &pending->peer_addr, network->pool);
+
+  if (peer != NULL) {
+#ifdef HAS_MSQUIC
+    peer->quic_connection = quic_connection;
+    peer->quic_stream = pending->quic_stream;
+#endif
+    conn_state_on_direct_connected(peer);
+
+    // Insert the authenticated peer into the ring table so find_block_execute
+    // can route FindBlock requests to it. Without this, the ring table only
+    // gets populated via gossip exchanges which may not have run yet.
+    net_node_t* node = net_node_create(&salut->sender_id, 0, 0);
+    if (node != NULL) {
+      node->weight = FIND_BLOCK_MIN_WEIGHT;
+      node->last_gossip_time = (uint64_t)time(NULL) * 1000;
+      net_node_record_success(node);
+      ring_set_insert(network->rings, node, 0);
+    }
+  }
+
+  free(pending);
+
+  wire_salutation_destroy(salut);
 }
 
 // --- Ping handler ---
@@ -525,6 +591,53 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
   wire_find_block_t* find = (wire_find_block_t*)msg->payload;
   if (find == NULL) return;
 
+  // Check local block cache first — if we have the block, respond immediately
+  if (network->block_cache != NULL && network->block_cache->index != NULL) {
+    buffer_t* hash_buf = buffer_create_from_pointer_copy(find->block_hash, 32);
+    if (hash_buf != NULL) {
+      index_entry_t* entry = index_peek(network->block_cache->index, hash_buf);
+      if (entry != NULL) {
+        // Block found locally — send FOUND response back along the path
+        const node_id_t* reply_to = &find->original_source;
+        if (find->path_len > 0) {
+          reply_to = &find->path[find->path_len - 1];
+        }
+        peer_connection_t* reply_peer = connection_manager_lookup(&network->conn_mgr, reply_to);
+        if (reply_peer != NULL) {
+          wire_find_block_response_t found_resp;
+          memset(&found_resp, 0, sizeof(found_resp));
+          found_resp.message_id = find->message_id;
+          memcpy(found_resp.block_hash, find->block_hash, 32);
+          found_resp.found = 1;
+          memcpy(&found_resp.holder, &network->authority->local_id, sizeof(node_id_t));
+          found_resp.fib = entry->counter.fib;
+          memcpy(found_resp.path, find->path, find->path_len * sizeof(node_id_t));
+          found_resp.path_len = find->path_len;
+          found_resp.latency_ms = 0;
+
+          /* Include block data from LRU cache so the requester can store it */
+          block_t* block = block_lru_cache_get(network->block_cache->lru, hash_buf);
+          if (block != NULL) {
+            found_resp.block_data = block->data->data;
+            found_resp.block_data_len = block->data->size;
+            found_resp.block_fib = entry->counter.fib;
+          }
+
+          cbor_item_t* cbor = wire_find_block_response_encode(&found_resp);
+          conn_state_send(network, reply_peer, cbor);
+          cbor_decref(&cbor);
+
+          if (block != NULL) {
+            DESTROY(block, block);
+          }
+        }
+        buffer_destroy(hash_buf);
+        return;
+      }
+      buffer_destroy(hash_buf);
+    }
+  }
+
   // Build find_block_state from the wire message
   find_block_state_t state;
   memset(&state, 0, sizeof(state));
@@ -555,8 +668,7 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
 
   switch (result) {
     case FIND_BLOCK_FOUND:
-      // Block is local — caller should have checked block_cache before dispatching
-      // This shouldn't happen; if it does, treat as NOT_FOUND
+      // Already handled above via cache check
       break;
 
     case FIND_BLOCK_NOT_FOUND:
@@ -695,6 +807,31 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
       peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &response->path[index + 1]);
       if (peer != NULL) {
         peer_eabf_subscribe(peer, response->block_hash, 32);
+      }
+    }
+
+    // If the response includes block data, insert it into the local cache
+    // before notifying requesters (so block_cache_get will find it)
+    if (response->block_data != NULL && response->block_data_len > 0 && network->block_cache != NULL) {
+      buffer_t* data_buf = buffer_create_from_pointer_copy(response->block_data, response->block_data_len);
+      buffer_t* hash_buf = buffer_create_from_pointer_copy(response->block_hash, 32);
+      block_t* block = NULL;
+      if (data_buf != NULL && hash_buf != NULL) {
+        block_size_e block_type = network->block_cache->type;
+        if (response->block_data_len == mega) block_type = mega;
+        else if (response->block_data_len == standard) block_type = standard;
+        else if (response->block_data_len == mini) block_type = mini;
+        else if (response->block_data_len == nano) block_type = nano;
+        block = block_create_existing_data_hash_by_type(data_buf, hash_buf, block_type);
+      }
+      if (block != NULL) {
+        block_cache_put(network->block_cache, block, response->block_fib, NULL);
+        DESTROY(block, block);
+        DESTROY(data_buf, buffer);
+        DESTROY(hash_buf, buffer);
+      } else {
+        if (data_buf != NULL) DESTROY(data_buf, buffer);
+        if (hash_buf != NULL) DESTROY(hash_buf, buffer);
       }
     }
 
@@ -1660,147 +1797,218 @@ void network_dispatch(void* state, message_t* msg) {
       break;
     case NETWORK_QUIC_DATA: {
       quic_data_payload_t* quic_data = (quic_data_payload_t*)msg->payload;
-      if (quic_data == NULL || quic_data->data == NULL || quic_data->length == 0) break;
+      if (quic_data == NULL) break;
+      if (quic_data->data == NULL || quic_data->length == 0) break;
+      if (quic_data->length > 2097152) { /* 2MB — accommodates mega blocks + CBOR overhead */
+        break;
+      }
       // Decode CBOR wire message and re-dispatch
-      cbor_item_t* wire_msg = cbor_load(quic_data->data, quic_data->length, NULL);
-      if (wire_msg != NULL && cbor_isa_array(wire_msg) && cbor_array_size(wire_msg) >= 1) {
-        uint8_t type = wire_get_type(wire_msg);
-        message_t dispatch_msg;
-        memset(&dispatch_msg, 0, sizeof(dispatch_msg));
-        dispatch_msg.type = type;
-        dispatch_msg.payload_destroy = free;
-        switch (type) {
-          case WIRE_PING: {
-            wire_ping_t* payload = get_clear_memory(sizeof(wire_ping_t));
-            if (wire_ping_decode(wire_msg, payload) == 0) {
-              dispatch_msg.payload = payload;
-              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
-              network_handle_ping(network, &dispatch_msg);
-            } else {
-              free(payload);
-            }
-            break;
+      struct cbor_load_result load_result;
+      cbor_item_t* wire_msg = cbor_load(quic_data->data, quic_data->length, &load_result);
+      if (wire_msg == NULL) {
+        log_error("QUIC_DATA: cbor_load failed, error=%d read=%zu",
+                  load_result.error.code, load_result.read);
+        break;
+      }
+      if (!cbor_isa_array(wire_msg) || cbor_array_size(wire_msg) < 1) {
+        log_error("QUIC_DATA: not a CBOR array, type=%d size=%zu",
+                  cbor_typeof(wire_msg), cbor_refcount(wire_msg));
+        cbor_decref(&wire_msg);
+        break;
+      }
+      uint8_t type = wire_get_type(wire_msg);
+      // Drop non-salutation messages from unauthenticated QUIC connections
+      if (type != WIRE_SALUTATION &&
+          pending_quic_find(network, quic_data->quic_connection) != NULL) {
+        cbor_decref(&wire_msg);
+        break;
+      }
+      message_t dispatch_msg;
+      memset(&dispatch_msg, 0, sizeof(dispatch_msg));
+      dispatch_msg.type = type;
+      dispatch_msg.payload_destroy = free;
+      switch (type) {
+        case WIRE_SALUTATION: {
+          wire_salutation_t* payload = get_clear_memory(sizeof(wire_salutation_t));
+          if (wire_salutation_decode(wire_msg, payload) == 0) {
+            dispatch_msg.payload = payload;
+            dispatch_msg.payload_destroy = (void (*)(void*))wire_salutation_destroy;
+            network_handle_salutation(network, &dispatch_msg, quic_data->quic_connection);
+          } else {
+            wire_salutation_destroy(payload);
           }
-          case WIRE_PING_CAPACITY: {
-            wire_ping_capacity_t* payload = get_clear_memory(sizeof(wire_ping_capacity_t));
-            if (wire_ping_capacity_decode(wire_msg, payload) == 0) {
-              dispatch_msg.payload = payload;
-              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
-              network_handle_ping_capacity(network, &dispatch_msg);
-            } else {
-              free(payload);
-            }
-            break;
+          break;
+        }
+        case WIRE_PING: {
+          wire_ping_t* payload = get_clear_memory(sizeof(wire_ping_t));
+          if (wire_ping_decode(wire_msg, payload) == 0) {
+            dispatch_msg.payload = payload;
+            network_handle_ping(network, &dispatch_msg);
+          } else {
+            free(payload);
           }
-          case WIRE_PING_BLOCK: {
-            wire_ping_block_t* payload = get_clear_memory(sizeof(wire_ping_block_t));
-            if (wire_ping_block_decode(wire_msg, payload) == 0) {
-              dispatch_msg.payload = payload;
-              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
-              network_handle_ping_block(network, &dispatch_msg);
-            } else {
-              free(payload);
-            }
-            break;
+          break;
+        }
+        case WIRE_PING_CAPACITY: {
+          wire_ping_capacity_t* payload = get_clear_memory(sizeof(wire_ping_capacity_t));
+          if (wire_ping_capacity_decode(wire_msg, payload) == 0) {
+            dispatch_msg.payload = payload;
+            network_handle_ping_capacity(network, &dispatch_msg);
+          } else {
+            free(payload);
           }
-          case WIRE_FIND_BLOCK: {
-            wire_find_block_t* payload = get_clear_memory(sizeof(wire_find_block_t));
-            if (wire_find_block_decode(wire_msg, payload) == 0) {
-              dispatch_msg.payload = payload;
-              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
-              network_handle_find_block(network, &dispatch_msg);
-            } else {
-              free(payload);
-            }
-            break;
+          break;
+        }
+        case WIRE_PING_BLOCK: {
+          wire_ping_block_t* payload = get_clear_memory(sizeof(wire_ping_block_t));
+          if (wire_ping_block_decode(wire_msg, payload) == 0) {
+            dispatch_msg.payload = payload;
+            network_handle_ping_block(network, &dispatch_msg);
+          } else {
+            free(payload);
           }
-          case WIRE_FIND_NODE: {
-            wire_find_node_t* payload = get_clear_memory(sizeof(wire_find_node_t));
-            if (wire_find_node_decode(wire_msg, payload) == 0) {
-              dispatch_msg.payload = payload;
-              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
-              network_handle_find_node(network, &dispatch_msg);
-            } else {
-              free(payload);
-            }
-            break;
+          break;
+        }
+        case WIRE_FIND_BLOCK: {
+          wire_find_block_t* payload = get_clear_memory(sizeof(wire_find_block_t));
+          if (wire_find_block_decode(wire_msg, payload) == 0) {
+            dispatch_msg.payload = payload;
+            network_handle_find_block(network, &dispatch_msg);
+          } else {
+            free(payload);
           }
-          case WIRE_STORE_BLOCK: {
-            wire_store_block_t* payload = get_clear_memory(sizeof(wire_store_block_t));
-            if (wire_store_block_decode(wire_msg, payload) == 0) {
-              dispatch_msg.payload = payload;
-              dispatch_msg.payload_destroy = (void (*)(void*))wire_store_block_destroy;
-              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
-              network_handle_store_block(network, &dispatch_msg);
-            } else {
-              wire_store_block_destroy(payload);
-            }
-            break;
+          break;
+        }
+        case WIRE_FIND_NODE: {
+          wire_find_node_t* payload = get_clear_memory(sizeof(wire_find_node_t));
+          if (wire_find_node_decode(wire_msg, payload) == 0) {
+            dispatch_msg.payload = payload;
+            network_handle_find_node(network, &dispatch_msg);
+          } else {
+            free(payload);
           }
-          case WIRE_SEEKING_BLOCKS: {
-            wire_seeking_blocks_t* payload = get_clear_memory(sizeof(wire_seeking_blocks_t));
-            if (wire_seeking_blocks_decode(wire_msg, payload) == 0) {
-              dispatch_msg.payload = payload;
-              dispatch_msg.payload_destroy = (void (*)(void*))wire_seeking_blocks_destroy;
-              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
-              network_handle_seeking_blocks(network, &dispatch_msg);
-            } else {
-              wire_seeking_blocks_destroy(payload);
-            }
-            break;
+          break;
+        }
+        case WIRE_STORE_BLOCK: {
+          wire_store_block_t* payload = get_clear_memory(sizeof(wire_store_block_t));
+          if (wire_store_block_decode(wire_msg, payload) == 0) {
+            dispatch_msg.payload = payload;
+            dispatch_msg.payload_destroy = (void (*)(void*))wire_store_block_destroy;
+            network_handle_store_block(network, &dispatch_msg);
+          } else {
+            wire_store_block_destroy(payload);
           }
-          case WIRE_RANK_BLOCK: {
-            wire_rank_block_t* payload = get_clear_memory(sizeof(wire_rank_block_t));
-            if (wire_rank_block_decode(wire_msg, payload) == 0) {
-              dispatch_msg.payload = payload;
-              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
-              network_handle_rank_block(network, &dispatch_msg);
-            } else {
-              free(payload);
-            }
-            break;
+          break;
+        }
+        case WIRE_SEEKING_BLOCKS: {
+          wire_seeking_blocks_t* payload = get_clear_memory(sizeof(wire_seeking_blocks_t));
+          if (wire_seeking_blocks_decode(wire_msg, payload) == 0) {
+            dispatch_msg.payload = payload;
+            dispatch_msg.payload_destroy = (void (*)(void*))wire_seeking_blocks_destroy;
+            network_handle_seeking_blocks(network, &dispatch_msg);
+          } else {
+            wire_seeking_blocks_destroy(payload);
           }
-          case WIRE_RECALL_BLOCK: {
+          break;
+        }
+        case WIRE_RANK_BLOCK: {
+          wire_rank_block_t* payload = get_clear_memory(sizeof(wire_rank_block_t));
+          if (wire_rank_block_decode(wire_msg, payload) == 0) {
+            dispatch_msg.payload = payload;
+            network_handle_rank_block(network, &dispatch_msg);
+          } else {
+            free(payload);
+          }
+          break;
+        }
+        case WIRE_RECALL_BLOCK: {
             wire_recall_block_t* payload = get_clear_memory(sizeof(wire_recall_block_t));
             if (wire_recall_block_decode(wire_msg, payload) == 0) {
               dispatch_msg.payload = payload;
-              _network_learn_quic_peer(network, &dispatch_msg, quic_data->quic_connection);
               network_handle_recall_block(network, &dispatch_msg);
             } else {
               free(payload);
             }
             break;
           }
-          default:
-            // Response types are handled by their respective handlers when
-            // dispatched by the QUIC connection layer with the correct message_type
-            break;
+        case WIRE_PING_RESPONSE: {
+          wire_ping_response_t* payload = get_clear_memory(sizeof(wire_ping_response_t));
+          if (wire_ping_response_decode(wire_msg, payload) == 0) {
+            dispatch_msg.payload = payload;
+            network_handle_ping_response(network, &dispatch_msg);
+          } else {
+            free(payload);
+          }
+          break;
         }
-        cbor_decref(&wire_msg);
+        case WIRE_PING_CAPACITY_RESPONSE: {
+          wire_ping_capacity_response_t* payload = get_clear_memory(sizeof(wire_ping_capacity_response_t));
+          if (wire_ping_capacity_response_decode(wire_msg, payload) == 0) {
+            dispatch_msg.payload = payload;
+            network_handle_ping_capacity_response(network, &dispatch_msg);
+          } else {
+            free(payload);
+          }
+          break;
+        }
+        case WIRE_PING_BLOCK_RESPONSE: {
+          wire_ping_block_response_t* payload = get_clear_memory(sizeof(wire_ping_block_response_t));
+          if (wire_ping_block_response_decode(wire_msg, payload) == 0) {
+            dispatch_msg.payload = payload;
+            network_handle_ping_block_response(network, &dispatch_msg);
+          } else {
+            free(payload);
+          }
+          break;
+        }
+        case WIRE_FIND_BLOCK_RESPONSE: {
+          wire_find_block_response_t* payload = get_clear_memory(sizeof(wire_find_block_response_t));
+          if (wire_find_block_response_decode(wire_msg, payload) == 0) {
+            dispatch_msg.payload = payload;
+            network_handle_find_block_response(network, &dispatch_msg);
+          } else {
+            free(payload);
+          }
+          break;
+        }
+        case WIRE_FIND_NODE_RESPONSE: {
+          wire_find_node_response_t* payload = get_clear_memory(sizeof(wire_find_node_response_t));
+          if (wire_find_node_response_decode(wire_msg, payload) == 0) {
+            dispatch_msg.payload = payload;
+            network_handle_find_node_response(network, &dispatch_msg);
+          } else {
+            free(payload);
+          }
+          break;
+        }
+        case WIRE_STORE_BLOCK_RESPONSE: {
+          wire_store_block_response_t* payload = get_clear_memory(sizeof(wire_store_block_response_t));
+          if (wire_store_block_response_decode(wire_msg, payload) == 0) {
+            dispatch_msg.payload = payload;
+            network_handle_store_block_response(network, &dispatch_msg);
+          } else {
+            free(payload);
+          }
+          break;
+        }
+        default:
+          break;
       }
+      cbor_decref(&wire_msg);
       break;
     }
     case NETWORK_QUIC_CONNECTED: {
-      // New QUIC connection — add peer to connection manager
+      // New QUIC connection — add to pending (salutation deferred via actor message)
       quic_connected_payload_t* quic_conn = (quic_connected_payload_t*)msg->payload;
       if (quic_conn != NULL) {
-        node_id_t peer_id;
-        node_id_clear(&peer_id);
-        peer_connection_t* peer = connection_manager_add(
-            &network->conn_mgr, &peer_id, &quic_conn->peer_addr, network->pool);
-        if (peer != NULL) {
-#ifdef HAS_MSQUIC
-          peer->quic_connection = quic_conn->connection;
-#endif
-          // Direct QUIC connection established — set state to DIRECT
-          conn_state_on_direct_connected(peer);
-        }
+        pending_quic_add(network, quic_conn->connection, quic_conn->stream, &quic_conn->peer_addr);
       }
       break;
     }
     case NETWORK_QUIC_DISCONNECTED: {
       quic_connected_payload_t* quic_conn = (quic_connected_payload_t*)msg->payload;
       if (quic_conn != NULL) {
+        // Check if this is an authenticated peer
         peer_connection_t* peer = connection_manager_lookup_by_quic(
             &network->conn_mgr, quic_conn->connection);
         if (peer != NULL) {
@@ -1809,7 +2017,13 @@ void network_dispatch(void* state, message_t* msg) {
           peer->quic_connection = NULL;
           peer->quic_stream = NULL;
 #endif
-          connection_manager_remove_peer(&network->conn_mgr, peer);
+          connection_manager_remove(&network->conn_mgr, &peer->remote_node_id);
+        } else {
+          // Unauthenticated — remove from pending list
+          pending_quic_t* pending = pending_quic_remove(network, quic_conn->connection);
+          if (pending != NULL) {
+            free(pending);
+          }
         }
       }
       break;

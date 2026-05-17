@@ -509,6 +509,7 @@ static void _put_on_descriptor_close(void* ctx, void* unused) {
 
     /* Order matters: pending list is LIFO. Add recipe first so its destructor
        runs LAST — after ws's destructor drops its recipe ref. */
+    refcounter_dereference((refcounter_t*)put_ctx->recipe);
     scheduler_pool_defer_cleanup(((stream_t*)put_ctx->ws)->pool, put_ctx->recipe,
                                  (void (*)(void*))new_blocks_recipe_destroy);
     stream_deferred_deref((stream_t*)put_ctx->desc);
