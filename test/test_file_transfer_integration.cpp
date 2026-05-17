@@ -287,6 +287,75 @@ protected:
     return false;
   }
 
+protected:
+  static uint32_t parse_endpoint_from_status(const std::string& status) {
+    const std::string prefix = "endpoint=";
+    size_t pos = status.find(prefix);
+    if (pos == std::string::npos) return 0;
+    return (uint32_t)std::stoul(status.substr(pos + prefix.length()));
+  }
+
+  static std::string parse_node_id_from_status(const std::string& status) {
+    const std::string prefix = "node_id=";
+    size_t pos = status.find(prefix);
+    if (pos == std::string::npos) return "";
+    size_t end = status.find(' ', pos + prefix.length());
+    if (end == std::string::npos) end = status.length();
+    return status.substr(pos + prefix.length(), end - pos - prefix.length());
+  }
+
+  bool wait_for_relay(int control_fd, int timeout_ms = 5000) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+      std::string response = send_command(control_fd, CTRL_STATUS);
+      if (response.find("relay=connected") != std::string::npos) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    return false;
+  }
+
+  void force_relay_only() {
+    // Wait for both nodes to connect to the relay server before forcing relay-only.
+    // Without this, endpoint IDs will be 0 and relay messages will be undeliverable.
+    bool relay_a = wait_for_relay(nodes[0].control_fd);
+    bool relay_b = wait_for_relay(nodes[1].control_fd);
+    if (!relay_a || !relay_b) {
+      ADD_FAILURE() << "Relay not connected: node_a=" << relay_a
+                   << " node_b=" << relay_b;
+      return;
+    }
+
+    // Get each node's status to extract node_id and relay endpoint
+    std::string status_a = send_command(nodes[0].control_fd, CTRL_STATUS);
+    std::string status_b = send_command(nodes[1].control_fd, CTRL_STATUS);
+
+    std::string node_id_a = parse_node_id_from_status(status_a);
+    std::string node_id_b = parse_node_id_from_status(status_b);
+    uint32_t endpoint_a = parse_endpoint_from_status(status_a);
+    uint32_t endpoint_b = parse_endpoint_from_status(status_b);
+
+    if (node_id_a.empty() || node_id_b.empty()) {
+      ADD_FAILURE() << "Node IDs not set: node_id_a=" << node_id_a
+                   << " node_id_b=" << node_id_b;
+      return;
+    }
+    if (endpoint_a == 0 || endpoint_b == 0) {
+      ADD_FAILURE() << "Relay endpoint IDs not set: endpoint_a=" << endpoint_a
+                   << " endpoint_b=" << endpoint_b;
+      return;
+    }
+
+    // Add each peer to the other node's connection manager with relay endpoint ID.
+    // This avoids requiring a direct QUIC connection for relay-only testing.
+    // Node A learns about node B (with B's relay endpoint), and vice versa.
+    send_command(nodes[0].control_fd,
+        std::string(CTRL_ADD_PEER) + " " + node_id_b + " " + std::to_string(endpoint_b));
+    send_command(nodes[1].control_fd,
+        std::string(CTRL_ADD_PEER) + " " + node_id_a + " " + std::to_string(endpoint_a));
+  }
+
 private:
   int connect_control_socket(uint16_t port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -470,12 +539,10 @@ TEST_F(FileTransferIntegrationTest, RelaySmallFileTransfer) {
     ASSERT_GT(nodes[1].pid, 0);
     ASSERT_GE(nodes[1].control_fd, 0);
 
-    // Nodes must discover each other before file transfer can work.
-    // On localhost, direct QUIC connection succeeds — conn_state will
-    // prefer the direct path and fall back to relay if it fails.
-    std::string peer_cmd = std::string(CTRL_PEER_ADD) + " 127.0.0.1:" + std::to_string(port_b);
-    send_command(nodes[0].control_fd, peer_cmd);
-    send_command(nodes[0].control_fd, std::string(CTRL_WAIT_FOR_PEER) + " 1");
+    // Use relay-only peer discovery (no direct QUIC connection needed).
+    // ADD_PEER sets up the peer relationship with relay endpoint IDs
+    // so conn_state_send uses the relay path for all messages.
+    force_relay_only();
 
     std::string resp = send_command(nodes[0].control_fd, std::string(CTRL_STORE_FILE) + " 100000 2 3");
     ASSERT_NE(resp.find(CTRL_RESP_HASH), std::string::npos) << "STORE: " << resp;
@@ -519,10 +586,8 @@ TEST_F(FileTransferIntegrationTest, RelayLargeFileTransfer) {
     ASSERT_GT(nodes[1].pid, 0);
     ASSERT_GE(nodes[1].control_fd, 0);
 
-    // Nodes must discover each other before file transfer can work.
-    std::string peer_cmd = std::string(CTRL_PEER_ADD) + " 127.0.0.1:" + std::to_string(port_b);
-    send_command(nodes[0].control_fd, peer_cmd);
-    send_command(nodes[0].control_fd, std::string(CTRL_WAIT_FOR_PEER) + " 1");
+    // Use relay-only peer discovery (no direct QUIC connection needed).
+    force_relay_only();
 
     std::string resp = send_command(nodes[0].control_fd, std::string(CTRL_STORE_FILE) + " 640000 2 3");
     ASSERT_NE(resp.find(CTRL_RESP_HASH), std::string::npos) << "STORE: " << resp;
@@ -574,10 +639,8 @@ TEST_F(FileTransferIntegrationTest, RelayLateJoin) {
     ASSERT_GT(nodes[1].pid, 0);
     ASSERT_GE(nodes[1].control_fd, 0);
 
-    // Node B must discover node A before it can fetch.
-    std::string peer_cmd_b = std::string(CTRL_PEER_ADD) + " 127.0.0.1:" + std::to_string(port_a);
-    send_command(nodes[1].control_fd, peer_cmd_b);
-    send_command(nodes[1].control_fd, std::string(CTRL_WAIT_FOR_PEER) + " 1");
+    // Use relay-only peer discovery (no direct QUIC connection needed).
+    force_relay_only();
 
     std::string fetch_cmd = std::string(CTRL_FETCH_FILE) + " " + desc_hash_hex + " " +
                             file_hash_hex + " " + std::to_string(final_byte) + " 2 3";

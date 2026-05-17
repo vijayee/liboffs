@@ -191,7 +191,13 @@ int nat_detect_start(nat_detect_t* detect, const char* relay_a_host, uint16_t re
     return -1;
   }
 
-  int result = relay_client_connect(detect->relay_a, relay_a_host, relay_a_port);
+  int result = relay_client_connect(detect->relay_a, relay_a_host, relay_a_port,
+#ifdef HAS_MSQUIC
+                                      NULL
+#else
+                                      NULL
+#endif
+                                      );
   if (result != 0) {
     log_error("nat_detect: failed to connect relay client A");
     relay_client_destroy(detect->relay_a);
@@ -216,7 +222,13 @@ int nat_detect_start(nat_detect_t* detect, const char* relay_a_host, uint16_t re
     return -1;
   }
 
-  result = relay_client_connect(detect->relay_b, relay_b_host, relay_b_port);
+  result = relay_client_connect(detect->relay_b, relay_b_host, relay_b_port,
+#ifdef HAS_MSQUIC
+                                      NULL
+#else
+                                      NULL
+#endif
+                                      );
   if (result != 0) {
     log_error("nat_detect: failed to connect relay client B");
     relay_client_destroy(detect->relay_b);

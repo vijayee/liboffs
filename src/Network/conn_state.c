@@ -94,11 +94,11 @@ int conn_state_send(network_t* network, peer_connection_t* peer,
        * Note: actor_send takes ownership of the payload. On failure
        * (actor destroyed), actor_send already calls payload_destroy,
        * so we must NOT free it again. */
-      bool sent = actor_send(&network->actor, &msg);
-      if (!sent) {
-        log_error("conn_state_send: failed to send relay message to network actor");
-        return -1;
-      }
+      /* actor_send returns true only when the queue was empty (first message).
+       * Returning false means the queue already had messages — still success.
+       * Only ACTOR_FLAG_DESTROY causes a real failure, and in that case
+       * actor_send already frees the payload. */
+      actor_send(&network->actor, &msg);
       return 0;
     }
 

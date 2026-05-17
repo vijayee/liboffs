@@ -202,8 +202,21 @@ int network_connect_relay(network_t* network, const char* host, uint16_t port) {
     network->relay->key_path = strdup(network->authority->node_key_path);
   }
 
-  // Connect to relay server
-  if (relay_client_connect(network->relay, host, port) != 0) {
+  // Connect to relay server — share the quic_listener's registration to avoid
+  // UDP socket conflicts when both a listener and relay client are active in
+  // the same process (MsQuic routes connections through the registration's socket)
+#ifdef HAS_MSQUIC
+  HQUIC shared_reg = NULL;
+  if (network->quic_listener != NULL) {
+    shared_reg = network->quic_listener->registration;
+  }
+  log_info("network_connect_relay: shared_registration=%p, quic_listener=%p",
+           (void*)shared_reg, (void*)network->quic_listener);
+#else
+  void* shared_reg = NULL;
+#endif
+
+  if (relay_client_connect(network->relay, host, port, shared_reg) != 0) {
     log_error("network_connect_relay: failed to connect to relay");
     relay_client_destroy(network->relay);
     network->relay = NULL;
@@ -2174,8 +2187,13 @@ void network_dispatch(void* state, message_t* msg) {
       wire_relay_received_t* relay_payload = (wire_relay_received_t*)msg->payload;
       if (relay_payload == NULL || relay_payload->payload == NULL || relay_payload->payload_len == 0) break;
 
-      cbor_item_t* wire_msg = cbor_load(relay_payload->payload, relay_payload->payload_len, NULL);
-      if (wire_msg == NULL) break;
+      struct cbor_load_result load_result;
+      cbor_item_t* wire_msg = cbor_load(relay_payload->payload, relay_payload->payload_len, &load_result);
+      if (wire_msg == NULL) {
+        log_error("RELAY_RECEIVED: cbor_load failed, error=%d read=%zu",
+                  load_result.error.code, load_result.read);
+        break;
+      }
 
       if (cbor_isa_array(wire_msg) && cbor_array_size(wire_msg) >= 1) {
         // Extract sender_id from wire message and add to connection_manager

@@ -15,6 +15,7 @@
 #include <string.h>
 #include <poll-dancer/poll-dancer.h>
 #include <arpa/inet.h>
+#include <unistd.h>
 
 // --- Send context: wraps framed data for QUIC StreamSend completion ---
 
@@ -208,6 +209,7 @@ static QUIC_STATUS QUIC_API _relay_client_connection_callback(
   switch (event->Type) {
     case QUIC_CONNECTION_EVENT_CONNECTED: {
       log_info("relay_client: connected to relay server");
+      client->retry_count = 0;  // reset retry counter on successful connection
 
       // Open a bidirectional stream for relay communication
       HQUIC stream = NULL;
@@ -217,6 +219,7 @@ static QUIC_STATUS QUIC_API _relay_client_connection_callback(
       if (QUIC_FAILED(status)) {
         log_error("relay_client: StreamOpen failed: 0x%x", status);
         client->msquic->ConnectionClose(connection);
+        client->connection = NULL;
         return QUIC_STATUS_SUCCESS;
       }
 
@@ -228,15 +231,103 @@ static QUIC_STATUS QUIC_API _relay_client_connection_callback(
         client->msquic->StreamClose(stream);
         client->stream = NULL;
         client->msquic->ConnectionClose(connection);
+        client->connection = NULL;
         return QUIC_STATUS_SUCCESS;
       }
 
       ATOMIC_STORE(&client->connected, 1);
+
+      // Send ADDR_REQUEST to learn our endpoint ID from the relay server.
+      wire_addr_request_t* addr_req = get_clear_memory(sizeof(wire_addr_request_t));
+      if (addr_req != NULL) {
+        message_t msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.type = RELAY_CLIENT_ADDR_REQUEST;
+        msg.payload = addr_req;
+        msg.payload_destroy = free;
+        actor_send(&client->actor, &msg);
+      }
+      break;
+    }
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT: {
+      QUIC_STATUS shutdown_status = event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status;
+      log_error("relay_client: connection shutdown by transport, "
+               "status=0x%x, error_code=0x%lx",
+               shutdown_status,
+               (unsigned long)event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode);
+      // Schedule a retry if the error is UNREACHABLE and we haven't exhausted retries.
+      // MsQuic can return UNREACHABLE transiently on localhost when multiple QUIC
+      // connections start concurrently.
+      if (shutdown_status == QUIC_STATUS_UNREACHABLE &&
+          !client->shutdown_pending &&
+          client->retry_count < RELAY_CLIENT_MAX_RETRIES) {
+        client->retry_count++;
+        log_info("relay_client: scheduling retry %u/%u",
+                 client->retry_count, RELAY_CLIENT_MAX_RETRIES);
+      }
+      break;
+    }
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER: {
+      log_error("relay_client: connection shutdown by peer, "
+               "error_code=0x%lx",
+               (unsigned long)event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode);
       break;
     }
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
-      log_info("relay_client: connection shutdown complete");
+      log_info("relay_client: connection shutdown complete, "
+               "handshake_completed=%u, peer_ack=%u, app_close_in_progress=%u",
+               event->SHUTDOWN_COMPLETE.HandshakeCompleted,
+               event->SHUTDOWN_COMPLETE.PeerAcknowledgedShutdown,
+               event->SHUTDOWN_COMPLETE.AppCloseInProgress);
       ATOMIC_STORE(&client->connected, 0);
+
+      // If a retry was scheduled (retry_count was incremented by
+      // SHUTDOWN_INITIATED_BY_TRANSPORT for UNREACHABLE), attempt reconnect.
+      // We defer the retry to the I/O thread via actor_send to avoid blocking
+      // the MsQuic worker thread and to prevent thread leaks from spawning
+      // a new I/O thread while the old one is still running.
+      if (client->retry_count > 0 && client->retry_count <= RELAY_CLIENT_MAX_RETRIES &&
+          !client->shutdown_pending && ATOMIC_LOAD(&client->running)) {
+
+        // Clean up the current QUIC connection resources before retrying.
+        if (client->stream != NULL) {
+          client->msquic->StreamClose(client->stream);
+          client->stream = NULL;
+        }
+        client->msquic->ConnectionClose(client->connection);
+        client->connection = NULL;
+        if (client->configuration != NULL) {
+          client->msquic->ConfigurationClose(client->configuration);
+          client->configuration = NULL;
+        }
+        if (client->owns_registration && client->registration != NULL) {
+          client->msquic->RegistrationClose(client->registration);
+          client->registration = NULL;
+        }
+        if (client->framer != NULL) {
+          stream_framer_destroy(client->framer);
+          client->framer = NULL;
+        }
+
+        // Defer reconnect to the I/O thread — it will apply exponential
+        // backoff and call relay_client_connect from a safe context.
+        unsigned long delay_ms = RELAY_CLIENT_RETRY_DELAY_MS * (1 << (client->retry_count - 1));
+        log_info("relay_client: scheduling retry (attempt %u/%u) to %s:%u in %lums",
+                 client->retry_count, RELAY_CLIENT_MAX_RETRIES,
+                 client->relay_host ? client->relay_host : "127.0.0.1",
+                 client->relay_port, delay_ms);
+
+        relay_retry_payload_t* retry_payload = get_clear_memory(sizeof(relay_retry_payload_t));
+        if (retry_payload != NULL) {
+          retry_payload->delay_ms = delay_ms;
+          message_t msg;
+          memset(&msg, 0, sizeof(msg));
+          msg.type = RELAY_CLIENT_RETRY;
+          msg.payload = retry_payload;
+          msg.payload_destroy = free;
+          actor_send(&client->actor, &msg);
+        }
+      }
       break;
     }
     default:
@@ -294,6 +385,9 @@ relay_client_t* relay_client_create(network_t* network, scheduler_pool_t* pool) 
 void relay_client_destroy(relay_client_t* client) {
   if (client == NULL) return;
 
+  // Mark as shutting down so retry logic doesn't fire during cleanup
+  client->shutdown_pending = 1;
+
   if (ATOMIC_LOAD(&client->running)) {
     relay_client_disconnect(client);
   }
@@ -310,7 +404,7 @@ void relay_client_destroy(relay_client_t* client) {
     client->msquic->ConfigurationClose(client->configuration);
     client->configuration = NULL;
   }
-  if (client->registration != NULL && client->msquic != NULL) {
+  if (client->registration != NULL && client->msquic != NULL && client->owns_registration) {
     client->msquic->RegistrationClose(client->registration);
     client->registration = NULL;
   }
@@ -326,30 +420,60 @@ void relay_client_destroy(relay_client_t* client) {
   }
   if (client->cert_path != NULL) { free(client->cert_path); client->cert_path = NULL; }
   if (client->key_path != NULL) { free(client->key_path); client->key_path = NULL; }
+  if (client->relay_host != NULL) { free(client->relay_host); client->relay_host = NULL; }
   _destroy_stack_destroy(client);
   actor_destroy(&client->actor);
   free(client);
 }
 
-int relay_client_connect(relay_client_t* client, const char* host, uint16_t port) {
+int relay_client_connect(relay_client_t* client, const char* host, uint16_t port,
+#ifdef HAS_MSQUIC
+                          HQUIC shared_registration
+#else
+                          void* shared_registration
+#endif
+                          ) {
   if (client == NULL) return -1;
+
+  // Store connection parameters for retry support
+  if (host != NULL && host != client->relay_host) {
+    // New host provided (not from a retry) — update the stored copy
+    if (client->relay_host != NULL) {
+      free(client->relay_host);
+    }
+    client->relay_host = strdup(host);
+    if (client->relay_host == NULL) {
+      log_error("relay_client: failed to allocate relay_host");
+      return -1;
+    }
+  }
+  client->relay_port = port;
+  client->shared_registration = shared_registration;
+  client->shutdown_pending = 0;
 
   QUIC_STATUS status;
 
-  // Open registration with "offs_relay" ALPN
-  QUIC_REGISTRATION_CONFIG reg_config = {
-    "offs_relay",
-    QUIC_EXECUTION_PROFILE_LOW_LATENCY
-  };
-  if (QUIC_FAILED(status = client->msquic->RegistrationOpen(
-          &reg_config, &client->registration))) {
-    log_error("relay_client: RegistrationOpen failed: 0x%x", status);
-    return -1;
+  // Use shared registration if provided (avoids UDP socket conflicts when
+  // a quic_listener is also active in the same process), otherwise create our own
+  if (shared_registration != NULL) {
+    client->registration = shared_registration;
+    client->owns_registration = 0;
+  } else {
+    QUIC_REGISTRATION_CONFIG reg_config = {
+      "offs_relay",
+      QUIC_EXECUTION_PROFILE_LOW_LATENCY
+    };
+    if (QUIC_FAILED(status = client->msquic->RegistrationOpen(
+            &reg_config, &client->registration))) {
+      log_error("relay_client: RegistrationOpen failed: 0x%x", status);
+      return -1;
+    }
+    client->owns_registration = 1;
   }
 
   QUIC_BUFFER alpn = { sizeof("offs_relay") - 1, (uint8_t*)"offs_relay" };
 
-  // Open configuration
+  // Open configuration (each connection type needs its own configuration for its ALPN)
   QUIC_SETTINGS settings = {0};
   settings.PeerBidiStreamCount = 1;
   settings.IsSet.PeerBidiStreamCount = TRUE;
@@ -363,7 +487,11 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
           NULL,
           &client->configuration))) {
     log_error("relay_client: ConfigurationOpen failed: 0x%x", status);
-    client->msquic->RegistrationClose(client->registration);
+    client->msquic->ConfigurationClose(client->configuration);
+    client->configuration = NULL;
+    if (client->owns_registration) {
+      client->msquic->RegistrationClose(client->registration);
+    }
     client->registration = NULL;
     return -1;
   }
@@ -387,7 +515,9 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
     log_error("relay_client: ConfigurationLoadCredential failed: 0x%x", status);
     client->msquic->ConfigurationClose(client->configuration);
     client->configuration = NULL;
-    client->msquic->RegistrationClose(client->registration);
+    if (client->owns_registration) {
+      client->msquic->RegistrationClose(client->registration);
+    }
     client->registration = NULL;
     return -1;
   }
@@ -401,7 +531,9 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
     log_error("relay_client: ConnectionOpen failed: 0x%x", status);
     client->msquic->ConfigurationClose(client->configuration);
     client->configuration = NULL;
-    client->msquic->RegistrationClose(client->registration);
+    if (client->owns_registration) {
+      client->msquic->RegistrationClose(client->registration);
+    }
     client->registration = NULL;
     return -1;
   }
@@ -418,7 +550,9 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
     client->connection = NULL;
     client->msquic->ConfigurationClose(client->configuration);
     client->configuration = NULL;
-    client->msquic->RegistrationClose(client->registration);
+    if (client->owns_registration) {
+      client->msquic->RegistrationClose(client->registration);
+    }
     client->registration = NULL;
     return -1;
   }
@@ -443,7 +577,9 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
     client->connection = NULL;
     client->msquic->ConfigurationClose(client->configuration);
     client->configuration = NULL;
-    client->msquic->RegistrationClose(client->registration);
+    if (client->owns_registration) {
+      client->msquic->RegistrationClose(client->registration);
+    }
     client->registration = NULL;
     return -1;
   }
@@ -471,6 +607,7 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
 
 void relay_client_disconnect(relay_client_t* client) {
   if (client == NULL) return;
+  client->shutdown_pending = 1;  // prevent retry during intentional disconnect
   ATOMIC_STORE(&client->running, 0);
   pd_loop_async_send(client->loop, NULL);
   pthread_join(client->thread, NULL);
@@ -489,15 +626,23 @@ void relay_client_disconnect(relay_client_t* client) {
 void relay_client_dispatch(void* state, message_t* msg) {
   relay_client_t* client = (relay_client_t*)state;
   if (msg == NULL) return;
-  if (!ATOMIC_LOAD(&client->running) || !ATOMIC_LOAD(&client->connected)) {
-    log_error("relay_client: dispatch called while not connected");
-    if (msg->payload_destroy != NULL && msg->payload != NULL) {
-      msg->payload_destroy(msg->payload);
-    }
-    return;
-  }
 
   switch (msg->type) {
+    case RELAY_CLIENT_RETRY: {
+      // Retry the relay connection after exponential backoff delay.
+      // This is dispatched from the SHUTDOWN_COMPLETE callback via actor_send,
+      // so it runs on the I/O thread where pd_loop is safe to use.
+      relay_retry_payload_t* retry = (relay_retry_payload_t*)msg->payload;
+      if (retry == NULL) break;
+      unsigned long delay_ms = retry->delay_ms;
+      log_info("relay_client: retrying connection to %s:%u (delayed %lums)",
+               client->relay_host ? client->relay_host : "127.0.0.1",
+               client->relay_port, delay_ms);
+      usleep(delay_ms * 1000);
+      relay_client_connect(client, client->relay_host, client->relay_port,
+                           client->shared_registration);
+      break;
+    }
     case RELAY_CLIENT_SEND: {
       wire_relay_send_t* relay_send = (wire_relay_send_t*)msg->payload;
       if (relay_send == NULL) break;
@@ -555,10 +700,6 @@ void relay_client_dispatch(void* state, message_t* msg) {
     default:
       break;
   }
-
-  if (msg->payload_destroy != NULL && msg->payload != NULL) {
-    msg->payload_destroy(msg->payload);
-  }
 }
 
 #else // !HAS_MSQUIC — stub implementations
@@ -575,10 +716,12 @@ void relay_client_destroy(relay_client_t* client) {
   (void)client;
 }
 
-int relay_client_connect(relay_client_t* client, const char* host, uint16_t port) {
+int relay_client_connect(relay_client_t* client, const char* host, uint16_t port,
+                          void* shared_registration) {
   (void)client;
   (void)host;
   (void)port;
+  (void)shared_registration;
   return -1;
 }
 

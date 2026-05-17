@@ -5,10 +5,12 @@
 #define CTRL_STORE_FILE      "STORE_FILE"
 #define CTRL_FETCH_FILE      "FETCH_FILE"
 #define CTRL_PEER_ADD        "PEER_ADD"
+#define CTRL_ADD_PEER        "ADD_PEER"
 #define CTRL_CONNECT_RELAY   "CONNECT_RELAY"
 #define CTRL_WAIT_FOR_PEER   "WAIT_FOR_PEER"
 #define CTRL_STATUS          "STATUS"
 #define CTRL_SHUTDOWN        "SHUTDOWN"
+#define CTRL_FORCE_RELAY_ENDPOINT "FORCE_RELAY_ENDPOINT"
 
 /* Response prefixes (node → coordinator) */
 #define CTRL_RESP_OK         "OK"

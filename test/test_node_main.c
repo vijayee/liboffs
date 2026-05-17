@@ -9,6 +9,8 @@
 #include "../src/Network/quic_listener.h"
 #include "../src/Network/relay_client.h"
 #include "../src/Network/conn_state.h"
+#include "../src/Network/find_block.h"
+#include "../src/Util/log.h"
 #include "../src/BlockCache/block_cache.h"
 #include "../src/BlockCache/block.h"
 #include "../src/OFFStreams/writeable_off_stream.h"
@@ -183,7 +185,7 @@ static const char* nat_type_string(nat_type_e type) {
 /* ---- Control command handlers ---- */
 
 static void handle_status(int client_fd) {
-  char response[256];
+  char response[512];
   size_t peers = get_peer_count();
   size_t blocks = get_block_count();
   const char* relay_status = is_relay_connected() ? "connected" : "disconnected";
@@ -191,8 +193,10 @@ static void handle_status(int client_fd) {
   if (g_node.network) {
     nat = nat_type_string(g_node.network->local_nat_type);
   }
-  snprintf(response, sizeof(response), "%s peers=%zu blocks=%zu relay=%s nat=%s",
-           CTRL_RESP_STATUS, peers, blocks, relay_status, nat);
+  const char* node_id_str = g_node.authority ? g_node.authority->local_id.str : "null";
+  snprintf(response, sizeof(response), "%s node_id=%s peers=%zu blocks=%zu relay=%s nat=%s endpoint=%u",
+           CTRL_RESP_STATUS, node_id_str, peers, blocks, relay_status, nat,
+           g_node.network->relay ? g_node.network->relay->local_endpoint_id : 0);
   send_response(client_fd, response);
 }
 
@@ -666,6 +670,54 @@ static void handle_command(int client_fd, char* line) {
     } else {
       send_response(client_fd, CTRL_RESP_ERROR " no network");
     }
+  } else if (strncmp(line, CTRL_ADD_PEER " ", strlen(CTRL_ADD_PEER) + 1) == 0) {
+    // ADD_PEER <node_id_hex> <relay_endpoint_id>
+    // Creates a peer entry in the connection manager without a direct QUIC connection.
+    // Used for relay-only testing where peers communicate through the relay server.
+    const char* args = line + strlen(CTRL_ADD_PEER) + 1;
+    node_id_t peer_id;
+    memset(&peer_id, 0, sizeof(peer_id));
+    uint32_t relay_endpoint_id = 0;
+    char node_id_str[NODE_ID_STRING_SIZE];
+    int parsed = sscanf(args, "%47s %u", node_id_str, &relay_endpoint_id);
+    if (parsed < 1) {
+      send_response(client_fd, CTRL_RESP_ERROR " invalid ADD_PEER format");
+      return;
+    }
+    if (node_id_from_string(node_id_str, &peer_id) != 0) {
+      send_response(client_fd, CTRL_RESP_ERROR " invalid node_id");
+      return;
+    }
+    if (g_node.network != NULL) {
+      peer_connection_t* existing = connection_manager_lookup(&g_node.network->conn_mgr, &peer_id);
+      if (existing != NULL) {
+        // Peer already exists — update relay endpoint if provided
+        if (parsed >= 2 && relay_endpoint_id != 0) {
+          existing->relay_endpoint_id = relay_endpoint_id;
+          conn_state_set_peer_nat_type(existing, NAT_TYPE_SYMMETRIC);
+        }
+        send_response(client_fd, CTRL_RESP_OK);
+      } else {
+        peer_connection_t* peer = connection_manager_add(&g_node.network->conn_mgr, &peer_id, NULL, g_node.pool);
+        if (peer != NULL) {
+          if (parsed >= 2 && relay_endpoint_id != 0) {
+            peer->relay_endpoint_id = relay_endpoint_id;
+            conn_state_set_peer_nat_type(peer, NAT_TYPE_SYMMETRIC);
+          }
+          // Ensure the peer is in the ring set for routing
+          net_node_t* ring_node = net_node_create(&peer_id, 0, 0);
+          if (ring_node != NULL) {
+            ring_node->weight = FIND_BLOCK_MIN_WEIGHT;
+            ring_set_insert(g_node.network->rings, ring_node, 0);
+          }
+          send_response(client_fd, CTRL_RESP_OK);
+        } else {
+          send_response(client_fd, CTRL_RESP_ERROR " failed to add peer");
+        }
+      }
+    } else {
+      send_response(client_fd, CTRL_RESP_ERROR " no network");
+    }
   } else if (strncmp(line, CTRL_WAIT_FOR_PEER " ", strlen(CTRL_WAIT_FOR_PEER) + 1) == 0) {
     size_t target_count = (size_t)atol(line + strlen(CTRL_WAIT_FOR_PEER) + 1);
     int found = 0;
@@ -687,6 +739,22 @@ static void handle_command(int client_fd, char* line) {
   } else if (strncmp(line, CTRL_FETCH_FILE " ", strlen(CTRL_FETCH_FILE) + 1) == 0) {
     const char* fetch_args = line + strlen(CTRL_FETCH_FILE) + 1;
     handle_fetch_file(client_fd, fetch_args);
+  } else if (strncmp(line, CTRL_FORCE_RELAY_ENDPOINT " ",
+                strlen(CTRL_FORCE_RELAY_ENDPOINT) + 1) == 0) {
+    uint32_t endpoint_id = (uint32_t)atol(line + strlen(CTRL_FORCE_RELAY_ENDPOINT) + 1);
+    if (g_node.network != NULL) {
+      connection_manager_t* mgr = &g_node.network->conn_mgr;
+      for (size_t idx = 0; idx < mgr->peer_count; idx++) {
+        peer_connection_t* peer = mgr->peers[idx];
+        if (peer != NULL && peer->connected) {
+          peer->relay_endpoint_id = endpoint_id;
+          conn_state_set_peer_nat_type(peer, NAT_TYPE_SYMMETRIC);
+        }
+      }
+      send_response(client_fd, CTRL_RESP_OK);
+    } else {
+      send_response(client_fd, CTRL_RESP_ERROR " no network");
+    }
   } else {
     send_response(client_fd, CTRL_RESP_ERROR " unknown command");
   }

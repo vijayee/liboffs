@@ -354,68 +354,79 @@ static QUIC_STATUS QUIC_API _relay_connection_callback(
 
       uint32_t endpoint_id = server->next_endpoint_id++;
 
-      relay_stream_context_t* stream_ctx = get_clear_memory(sizeof(relay_stream_context_t));
-      if (stream_ctx == NULL) {
-        platform_unlock(&server->clients_lock);
-        log_error("relay: failed to allocate stream context");
-        server->msquic->ConnectionClose(connection);
-        return QUIC_STATUS_SUCCESS;
-      }
-
       relay_client_entry_t* client = &server->clients[slot];
       client->endpoint_id = endpoint_id;
       client->connection = (void*)connection;
       client->active = 1;
+      client->stream = NULL;
       client->framer = stream_framer_create();
       if (client->framer == NULL) {
         platform_unlock(&server->clients_lock);
         log_error("relay: failed to create stream framer");
-        free(stream_ctx);
         client->active = 0;
         client->connection = NULL;
-        server->msquic->ConnectionClose(connection);
-        return QUIC_STATUS_SUCCESS;
-      }
-
-      stream_ctx->server = server;
-      stream_ctx->client = client;
-
-      HQUIC stream = NULL;
-      QUIC_STATUS status = server->msquic->StreamOpen(
-          connection, QUIC_STREAM_OPEN_FLAG_NONE,
-          _relay_stream_callback, stream_ctx, &stream);
-      if (QUIC_FAILED(status)) {
-        log_error("relay: StreamOpen failed: 0x%x", status);
-        stream_framer_destroy(client->framer);
-        client->framer = NULL;
-        client->active = 0;
-        client->connection = NULL;
-        platform_unlock(&server->clients_lock);
-        free(stream_ctx);
-        server->msquic->ConnectionClose(connection);
-        return QUIC_STATUS_SUCCESS;
-      }
-
-      client->stream = (void*)stream;
-
-      status = server->msquic->StreamStart(stream, QUIC_STREAM_START_FLAG_NONE);
-      if (QUIC_FAILED(status)) {
-        log_error("relay: StreamStart failed: 0x%x", status);
-        server->msquic->StreamClose(stream);
-        stream_framer_destroy(client->framer);
-        client->framer = NULL;
-        client->active = 0;
-        client->connection = NULL;
-        client->stream = NULL;
-        platform_unlock(&server->clients_lock);
-        free(stream_ctx);
         server->msquic->ConnectionClose(connection);
         return QUIC_STATUS_SUCCESS;
       }
 
       server->num_clients++;
-      log_info("relay: client connected with endpoint_id=%u", endpoint_id);
+      log_info("relay: client connected with endpoint_id=%u, stream pending", endpoint_id);
       platform_unlock(&server->clients_lock);
+      break;
+    }
+    case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
+      // The client opens a bidirectional stream — accept it and set our callback
+      platform_lock(&server->clients_lock);
+      relay_client_entry_t* client = NULL;
+      for (size_t index = 0; index < RELAY_MAX_CLIENTS; index++) {
+        if (server->clients[index].active &&
+            server->clients[index].connection == (void*)connection) {
+          client = &server->clients[index];
+          break;
+        }
+      }
+      if (client == NULL) {
+        platform_unlock(&server->clients_lock);
+        log_error("relay: PEER_STREAM_STARTED for unknown connection");
+        return QUIC_STATUS_SUCCESS;
+      }
+
+      if (client->stream != NULL) {
+        platform_unlock(&server->clients_lock);
+        log_error("relay: client already has a stream, rejecting extra stream");
+        return QUIC_STATUS_ABORTED;
+      }
+
+      relay_stream_context_t* stream_ctx = get_clear_memory(sizeof(relay_stream_context_t));
+      if (stream_ctx == NULL) {
+        platform_unlock(&server->clients_lock);
+        log_error("relay: failed to allocate stream context");
+        return QUIC_STATUS_ABORTED;
+      }
+
+      stream_ctx->server = server;
+      stream_ctx->client = client;
+
+      HQUIC peer_stream = event->PEER_STREAM_STARTED.Stream;
+      server->msquic->SetCallbackHandler(
+          peer_stream, (void*)_relay_stream_callback, stream_ctx);
+      client->stream = (void*)peer_stream;
+
+      log_info("relay: client endpoint_id=%u stream started", client->endpoint_id);
+      platform_unlock(&server->clients_lock);
+      break;
+    }
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT: {
+      log_error("relay: connection %p shutdown by transport, status=0x%x, error_code=0x%lx",
+               (void*)connection,
+               event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status,
+               (unsigned long)event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode);
+      break;
+    }
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER: {
+      log_error("relay: connection %p shutdown by peer, error_code=0x%lx",
+               (void*)connection,
+               (unsigned long)event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode);
       break;
     }
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {

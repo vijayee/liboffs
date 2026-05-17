@@ -261,6 +261,7 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
   quic_listener_t* listener = (quic_listener_t*)context;
   switch (event->Type) {
     case QUIC_CONNECTION_EVENT_CONNECTED: {
+      log_info("quic_listener: connection CONNECTED");
       // Extract peer address from the connection
       QUIC_ADDR peer_addr;
       uint32_t peer_addr_len = sizeof(peer_addr);
@@ -290,7 +291,7 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
       break;
     }
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
-      // Send NETWORK_QUIC_DISCONNECTED to protocol actor
+      log_info("quic_listener: connection SHUTDOWN_COMPLETE");
       quic_connected_payload_t* payload = get_clear_memory(sizeof(quic_connected_payload_t));
       if (payload != NULL) {
         payload->connection = connection;
@@ -340,6 +341,7 @@ static QUIC_STATUS QUIC_API quic_listener_callback(
   switch (event->Type) {
     case QUIC_LISTENER_EVENT_NEW_CONNECTION: {
       HQUIC connection = event->NEW_CONNECTION.Connection;
+      log_info("quic_listener: NEW_CONNECTION received");
       // Set connection callback and configuration
       listener->msquic->SetCallbackHandler(
           connection,
@@ -528,6 +530,7 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
     return -1;
   }
 
+  log_info("quic_listener: listening on %s:%u", host ? host : "0.0.0.0", port);
   return 0;
 }
 
