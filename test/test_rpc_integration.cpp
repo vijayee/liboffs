@@ -43,6 +43,8 @@ static constexpr uint8_t WIRE_RECALL_BLOCK_VAL         = 16;
 static constexpr uint8_t WIRE_RECALL_ACCEPT_VAL        = 17;
 static constexpr uint8_t WIRE_RECALL_DECLINE_VAL       = 18;
 static constexpr uint8_t WIRE_RATE_LIMITED_VAL          = 19;
+static constexpr uint8_t WIRE_GOSSIP_VAL              = 21;
+static constexpr uint8_t WIRE_GOSSIP_PULL_VAL          = 22;
 
 /* Message direction constants (must match src/Network/message_log.h) */
 static constexpr uint8_t MSG_DIRECTION_SENT_VAL      = 0;

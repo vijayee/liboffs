@@ -1039,6 +1039,20 @@ static void handle_command(int client_fd, char* line) {
 #else
     send_response(client_fd, CTRL_RESP_ERROR " not available");
 #endif
+  } else if (strncmp(line, CTRL_GOSSIP, strlen(CTRL_GOSSIP)) == 0) {
+#ifdef OFFS_TEST
+    if (g_node.network != NULL) {
+      message_t msg;
+      memset(&msg, 0, sizeof(msg));
+      msg.type = NETWORK_GOSSIP_TICK;
+      actor_send(&g_node.network->actor, &msg);
+      send_response(client_fd, CTRL_RESP_OK);
+    } else {
+      send_response(client_fd, CTRL_RESP_ERROR " no network");
+    }
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
   } else {
     send_response(client_fd, CTRL_RESP_ERROR " unknown command");
   }
