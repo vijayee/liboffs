@@ -715,7 +715,11 @@ private:
 /* ================================================================ */
 
 TEST_F(RpcIntegrationTest, FixtureCompiles) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
   EXPECT_TRUE(true);
+#endif
 }
 
 TEST_F(RpcIntegrationTest, FindBlockChain) {
