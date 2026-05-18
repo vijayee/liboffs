@@ -447,6 +447,103 @@ TEST(RingSetTest, PromoteSecondary) {
   ring_set_destroy(set);
 }
 
+// === RingSetGetRandomNodes tests ===
+
+TEST(RingSetGetRandomNodes, EmptySetReturnsZero) {
+  ring_set_t* set = ring_set_create(RING_K, RING_M, RING_ALPHA);
+  ASSERT_NE(set, nullptr);
+  net_node_t nodes[RING_MAX_RINGS];
+  size_t count = ring_set_get_random_nodes(set, nodes, RING_MAX_RINGS, nullptr);
+  EXPECT_EQ(count, 0u);
+  ring_set_destroy(set);
+}
+
+TEST(RingSetGetRandomNodes, ReturnsOnePerNonEmptyRing) {
+  ring_set_t* set = ring_set_create(RING_K, RING_M, RING_ALPHA);
+  ASSERT_NE(set, nullptr);
+  // Insert 5 nodes into different latency rings
+  node_id_t node_ids[5];
+  for (int i = 0; i < 5; i++) {
+    memset(&node_ids[i], 0, sizeof(node_id_t));
+    node_ids[i].hash[0] = (uint8_t)i;
+    snprintf(node_ids[i].str, sizeof(node_ids[i].str), "node_%d", i);
+    net_node_t* node = net_node_create(&node_ids[i], 0, 0);
+    if (node != NULL) {
+      ring_set_insert(set, node, (uint32_t)(1000 + i * 2000));
+    }
+  }
+  net_node_t nodes[RING_MAX_RINGS];
+  size_t count = ring_set_get_random_nodes(set, nodes, RING_MAX_RINGS, nullptr);
+  EXPECT_GT(count, 0u);
+  EXPECT_LE(count, (size_t)set->ring_count);
+  ring_set_clear_nodes(set);
+  ring_set_destroy(set);
+}
+
+TEST(RingSetGetRandomNodes, ExcludesNodeId) {
+  ring_set_t* set = ring_set_create(RING_K, RING_M, RING_ALPHA);
+  ASSERT_NE(set, nullptr);
+  node_id_t exclude_id;
+  memset(&exclude_id, 0, sizeof(exclude_id));
+  exclude_id.hash[0] = 42;
+  snprintf(exclude_id.str, sizeof(exclude_id.str), "excluded");
+  // Insert the excluded node and another node
+  net_node_t* node1 = net_node_create(&exclude_id, 0, 0);
+  if (node1 != NULL) {
+    ring_set_insert(set, node1, 1000);
+  }
+  node_id_t other_id;
+  memset(&other_id, 0, sizeof(other_id));
+  other_id.hash[0] = 99;
+  snprintf(other_id.str, sizeof(other_id.str), "other");
+  net_node_t* node2 = net_node_create(&other_id, 0, 0);
+  if (node2 != NULL) {
+    ring_set_insert(set, node2, 5000);
+  }
+  net_node_t nodes[RING_MAX_RINGS];
+  size_t count = ring_set_get_random_nodes(set, nodes, RING_MAX_RINGS, &exclude_id);
+  // Should not include the excluded node — count may be 0 or 1 depending on ring distribution
+  for (size_t i = 0; i < count; i++) {
+    EXPECT_FALSE(node_id_equals(&nodes[i].id, &exclude_id))
+        << "Excluded node should not appear in results";
+  }
+  ring_set_clear_nodes(set);
+  ring_set_destroy(set);
+}
+
+TEST(RingSetGetRandomNodes, NullSetReturnsZero) {
+  net_node_t nodes[RING_MAX_RINGS];
+  EXPECT_EQ(ring_set_get_random_nodes(nullptr, nodes, RING_MAX_RINGS, nullptr), 0u);
+}
+
+TEST(RingSetGetRandomNodes, NullNodesArrayReturnsZero) {
+  ring_set_t* set = ring_set_create(RING_K, RING_M, RING_ALPHA);
+  ASSERT_NE(set, nullptr);
+  EXPECT_EQ(ring_set_get_random_nodes(set, nullptr, RING_MAX_RINGS, nullptr), 0u);
+  ring_set_destroy(set);
+}
+
+TEST(RingSetGetRandomNodes, RespectsMaxNodes) {
+  ring_set_t* set = ring_set_create(RING_K, RING_M, RING_ALPHA);
+  ASSERT_NE(set, nullptr);
+  // Insert nodes into different rings
+  node_id_t node_ids[5];
+  for (int i = 0; i < 5; i++) {
+    memset(&node_ids[i], 0, sizeof(node_id_t));
+    node_ids[i].hash[0] = (uint8_t)(10 + i);
+    snprintf(node_ids[i].str, sizeof(node_ids[i].str), "max_node_%d", i);
+    net_node_t* node = net_node_create(&node_ids[i], 0, 0);
+    if (node != NULL) {
+      ring_set_insert(set, node, (uint32_t)(1000 + i * 2000));
+    }
+  }
+  net_node_t nodes[2];
+  size_t count = ring_set_get_random_nodes(set, nodes, 2, nullptr);
+  EXPECT_LE(count, 2u);
+  ring_set_clear_nodes(set);
+  ring_set_destroy(set);
+}
+
 // === Latency cache tests ===
 
 TEST(LatencyCacheTest, CreateDestroy) {

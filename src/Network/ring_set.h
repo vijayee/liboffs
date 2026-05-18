@@ -41,4 +41,11 @@ net_node_t* ring_set_promote_secondary(ring_set_t* set, int ring_index);
 size_t ring_set_total_nodes(const ring_set_t* set);
 void ring_set_clear_nodes(ring_set_t* set);
 
+// Select one random node from each non-empty primary ring, excluding exclude_id if non-NULL.
+// Returns the number of nodes selected (up to max_nodes).
+size_t ring_set_get_random_nodes(const ring_set_t* set,
+                                  net_node_t* nodes,
+                                  size_t max_nodes,
+                                  const node_id_t* exclude_id);
+
 #endif // OFFS_RING_SET_H

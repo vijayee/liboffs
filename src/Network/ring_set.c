@@ -165,3 +165,28 @@ void ring_set_clear_nodes(ring_set_t* set) {
     set->rings[index].secondary.length = 0;
   }
 }
+
+size_t ring_set_get_random_nodes(const ring_set_t* set,
+                                  net_node_t* nodes,
+                                  size_t max_nodes,
+                                  const node_id_t* exclude_id) {
+  if (set == NULL || nodes == NULL) return 0;
+  size_t count = 0;
+  for (size_t ring_index = 0;
+       ring_index < set->ring_count && count < max_nodes;
+       ring_index++) {
+    ring_t* ring = &set->rings[ring_index];
+    if (ring->primary.length == 0) continue;
+    // Select a random node from this ring's primary list
+    int node_index = rand() % ring->primary.length;
+    net_node_t* candidate = ring->primary.data[node_index];
+    if (candidate == NULL) continue;
+    // Skip if excluded
+    if (exclude_id != NULL &&
+        node_id_equals(&candidate->id, exclude_id)) {
+      continue;
+    }
+    nodes[count++] = *candidate;
+  }
+  return count;
+}
