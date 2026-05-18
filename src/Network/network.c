@@ -362,6 +362,19 @@ static void network_handle_salutation(network_t* network, message_t* msg,
       net_node_record_success(node);
       ring_set_insert(network->rings, node, 0);
     }
+
+    // Send immediate PingCapacity to newly connected peer
+    {
+      wire_ping_capacity_t ping_cap;
+      memset(&ping_cap, 0, sizeof(ping_cap));
+      ping_cap.message_id = gossip_handle_next_query_id(&network->gossip);
+      memcpy(&ping_cap.source, &network->authority->local_id, sizeof(node_id_t));
+      ping_cap.capacity = atomic_load(&network->authority->capacity);
+      ping_cap.phase = atomic_load(&network->authority->phase);
+      cbor_item_t* ping_cap_cbor = wire_ping_capacity_encode(&ping_cap);
+      conn_state_send(network, peer, ping_cap_cbor);
+      cbor_decref(&ping_cap_cbor);
+    }
   }
 
   free(pending);
@@ -2466,6 +2479,30 @@ void network_dispatch(void* state, message_t* msg) {
           }
           break;
         }
+        case WIRE_GOSSIP: {
+          wire_gossip_t* payload = get_clear_memory(sizeof(wire_gossip_t));
+          if (payload != NULL) {
+            if (wire_gossip_decode(wire_msg, payload) == 0) {
+              dispatch_msg.payload = payload;
+              network_handle_gossip_received(network, &dispatch_msg);
+            } else {
+              free(payload);
+            }
+          }
+          break;
+        }
+        case WIRE_GOSSIP_PULL: {
+          wire_gossip_pull_t* payload = get_clear_memory(sizeof(wire_gossip_pull_t));
+          if (payload != NULL) {
+            if (wire_gossip_pull_decode(wire_msg, payload) == 0) {
+              dispatch_msg.payload = payload;
+              network_handle_gossip_pull_received(network, &dispatch_msg);
+            } else {
+              free(payload);
+            }
+          }
+          break;
+        }
         default:
           break;
       }
@@ -2894,6 +2931,30 @@ void network_dispatch(void* state, message_t* msg) {
               if (wire_rate_limited_decode(wire_msg, payload) == 0) {
                 dispatch_msg.payload = payload;
                 network_handle_rate_limited(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_GOSSIP: {
+            wire_gossip_t* payload = get_clear_memory(sizeof(wire_gossip_t));
+            if (payload != NULL) {
+              if (wire_gossip_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_gossip_received(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_GOSSIP_PULL: {
+            wire_gossip_pull_t* payload = get_clear_memory(sizeof(wire_gossip_pull_t));
+            if (payload != NULL) {
+              if (wire_gossip_pull_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_gossip_pull_received(network, &dispatch_msg);
               } else {
                 free(payload);
               }
