@@ -8,15 +8,18 @@
 
 **Tech Stack:** C (node-side event logging, control command handlers), C++/GTest (test framework, topology helpers, assertions)
 
+**Security:** All message logging and RPC injection is compiled out of release builds via `#ifdef OFFS_TEST`. The `message_log_t` in `network_t`, all `message_log_record()` calls, the control command handlers, and the `CTRL_*` protocol definitions are gated behind this flag. The `test_node_main.c` (which contains the TCP control socket server) is only linked into the test binary, never `off_server`. In release builds, there is zero memory overhead, zero processing overhead, and no attack surface from test infrastructure.
+
 ---
 
 ## Components
 
 ### 1. Message Event Log (C, node-side)
 
-A fixed-size circular buffer in `network_t` that records every wire message sent or received. Each event captures the message type, direction, peer, correlation ID, and a result field.
+A fixed-size circular buffer in `network_t` that records every wire message sent or received. Each event captures the message type, direction, peer, correlation ID, and a result field. **Compiled out in release builds** via `#ifdef OFFS_TEST`.
 
 ```c
+#ifdef OFFS_TEST
 #define MESSAGE_LOG_CAPACITY 256
 
 typedef enum {
@@ -42,7 +45,14 @@ typedef struct {
   size_t cursor;             // index of oldest event (wraps)
   PLATFORMLOCKTYPE(lock);
 } message_log_t;
-```
+#else
+// Release build: message logging is completely compiled out
+typedef struct { int _unused; } message_log_t;
+#define message_log_init(log) ((void)0)
+#define message_log_record(log, type, dir, peer, msg_id, hash, result, network) ((void)0)
+#define message_log_query(log, after, out, out_cap) (0)
+#define message_log_clear(log) ((void)0)
+#endif // OFFS_TEST
 
 **Log points** — insert `message_log_record()` calls in `network_dispatch` at every message type handler, and in `conn_state_send` / `relay_client` send paths:
 
@@ -318,10 +328,10 @@ Decoded:
 
 | File | Change |
 |------|--------|
-| `src/Network/network.h` | Add `message_log_t` to `network_t` |
+| `src/Network/network.h` | Add `message_log_t log` to `network_t` (inside `#ifdef OFFS_TEST`) |
 | `src/Network/message_log.h` | New: message_log_t definition, init/destroy/record/query API |
 | `src/Network/message_log.c` | New: implementation |
-| `src/Network/network.c` | Call `message_log_record` at each message handler, record `hebbian_weight` from peer |
+| `src/Network/network.c` | Call `message_log_record` at each message handler, record `hebbian_weight` from peer (inside `#ifdef OFFS_TEST`) |
 | `src/Network/conn_state.c` | Call `message_log_record` in send paths |
 | `src/Network/hebbian.h` | Add `hebbian_table_query` function for CTRL_HEBBIAN |
 | `test/test_control_protocol.h` | Add GET_EVENTS, CLEAR_EVENTS, FIND_BLOCK, PING_PEER, HEBBIAN |
