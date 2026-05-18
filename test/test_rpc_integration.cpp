@@ -1166,6 +1166,79 @@ TEST_F(RpcIntegrationTest, RankBlockVisitedBloomDiamond) {
 #endif
 }
 
+TEST_F(RpcIntegrationTest, GossipDiscoveryDiamond) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  /* Create diamond topology: A-B-D, A-C-D */
+  auto diamond = make_diamond();
+  ASSERT_EQ(diamond.size(), 4u);
+
+  /* Clear event logs on all nodes */
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    clear_events(diamond[idx].control_fd);
+  }
+
+  /* Trigger gossip on all nodes so they exchange ring membership */
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    send_command(diamond[idx].control_fd, CTRL_GOSSIP);
+  }
+
+  /* Wait for gossip propagation */
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  /* Verify that WIRE_GOSSIP was sent by at least one node */
+  bool any_gossip_sent = false;
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    auto events = get_events(diamond[idx].control_fd);
+    if (count_events(events, MSG_DIRECTION_SENT_VAL, WIRE_GOSSIP_VAL) > 0) {
+      any_gossip_sent = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(any_gossip_sent) << "At least one node should have sent WIRE_GOSSIP";
+
+  /* Verify that WIRE_GOSSIP was received by at least one node */
+  bool any_gossip_received = false;
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    auto events = get_events(diamond[idx].control_fd);
+    if (count_events(events, MSG_DIRECTION_RECEIVED_VAL, WIRE_GOSSIP_VAL) > 0) {
+      any_gossip_received = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(any_gossip_received) << "At least one node should have received WIRE_GOSSIP";
+
+  /* Verify that WIRE_GOSSIP_PULL was received (PUSHPULL mode) */
+  bool any_pull_received = false;
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    auto events = get_events(diamond[idx].control_fd);
+    if (count_events(events, MSG_DIRECTION_RECEIVED_VAL, WIRE_GOSSIP_PULL_VAL) > 0) {
+      any_pull_received = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(any_pull_received) << "At least one node should have received WIRE_GOSSIP_PULL";
+
+  /* Verify gossip traffic is bounded — no flooding.
+   * In a diamond with 4 nodes each having 2 peers, each gossip tick
+   * sends at most 1 WIRE_GOSSIP per connected peer target. Each
+   * received WIRE_GOSSIP triggers exactly 1 WIRE_GOSSIP_PULL back.
+   * Total gossip messages (GOSSIP_SENT + GOSSIP_RECEIVED + PULL_RECEIVED)
+   * should be well under 40. */
+  size_t total_gossip_events = 0;
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    auto events = get_events(diamond[idx].control_fd);
+    total_gossip_events += count_events(events, MSG_DIRECTION_SENT_VAL, WIRE_GOSSIP_VAL);
+    total_gossip_events += count_events(events, MSG_DIRECTION_RECEIVED_VAL, WIRE_GOSSIP_VAL);
+    total_gossip_events += count_events(events, MSG_DIRECTION_SENT_VAL, WIRE_GOSSIP_PULL_VAL);
+    total_gossip_events += count_events(events, MSG_DIRECTION_RECEIVED_VAL, WIRE_GOSSIP_PULL_VAL);
+  }
+  EXPECT_LE(total_gossip_events, 40u)
+      << "Total gossip traffic should be bounded, got " << total_gossip_events;
+#endif
+}
+
 int main(int argc, char* argv[]) {
   for (int idx = 1; idx < argc; idx++) {
     std::string arg(argv[idx]);
