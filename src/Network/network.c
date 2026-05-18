@@ -29,10 +29,26 @@
 #include <time.h>
 
 #define TOPOLOGY_METRICS_PUSH_INTERVAL_MS 300000  // 5 minutes
+#define PING_CAPACITY_INTERVAL_MS 900000  // 15 minutes
 
 // Forward declarations for internal handlers
 static void network_sync_hebbian_to_rings(network_t* network);
 static void network_handle_local_find_block(network_t* network, message_t* msg);
+static void network_handle_ping_capacity_tick(network_t* network, message_t* msg);
+static void network_handle_gossip_received(network_t* network, message_t* msg);
+static void network_handle_gossip_pull_received(network_t* network, message_t* msg);
+
+static void network_handle_gossip_received(network_t* network, message_t* msg) {
+  (void)network;
+  (void)msg;
+  // TODO: Implement in Task 4 - Meridian gossip receipt handler
+}
+
+static void network_handle_gossip_pull_received(network_t* network, message_t* msg) {
+  (void)network;
+  (void)msg;
+  // TODO: Implement in Task 4 - Meridian gossip pull receipt handler
+}
 
 // --- Payload destroy for cache PUT from network ---
 static void network_cache_put_payload_destroy(void* ptr) {
@@ -84,13 +100,12 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   network->wanted_list = wanted_list_create();
   hebbian_table_init(&network->hebbian, 32);
   rate_limit_table_init(&network->rate_limits, 32);
-#ifdef OFFS_TEST
-  message_log_init(&network->log);
-#endif
+  network->log = NULL;
   network->topology_metrics = topology_metrics_create(pool);
   connection_manager_init(&network->conn_mgr, 16, NULL);
   network->hebbian_decay_timer_id = 0;
   network->metrics_push_timer_id = 0;
+  network->ping_capacity_timer_id = 0;
   network->relay = NULL;
   network->nat_detect = NULL;
   network->local_nat_type = NAT_TYPE_UNKNOWN;
@@ -128,6 +143,13 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
       &network->actor,
       NETWORK_METRICS_PUSH);
 
+  // PingCapacity timer: periodic capacity exchange with all peers
+  network->ping_capacity_timer_id = timer_actor_set(timer,
+      PING_CAPACITY_INTERVAL_MS,
+      PING_CAPACITY_INTERVAL_MS,
+      &network->actor,
+      NETWORK_PING_CAPACITY_TICK);
+
   return network;
 }
 
@@ -155,6 +177,10 @@ void network_destroy(network_t* network) {
   if (network->metrics_push_timer_id != 0) {
     timer_actor_cancel(network->timer, network->metrics_push_timer_id);
   }
+  if (network->ping_capacity_timer_id != 0) {
+    timer_actor_cancel(network->timer, network->ping_capacity_timer_id);
+    network->ping_capacity_timer_id = 0;
+  }
   if (network->relay != NULL) {
     relay_client_destroy(network->relay);
     network->relay = NULL;
@@ -177,9 +203,11 @@ void network_destroy(network_t* network) {
   }
 #endif
   actor_destroy(&network->actor);
-#ifdef OFFS_TEST
-  message_log_clear(&network->log);
-#endif
+  if (network->log != NULL) {
+    message_log_clear(network->log);
+    free(network->log);
+    network->log = NULL;
+  }
   free(network);
 }
 
@@ -361,11 +389,11 @@ static void network_handle_ping(network_t* network, message_t* msg) {
   wire_ping_t* ping = (wire_ping_t*)msg->payload;
   if (ping == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_PING, MSG_DIRECTION_RECEIVED,
-                     &ping->sender_id, ping->message_id, NULL,
-                     0, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_PING, MSG_DIRECTION_RECEIVED,
+                       &ping->sender_id, ping->message_id, NULL,
+                       0, &network->hebbian);
+  }
 
   // Build wire PingResponse with our capacity/phase and echo timestamp for RTT
   wire_ping_response_t response;
@@ -388,11 +416,11 @@ static void network_handle_ping_response(network_t* network, message_t* msg) {
   wire_ping_response_t* response = (wire_ping_response_t*)msg->payload;
   if (response == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_PING_RESPONSE, MSG_DIRECTION_RECEIVED,
-                     &response->sender_id, response->message_id, NULL,
-                     0, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_PING_RESPONSE, MSG_DIRECTION_RECEIVED,
+                       &response->sender_id, response->message_id, NULL,
+                       0, &network->hebbian);
+  }
 
   // Calculate RTT from echo_time (the timestamp field holds the original send time)
   uint64_t now_ms = (uint64_t)time(NULL) * 1000;
@@ -421,11 +449,11 @@ static void network_handle_ping_block(network_t* network, message_t* msg) {
   wire_ping_block_t* ping = (wire_ping_block_t*)msg->payload;
   if (ping == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_PING_BLOCK, MSG_DIRECTION_RECEIVED,
-                     &ping->sender_id, ping->message_id, ping->block_hash,
-                     0, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_PING_BLOCK, MSG_DIRECTION_RECEIVED,
+                       &ping->sender_id, ping->message_id, ping->block_hash,
+                       0, &network->hebbian);
+  }
 
   // Check if we have the block locally via synchronous index_peek
   buffer_t* hash_buf = buffer_create_from_pointer_copy(ping->block_hash, 32);
@@ -473,17 +501,43 @@ static void network_handle_ping_block_response(network_t* network, message_t* ms
   wire_ping_block_response_t* response = (wire_ping_block_response_t*)msg->payload;
   if (response == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_PING_BLOCK_RESPONSE, MSG_DIRECTION_RECEIVED,
-                     &response->sender_id, response->message_id, NULL,
-                     0, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_PING_BLOCK_RESPONSE, MSG_DIRECTION_RECEIVED,
+                       &response->sender_id, response->message_id, NULL,
+                       0, &network->hebbian);
+  }
 
   // On successful block existence confirmation, strengthen Hebbian weight
   if (response->exists) {
     float delta_w = hebbian_compute_delta(GOSSIP_TIMEOUT_MS, HEBBIAN_FIND_BLOCK_MULTIPLIER);
     hebbian_frequency(&network->hebbian, &response->sender_id, delta_w);
     network_sync_hebbian_to_rings(network);
+  }
+}
+
+// --- PingCapacity periodic tick ---
+// Sends PingCapacity to all connected peers every 15 minutes.
+// Separate from gossip because PingCapacity is about capacity awareness,
+// not ring maintenance/peer discovery.
+
+static void network_handle_ping_capacity_tick(network_t* network, message_t* msg) {
+  (void)msg;
+  if (network->conn_mgr.peer_count == 0) return;
+
+  for (size_t index = 0; index < network->conn_mgr.peer_count; index++) {
+    peer_connection_t* peer = network->conn_mgr.peers[index];
+    if (peer == NULL || !peer->connected) continue;
+
+    wire_ping_capacity_t ping_cap;
+    memset(&ping_cap, 0, sizeof(ping_cap));
+    ping_cap.message_id = gossip_handle_next_query_id(&network->gossip);
+    memcpy(&ping_cap.source, &network->authority->local_id, sizeof(node_id_t));
+    ping_cap.capacity = atomic_load(&network->authority->capacity);
+    ping_cap.phase = atomic_load(&network->authority->phase);
+
+    cbor_item_t* cbor = wire_ping_capacity_encode(&ping_cap);
+    conn_state_send(network, peer, cbor);
+    cbor_decref(&cbor);
   }
 }
 
@@ -535,11 +589,11 @@ static void network_handle_ping_capacity(network_t* network, message_t* msg) {
   wire_ping_capacity_t* ping = (wire_ping_capacity_t*)msg->payload;
   if (ping == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_PING_CAPACITY, MSG_DIRECTION_RECEIVED,
-                     &ping->source, ping->message_id, NULL,
-                     0, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_PING_CAPACITY, MSG_DIRECTION_RECEIVED,
+                       &ping->source, ping->message_id, NULL,
+                       0, &network->hebbian);
+  }
 
   // Look up or create node entry for the sender
   net_node_t* node = ring_set_find_by_id(network->rings, &ping->source);
@@ -572,11 +626,11 @@ static void network_handle_ping_capacity_response(network_t* network, message_t*
   wire_ping_capacity_response_t* response = (wire_ping_capacity_response_t*)msg->payload;
   if (response == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_PING_CAPACITY_RESPONSE, MSG_DIRECTION_RECEIVED,
-                     &response->sender_id, response->message_id, NULL,
-                     0, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_PING_CAPACITY_RESPONSE, MSG_DIRECTION_RECEIVED,
+                       &response->sender_id, response->message_id, NULL,
+                       0, &network->hebbian);
+  }
 
   // Calculate delta_w from RTT. PingCapacity doesn't carry echo_time,
   // so we use a default latency estimate from the gossip timeout.
@@ -608,11 +662,11 @@ static void network_handle_find_node(network_t* network, message_t* msg) {
   wire_find_node_t* find = (wire_find_node_t*)msg->payload;
   if (find == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_FIND_NODE, MSG_DIRECTION_RECEIVED,
-                     &find->sender_id, find->message_id, NULL,
-                     0, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_FIND_NODE, MSG_DIRECTION_RECEIVED,
+                       &find->sender_id, find->message_id, NULL,
+                       0, &network->hebbian);
+  }
 
   wire_find_node_response_t* response = get_clear_memory(sizeof(wire_find_node_response_t));
   response->message_id = find->message_id;
@@ -644,11 +698,11 @@ static void network_handle_find_node_response(network_t* network, message_t* msg
   wire_find_node_response_t* response = (wire_find_node_response_t*)msg->payload;
   if (response == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_FIND_NODE_RESPONSE, MSG_DIRECTION_RECEIVED,
-                     &response->sender_id, response->message_id, NULL,
-                     0, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_FIND_NODE_RESPONSE, MSG_DIRECTION_RECEIVED,
+                       &response->sender_id, response->message_id, NULL,
+                       0, &network->hebbian);
+  }
 
   // Insert responding peers into our ring table based on measured latency
   for (uint8_t index = 0; index < response->closest_count; index++) {
@@ -670,11 +724,11 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
   wire_find_block_t* find = (wire_find_block_t*)msg->payload;
   if (find == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_RECEIVED,
-                     &find->original_source, find->message_id, find->block_hash,
-                     0, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_RECEIVED,
+                       &find->original_source, find->message_id, find->block_hash,
+                       0, &network->hebbian);
+  }
 
   // Check local block cache first — if we have the block, respond immediately
   if (network->block_cache != NULL && network->block_cache->index != NULL) {
@@ -712,11 +766,11 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
           conn_state_send(network, reply_peer, cbor);
           cbor_decref(&cbor);
 
-#ifdef OFFS_TEST
-          message_log_record(&network->log, WIRE_FIND_BLOCK_RESPONSE, MSG_DIRECTION_SENT,
+        if (network->log != NULL) {
+          message_log_record(network->log, WIRE_FIND_BLOCK_RESPONSE, MSG_DIRECTION_SENT,
                              reply_to, find->message_id, find->block_hash,
                              0, &network->hebbian);
-#endif
+        }
 
           if (block != NULL) {
             DESTROY(block, block);
@@ -808,11 +862,11 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
           conn_state_send(network, reply_peer, cbor);
           cbor_decref(&cbor);
 
-#ifdef OFFS_TEST
-          message_log_record(&network->log, WIRE_FIND_BLOCK_RESPONSE, MSG_DIRECTION_SENT,
+        if (network->log != NULL) {
+          message_log_record(network->log, WIRE_FIND_BLOCK_RESPONSE, MSG_DIRECTION_SENT,
                              reply_to, state.message_id, state.block_hash,
                              2, &network->hebbian);
-#endif
+        }
         }
       }
       break;
@@ -865,11 +919,11 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
           conn_state_send(network, next_peer, cbor);
         }
         cbor_decref(&cbor);
-#ifdef OFFS_TEST
-        message_log_record(&network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
-                           &next_hops[hop]->id, state.message_id, state.block_hash,
-                           1, &network->hebbian);
-#endif
+        if (network->log != NULL) {
+          message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
+                             &next_hops[hop]->id, state.message_id, state.block_hash,
+                             1, &network->hebbian);
+        }
         free(forward);
       }
       break;
@@ -881,11 +935,11 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
   wire_find_block_response_t* response = (wire_find_block_response_t*)msg->payload;
   if (response == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_FIND_BLOCK_RESPONSE, MSG_DIRECTION_RECEIVED,
-                     &response->holder, response->message_id, response->block_hash,
-                     response->found ? 0 : 2, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_FIND_BLOCK_RESPONSE, MSG_DIRECTION_RECEIVED,
+                       &response->holder, response->message_id, response->block_hash,
+                       response->found ? 0 : 2, &network->hebbian);
+  }
 
   if (response->found) {
     // Block found — apply Hebbian learning rules along the response path
@@ -1018,18 +1072,16 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
   wire_store_block_t* store = (wire_store_block_t*)msg->payload;
   if (store == NULL) return;
 
-#ifdef OFFS_TEST
-  {
+  if (network->log != NULL) {
     node_id_t store_sender;
     memset(&store_sender, 0, sizeof(node_id_t));
     if (store->path_len > 0) {
       memcpy(&store_sender, &store->path[store->path_len - 1], sizeof(node_id_t));
     }
-    message_log_record(&network->log, WIRE_STORE_BLOCK, MSG_DIRECTION_RECEIVED,
+    message_log_record(network->log, WIRE_STORE_BLOCK, MSG_DIRECTION_RECEIVED,
                        &store_sender, store->message_id, store->block_hash,
                        0, &network->hebbian);
   }
-#endif
 
   // Build store_block_state from the wire message
   store_block_state_t state;
@@ -1139,11 +1191,11 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
             conn_state_send(network, next_peer, cbor);
           }
           cbor_decref(&cbor);
-#ifdef OFFS_TEST
-          message_log_record(&network->log, WIRE_STORE_BLOCK, MSG_DIRECTION_FORWARDED,
+        if (network->log != NULL) {
+          message_log_record(network->log, WIRE_STORE_BLOCK, MSG_DIRECTION_FORWARDED,
                              &next_hops[hop]->id, state.message_id, state.block_hash,
                              1, &network->hebbian);
-#endif
+        }
           wire_store_block_destroy(forward);
         }
       }
@@ -1198,11 +1250,11 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
           cbor_item_t* cbor = wire_store_block_response_encode(&decline);
           conn_state_send(network, reply_peer, cbor);
           cbor_decref(&cbor);
-#ifdef OFFS_TEST
-          message_log_record(&network->log, WIRE_STORE_BLOCK_RESPONSE, MSG_DIRECTION_SENT,
+        if (network->log != NULL) {
+          message_log_record(network->log, WIRE_STORE_BLOCK_RESPONSE, MSG_DIRECTION_SENT,
                              reply_to, store->message_id, store->block_hash,
                              3, &network->hebbian);
-#endif
+        }
         }
       }
       break;
@@ -1249,11 +1301,11 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
           conn_state_send(network, next_peer, cbor);
         }
         cbor_decref(&cbor);
-#ifdef OFFS_TEST
-        message_log_record(&network->log, WIRE_STORE_BLOCK, MSG_DIRECTION_FORWARDED,
+      if (network->log != NULL) {
+        message_log_record(network->log, WIRE_STORE_BLOCK, MSG_DIRECTION_FORWARDED,
                            &next_hops[hop]->id, state.message_id, state.block_hash,
                            1, &network->hebbian);
-#endif
+      }
         wire_store_block_destroy(forward);
       }
       break;
@@ -1265,11 +1317,11 @@ static void network_handle_store_block_response(network_t* network, message_t* m
   wire_store_block_response_t* response = (wire_store_block_response_t*)msg->payload;
   if (response == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_STORE_BLOCK_RESPONSE, MSG_DIRECTION_RECEIVED,
-                     &response->holder, response->message_id, response->block_hash,
-                     response->accepted ? 0 : 3, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_STORE_BLOCK_RESPONSE, MSG_DIRECTION_RECEIVED,
+                       &response->holder, response->message_id, response->block_hash,
+                       response->accepted ? 0 : 3, &network->hebbian);
+  }
 
   if (response->accepted) {
     // Block accepted — apply Hebbian learning rules along the response path
@@ -1332,11 +1384,11 @@ static void network_handle_seeking_blocks(network_t* network, message_t* msg) {
   wire_seeking_blocks_t* seeking = (wire_seeking_blocks_t*)msg->payload;
   if (seeking == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_SEEKING_BLOCKS, MSG_DIRECTION_RECEIVED,
-                     &seeking->sender_id, seeking->message_id, NULL,
-                     0, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_SEEKING_BLOCKS, MSG_DIRECTION_RECEIVED,
+                       &seeking->sender_id, seeking->message_id, NULL,
+                       0, &network->hebbian);
+  }
 
   float local_capacity = atomic_load(&network->authority->capacity);
 
@@ -1399,11 +1451,11 @@ static void network_handle_seeking_blocks_response(network_t* network, message_t
   wire_seeking_blocks_response_t* response = (wire_seeking_blocks_response_t*)msg->payload;
   if (response == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_SEEKING_BLOCKS_RESPONSE, MSG_DIRECTION_RECEIVED,
-                     &response->sender_id, response->message_id, NULL,
-                     0, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_SEEKING_BLOCKS_RESPONSE, MSG_DIRECTION_RECEIVED,
+                       &response->sender_id, response->message_id, NULL,
+                       0, &network->hebbian);
+  }
 
   float local_capacity = atomic_load(&network->authority->capacity);
 
@@ -1448,17 +1500,23 @@ static void network_handle_seeking_blocks_response(network_t* network, message_t
 // --- RankBlock handler ---
 // Fire-and-forget: upgrade our local rank or initiate seek
 
-#define MAX_RANK_HOPS 6
-
 static void network_handle_rank_block(network_t* network, message_t* msg) {
   wire_rank_block_t* rank = (wire_rank_block_t*)msg->payload;
   if (rank == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_RANK_BLOCK, MSG_DIRECTION_RECEIVED,
-                     &rank->origin, 0, rank->block_hash,
-                     0, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_RANK_BLOCK, MSG_DIRECTION_RECEIVED,
+                       &rank->origin, 0, rank->block_hash,
+                       0, &network->hebbian);
+  }
+
+  // Add self to visited bloom and path
+  find_block_add_visited(rank->visited_bloom, &rank->visited_count,
+                         network->authority->local_id.hash);
+  if (rank->path_len < WIRE_MAX_PATH) {
+    memcpy(&rank->path[rank->path_len], &network->authority->local_id, sizeof(node_id_t));
+    rank->path_len++;
+  }
 
   float local_capacity = atomic_load(&network->authority->capacity);
 
@@ -1492,22 +1550,41 @@ static void network_handle_rank_block(network_t* network, message_t* msg) {
     }
   }
 
-  // If hop_count < MAX_RANK_HOPS → forward to random subset of peers
-  if (rank->hop_count < MAX_RANK_HOPS) {
-    // Select up to 3 random peers from ring table for forwarding
+  // If hop_count < RANK_BLOCK_MAX_HOPS → forward to random subset of peers
+  if (rank->hop_count < RANK_BLOCK_MAX_HOPS) {
+    // Select up to 3 random peers from ring table, filtering by visited bloom and path
     net_node_t* candidates[RING_K * RING_MAX_RINGS];
     size_t candidate_count = 0;
 
-    for (size_t ring_index = 0; ring_index < network->rings->ring_count && candidate_count < 3; ring_index++) {
+    for (size_t ring_index = 0; ring_index < network->rings->ring_count && candidate_count < RANK_BLOCK_FORWARD_FANOUT; ring_index++) {
       ring_t* ring = &network->rings->rings[ring_index];
-      for (int node_index = 0; node_index < ring->primary.length && candidate_count < 3; node_index++) {
+      for (int node_index = 0; node_index < ring->primary.length && candidate_count < RANK_BLOCK_FORWARD_FANOUT; node_index++) {
         net_node_t* node = ring->primary.data[node_index];
         if (node == NULL) continue;
         if (node->flags & NET_NODE_FLAG_RENDEZVOUS) continue;
+
+        // Skip nodes already in the path
+        bool in_path = false;
+        for (uint8_t path_index = 0; path_index < rank->path_len; path_index++) {
+          if (node_id_equals(&rank->path[path_index], &node->id)) {
+            in_path = true;
+            break;
+          }
+        }
+        if (in_path) continue;
+
+        // Skip nodes already in visited bloom
+        if (find_block_is_visited(rank->visited_bloom, rank->visited_count, node->id.hash)) {
+          continue;
+        }
+
         candidates[candidate_count] = node;
         candidate_count++;
       }
     }
+
+    // Increment hop count for forwarded messages
+    rank->hop_count++;
 
     for (size_t hop = 0; hop < candidate_count; hop++) {
       wire_rank_block_t* forward = get_clear_memory(sizeof(wire_rank_block_t));
@@ -1516,29 +1593,26 @@ static void network_handle_rank_block(network_t* network, message_t* msg) {
       forward->fib = rank->fib;
       forward->count = rank->count;
       memcpy(&forward->origin, &rank->origin, sizeof(node_id_t));
-      forward->hop_count = rank->hop_count + 1;
+      forward->hop_count = rank->hop_count;
+      memcpy(forward->visited_bloom, rank->visited_bloom, WIRE_MAX_VISITED_BLOOM);
+      forward->visited_count = rank->visited_count;
+      memcpy(forward->path, rank->path, rank->path_len * sizeof(node_id_t));
+      forward->path_len = rank->path_len;
 
-      message_t forward_msg;
-      forward_msg.type = NETWORK_RANK_BLOCK;
-      forward_msg.payload = forward;
-      forward_msg.payload_destroy = free;
-      // Encode and send RankBlock to candidate peer via QUIC
-      {
-        cbor_item_t* cbor = wire_rank_block_encode(forward);
-        peer_connection_t* candidate_peer = connection_manager_lookup(
-            &network->conn_mgr, &candidates[hop]->id);
-        if (candidate_peer != NULL) {
-          conn_state_send(network, candidate_peer, cbor);
-        }
-        cbor_decref(&cbor);
-#ifdef OFFS_TEST
-        message_log_record(&network->log, WIRE_RANK_BLOCK, MSG_DIRECTION_FORWARDED,
+      // Encode and send RankBlock to candidate peer
+      cbor_item_t* cbor = wire_rank_block_encode(forward);
+      peer_connection_t* candidate_peer = connection_manager_lookup(
+          &network->conn_mgr, &candidates[hop]->id);
+      if (candidate_peer != NULL) {
+        conn_state_send(network, candidate_peer, cbor);
+      }
+      cbor_decref(&cbor);
+      if (network->log != NULL) {
+        message_log_record(network->log, WIRE_RANK_BLOCK, MSG_DIRECTION_FORWARDED,
                            &candidates[hop]->id, 0, rank->block_hash,
                            1, &network->hebbian);
-#endif
       }
       free(forward);
-      (void)forward_msg;
     }
   }
 }
@@ -1549,11 +1623,11 @@ static void network_handle_recall_block(network_t* network, message_t* msg) {
   wire_recall_block_t* recall = (wire_recall_block_t*)msg->payload;
   if (recall == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_RECALL_BLOCK, MSG_DIRECTION_RECEIVED,
-                     &recall->sender_id, recall->message_id, recall->block_hash,
-                     0, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_RECALL_BLOCK, MSG_DIRECTION_RECEIVED,
+                       &recall->sender_id, recall->message_id, recall->block_hash,
+                       0, &network->hebbian);
+  }
 
   float local_capacity = atomic_load(&network->authority->capacity);
 
@@ -1593,11 +1667,11 @@ static void network_handle_recall_accept(network_t* network, message_t* msg) {
   wire_recall_accept_t* accept = (wire_recall_accept_t*)msg->payload;
   if (accept == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_RECALL_ACCEPT, MSG_DIRECTION_RECEIVED,
-                     &accept->sender_id, accept->message_id, accept->block_hash,
-                     0, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_RECALL_ACCEPT, MSG_DIRECTION_RECEIVED,
+                       &accept->sender_id, accept->message_id, accept->block_hash,
+                       0, &network->hebbian);
+  }
 
   // Look up the block by hash in the local block_cache index
   buffer_t* hash_buf = buffer_create_from_pointer_copy(accept->block_hash, 32);
@@ -1665,11 +1739,11 @@ static void network_handle_recall_decline(network_t* network, message_t* msg) {
   wire_recall_decline_t* decline = (wire_recall_decline_t*)msg->payload;
   if (decline == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_RECALL_DECLINE, MSG_DIRECTION_RECEIVED,
-                     &decline->sender_id, decline->message_id, decline->block_hash,
-                     3, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_RECALL_DECLINE, MSG_DIRECTION_RECEIVED,
+                       &decline->sender_id, decline->message_id, decline->block_hash,
+                       3, &network->hebbian);
+  }
 
   // Remove the declined block hash from the sender's EABF to stop
   // sending recall requests for blocks the sender doesn't want.
@@ -1695,11 +1769,11 @@ static void network_handle_rate_limited(network_t* network, message_t* msg) {
   wire_rate_limited_t* limited = (wire_rate_limited_t*)msg->payload;
   if (limited == NULL) return;
 
-#ifdef OFFS_TEST
-  message_log_record(&network->log, WIRE_RATE_LIMITED, MSG_DIRECTION_RECEIVED,
-                     &limited->sender_id, limited->message_id, NULL,
-                     0, &network->hebbian);
-#endif
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_RATE_LIMITED, MSG_DIRECTION_RECEIVED,
+                       &limited->sender_id, limited->message_id, NULL,
+                       0, &network->hebbian);
+  }
 
   // Look up the peer's rate limit entry and drain tokens for the specified RPC type.
   // This ensures we respect the peer's backoff signal and don't immediately retry.
@@ -1982,6 +2056,15 @@ void network_dispatch(void* state, message_t* msg) {
     case NETWORK_GOSSIP_EXPIRE:
       network_handle_gossip_expire(network, msg);
       break;
+    case NETWORK_PING_CAPACITY_TICK:
+      network_handle_ping_capacity_tick(network, msg);
+      break;
+    case NETWORK_GOSSIP_RECEIVED:
+      network_handle_gossip_received(network, msg);
+      break;
+    case NETWORK_GOSSIP_PULL_RECEIVED:
+      network_handle_gossip_pull_received(network, msg);
+      break;
     case NETWORK_METRICS_PUSH: {
       size_t peer_count = connection_manager_count(&network->conn_mgr);
       rate_limit_table_set_peer_count(&network->rate_limits, peer_count);
@@ -2195,6 +2278,55 @@ void network_dispatch(void* state, message_t* msg) {
             network_handle_store_block_response(network, &dispatch_msg);
           } else {
             free(payload);
+          }
+          break;
+        }
+        case WIRE_SEEKING_BLOCKS_RESPONSE: {
+          wire_seeking_blocks_response_t* payload = get_clear_memory(sizeof(wire_seeking_blocks_response_t));
+          if (payload != NULL) {
+            if (wire_seeking_blocks_response_decode(wire_msg, payload) == 0) {
+              dispatch_msg.payload = payload;
+              network_handle_seeking_blocks_response(network, &dispatch_msg);
+            } else {
+              free(payload);
+            }
+          }
+          break;
+        }
+        case WIRE_RECALL_ACCEPT: {
+          wire_recall_accept_t* payload = get_clear_memory(sizeof(wire_recall_accept_t));
+          if (payload != NULL) {
+            if (wire_recall_accept_decode(wire_msg, payload) == 0) {
+              dispatch_msg.payload = payload;
+              dispatch_msg.payload_destroy = (void (*)(void*))wire_recall_accept_destroy;
+              network_handle_recall_accept(network, &dispatch_msg);
+            } else {
+              wire_recall_accept_destroy(payload);
+            }
+          }
+          break;
+        }
+        case WIRE_RECALL_DECLINE: {
+          wire_recall_decline_t* payload = get_clear_memory(sizeof(wire_recall_decline_t));
+          if (payload != NULL) {
+            if (wire_recall_decline_decode(wire_msg, payload) == 0) {
+              dispatch_msg.payload = payload;
+              network_handle_recall_decline(network, &dispatch_msg);
+            } else {
+              free(payload);
+            }
+          }
+          break;
+        }
+        case WIRE_RATE_LIMITED: {
+          wire_rate_limited_t* payload = get_clear_memory(sizeof(wire_rate_limited_t));
+          if (payload != NULL) {
+            if (wire_rate_limited_decode(wire_msg, payload) == 0) {
+              dispatch_msg.payload = payload;
+              network_handle_rate_limited(network, &dispatch_msg);
+            } else {
+              free(payload);
+            }
           }
           break;
         }
@@ -2412,6 +2544,18 @@ void network_dispatch(void* state, message_t* msg) {
             }
             break;
           }
+          case WIRE_PING_RESPONSE: {
+            wire_ping_response_t* payload = get_clear_memory(sizeof(wire_ping_response_t));
+            if (payload != NULL) {
+              if (wire_ping_response_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_ping_response(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
           case WIRE_PING_CAPACITY: {
             wire_ping_capacity_t* payload = get_clear_memory(sizeof(wire_ping_capacity_t));
             if (payload != NULL) {
@@ -2424,12 +2568,36 @@ void network_dispatch(void* state, message_t* msg) {
             }
             break;
           }
+          case WIRE_PING_CAPACITY_RESPONSE: {
+            wire_ping_capacity_response_t* payload = get_clear_memory(sizeof(wire_ping_capacity_response_t));
+            if (payload != NULL) {
+              if (wire_ping_capacity_response_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_ping_capacity_response(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
           case WIRE_PING_BLOCK: {
             wire_ping_block_t* payload = get_clear_memory(sizeof(wire_ping_block_t));
             if (payload != NULL) {
               if (wire_ping_block_decode(wire_msg, payload) == 0) {
                 dispatch_msg.payload = payload;
                 network_handle_ping_block(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_PING_BLOCK_RESPONSE: {
+            wire_ping_block_response_t* payload = get_clear_memory(sizeof(wire_ping_block_response_t));
+            if (payload != NULL) {
+              if (wire_ping_block_response_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_ping_block_response(network, &dispatch_msg);
               } else {
                 free(payload);
               }
@@ -2449,12 +2617,36 @@ void network_dispatch(void* state, message_t* msg) {
             }
             break;
           }
+          case WIRE_FIND_BLOCK_RESPONSE: {
+            wire_find_block_response_t* payload = get_clear_memory(sizeof(wire_find_block_response_t));
+            if (payload != NULL) {
+              if (wire_find_block_response_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_find_block_response(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
           case WIRE_FIND_NODE: {
             wire_find_node_t* payload = get_clear_memory(sizeof(wire_find_node_t));
             if (payload != NULL) {
               if (wire_find_node_decode(wire_msg, payload) == 0) {
                 dispatch_msg.payload = payload;
                 network_handle_find_node(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_FIND_NODE_RESPONSE: {
+            wire_find_node_response_t* payload = get_clear_memory(sizeof(wire_find_node_response_t));
+            if (payload != NULL) {
+              if (wire_find_node_response_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_find_node_response(network, &dispatch_msg);
               } else {
                 free(payload);
               }
@@ -2470,6 +2662,18 @@ void network_dispatch(void* state, message_t* msg) {
                 network_handle_store_block(network, &dispatch_msg);
               } else {
                 wire_store_block_destroy(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_STORE_BLOCK_RESPONSE: {
+            wire_store_block_response_t* payload = get_clear_memory(sizeof(wire_store_block_response_t));
+            if (payload != NULL) {
+              if (wire_store_block_response_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_store_block_response(network, &dispatch_msg);
+              } else {
+                free(payload);
               }
             }
             break;
@@ -2511,8 +2715,56 @@ void network_dispatch(void* state, message_t* msg) {
             }
             break;
           }
+          case WIRE_SEEKING_BLOCKS_RESPONSE: {
+            wire_seeking_blocks_response_t* payload = get_clear_memory(sizeof(wire_seeking_blocks_response_t));
+            if (payload != NULL) {
+              if (wire_seeking_blocks_response_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_seeking_blocks_response(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_RECALL_ACCEPT: {
+            wire_recall_accept_t* payload = get_clear_memory(sizeof(wire_recall_accept_t));
+            if (payload != NULL) {
+              if (wire_recall_accept_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                dispatch_msg.payload_destroy = (void (*)(void*))wire_recall_accept_destroy;
+                network_handle_recall_accept(network, &dispatch_msg);
+              } else {
+                wire_recall_accept_destroy(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_RECALL_DECLINE: {
+            wire_recall_decline_t* payload = get_clear_memory(sizeof(wire_recall_decline_t));
+            if (payload != NULL) {
+              if (wire_recall_decline_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_recall_decline(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_RATE_LIMITED: {
+            wire_rate_limited_t* payload = get_clear_memory(sizeof(wire_rate_limited_t));
+            if (payload != NULL) {
+              if (wire_rate_limited_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_rate_limited(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
           default:
-            // Response types and relay-specific messages are handled elsewhere
             break;
         }
       }

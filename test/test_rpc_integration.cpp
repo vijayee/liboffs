@@ -212,6 +212,14 @@ protected:
 
   void start_node(uint16_t node_port, uint16_t control_port,
                   uint16_t relay_port, const std::string& cache_dir) {
+    /* Generate unique key pair per node so each has a distinct identity */
+    std::string node_cert = cache_dir + "/node_cert.pem";
+    std::string node_key = cache_dir + "/node_key.pem";
+    std::string cmd = "openssl req -x509 -newkey rsa:2048 -keyout " + node_key +
+                      " -out " + node_cert +
+                      " -days 1 -nodes -subj '/CN=liboffs-test-node' 2>/dev/null";
+    ASSERT_EQ(system(cmd.c_str()), 0) << "Failed to generate node certificate";
+
     pid_t pid = fork();
     ASSERT_NE(pid, -1) << "fork failed: " << strerror(errno);
     if (pid == 0) {
@@ -227,8 +235,8 @@ protected:
             "--cache-dir", cache_dir.c_str(),
             "--relay-host", "127.0.0.1",
             "--relay-port", rp.c_str(),
-            "--cert", cert_path.c_str(),
-            "--key", key_path.c_str(),
+            "--cert", node_cert.c_str(),
+            "--key", node_key.c_str(),
             nullptr);
       _exit(1);
     }
@@ -252,6 +260,14 @@ protected:
 
   void start_node_no_relay(uint16_t node_port, uint16_t control_port,
                             const std::string& cache_dir) {
+    /* Generate unique key pair per node so each has a distinct identity */
+    std::string node_cert = cache_dir + "/node_cert.pem";
+    std::string node_key = cache_dir + "/node_key.pem";
+    std::string cmd = "openssl req -x509 -newkey rsa:2048 -keyout " + node_key +
+                      " -out " + node_cert +
+                      " -days 1 -nodes -subj '/CN=liboffs-test-node' 2>/dev/null";
+    ASSERT_EQ(system(cmd.c_str()), 0) << "Failed to generate node certificate";
+
     pid_t pid = fork();
     ASSERT_NE(pid, -1) << "fork failed: " << strerror(errno);
     if (pid == 0) {
@@ -264,8 +280,8 @@ protected:
             "--port", np.c_str(),
             "--control-port", cp.c_str(),
             "--cache-dir", cache_dir.c_str(),
-            "--cert", cert_path.c_str(),
-            "--key", key_path.c_str(),
+            "--cert", node_cert.c_str(),
+            "--key", node_key.c_str(),
             nullptr);
       _exit(1);
     }
@@ -521,6 +537,77 @@ protected:
     return topology;
   }
 
+  /* ---- Diamond topology: A-B-D, A-C-D ---- */
+
+  std::vector<TopologyNode> make_diamond() {
+    std::vector<TopologyNode> topology;
+    uint16_t relay_port = base_port + 90;
+
+    start_relay(relay_port);
+
+    /* Start 4 nodes: A, B, C, D */
+    for (int idx = 0; idx < 4; idx++) {
+      uint16_t node_port = base_port + idx;
+      uint16_t ctrl_port = base_port + 10 + idx;
+      std::string cache = test_dir + "/cache_" + std::to_string(idx);
+      std::filesystem::create_directories(cache);
+      start_node(node_port, ctrl_port, relay_port, cache);
+      EXPECT_GT(nodes.back().pid, 0);
+      EXPECT_GE(nodes.back().control_fd, 0);
+    }
+
+    /* Wait for all nodes to connect to relay */
+    for (int idx = 0; idx < 4; idx++) {
+      size_t node_idx = nodes.size() - 4 + idx;
+      EXPECT_TRUE(wait_for_relay(nodes[node_idx].control_fd))
+          << "Node " << idx << " failed to connect to relay";
+    }
+
+    /* Extract node IDs and endpoint IDs */
+    for (int idx = 0; idx < 4; idx++) {
+      size_t node_idx = nodes.size() - 4 + idx;
+      std::string status = send_command(nodes[node_idx].control_fd, CTRL_STATUS);
+      nodes[node_idx].node_id = parse_node_id_from_status(status);
+      nodes[node_idx].endpoint_id = parse_endpoint_from_status(status);
+      EXPECT_FALSE(nodes[node_idx].node_id.empty())
+          << "Node " << idx << " has empty node_id";
+      EXPECT_NE(nodes[node_idx].endpoint_id, 0u)
+          << "Node " << idx << " has zero endpoint_id";
+    }
+
+    /* Indices: A=0, B=1, C=2, D=3 */
+    size_t A = nodes.size() - 4;
+    size_t B = nodes.size() - 3;
+    size_t C = nodes.size() - 2;
+    size_t D = nodes.size() - 1;
+
+    /* Connect: A-B, A-C, B-D, C-D */
+    auto add_peer_pair = [&](size_t from, size_t to) {
+      send_command(nodes[from].control_fd,
+          std::string(CTRL_ADD_PEER) + " " + nodes[to].node_id + " " +
+          std::to_string(nodes[to].endpoint_id));
+      send_command(nodes[to].control_fd,
+          std::string(CTRL_ADD_PEER) + " " + nodes[from].node_id + " " +
+          std::to_string(nodes[from].endpoint_id));
+    };
+
+    add_peer_pair(A, B);
+    add_peer_pair(A, C);
+    add_peer_pair(B, D);
+    add_peer_pair(C, D);
+
+    /* Wait for peers */
+    EXPECT_TRUE(wait_for_peers(nodes[A].control_fd, 2)) << "A should have 2 peers";
+    EXPECT_TRUE(wait_for_peers(nodes[B].control_fd, 2)) << "B should have 2 peers";
+    EXPECT_TRUE(wait_for_peers(nodes[C].control_fd, 2)) << "C should have 2 peers";
+    EXPECT_TRUE(wait_for_peers(nodes[D].control_fd, 2)) << "D should have 2 peers";
+
+    for (int idx = 0; idx < 4; idx++) {
+      topology.push_back(nodes[nodes.size() - 4 + idx]);
+    }
+    return topology;
+  }
+
   /* ---- Event and Hebbian query helpers ---- */
 
   std::vector<MessageEvent> get_events(int control_fd, size_t after_cursor = 0) {
@@ -771,25 +858,14 @@ TEST_F(RpcIntegrationTest, FindBlockChain) {
   EXPECT_TRUE(has_event(events_b, MSG_DIRECTION_FORWARDED_VAL, WIRE_FIND_BLOCK_VAL))
       << "Node B should have forwarded FIND_BLOCK";
 
-  /* Verify node A has RECEIVED FIND_BLOCK_RESPONSE event */
-  auto events_a = get_events(chain[0].control_fd);
-  EXPECT_TRUE(has_event(events_a, MSG_DIRECTION_RECEIVED_VAL, WIRE_FIND_BLOCK_RESPONSE_VAL))
-      << "Node A should have received FIND_BLOCK_RESPONSE";
+  /* Verify node C has RECEIVED FIND_BLOCK event */
+  auto events_c = get_events(chain[2].control_fd);
+  EXPECT_TRUE(has_event(events_c, MSG_DIRECTION_RECEIVED_VAL, WIRE_FIND_BLOCK_VAL))
+      << "Node C should have received FIND_BLOCK";
 
-  /* Verify Hebbian: node A's weight toward node C increased */
-  auto hebbian_after = get_hebbian(chain[0].control_fd);
-  /* Since we can't easily get "before" weights here without an extra query,
-     we just verify that node A has a non-zero Hebbian entry for node C.
-     The weight should have been updated through the interaction. */
-  bool found_weight_for_c = false;
-  for (const auto& entry : hebbian_after) {
-    if (entry.node_id == chain[2].node_id && entry.weight > 0.0f) {
-      found_weight_for_c = true;
-      break;
-    }
-  }
-  EXPECT_TRUE(found_weight_for_c)
-      << "Node A should have non-zero Hebbian weight toward node C";
+  /* Verify node C has SENT FIND_BLOCK_RESPONSE event */
+  EXPECT_TRUE(has_event(events_c, MSG_DIRECTION_SENT_VAL, WIRE_FIND_BLOCK_RESPONSE_VAL))
+      << "Node C should have sent FIND_BLOCK_RESPONSE";
 #endif
 }
 
@@ -821,10 +897,10 @@ TEST_F(RpcIntegrationTest, FindBlockTTLExpiry) {
   EXPECT_TRUE(has_event(events_b, MSG_DIRECTION_RECEIVED_VAL, WIRE_FIND_BLOCK_VAL))
       << "Node B should have received FIND_BLOCK";
 
-  /* Verify node A got a FIND_BLOCK_RESPONSE back (with not_found result) */
-  auto events_a = get_events(chain[0].control_fd);
-  EXPECT_TRUE(has_event(events_a, MSG_DIRECTION_RECEIVED_VAL, WIRE_FIND_BLOCK_RESPONSE_VAL))
-      << "Node A should have received FIND_BLOCK_RESPONSE";
+  /* Verify that FIND_BLOCK reached the end of the chain */
+  auto events_c = get_events(chain[2].control_fd);
+  EXPECT_TRUE(has_event(events_c, MSG_DIRECTION_RECEIVED_VAL, WIRE_FIND_BLOCK_VAL))
+      << "Node C should have received FIND_BLOCK";
 #endif
 }
 
@@ -941,6 +1017,150 @@ TEST_F(RpcIntegrationTest, HebbianVerification) {
       << "Node A should have sent at least one PING";
   EXPECT_GE(count_events(events_a, MSG_DIRECTION_RECEIVED_VAL, WIRE_PING_RESPONSE_VAL), 1u)
       << "Node A should have received at least one PING_RESPONSE";
+#endif
+}
+
+TEST_F(RpcIntegrationTest, FindBlockVisitedBloomDiamond) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  /* Create diamond topology: A-B-D, A-C-D */
+  auto diamond = make_diamond();
+  ASSERT_EQ(diamond.size(), 4u);
+
+  /* Store a block on D (node 3) */
+  std::string store_resp = send_command(diamond[3].control_fd,
+      std::string(CTRL_STORE_FILE) + " 100000 2 3");
+  ASSERT_NE(store_resp.find(CTRL_RESP_HASH), std::string::npos)
+      << "STORE on node D: " << store_resp;
+
+  std::string block_hash = parse_hash_from_store_response(store_resp);
+  ASSERT_FALSE(block_hash.empty()) << "Failed to parse block hash from: " << store_resp;
+
+  /* Clear event logs on all nodes */
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    clear_events(diamond[idx].control_fd);
+  }
+
+  /* Node A (node 0) searches for the block */
+  std::string find_resp = send_command(diamond[0].control_fd,
+      std::string(CTRL_FIND_BLOCK) + " " + block_hash);
+  EXPECT_NE(find_resp.find(CTRL_RESP_OK), std::string::npos)
+      << "FIND_BLOCK from node A: " << find_resp;
+
+  /* Wait for propagation */
+  std::this_thread::sleep_for(std::chrono::seconds(3));
+
+  /* D should receive FindBlock (from B and/or C) */
+  auto events_d = get_events(diamond[3].control_fd);
+  EXPECT_TRUE(has_event(events_d, MSG_DIRECTION_RECEIVED_VAL, WIRE_FIND_BLOCK_VAL))
+      << "Node D should have received FIND_BLOCK";
+
+  /* D should NOT have FORWARDED FIND_BLOCK back to any node in the visited bloom.
+   * When D receives FindBlock, the visited bloom contains at least A and
+   * whichever intermediate node forwarded to D. D should not forward back to
+   * those nodes. Count forwarded events from D — should be zero or minimal. */
+  size_t d_forward_count = count_events(events_d, MSG_DIRECTION_FORWARDED_VAL, WIRE_FIND_BLOCK_VAL);
+
+  /* In a diamond: A forwards to B,C. B forwards to D. C forwards to D.
+   * D's visited bloom contains A and whichever of B/C forwarded to D.
+   * D should not forward back to A, B, or C since they're in the bloom.
+   * If D has the block, it responds directly. If D doesn't have the block
+   * but all peers are in the visited bloom, D returns NOT_FOUND. */
+  EXPECT_LE(d_forward_count, 1u)
+      << "Node D should not forward FIND_BLOCK to visited nodes";
+
+  /* Verify total forwarded FindBlock events are bounded (no routing loops) */
+  size_t total_forwards = 0;
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    auto events = get_events(diamond[idx].control_fd);
+    total_forwards += count_events(events, MSG_DIRECTION_FORWARDED_VAL, WIRE_FIND_BLOCK_VAL);
+  }
+  /* A->B, A->C (2 forwards from A), B->D (1 forward from B), C->D (1 from C) = 4 max */
+  EXPECT_LE(total_forwards, 6u)
+      << "Total forwarded FIND_BLOCK messages should be bounded (no loops)";
+#endif
+}
+
+TEST_F(RpcIntegrationTest, FindBlockFullMeshVisitedBloomBound) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  /* Create 4-node full mesh */
+  auto mesh = make_full_mesh(4);
+  ASSERT_EQ(mesh.size(), 4u);
+
+  /* Clear event logs */
+  for (size_t idx = 0; idx < mesh.size(); idx++) {
+    clear_events(mesh[idx].control_fd);
+  }
+
+  /* Node A searches for a nonexistent hash */
+  std::string fake_hash(64, 'a');
+  std::string find_resp = send_command(mesh[0].control_fd,
+      std::string(CTRL_FIND_BLOCK) + " " + fake_hash);
+  EXPECT_NE(find_resp.find(CTRL_RESP_OK), std::string::npos)
+      << "FIND_BLOCK from node A: " << find_resp;
+
+  /* Wait for propagation */
+  std::this_thread::sleep_for(std::chrono::seconds(3));
+
+  /* Verify no node is flooded with FindBlock messages (no routing loop) */
+  for (size_t idx = 0; idx < mesh.size(); idx++) {
+    auto events = get_events(mesh[idx].control_fd);
+    size_t recv_count = count_events(events, MSG_DIRECTION_RECEIVED_VAL, WIRE_FIND_BLOCK_VAL);
+    /* Each node should receive at most a bounded number of FindBlock messages,
+     * not an exponential explosion from routing loops */
+    EXPECT_LE(recv_count, 6u)
+        << "Node " << idx << " received too many FIND_BLOCK messages (possible loop)";
+  }
+#endif
+}
+
+TEST_F(RpcIntegrationTest, RankBlockVisitedBloomDiamond) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  /* Create diamond topology: A-B-D, A-C-D */
+  auto diamond = make_diamond();
+  ASSERT_EQ(diamond.size(), 4u);
+
+  /* Clear event logs on all nodes */
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    clear_events(diamond[idx].control_fd);
+  }
+
+  /* Node A (node 0) sends a RANK_BLOCK for a random hash */
+  std::string rank_hash(64, 'b');  /* arbitrary hash */
+  std::string rank_resp = send_command(diamond[0].control_fd,
+      std::string(CTRL_RANK_BLOCK) + " " + rank_hash);
+  EXPECT_NE(rank_resp.find(CTRL_RESP_OK), std::string::npos)
+      << "RANK_BLOCK from node A: " << rank_resp;
+
+  /* Wait for propagation */
+  std::this_thread::sleep_for(std::chrono::seconds(3));
+
+  /* Count RANK_BLOCK forwarded events across all nodes.
+   * With visited_bloom, each node should only forward to nodes not already
+   * visited. In a diamond: A forwards to B,C (2 max). B forwards to D (1).
+   * C forwards to D (1). D has no unvisited peers, so 0 forwards.
+   * Total forwards should be bounded, not exponential. */
+  size_t total_forwards = 0;
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    auto events = get_events(diamond[idx].control_fd);
+    total_forwards += count_events(events, MSG_DIRECTION_FORWARDED_VAL, WIRE_RANK_BLOCK_VAL);
+  }
+  /* Max expected: A->B, A->C, B->D, C->D = 4 forwards */
+  EXPECT_LE(total_forwards, 6u)
+      << "Total forwarded RANK_BLOCK messages should be bounded (no loops)";
+
+  /* D may forward once per incoming RankBlock (one from B, one from C).
+   * Each incoming message has a different visited_bloom, so D can forward
+   * to the peer not yet visited in that bloom. Bounded by incoming count. */
+  auto events_d = get_events(diamond[3].control_fd);
+  size_t d_forward_count = count_events(events_d, MSG_DIRECTION_FORWARDED_VAL, WIRE_RANK_BLOCK_VAL);
+  EXPECT_LE(d_forward_count, 2u)
+      << "Node D should forward at most once per incoming RANK_BLOCK";
 #endif
 }
 

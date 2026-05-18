@@ -55,15 +55,14 @@ typedef struct network_t {
   wanted_list_t* wanted_list;
   hebbian_table_t hebbian;
   rate_limit_table_t rate_limits;
-#ifdef OFFS_TEST
-  message_log_t log;
-#endif
+  message_log_t* log;             /* Test-only message event log (NULL in release builds) */
   topology_metrics_t* topology_metrics;
   connection_manager_t conn_mgr;
   uint64_t gossip_timer_id;
   uint64_t eabf_maintenance_timer_id;
   uint64_t hebbian_decay_timer_id;
   uint64_t metrics_push_timer_id;
+  uint64_t ping_capacity_timer_id;
   ATOMIC(uint8_t) running;
 
   relay_client_t* relay;          /* Connected relay client (or NULL) */

@@ -82,6 +82,19 @@ typedef struct quic_listener_t {
   // Destroy stack for deferred watcher cleanup
   PLATFORMLOCKTYPE(destroy_lock);
   struct quic_destroy_node_t* destroy_head;
+
+  // Active connection tracking for graceful shutdown
+#ifdef HAS_MSQUIC
+  HQUIC* connections;
+  size_t connection_count;
+  size_t connection_capacity;
+  PLATFORMLOCKTYPE(conn_lock);
+#else
+  void** connections;
+  size_t connection_count;
+  size_t connection_capacity;
+  PLATFORMLOCKTYPE(conn_lock);
+#endif
 } quic_listener_t;
 
 quic_listener_t* quic_listener_create(network_t* network, scheduler_pool_t* pool);

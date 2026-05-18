@@ -14,7 +14,9 @@ void quic_data_payload_destroy(quic_data_payload_t* payload) {
 
 void quic_connected_payload_destroy(quic_connected_payload_t* payload) {
   if (payload == NULL) return;
-  // connection and stream handles are owned by msquic — do not close them here
+  // For DISCONNECTED payloads, ConnectionClose is called by the network
+  // dispatch handler before this destroy runs. For CONNECTED payloads,
+  // the connection and stream handles are owned by msquic.
   free(payload);
 }
 
@@ -72,6 +74,87 @@ static void _destroy_stack_drain(quic_listener_t* listener) {
 static void _destroy_stack_destroy(quic_listener_t* listener) {
   _destroy_stack_drain(listener);
   platform_lock_destroy(&listener->destroy_lock);
+}
+
+// Connection tracking — maintains a list of active HQUIC connections so
+// quic_listener_destroy can gracefully shut them all down before closing
+// the registration.
+
+static void _conn_track_init(quic_listener_t* listener) {
+  platform_lock_init(&listener->conn_lock);
+  listener->connections = NULL;
+  listener->connection_count = 0;
+  listener->connection_capacity = 0;
+}
+
+static void _conn_track_add(quic_listener_t* listener, HQUIC connection) {
+  platform_lock(&listener->conn_lock);
+  if (listener->connection_count >= listener->connection_capacity) {
+    size_t new_cap = listener->connection_capacity == 0 ? 8 : listener->connection_capacity * 2;
+    HQUIC* new_arr = get_clear_memory(new_cap * sizeof(HQUIC));
+    if (new_arr == NULL) {
+      platform_unlock(&listener->conn_lock);
+      return;
+    }
+    if (listener->connections != NULL) {
+      memcpy(new_arr, listener->connections, listener->connection_count * sizeof(HQUIC));
+      free(listener->connections);
+    }
+    listener->connections = new_arr;
+    listener->connection_capacity = new_cap;
+  }
+  listener->connections[listener->connection_count++] = connection;
+  platform_unlock(&listener->conn_lock);
+}
+
+static void _conn_track_remove(quic_listener_t* listener, HQUIC connection) {
+  platform_lock(&listener->conn_lock);
+  for (size_t index = 0; index < listener->connection_count; index++) {
+    if (listener->connections[index] == connection) {
+      listener->connections[index] = listener->connections[listener->connection_count - 1];
+      listener->connection_count--;
+      break;
+    }
+  }
+  platform_unlock(&listener->conn_lock);
+}
+
+static void _conn_track_shutdown_all(quic_listener_t* listener) {
+  // Snapshot the connection list under the lock, then release it before
+  // calling ConnectionShutdown. This avoids holding conn_lock during msquic
+  // API calls which could deadlock if SHUTDOWN_COMPLETE fires synchronously
+  // and tries to acquire conn_lock in _conn_track_remove.
+  platform_lock(&listener->conn_lock);
+  size_t count = listener->connection_count;
+  HQUIC* snapshot = NULL;
+  if (count > 0) {
+    snapshot = get_clear_memory(count * sizeof(HQUIC));
+    if (snapshot != NULL) {
+      memcpy(snapshot, listener->connections, count * sizeof(HQUIC));
+    }
+  }
+  platform_unlock(&listener->conn_lock);
+
+  if (snapshot != NULL) {
+    for (size_t index = 0; index < count; index++) {
+      listener->msquic->ConnectionShutdown(
+          snapshot[index],
+          QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT,
+          0);
+    }
+    free(snapshot);
+  }
+}
+
+static void _conn_track_destroy(quic_listener_t* listener) {
+  // Connections are closed by their SHUTDOWN_COMPLETE callbacks,
+  // which fire after _conn_track_shutdown_all initiates shutdown.
+  // Just free the tracking array.
+  platform_lock_destroy(&listener->conn_lock);
+  free(listener->connections);
+  listener->connections = NULL;
+  listener->connection_count = 0;
+  listener->connection_capacity = 0;
 }
 
 // Per-stream context carrying the parent connection handle and a framer
@@ -232,7 +315,11 @@ static HQUIC _open_persistent_stream(quic_listener_t* listener, HQUIC connection
   status = listener->msquic->StreamStart(stream, QUIC_STREAM_START_FLAG_NONE);
   if (QUIC_FAILED(status)) {
     log_error("quic_listener: persistent StreamStart failed: 0x%x", status);
-    // stream_ctx will be freed in the SHUTDOWN_COMPLETE callback
+    // Destroy the framer now since SHUTDOWN_COMPLETE won't access it after
+    // we clear the pointer. StreamClose triggers SHUTDOWN_COMPLETE which
+    // frees stream_ctx — we must not free it here or we'd double-free.
+    stream_framer_destroy(stream_ctx->framer);
+    stream_ctx->framer = NULL;
     listener->msquic->StreamClose(stream);
     return NULL;
   }
@@ -262,6 +349,8 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
   switch (event->Type) {
     case QUIC_CONNECTION_EVENT_CONNECTED: {
       log_info("quic_listener: connection CONNECTED");
+      _conn_track_add(listener, connection);
+
       // Extract peer address from the connection
       QUIC_ADDR peer_addr;
       uint32_t peer_addr_len = sizeof(peer_addr);
@@ -274,6 +363,12 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
       // Open a persistent bidirectional stream — salutation is sent as
       // the first framed message on this same stream
       HQUIC persistent_stream = _open_persistent_stream(listener, connection, &peer_addr);
+      if (persistent_stream == NULL) {
+        log_error("quic_listener: failed to open persistent stream on CONNECTED, "
+                  "shutting down connection %p", (void*)connection);
+        listener->msquic->ConnectionShutdown(connection, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT, 0);
+        break;
+      }
 
       // Build payload with connection handle, persistent stream handle, and peer address
       quic_connected_payload_t* payload = get_clear_memory(sizeof(quic_connected_payload_t));
@@ -292,6 +387,11 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
     }
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
       log_info("quic_listener: connection SHUTDOWN_COMPLETE");
+      _conn_track_remove(listener, connection);
+
+      // Pass the connection handle to the dispatch handler so it can look up
+      // the peer before closing. ConnectionClose is called from the dispatch
+      // handler after cleanup is complete.
       quic_connected_payload_t* payload = get_clear_memory(sizeof(quic_connected_payload_t));
       if (payload != NULL) {
         payload->connection = connection;
@@ -377,6 +477,7 @@ quic_listener_t* quic_listener_create(network_t* network, scheduler_pool_t* pool
 
   actor_init(&listener->actor, listener, quic_listener_dispatch, pool);
   _destroy_stack_init(listener);
+  _conn_track_init(listener);
 
   listener->loop = pd_loop_create(NULL);
   if (listener->loop == NULL) {
@@ -400,6 +501,10 @@ void quic_listener_destroy(quic_listener_t* listener) {
   if (ATOMIC_LOAD(&listener->running)) {
     quic_listener_stop(listener);
   }
+  // Shut down all active connections gracefully so their SHUTDOWN_COMPLETE
+  // callbacks fire and clean up. This must happen before RegistrationClose
+  // or msquic worker threads could access freed memory.
+  _conn_track_shutdown_all(listener);
   if (listener->listener != NULL) {
     listener->msquic->ListenerClose(listener->listener);
   }
@@ -414,6 +519,7 @@ void quic_listener_destroy(quic_listener_t* listener) {
     pd_loop_destroy(listener->loop);
   }
   _destroy_stack_destroy(listener);
+  _conn_track_destroy(listener);
   actor_destroy(&listener->actor);
   free(listener);
 }
@@ -577,6 +683,9 @@ int quic_listener_connect(quic_listener_t* listener, const char* host, uint16_t 
     listener->msquic->ConnectionClose(connection);
     return -1;
   }
+
+  // Track outgoing connection for graceful shutdown
+  _conn_track_add(listener, connection);
 
   return 0;
 }

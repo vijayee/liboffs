@@ -178,6 +178,11 @@ find_block_result_e find_block_execute(
           }
         }
         if (!in_path) {
+          // Skip peers already in visited bloom
+          if (find_block_is_visited(state->visited_bloom, state->visited_count,
+                                    peer->remote_node_id.hash)) {
+            continue;
+          }
           // Look up the peer node in ring table for net_node_t
           net_node_t* peer_node = ring_set_find_by_id(rings, &peer->remote_node_id);
           if (peer_node != NULL && !(peer_node->flags & NET_NODE_FLAG_RENDEZVOUS)) {
@@ -201,6 +206,7 @@ find_block_result_e find_block_execute(
   float gravity_best_weight = FIND_BLOCK_MIN_WEIGHT;
   uint32_t gravity_best_level = UINT32_MAX;
 
+  if (eabf_table != NULL) {
   for (size_t index = 0; index < eabf_table->count; index++) {
     eabf_entry_t* entry = &eabf_table->entries[index];
     eabf_t* eabf = entry->eabf;
@@ -228,6 +234,12 @@ find_block_result_e find_block_execute(
     }
     if (peer_in_path) continue;
 
+    // Skip peers already in visited bloom
+    if (find_block_is_visited(state->visited_bloom, state->visited_count,
+                              entry->peer_id.hash)) {
+      continue;
+    }
+
     // Use the peer's Hebbian weight, with a floor of FIND_BLOCK_MIN_WEIGHT
     float weight = peer_node->weight;
     if (weight < FIND_BLOCK_MIN_WEIGHT) weight = FIND_BLOCK_MIN_WEIGHT;
@@ -240,6 +252,7 @@ find_block_result_e find_block_execute(
       gravity_best_level = hops;
     }
   }
+  } // end if (eabf_table != NULL)
 
   if (gravity_candidate != NULL) {
     // Directed walk: forward to the peer with the strongest gravity well
@@ -277,6 +290,12 @@ find_block_result_e find_block_execute(
       }
       if (in_path) continue;
 
+      // Skip nodes already in visited bloom
+      if (find_block_is_visited(state->visited_bloom, state->visited_count,
+                                node->id.hash)) {
+        continue;
+      }
+
       // Skip nodes below minimum weight
       if (node->weight < FIND_BLOCK_MIN_WEIGHT) continue;
 
@@ -305,6 +324,12 @@ find_block_result_e find_block_execute(
         }
       }
       if (in_path) continue;
+
+      // Skip nodes already in visited bloom
+      if (find_block_is_visited(state->visited_bloom, state->visited_count,
+                                node->id.hash)) {
+        continue;
+      }
 
       if (node->weight < FIND_BLOCK_MIN_WEIGHT) continue;
 

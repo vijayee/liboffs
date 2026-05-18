@@ -2,8 +2,6 @@
 // Created by victor on 5/18/25.
 //
 
-#ifdef OFFS_TEST
-
 #include "message_log.h"
 #include "hebbian.h"
 #include <string.h>
@@ -43,7 +41,6 @@ void message_log_record(message_log_t* log, uint8_t type, uint8_t direction,
 
   event->result = result;
 
-  // Snapshot the peer's Hebbian weight
   if (hebbian != NULL && peer != NULL) {
     event->hebbian_weight = hebbian_table_get(hebbian, peer);
   } else {
@@ -80,5 +77,3 @@ void message_log_clear(message_log_t* log) {
   if (log == NULL) return;
   log->count = 0;
 }
-
-#endif // OFFS_TEST

@@ -7,6 +7,7 @@
 #include "relay_client.h"
 #include "quic_peer_send.h"
 #include "wire.h"
+#include "message_log.h"
 #include "network.h"
 #include "../Actor/actor.h"
 #include "../Util/allocator.h"
@@ -40,6 +41,13 @@ int conn_state_send(network_t* network, peer_connection_t* peer,
                     cbor_item_t* cbor_msg) {
   if (network == NULL || peer == NULL || cbor_msg == NULL) {
     return -1;
+  }
+
+  if (network->log != NULL) {
+    uint8_t wire_type = wire_get_type(cbor_msg);
+    message_log_record(network->log, wire_type, MSG_DIRECTION_SENT,
+                       &peer->remote_node_id, 0, NULL, 0,
+                       &network->hebbian);
   }
 
   switch (peer->conn_state) {

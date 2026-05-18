@@ -610,13 +610,17 @@ static void handle_get_events(int client_fd, size_t cursor) {
     send_response(client_fd, CTRL_RESP_ERROR " no network");
     return;
   }
+  if (g_node.network->log == NULL) {
+    send_response(client_fd, CTRL_RESP_EVENTS " 0|");
+    return;
+  }
 
   message_event_t events[64];
-  size_t count = message_log_query(&g_node.network->log, cursor, events, 64);
+  size_t count = message_log_query(g_node.network->log, cursor, events, 64);
 
   char response[8192];
   int offset = snprintf(response, sizeof(response), "%s %zu|",
-                        CTRL_RESP_EVENTS, g_node.network->log.count);
+                        CTRL_RESP_EVENTS, g_node.network->log->count);
 
   for (size_t idx = 0; idx < count; idx++) {
     message_event_t* ev = &events[idx];
@@ -954,7 +958,7 @@ static void handle_command(int client_fd, char* line) {
   } else if (strcmp(line, CTRL_CLEAR_EVENTS) == 0) {
 #ifdef OFFS_TEST
     if (g_node.network != NULL) {
-      message_log_clear(&g_node.network->log);
+      message_log_clear(g_node.network->log);
       send_response(client_fd, CTRL_RESP_OK);
     } else {
       send_response(client_fd, CTRL_RESP_ERROR " no network");
@@ -979,6 +983,59 @@ static void handle_command(int client_fd, char* line) {
   } else if (strcmp(line, CTRL_HEBBIAN) == 0) {
 #ifdef OFFS_TEST
     handle_hebbian_cmd(client_fd);
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
+  } else if (strncmp(line, CTRL_RANK_BLOCK " ",
+                strlen(CTRL_RANK_BLOCK) + 1) == 0) {
+#ifdef OFFS_TEST
+    if (g_node.network != NULL) {
+      const char* hash_hex = line + strlen(CTRL_RANK_BLOCK) + 1;
+      uint8_t block_hash[32];
+      if (strlen(hash_hex) != 64) {
+        send_response(client_fd, CTRL_RESP_ERROR " invalid hash length");
+      } else {
+        int valid = 1;
+        for (int idx = 0; idx < 32 && valid; idx++) {
+          unsigned int byte;
+          if (sscanf(hash_hex + idx * 2, "%02x", &byte) != 1) {
+            valid = 0;
+          } else {
+            block_hash[idx] = (uint8_t)byte;
+          }
+        }
+        if (!valid) {
+          send_response(client_fd, CTRL_RESP_ERROR " invalid hash hex");
+        } else {
+          wire_rank_block_t* rank = get_clear_memory(sizeof(wire_rank_block_t));
+          if (rank == NULL) {
+            send_response(client_fd, CTRL_RESP_ERROR " allocation failed");
+          } else {
+            memcpy(rank->block_hash, block_hash, 32);
+            rank->fib = 0;
+            rank->count = 1;
+            memcpy(&rank->origin, &g_node.network->authority->local_id, sizeof(node_id_t));
+            rank->hop_count = 0;
+            memset(rank->visited_bloom, 0, WIRE_MAX_VISITED_BLOOM);
+            rank->visited_count = 0;
+            memcpy(&rank->path[0], &g_node.network->authority->local_id, sizeof(node_id_t));
+            rank->path_len = 1;
+            find_block_add_visited(rank->visited_bloom, &rank->visited_count,
+                                   g_node.network->authority->local_id.hash);
+
+            message_t msg;
+            memset(&msg, 0, sizeof(msg));
+            msg.type = NETWORK_RANK_BLOCK;
+            msg.payload = rank;
+            msg.payload_destroy = free;
+            actor_send(&g_node.network->actor, &msg);
+            send_response(client_fd, CTRL_RESP_OK);
+          }
+        }
+      }
+    } else {
+      send_response(client_fd, CTRL_RESP_ERROR " no network");
+    }
 #else
     send_response(client_fd, CTRL_RESP_ERROR " not available");
 #endif
@@ -1200,6 +1257,11 @@ int node_main(int argc, char* argv[]) {
     node_state_destroy(&g_node);
     return 1;
   }
+
+#ifdef OFFS_TEST
+  g_node.network->log = get_clear_memory(sizeof(message_log_t));
+  message_log_init(g_node.network->log);
+#endif
 
 #ifdef HAS_MSQUIC
   if (g_node.port > 0) {

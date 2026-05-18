@@ -113,6 +113,11 @@ store_block_result_e store_block_execute(
           }
         }
         if (!in_path) {
+          // Skip peers already in visited bloom
+          if (find_block_is_visited(state->visited_bloom, state->visited_count,
+                                    peer->remote_node_id.hash)) {
+            continue;
+          }
           net_node_t* peer_node = ring_set_find_by_id(rings, &peer->remote_node_id);
           if (peer_node != NULL && !(peer_node->flags & NET_NODE_FLAG_RENDEZVOUS)) {
             next_hops[0] = peer_node;

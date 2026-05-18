@@ -18,6 +18,7 @@
 #define CTRL_FIND_BLOCK      "FIND_BLOCK"
 #define CTRL_PING_PEER       "PING_PEER"
 #define CTRL_HEBBIAN         "HEBBIAN"
+#define CTRL_RANK_BLOCK      "RANK_BLOCK"
 
 /* Response prefixes for new commands */
 #define CTRL_RESP_EVENTS     "EVENTS"
