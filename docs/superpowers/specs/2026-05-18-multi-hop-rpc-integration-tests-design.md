@@ -33,6 +33,7 @@ typedef struct {
   uint64_t message_id;       // correlation ID from wire message
   uint8_t block_hash[32];    // zeroed if not applicable
   uint8_t result;            // 0=success, 1=forwarded, 2=not_found, 3=declined, etc.
+  float hebbian_weight;      // peer's Hebbian weight AFTER this event
 } message_event_t;
 
 typedef struct {
@@ -63,6 +64,7 @@ Add to `test/test_control_protocol.h`:
 #define CTRL_CLEAR_EVENTS   "CLEAR_EVENTS"
 #define CTRL_FIND_BLOCK     "FIND_BLOCK"
 #define CTRL_PING_PEER      "PING_PEER"
+#define CTRL_HEBBIAN        "HEBBIAN"
 ```
 
 **GET_EVENTS** — Returns all events since a given cursor:
@@ -81,6 +83,12 @@ Add to `test/test_control_protocol.h`:
 **PING_PEER** — Sends a ping to a specific connected peer:
 - Request: `PING_PEER <node_id_hex>`
 - Response: `OK <message_id>`
+
+**HEBBIAN** — Returns the Hebbian weight table for all known peers:
+- Request: `HEBBIAN`
+- Response: `HEBBIAN <count>|<node_id_hex>:<weight>;...`
+- Each entry is a peer's node_id and its current Hebbian weight in the global table
+- Also includes the per-connection `hebbian_weight` from `peer_connection_t` for connected peers
 
 ### 3. Topology Construction Helpers (C++, test-side)
 
@@ -121,9 +129,17 @@ struct MessageEvent {
   uint64_t message_id;
   std::string block_hash;  // hex
   uint8_t result;
+  float hebbian_weight;     // peer's Hebbian weight after this event
+};
+
+struct HebbianEntry {
+  std::string node_id;
+  float weight;
 };
 
 std::vector<MessageEvent> get_events(int control_fd, size_t after_cursor = 0);
+
+std::vector<HebbianEntry> get_hebbian(int control_fd);
 
 bool has_event(const std::vector<MessageEvent>& events,
                uint8_t direction, uint8_t type,
@@ -132,6 +148,18 @@ bool has_event(const std::vector<MessageEvent>& events,
 
 size_t count_events(const std::vector<MessageEvent>& events,
                     uint8_t direction, uint8_t type);
+
+// Verify Hebbian weight for a peer increased by at least delta after an event
+bool hebbian_increased(const std::vector<HebbianEntry>& before,
+                       const std::vector<HebbianEntry>& after,
+                       const std::string& peer_id,
+                       float min_delta = 0.001f);
+
+// Verify Hebbian weight for a peer is at approximately an expected value
+bool hebbian_approx(const std::vector<HebbianEntry>& entries,
+                    const std::string& peer_id,
+                    float expected,
+                    float tolerance = 0.01f);
 ```
 
 ---
@@ -145,6 +173,7 @@ size_t count_events(const std::vector<MessageEvent>& events,
 - Verify: B receives FIND_BLOCK from A, forwards to C
 - Verify: C responds FOUND to B, B forwards response to A
 - Verify: A receives FOUND response
+- **Hebbian:** After response, verify A's weight toward C (holder) increased, A's weight toward B (forwarder) increased via feedback rule, B's weight toward C increased via frequency rule
 
 **FindBlock TTL Expiry (A -> B -> C -> D, TTL=2)**
 - E has a block, TTL starts at 3
@@ -157,6 +186,7 @@ size_t count_events(const std::vector<MessageEvent>& events,
 - Verify: B receives STORE_BLOCK, accepts (result=accepted), forwards to C
 - Verify: C receives STORE_BLOCK, accepts
 - Verify: STORE_BLOCK_RESPONSE propagates back
+- **Hebbian:** After response, verify A's weight toward B and C increased via `hebbian_apply_success` with path [A, B, C]
 
 **RankBlock Flood (A -> B, C)**
 - A sends RankBlock with hop_count=0
@@ -168,14 +198,17 @@ size_t count_events(const std::vector<MessageEvent>& events,
 **Ping Round-Trip**
 - A pings B, verify B responds with PingResponse
 - Verify RTT measurement is populated
+- **Hebbian:** Not directly updated by PING (no handler applies Hebbian for PING_RESPONSE)
 
 **PingCapacity Exchange**
 - A sends PingCapacity to B
 - Verify B responds with capacity and phase
+- **Hebbian:** After response, verify A's weight toward B increased via `hebbian_frequency`
 
 **PingBlock Existence Check**
 - A sends PingBlock to B for a block B has
 - Verify B responds with exists=true
+- **Hebbian:** After response, verify A's weight toward B increased via `hebbian_frequency`
 
 **FindNode K-Closest**
 - A sends FindNode to B
@@ -216,6 +249,39 @@ assert(has_event(events, SENT, WIRE_FIND_BLOCK, node_b))
 assert(has_event(events, RECEIVED, WIRE_FIND_BLOCK_RESPONSE, node_b))
 ```
 
+## Hebbian Weight Verification
+
+Each RPC that updates Hebbian weights must be verified. The `CTRL_HEBBIAN` command returns the full weight table, and each event log entry includes the peer's weight at the time of the event.
+
+### Hebbian Update Rules (by RPC)
+
+| RPC | Condition | Update | Verification |
+|-----|-----------|--------|---------------|
+| PING_RESPONSE | Always | No Hebbian update | N/A |
+| PING_CAPACITY_RESPONSE | Always | `hebbian_frequency(peer, delta)` | Weight toward responding peer increases |
+| PING_BLOCK_RESPONSE | `exists=true` | `hebbian_frequency(peer, delta)` | Weight toward responding peer increases |
+| FIND_BLOCK_RESPONSE | `found=true` | `hebbian_apply_success(path, latency, 1.0)` | Weight increases along path: holder (frequency), forwarders (feedback * 0.25), reverse direction (symmetry * 0.05) |
+| FIND_BLOCK_RESPONSE | `found=false` | EABF subscribe | No direct Hebbian update |
+| STORE_BLOCK_RESPONSE | `accepted=true` | `hebbian_apply_success(path, latency, 1.0)` | Same as FindBlockResponse |
+| STORE_BLOCK_RESPONSE | `accepted=true` + EABF match | `peer_hebbian_update(peer, 2.0)` | Per-connection weight jumps by recall_reward (2.0) |
+| GOSSIP_TICK | Periodic | `hebbian_decay` (×0.999 per tick) | All weights decrease slightly |
+
+### Verification Pattern
+
+For multi-hop tests, capture Hebbian state before and after the RPC, then verify weight changes:
+
+```cpp
+auto hebbian_before = get_hebbian(nodes[0].control_fd);
+send_command(nodes[0].control_fd, "FIND_BLOCK <hash>");
+auto events = get_events(nodes[0].control_fd);
+auto hebbian_after = get_hebbian(nodes[0].control_fd);
+
+// Verify weight toward block holder increased
+EXPECT_TRUE(hebbian_increased(hebbian_before, hebbian_after, node_c_id, 0.05f));
+// Verify weight toward forwarder increased (feedback rule)
+EXPECT_TRUE(hebbian_increased(hebbian_before, hebbian_after, node_b_id, 0.01f));
+```
+
 ## Error Handling
 
 - **Event log overflow:** When `count >= MESSAGE_LOG_CAPACITY`, oldest events are overwritten. The `cursor` field tracks the wrap point. `GET_EVENTS` with a cursor value returns only events after that cursor, or an empty result if the cursor has been surpassed.
@@ -224,7 +290,7 @@ assert(has_event(events, RECEIVED, WIRE_FIND_BLOCK_RESPONSE, node_b))
 
 ## Wire Message Format for GET_EVENTS Response
 
-Each event is encoded as comma-separated fields: `type,direction,peer_id_hex,message_id,hash_prefix,result`
+Each event is encoded as comma-separated fields: `type,direction,peer_id_hex,message_id,hash_prefix,result,hebbian_weight`
 
 - `type`: wire message type number (e.g., 7=FIND_BLOCK, 8=FIND_BLOCK_RESPONSE)
 - `direction`: 0=SENT, 1=RECEIVED, 2=FORWARDED
@@ -232,20 +298,21 @@ Each event is encoded as comma-separated fields: `type,direction,peer_id_hex,mes
 - `message_id`: decimal message correlation ID
 - `hash_prefix`: first 8 hex chars of block_hash for correlation, or `0` if not applicable
 - `result`: 0=success, 1=forwarded, 2=not_found, 3=declined
+- `hebbian_weight`: the peer's Hebbian weight in the global table AFTER this event (float, 4 decimal places)
 
 ```
-EVENTS <total_count>|<index>:<type>,<dir>,<peer_id>,<msg_id>,<hash_prefix>,<result>;...
+EVENTS <total_count>|<index>:<type>,<dir>,<peer_id>,<msg_id>,<hash_prefix>,<result>,<hebbian_weight>;...
 ```
 
 Example:
 ```
-EVENTS 3|0:7,0,a1b2c3,1001,4a5b6c7d,1;1:7,2,d4e5f6,1002,4a5b6c7d,1;2:8,1,a1b2c3,1001,4a5b6c7d,0
+EVENTS 3|0:7,0,a1b2c3,1001,4a5b6c7d,1,0.0100;1:7,2,d4e5f6,1002,4a5b6c7d,1,0.0100;2:8,1,a1b2c3,1001,4a5b6c7d,0,0.0917
 ```
 
 Decoded:
-- Event 0: FIND_BLOCK(7) SENT(0) to peer a1b2c3, msg_id=1001, hash=4a5b6c7d..., result=FORWARDED(1)
-- Event 1: FIND_BLOCK(7) FORWARDED(2) to peer d4e5f6, msg_id=1002, hash=4a5b6c7d..., result=FORWARDED(1)
-- Event 2: FIND_BLOCK_RESPONSE(8) RECEIVED(1) from peer a1b2c3, msg_id=1001, hash=4a5b6c7d..., result=SUCCESS(0)
+- Event 0: FIND_BLOCK(7) SENT(0) to peer a1b2c3, msg_id=1001, hash=4a5b6c7d..., result=FORWARDED(1), hebbian=0.0100 (initial)
+- Event 1: FIND_BLOCK(7) FORWARDED(2) to peer d4e5f6, msg_id=1002, hash=4a5b6c7d..., result=FORWARDED(1), hebbian=0.0100 (initial)
+- Event 2: FIND_BLOCK_RESPONSE(8) RECEIVED(1) from peer a1b2c3, msg_id=1001, hash=4a5b6c7d..., result=SUCCESS(0), hebbian=0.0917 (increased after apply_success)
 
 ## File Changes
 
@@ -254,9 +321,10 @@ Decoded:
 | `src/Network/network.h` | Add `message_log_t` to `network_t` |
 | `src/Network/message_log.h` | New: message_log_t definition, init/destroy/record/query API |
 | `src/Network/message_log.c` | New: implementation |
-| `src/Network/network.c` | Call `message_log_record` at each message handler |
+| `src/Network/network.c` | Call `message_log_record` at each message handler, record `hebbian_weight` from peer |
 | `src/Network/conn_state.c` | Call `message_log_record` in send paths |
-| `test/test_control_protocol.h` | Add GET_EVENTS, CLEAR_EVENTS, FIND_BLOCK, PING_PEER |
-| `test/test_node_main.c` | Add handlers for new control commands, message_log initialization |
-| `test/test_rpc_integration.cpp` | New: multi-hop RPC integration tests |
+| `src/Network/hebbian.h` | Add `hebbian_table_query` function for CTRL_HEBBIAN |
+| `test/test_control_protocol.h` | Add GET_EVENTS, CLEAR_EVENTS, FIND_BLOCK, PING_PEER, HEBBIAN |
+| `test/test_node_main.c` | Add handlers for new control commands, message_log and hebbian query |
+| `test/test_rpc_integration.cpp` | New: multi-hop RPC integration tests with Hebbian verification |
 | `test/CMakeLists.txt` | Add test_rpc_integration target |
