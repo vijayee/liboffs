@@ -12,6 +12,17 @@
 #define CTRL_SHUTDOWN        "SHUTDOWN"
 #define CTRL_FORCE_RELAY_ENDPOINT "FORCE_RELAY_ENDPOINT"
 
+/* Event log and Hebbian query commands (OFFS_TEST only) */
+#define CTRL_GET_EVENTS      "GET_EVENTS"
+#define CTRL_CLEAR_EVENTS    "CLEAR_EVENTS"
+#define CTRL_FIND_BLOCK      "FIND_BLOCK"
+#define CTRL_PING_PEER       "PING_PEER"
+#define CTRL_HEBBIAN         "HEBBIAN"
+
+/* Response prefixes for new commands */
+#define CTRL_RESP_EVENTS     "EVENTS"
+#define CTRL_RESP_HEBBIAN    "HEBBIAN_RESP"
+
 /* Response prefixes (node → coordinator) */
 #define CTRL_RESP_OK         "OK"
 #define CTRL_RESP_HASH       "HASH"

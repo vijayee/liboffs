@@ -30,6 +30,10 @@
 #include "../src/Actor/actor.h"
 #include "../src/Actor/message.h"
 #include "../deps/BLAKE3/c/blake3.h"
+#ifdef OFFS_TEST
+#include "../src/Network/message_log.h"
+#include "../src/Network/wire.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -598,6 +602,184 @@ static void handle_fetch_file(int client_fd, const char* args) {
   send_response(client_fd, response);
 }
 
+/* ---- Event log and Hebbian query handlers (OFFS_TEST only) ---- */
+
+#ifdef OFFS_TEST
+static void handle_get_events(int client_fd, size_t cursor) {
+  if (g_node.network == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " no network");
+    return;
+  }
+
+  message_event_t events[64];
+  size_t count = message_log_query(&g_node.network->log, cursor, events, 64);
+
+  char response[8192];
+  int offset = snprintf(response, sizeof(response), "%s %zu|",
+                        CTRL_RESP_EVENTS, g_node.network->log.count);
+
+  for (size_t idx = 0; idx < count; idx++) {
+    message_event_t* ev = &events[idx];
+    char peer_hex[NODE_ID_STRING_SIZE];
+    node_id_to_string(&ev->peer_id, peer_hex);
+
+    /* Format first 8 bytes of block_hash as hex prefix for correlation */
+    char hash_prefix[17];
+    for (int byte = 0; byte < 8 && byte < 32; byte++) {
+      snprintf(hash_prefix + byte * 2, 3, "%02x", ev->block_hash[byte]);
+    }
+    hash_prefix[16] = '\0';
+
+    /* Check if peer_id is all-zero (null peer) */
+    int peer_is_null = 1;
+    for (int idx2 = 0; idx2 < 4; idx2++) {
+      if (ev->peer_id.hash[idx2] != 0) {
+        peer_is_null = 0;
+        break;
+      }
+    }
+
+    if (peer_is_null) {
+      offset += snprintf(response + offset, sizeof(response) - offset,
+                         "%zu:%u,%u,0,%llu,%s,%u,%.4f",
+                         cursor + idx, ev->type, ev->direction,
+                         (unsigned long long)ev->message_id,
+                         hash_prefix, ev->result, ev->hebbian_weight);
+    } else {
+      offset += snprintf(response + offset, sizeof(response) - offset,
+                         "%zu:%u,%u,%s,%llu,%s,%u,%.4f",
+                         cursor + idx, ev->type, ev->direction,
+                         peer_hex, (unsigned long long)ev->message_id,
+                         hash_prefix, ev->result, ev->hebbian_weight);
+    }
+
+    if (idx + 1 < count) {
+      offset += snprintf(response + offset, sizeof(response) - offset, ";");
+    }
+  }
+
+  send_response(client_fd, response);
+}
+
+static void handle_find_block_cmd(int client_fd, const char* hash_hex) {
+  if (g_node.network == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " no network");
+    return;
+  }
+
+  /* Parse 64-char hex hash */
+  uint8_t block_hash[32];
+  if (strlen(hash_hex) != 64) {
+    send_response(client_fd, CTRL_RESP_ERROR " invalid hash length");
+    return;
+  }
+  for (int idx = 0; idx < 32; idx++) {
+    unsigned int byte;
+    if (sscanf(hash_hex + idx * 2, "%02x", &byte) != 1) {
+      send_response(client_fd, CTRL_RESP_ERROR " invalid hash hex");
+      return;
+    }
+    block_hash[idx] = (uint8_t)byte;
+  }
+
+  /* Create a local FindBlock request and dispatch it */
+  network_local_find_block_payload_t* payload =
+      get_clear_memory(sizeof(network_local_find_block_payload_t));
+  if (payload == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " allocation failed");
+    return;
+  }
+  payload->hash = buffer_create_from_pointer_copy(block_hash, 32);
+  if (payload->hash == NULL) {
+    free(payload);
+    send_response(client_fd, CTRL_RESP_ERROR " allocation failed");
+    return;
+  }
+  payload->reply_to = &g_node.network->actor;
+
+  message_t msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.type = NETWORK_LOCAL_FIND_BLOCK;
+  msg.payload = payload;
+  msg.payload_destroy = network_local_find_block_payload_destroy;
+
+  actor_send(&g_node.network->actor, &msg);
+
+  char response[128];
+  snprintf(response, sizeof(response), "%s find_block_injected",
+           CTRL_RESP_OK);
+  send_response(client_fd, response);
+}
+
+static void handle_ping_peer_cmd(int client_fd, const char* node_id_hex) {
+  if (g_node.network == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " no network");
+    return;
+  }
+
+  node_id_t peer_id;
+  memset(&peer_id, 0, sizeof(peer_id));
+  if (node_id_from_string((char*)node_id_hex, &peer_id) != 0) {
+    send_response(client_fd, CTRL_RESP_ERROR " invalid node_id");
+    return;
+  }
+
+  peer_connection_t* peer = connection_manager_lookup(&g_node.network->conn_mgr, &peer_id);
+  if (peer == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " peer not found");
+    return;
+  }
+
+  wire_ping_t ping;
+  memset(&ping, 0, sizeof(ping));
+  ping.message_id = (uint64_t)(time(NULL)) ^ ((uint64_t)rand() << 32);
+  memcpy(&ping.sender_id, &g_node.network->authority->local_id, sizeof(node_id_t));
+  ping.timestamp = (uint64_t)(time(NULL) * 1000);
+
+  cbor_item_t* cbor = wire_ping_encode(&ping);
+  if (cbor == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " encode failed");
+    return;
+  }
+
+  int result = conn_state_send(g_node.network, peer, cbor);
+  cbor_decref(&cbor);
+
+  if (result == 0) {
+    char response[128];
+    snprintf(response, sizeof(response), "%s %llu",
+             CTRL_RESP_OK, (unsigned long long)ping.message_id);
+    send_response(client_fd, response);
+  } else {
+    send_response(client_fd, CTRL_RESP_ERROR " send failed");
+  }
+}
+
+static void handle_hebbian_cmd(int client_fd) {
+  if (g_node.network == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " no network");
+    return;
+  }
+
+  hebbian_table_t* table = &g_node.network->hebbian;
+  char response[4096];
+  int offset = snprintf(response, sizeof(response), "%s %zu|",
+                        CTRL_RESP_HEBBIAN, table->count);
+
+  for (size_t idx = 0; idx < table->count; idx++) {
+    char node_hex[NODE_ID_STRING_SIZE];
+    node_id_to_string(&table->entries[idx].peer_id, node_hex);
+    offset += snprintf(response + offset, sizeof(response) - offset,
+                      "%s:%.4f", node_hex, table->entries[idx].weight);
+    if (idx + 1 < table->count) {
+      offset += snprintf(response + offset, sizeof(response) - offset, ";");
+    }
+  }
+
+  send_response(client_fd, response);
+}
+#endif // OFFS_TEST
+
 /* ---- Command dispatcher ---- */
 
 static void handle_command(int client_fd, char* line) {
@@ -755,6 +937,51 @@ static void handle_command(int client_fd, char* line) {
     } else {
       send_response(client_fd, CTRL_RESP_ERROR " no network");
     }
+  } else if (strcmp(line, CTRL_GET_EVENTS) == 0) {
+#ifdef OFFS_TEST
+    handle_get_events(client_fd, 0);
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
+  } else if (strncmp(line, CTRL_GET_EVENTS " ",
+                strlen(CTRL_GET_EVENTS) + 1) == 0) {
+#ifdef OFFS_TEST
+    size_t cursor = (size_t)atol(line + strlen(CTRL_GET_EVENTS) + 1);
+    handle_get_events(client_fd, cursor);
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
+  } else if (strcmp(line, CTRL_CLEAR_EVENTS) == 0) {
+#ifdef OFFS_TEST
+    if (g_node.network != NULL) {
+      message_log_clear(&g_node.network->log);
+      send_response(client_fd, CTRL_RESP_OK);
+    } else {
+      send_response(client_fd, CTRL_RESP_ERROR " no network");
+    }
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
+  } else if (strncmp(line, CTRL_FIND_BLOCK " ",
+                strlen(CTRL_FIND_BLOCK) + 1) == 0) {
+#ifdef OFFS_TEST
+    handle_find_block_cmd(client_fd, line + strlen(CTRL_FIND_BLOCK) + 1);
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
+  } else if (strncmp(line, CTRL_PING_PEER " ",
+                strlen(CTRL_PING_PEER) + 1) == 0) {
+#ifdef OFFS_TEST
+    handle_ping_peer_cmd(client_fd, line + strlen(CTRL_PING_PEER) + 1);
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
+  } else if (strcmp(line, CTRL_HEBBIAN) == 0) {
+#ifdef OFFS_TEST
+    handle_hebbian_cmd(client_fd);
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
   } else {
     send_response(client_fd, CTRL_RESP_ERROR " unknown command");
   }
