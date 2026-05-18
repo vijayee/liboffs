@@ -4,6 +4,7 @@
 
 #include "hebbian.h"
 #include "../Util/allocator.h"
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
@@ -160,4 +161,15 @@ void hebbian_apply_success(hebbian_table_t* table, const node_id_t* path, uint8_
 
   // Symmetry rule: strengthen reverse direction
   hebbian_symmetry(table, path, path_len, delta_w);
+}
+
+hebbian_weight_t* hebbian_table_query(const hebbian_table_t* table, size_t* out_count) {
+  if (table == NULL || out_count == NULL) return NULL;
+
+  hebbian_weight_t* result = malloc(table->count * sizeof(hebbian_weight_t));
+  if (result == NULL) return NULL;
+
+  memcpy(result, table->entries, table->count * sizeof(hebbian_weight_t));
+  *out_count = table->count;
+  return result;
 }

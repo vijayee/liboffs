@@ -20,6 +20,7 @@
 #include "node_id.h"
 #include "wanted_list.h"
 #include "conn_state.h"
+#include "message_log.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -54,6 +55,9 @@ typedef struct network_t {
   wanted_list_t* wanted_list;
   hebbian_table_t hebbian;
   rate_limit_table_t rate_limits;
+#ifdef OFFS_TEST
+  message_log_t log;
+#endif
   topology_metrics_t* topology_metrics;
   connection_manager_t conn_mgr;
   uint64_t gossip_timer_id;

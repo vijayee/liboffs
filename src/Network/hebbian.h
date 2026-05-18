@@ -75,4 +75,9 @@ float hebbian_compute_delta(uint64_t latency_ms, float multiplier);
 void hebbian_apply_success(hebbian_table_t* table, const node_id_t* path, uint8_t path_len,
                            uint64_t latency_ms, float multiplier);
 
+// Query the weight table — returns a heap-allocated array of (node_id, weight)
+// pairs and sets *out_count. Caller must free() the returned array.
+// Returns NULL on error.
+hebbian_weight_t* hebbian_table_query(const hebbian_table_t* table, size_t* out_count);
+
 #endif // OFFS_HEBBIAN_H

@@ -84,6 +84,9 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   network->wanted_list = wanted_list_create();
   hebbian_table_init(&network->hebbian, 32);
   rate_limit_table_init(&network->rate_limits, 32);
+#ifdef OFFS_TEST
+  message_log_init(&network->log);
+#endif
   network->topology_metrics = topology_metrics_create(pool);
   connection_manager_init(&network->conn_mgr, 16, NULL);
   network->hebbian_decay_timer_id = 0;
@@ -174,6 +177,9 @@ void network_destroy(network_t* network) {
   }
 #endif
   actor_destroy(&network->actor);
+#ifdef OFFS_TEST
+  message_log_clear(&network->log);
+#endif
   free(network);
 }
 
@@ -2067,6 +2073,14 @@ void network_dispatch(void* state, message_t* msg) {
             free(pending);
           }
         }
+#ifdef HAS_MSQUIC
+        // ConnectionClose must be called after SHUTDOWN_COMPLETE to release
+        // the HQUIC connection handle. We defer it from the msquic callback
+        // to here so the handle stays valid for peer lookup above.
+        if (quic_conn->connection != NULL && network->msquic != NULL) {
+          network->msquic->ConnectionClose(quic_conn->connection);
+        }
+#endif
       }
       break;
     }
