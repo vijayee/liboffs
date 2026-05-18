@@ -3,8 +3,12 @@
 //
 
 #include "wire.h"
+#include "find_block.h"
 #include "../Util/allocator.h"
 #include <string.h>
+
+_Static_assert(WIRE_MAX_VISITED_BLOOM == FIND_BLOCK_MAX_VISITED_BLOOM,
+               "wire and find_block bloom sizes must match");
 
 // --- Helper functions ---
 
@@ -404,7 +408,7 @@ int wire_find_node_response_decode(cbor_item_t* item, wire_find_node_response_t*
 // --- RankBlock ---
 
 cbor_item_t* wire_rank_block_encode(const wire_rank_block_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(6);
+  cbor_item_t* array = cbor_new_definite_array(10);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_RANK_BLOCK);
@@ -431,11 +435,36 @@ cbor_item_t* wire_rank_block_encode(const wire_rank_block_t* msg) {
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
+  item = cbor_build_bytestring(msg->visited_bloom, WIRE_MAX_VISITED_BLOOM);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint16(msg->visited_count);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  cbor_item_t* path = cbor_new_definite_array(msg->path_len);
+  for (uint8_t index = 0; index < msg->path_len; index++) {
+    cbor_item_t* node_id = _node_id_encode(&msg->path[index]);
+    (void)cbor_array_push(path, node_id);
+    cbor_decref(&node_id);
+  }
+  (void)cbor_array_push(array, path);
+  cbor_decref(&path);
+
+  item = cbor_build_uint8(msg->path_len);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
   return array;
 }
 
 int wire_rank_block_decode(cbor_item_t* item, wire_rank_block_t* msg) {
-  if (cbor_array_size(item) < 6) return -1;
+  size_t array_size = cbor_array_size(item);
+
+  // Minimum 6 elements for backward compatibility (old format without visited_bloom/path)
+  if (array_size < 6) return -1;
+
   cbor_item_t* type_item = cbor_array_get(item, 0);
   if (cbor_get_uint8(type_item) != WIRE_RANK_BLOCK) { cbor_decref(&type_item); return -1; }
   cbor_decref(&type_item);
@@ -456,6 +485,44 @@ int wire_rank_block_decode(cbor_item_t* item, wire_rank_block_t* msg) {
   cbor_item_t* hop = cbor_array_get(item, 5);
   msg->hop_count = cbor_get_uint8(hop);
   cbor_decref(&hop);
+
+  if (array_size >= 10) {
+    // New format with visited_bloom, visited_count, path, path_len
+    cbor_item_t* visited = cbor_array_get(item, 6);
+    if (cbor_bytestring_length(visited) != WIRE_MAX_VISITED_BLOOM) {
+      cbor_decref(&visited);
+      return -1;
+    }
+    memcpy(msg->visited_bloom, cbor_bytestring_handle(visited), WIRE_MAX_VISITED_BLOOM);
+    cbor_decref(&visited);
+
+    cbor_item_t* vcount = cbor_array_get(item, 7);
+    msg->visited_count = (uint16_t)cbor_get_uint16(vcount);
+    cbor_decref(&vcount);
+
+    cbor_item_t* path_arr = cbor_array_get(item, 8);
+    size_t path_len = cbor_array_size(path_arr);
+    if (path_len > WIRE_MAX_PATH) path_len = WIRE_MAX_PATH;
+    msg->path_len = (uint8_t)path_len;
+    for (size_t index = 0; index < path_len; index++) {
+      cbor_item_t* node_item = cbor_array_get(path_arr, index);
+      _node_id_decode(node_item, &msg->path[index]);
+      cbor_decref(&node_item);
+    }
+    cbor_decref(&path_arr);
+
+    cbor_item_t* path_len_item = cbor_array_get(item, 9);
+    uint8_t wire_path_len = cbor_get_uint8(path_len_item);
+    if (wire_path_len < msg->path_len) msg->path_len = wire_path_len;
+    cbor_decref(&path_len_item);
+  } else {
+    // Old format: zero-fill visited_bloom and path
+    memset(msg->visited_bloom, 0, WIRE_MAX_VISITED_BLOOM);
+    msg->visited_count = 0;
+    memset(msg->path, 0, sizeof(msg->path));
+    msg->path_len = 0;
+  }
+
   return 0;
 }
 
@@ -1718,6 +1785,172 @@ int wire_addr_response_decode(cbor_item_t* item, wire_addr_response_t* msg) {
   cbor_item_t* port = cbor_array_get(item, 5);
   msg->reflexive_port = (uint16_t)cbor_get_uint16(port);
   cbor_decref(&port);
+  return 0;
+}
+
+// --- Gossip ---
+
+cbor_item_t* wire_gossip_encode(const wire_gossip_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(8);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(WIRE_GOSSIP);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->message_id >> 32);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->message_id & 0xFFFFFFFF);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  cbor_item_t* sender = _node_id_encode(&msg->sender_id);
+  (void)cbor_array_push(array, sender);
+  cbor_decref(&sender);
+
+  item = cbor_build_uint32(msg->rendezvous_addr);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint16(msg->rendezvous_port);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->target_count);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  cbor_item_t* targets = cbor_new_definite_array(msg->target_count);
+  for (uint8_t index = 0; index < msg->target_count; index++) {
+    cbor_item_t* node_id = _node_id_encode(&msg->targets[index]);
+    (void)cbor_array_push(targets, node_id);
+    cbor_decref(&node_id);
+  }
+  (void)cbor_array_push(array, targets);
+  cbor_decref(&targets);
+
+  return array;
+}
+
+int wire_gossip_decode(cbor_item_t* item, wire_gossip_t* msg) {
+  if (cbor_array_size(item) < 8) return -1;
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (cbor_get_uint8(type_item) != WIRE_GOSSIP) { cbor_decref(&type_item); return -1; }
+  cbor_decref(&type_item);
+  cbor_item_t* id_hi = cbor_array_get(item, 1);
+  cbor_item_t* id_lo = cbor_array_get(item, 2);
+  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  cbor_decref(&id_hi);
+  cbor_decref(&id_lo);
+  cbor_item_t* sender = cbor_array_get(item, 3);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* addr = cbor_array_get(item, 4);
+  msg->rendezvous_addr = cbor_get_uint32(addr);
+  cbor_decref(&addr);
+  cbor_item_t* port = cbor_array_get(item, 5);
+  msg->rendezvous_port = (uint16_t)cbor_get_uint16(port);
+  cbor_decref(&port);
+  cbor_item_t* tcount = cbor_array_get(item, 6);
+  msg->target_count = cbor_get_uint8(tcount);
+  cbor_decref(&tcount);
+  if (msg->target_count > RING_MAX_RINGS) msg->target_count = RING_MAX_RINGS;
+  cbor_item_t* targets_arr = cbor_array_get(item, 7);
+  size_t arr_len = cbor_array_size(targets_arr);
+  size_t decode_count = arr_len < msg->target_count ? arr_len : msg->target_count;
+  for (size_t index = 0; index < decode_count; index++) {
+    cbor_item_t* node_item = cbor_array_get(targets_arr, index);
+    _node_id_decode(node_item, &msg->targets[index]);
+    cbor_decref(&node_item);
+  }
+  msg->target_count = (uint8_t)decode_count;
+  cbor_decref(&targets_arr);
+  return 0;
+}
+
+// --- GossipPull ---
+
+cbor_item_t* wire_gossip_pull_encode(const wire_gossip_pull_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(8);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(WIRE_GOSSIP_PULL);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->message_id >> 32);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->message_id & 0xFFFFFFFF);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  cbor_item_t* sender = _node_id_encode(&msg->sender_id);
+  (void)cbor_array_push(array, sender);
+  cbor_decref(&sender);
+
+  item = cbor_build_uint32(msg->rendezvous_addr);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint16(msg->rendezvous_port);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->target_count);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  cbor_item_t* targets = cbor_new_definite_array(msg->target_count);
+  for (uint8_t index = 0; index < msg->target_count; index++) {
+    cbor_item_t* node_id = _node_id_encode(&msg->targets[index]);
+    (void)cbor_array_push(targets, node_id);
+    cbor_decref(&node_id);
+  }
+  (void)cbor_array_push(array, targets);
+  cbor_decref(&targets);
+
+  return array;
+}
+
+int wire_gossip_pull_decode(cbor_item_t* item, wire_gossip_pull_t* msg) {
+  if (cbor_array_size(item) < 8) return -1;
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (cbor_get_uint8(type_item) != WIRE_GOSSIP_PULL) { cbor_decref(&type_item); return -1; }
+  cbor_decref(&type_item);
+  cbor_item_t* id_hi = cbor_array_get(item, 1);
+  cbor_item_t* id_lo = cbor_array_get(item, 2);
+  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  cbor_decref(&id_hi);
+  cbor_decref(&id_lo);
+  cbor_item_t* sender = cbor_array_get(item, 3);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* addr = cbor_array_get(item, 4);
+  msg->rendezvous_addr = cbor_get_uint32(addr);
+  cbor_decref(&addr);
+  cbor_item_t* port = cbor_array_get(item, 5);
+  msg->rendezvous_port = (uint16_t)cbor_get_uint16(port);
+  cbor_decref(&port);
+  cbor_item_t* tcount = cbor_array_get(item, 6);
+  msg->target_count = cbor_get_uint8(tcount);
+  cbor_decref(&tcount);
+  if (msg->target_count > RING_MAX_RINGS) msg->target_count = RING_MAX_RINGS;
+  cbor_item_t* targets_arr = cbor_array_get(item, 7);
+  size_t arr_len = cbor_array_size(targets_arr);
+  size_t decode_count = arr_len < msg->target_count ? arr_len : msg->target_count;
+  for (size_t index = 0; index < decode_count; index++) {
+    cbor_item_t* node_item = cbor_array_get(targets_arr, index);
+    _node_id_decode(node_item, &msg->targets[index]);
+    cbor_decref(&node_item);
+  }
+  msg->target_count = (uint8_t)decode_count;
+  cbor_decref(&targets_arr);
   return 0;
 }
 

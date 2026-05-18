@@ -18,6 +18,7 @@ extern "C" {
 #include "Network/authority.h"
 #include "Network/find_block.h"
 #include "Network/store_block.h"
+#include "Network/wire.h"
 #include "Network/eabf.h"
 #include "Network/hebbian.h"
 #include "Network/respiration.h"
@@ -812,6 +813,111 @@ TEST_F(FindBlockTest, PathCycleDetection) {
   net_node_destroy(node_a);
 }
 
+TEST_F(FindBlockTest, VisitedBloomFiltersEabfGravityWell) {
+  // Create a ring member with an EABF gravity well for block_hash
+  node_id_t id_a = {};
+  memset(id_a.hash, 0x10, NODE_ID_HASH_SIZE);
+  net_node_t* node_a = net_node_create(&id_a, 0x0A000001, 8080);
+  node_a->weight = 0.9f;
+  ring_set_insert(rings, node_a, 5000);
+
+  eabf_t* eabf_a = eabf_table_insert(&eabf_table, &id_a);
+  ASSERT_NE(eabf_a, nullptr);
+  uint8_t block_hash[32] = {};
+  memset(block_hash, 0xAA, 32);
+  eabf_subscribe(eabf_a, block_hash, 32);
+
+  find_block_state_t state = {};
+  memcpy(state.block_hash, block_hash, 32);
+  state.ttl = 6;
+  // Add node_a to visited bloom — should be filtered out
+  find_block_add_visited(state.visited_bloom, &state.visited_count, id_a.hash);
+
+  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+  find_block_result_e result = find_block_execute(
+      &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
+      next_hops, &next_hop_count);
+
+  // node_a is in visited bloom so gravity well should be skipped
+  EXPECT_EQ(result, FIND_BLOCK_NOT_FOUND);
+
+  net_node_destroy(node_a);
+}
+
+TEST_F(FindBlockTest, VisitedBloomFiltersRingCandidates) {
+  // Create two ring members
+  node_id_t id_a = {};
+  memset(id_a.hash, 0x10, NODE_ID_HASH_SIZE);
+  net_node_t* node_a = net_node_create(&id_a, 0x0A000001, 8080);
+  node_a->weight = 0.8f;
+
+  node_id_t id_b = {};
+  memset(id_b.hash, 0x20, NODE_ID_HASH_SIZE);
+  net_node_t* node_b = net_node_create(&id_b, 0x0A000002, 8081);
+  node_b->weight = 0.9f;
+
+  ring_set_insert(rings, node_a, 5000);
+  ring_set_insert(rings, node_b, 10000);
+
+  find_block_state_t state = {};
+  memset(state.block_hash, 0xAA, 32);
+  state.ttl = 6;
+  // Add node_a to visited bloom — should be filtered out
+  find_block_add_visited(state.visited_bloom, &state.visited_count, id_a.hash);
+
+  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+  find_block_result_e result = find_block_execute(
+      &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
+      next_hops, &next_hop_count);
+
+  // Should forward but only to node_b (node_a is filtered by visited bloom)
+  EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
+  EXPECT_EQ(next_hop_count, 1u);
+  EXPECT_TRUE(node_id_equals(&next_hops[0]->id, &id_b));
+
+  net_node_destroy(node_a);
+  net_node_destroy(node_b);
+}
+
+TEST_F(FindBlockTest, VisitedBloomAndPathBothFilter) {
+  // Create two ring members: one in path, one in visited bloom
+  node_id_t id_a = {};
+  memset(id_a.hash, 0x10, NODE_ID_HASH_SIZE);
+  net_node_t* node_a = net_node_create(&id_a, 0x0A000001, 8080);
+  node_a->weight = 0.9f;
+
+  node_id_t id_b = {};
+  memset(id_b.hash, 0x20, NODE_ID_HASH_SIZE);
+  net_node_t* node_b = net_node_create(&id_b, 0x0A000002, 8081);
+  node_b->weight = 0.8f;
+
+  ring_set_insert(rings, node_a, 5000);
+  ring_set_insert(rings, node_b, 10000);
+
+  find_block_state_t state = {};
+  memset(state.block_hash, 0xAA, 32);
+  state.ttl = 6;
+  // node_a in path
+  memcpy(&state.path[0], &id_a, sizeof(node_id_t));
+  state.path_len = 1;
+  // node_b in visited bloom
+  find_block_add_visited(state.visited_bloom, &state.visited_count, id_b.hash);
+
+  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+  find_block_result_e result = find_block_execute(
+      &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
+      next_hops, &next_hop_count);
+
+  // Both candidates filtered (one by path, one by visited bloom)
+  EXPECT_EQ(result, FIND_BLOCK_NOT_FOUND);
+
+  net_node_destroy(node_a);
+  net_node_destroy(node_b);
+}
+
 // === StoreBlock tests ===
 
 class StoreBlockTest : public ::testing::Test {
@@ -937,6 +1043,94 @@ TEST_F(StoreBlockTest, HighCapacityForwards) {
 
   net_node_destroy(node_a);
   net_node_destroy(node_b);
+}
+
+// === RankBlock wire tests ===
+
+class WireRankBlockTest : public ::testing::Test {
+protected:
+  void SetUp() override {}
+  void TearDown() override {}
+};
+
+TEST_F(WireRankBlockTest, Roundtrip) {
+  wire_rank_block_t original = {};
+  memset(original.block_hash, 0xAB, 32);
+  original.fib = 42;
+  original.count = 7;
+  memset(original.origin.hash, 0x11, NODE_ID_HASH_SIZE);
+  original.hop_count = 3;
+  find_block_add_visited(original.visited_bloom, &original.visited_count,
+                         original.origin.hash);
+  memcpy(&original.path[0], &original.origin, sizeof(node_id_t));
+  original.path_len = 1;
+
+  cbor_item_t* encoded = wire_rank_block_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  wire_rank_block_t decoded = {};
+  int rc = wire_rank_block_decode(encoded, &decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(decoded.fib, 42u);
+  EXPECT_EQ(decoded.count, 7u);
+  EXPECT_EQ(decoded.hop_count, 3);
+  EXPECT_EQ(decoded.visited_count, 1u);
+  EXPECT_EQ(decoded.path_len, 1);
+  EXPECT_EQ(memcmp(decoded.block_hash, original.block_hash, 32), 0);
+  EXPECT_TRUE(node_id_equals(&decoded.origin, &original.origin));
+  EXPECT_TRUE(node_id_equals(&decoded.path[0], &original.path[0]));
+  // Origin hash should be in the bloom
+  EXPECT_TRUE(find_block_is_visited(decoded.visited_bloom, decoded.visited_count,
+                                    original.origin.hash));
+
+  cbor_decref(&encoded);
+}
+
+TEST_F(WireRankBlockTest, BackwardCompatOldFormat) {
+  // Simulate receiving a 6-element RankBlock (old format without visited_bloom/path)
+  // by extracting the first 6 elements from a properly encoded array.
+  wire_rank_block_t original = {};
+  memset(original.block_hash, 0xCD, 32);
+  original.fib = 100;
+  original.count = 5;
+  memset(original.origin.hash, 0x22, NODE_ID_HASH_SIZE);
+  original.hop_count = 2;
+  memset(original.visited_bloom, 0, WIRE_MAX_VISITED_BLOOM);
+  original.visited_count = 0;
+  original.path_len = 0;
+
+  cbor_item_t* full_encoded = wire_rank_block_encode(&original);
+  ASSERT_NE(full_encoded, nullptr);
+
+  // Build a 6-element array from the first 6 elements of the encoded array
+  cbor_item_t* old_array = cbor_new_definite_array(6);
+  for (size_t idx = 0; idx < 6; idx++) {
+    cbor_item_t* elem = cbor_array_get(full_encoded, idx);
+    (void)cbor_array_push(old_array, elem);
+    cbor_decref(&elem);
+  }
+
+  wire_rank_block_t old_decoded = {};
+  int rc = wire_rank_block_decode(old_array, &old_decoded);
+  ASSERT_EQ(rc, 0);
+  EXPECT_EQ(old_decoded.fib, 100u);
+  EXPECT_EQ(old_decoded.count, 5u);
+  EXPECT_EQ(old_decoded.hop_count, 2);
+  EXPECT_EQ(old_decoded.visited_count, 0u);
+  EXPECT_EQ(old_decoded.path_len, 0);
+  // visited_bloom should be zeroed
+  bool all_zero = true;
+  for (int idx = 0; idx < WIRE_MAX_VISITED_BLOOM; idx++) {
+    if (old_decoded.visited_bloom[idx] != 0) {
+      all_zero = false;
+      break;
+    }
+  }
+  EXPECT_TRUE(all_zero) << "visited_bloom should be all zeros for old format";
+
+  cbor_decref(&old_array);
+  cbor_decref(&full_encoded);
 }
 
 // === Hebbian weight table tests ===
@@ -2265,4 +2459,126 @@ TEST(WireSalutationTest, NodeIdFromPublicKeyVerification) {
   rc = node_id_from_public_key(different_key, sizeof(different_key), &different_id);
   ASSERT_EQ(rc, 0);
   EXPECT_EQ(node_id_equals(&computed_id, &different_id), false);
+}
+
+// === WireGossip wire tests ===
+
+class WireGossipTest : public ::testing::Test {
+protected:
+  void SetUp() override {}
+  void TearDown() override {}
+};
+
+TEST_F(WireGossipTest, Roundtrip) {
+  wire_gossip_t original = {};
+  original.message_id = 0x0102030405060708ULL;
+  node_id_from_string("node-sender-alpha", &original.sender_id);
+  original.rendezvous_addr = htonl(INADDR_LOOPBACK);
+  original.rendezvous_port = 9051;
+  original.target_count = 3;
+  node_id_from_string("node-target-one", &original.targets[0]);
+  node_id_from_string("node-target-two", &original.targets[1]);
+  node_id_from_string("node-target-three", &original.targets[2]);
+
+  cbor_item_t* encoded = wire_gossip_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  wire_gossip_t decoded = {};
+  int rc = wire_gossip_decode(encoded, &decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(decoded.message_id, original.message_id);
+  EXPECT_TRUE(node_id_equals(&decoded.sender_id, &original.sender_id));
+  EXPECT_EQ(decoded.rendezvous_addr, original.rendezvous_addr);
+  EXPECT_EQ(decoded.rendezvous_port, original.rendezvous_port);
+  EXPECT_EQ(decoded.target_count, 3);
+  EXPECT_TRUE(node_id_equals(&decoded.targets[0], &original.targets[0]));
+  EXPECT_TRUE(node_id_equals(&decoded.targets[1], &original.targets[1]));
+  EXPECT_TRUE(node_id_equals(&decoded.targets[2], &original.targets[2]));
+
+  cbor_decref(&encoded);
+}
+
+TEST_F(WireGossipTest, ZeroTargets) {
+  wire_gossip_t original = {};
+  original.message_id = 0xDEADBEEFCAFE1234ULL;
+  node_id_from_string("node-sender-beta", &original.sender_id);
+  original.rendezvous_addr = htonl(0xC0A80001);  // 192.168.0.1
+  original.rendezvous_port = 8080;
+  original.target_count = 0;
+
+  cbor_item_t* encoded = wire_gossip_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  wire_gossip_t decoded = {};
+  int rc = wire_gossip_decode(encoded, &decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(decoded.message_id, original.message_id);
+  EXPECT_TRUE(node_id_equals(&decoded.sender_id, &original.sender_id));
+  EXPECT_EQ(decoded.rendezvous_addr, original.rendezvous_addr);
+  EXPECT_EQ(decoded.rendezvous_port, original.rendezvous_port);
+  EXPECT_EQ(decoded.target_count, 0);
+
+  cbor_decref(&encoded);
+}
+
+// === WireGossipPull wire tests ===
+
+class WireGossipPullTest : public ::testing::Test {
+protected:
+  void SetUp() override {}
+  void TearDown() override {}
+};
+
+TEST_F(WireGossipPullTest, Roundtrip) {
+  wire_gossip_pull_t original = {};
+  original.message_id = 0xAABBCCDDEEFF0011ULL;
+  node_id_from_string("node-pull-sender", &original.sender_id);
+  original.rendezvous_addr = htonl(INADDR_LOOPBACK);
+  original.rendezvous_port = 443;
+  original.target_count = 2;
+  node_id_from_string("node-pull-target-a", &original.targets[0]);
+  node_id_from_string("node-pull-target-b", &original.targets[1]);
+
+  cbor_item_t* encoded = wire_gossip_pull_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  wire_gossip_pull_t decoded = {};
+  int rc = wire_gossip_pull_decode(encoded, &decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(decoded.message_id, original.message_id);
+  EXPECT_TRUE(node_id_equals(&decoded.sender_id, &original.sender_id));
+  EXPECT_EQ(decoded.rendezvous_addr, original.rendezvous_addr);
+  EXPECT_EQ(decoded.rendezvous_port, original.rendezvous_port);
+  EXPECT_EQ(decoded.target_count, 2);
+  EXPECT_TRUE(node_id_equals(&decoded.targets[0], &original.targets[0]));
+  EXPECT_TRUE(node_id_equals(&decoded.targets[1], &original.targets[1]));
+
+  cbor_decref(&encoded);
+}
+
+TEST_F(WireGossipPullTest, ZeroTargets) {
+  wire_gossip_pull_t original = {};
+  original.message_id = 0x1122334455667788ULL;
+  node_id_from_string("node-pull-empty", &original.sender_id);
+  original.rendezvous_addr = htonl(0x7F000001);
+  original.rendezvous_port = 9999;
+  original.target_count = 0;
+
+  cbor_item_t* encoded = wire_gossip_pull_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  wire_gossip_pull_t decoded = {};
+  int rc = wire_gossip_pull_decode(encoded, &decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(decoded.message_id, original.message_id);
+  EXPECT_TRUE(node_id_equals(&decoded.sender_id, &original.sender_id));
+  EXPECT_EQ(decoded.rendezvous_addr, original.rendezvous_addr);
+  EXPECT_EQ(decoded.rendezvous_port, original.rendezvous_port);
+  EXPECT_EQ(decoded.target_count, 0);
+
+  cbor_decref(&encoded);
 }

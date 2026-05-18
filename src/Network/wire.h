@@ -7,6 +7,7 @@
 
 #include "node_id.h"
 #include "authority.h"
+#include "ring.h"
 #include <cbor.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -212,12 +213,19 @@ typedef struct {
 
 // --- RankBlock ---
 
+#define RANK_BLOCK_MAX_HOPS 6
+#define RANK_BLOCK_FORWARD_FANOUT 3
+
 typedef struct {
   uint8_t block_hash[32];
   uint32_t fib;
   uint32_t count;
   node_id_t origin;
   uint8_t hop_count;
+  uint8_t visited_bloom[WIRE_MAX_VISITED_BLOOM];
+  uint16_t visited_count;
+  node_id_t path[WIRE_MAX_PATH];
+  uint8_t path_len;
 } wire_rank_block_t;
 
 // --- RecallBlock ---
@@ -295,6 +303,29 @@ typedef struct wire_addr_response_t {
   uint16_t reflexive_port;
 } wire_addr_response_t;
 
+// --- Gossip (ring maintenance / peer discovery) ---
+
+#define WIRE_GOSSIP            21
+#define WIRE_GOSSIP_PULL       22
+
+typedef struct {
+  uint64_t  message_id;
+  node_id_t sender_id;
+  uint32_t  rendezvous_addr;
+  uint16_t  rendezvous_port;
+  node_id_t targets[RING_MAX_RINGS];  // 1 random node per non-empty ring
+  uint8_t   target_count;
+} wire_gossip_t;
+
+typedef struct {
+  uint64_t  message_id;
+  node_id_t sender_id;
+  uint32_t  rendezvous_addr;
+  uint16_t  rendezvous_port;
+  node_id_t targets[RING_MAX_RINGS];
+  uint8_t   target_count;
+} wire_gossip_pull_t;
+
 // Encode functions — return CBOR item (caller must cbor_decref)
 cbor_item_t* wire_ping_encode(const wire_ping_t* msg);
 cbor_item_t* wire_ping_response_encode(const wire_ping_response_t* msg);
@@ -320,6 +351,8 @@ cbor_item_t* wire_relay_send_encode(const wire_relay_send_t* msg);
 cbor_item_t* wire_relay_received_encode(const wire_relay_received_t* msg);
 cbor_item_t* wire_addr_request_encode(const wire_addr_request_t* msg);
 cbor_item_t* wire_addr_response_encode(const wire_addr_response_t* msg);
+cbor_item_t* wire_gossip_encode(const wire_gossip_t* msg);
+cbor_item_t* wire_gossip_pull_encode(const wire_gossip_pull_t* msg);
 
 // Decode functions — fill existing struct, return 0 on success, -1 on error
 int wire_ping_decode(cbor_item_t* item, wire_ping_t* msg);
@@ -346,6 +379,8 @@ int wire_relay_send_decode(cbor_item_t* item, wire_relay_send_t* msg);
 int wire_relay_received_decode(cbor_item_t* item, wire_relay_received_t* msg);
 int wire_addr_request_decode(cbor_item_t* item, wire_addr_request_t* msg);
 int wire_addr_response_decode(cbor_item_t* item, wire_addr_response_t* msg);
+int wire_gossip_decode(cbor_item_t* item, wire_gossip_t* msg);
+int wire_gossip_pull_decode(cbor_item_t* item, wire_gossip_pull_t* msg);
 
 // Helper: extract type byte from CBOR item
 uint8_t wire_get_type(cbor_item_t* item);
