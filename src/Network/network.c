@@ -35,20 +35,6 @@
 static void network_sync_hebbian_to_rings(network_t* network);
 static void network_handle_local_find_block(network_t* network, message_t* msg);
 static void network_handle_ping_capacity_tick(network_t* network, message_t* msg);
-static void network_handle_gossip_received(network_t* network, message_t* msg);
-static void network_handle_gossip_pull_received(network_t* network, message_t* msg);
-
-static void network_handle_gossip_received(network_t* network, message_t* msg) {
-  (void)network;
-  (void)msg;
-  // TODO: Implement in Task 4 - Meridian gossip receipt handler
-}
-
-static void network_handle_gossip_pull_received(network_t* network, message_t* msg) {
-  (void)network;
-  (void)msg;
-  // TODO: Implement in Task 4 - Meridian gossip pull receipt handler
-}
 
 // --- Payload destroy for cache PUT from network ---
 static void network_cache_put_payload_destroy(void* ptr) {
@@ -541,7 +527,63 @@ static void network_handle_ping_capacity_tick(network_t* network, message_t* msg
   }
 }
 
-// --- Gossip tick handler ---
+// --- Add node to ring table (helper for gossip handlers) ---
+
+static void network_add_node_to_ring(network_t* network,
+                                      const node_id_t* node_id,
+                                      uint32_t addr,
+                                      uint16_t port) {
+  if (network == NULL || node_id == NULL) return;
+
+  // Check if already in ring table — skip duplicate insertion
+  net_node_t* existing = ring_set_find_by_id(network->rings, node_id);
+  if (existing != NULL) {
+    // Update last_gossip_time and record success
+    existing->last_gossip_time = (uint64_t)time(NULL) * 1000;
+    net_node_record_success(existing);
+    return;
+  }
+
+  // Check probe cache — use cached latency if available
+  float cached_latency_ms;
+  if (latency_cache_get(network->latency_cache, node_id, &cached_latency_ms) == 0) {
+    uint32_t latency_us = (uint32_t)(cached_latency_ms * 1000);
+    net_node_t* node = net_node_create(node_id, addr, port);
+    if (node != NULL) {
+      node->weight = FIND_BLOCK_MIN_WEIGHT;
+      node->last_gossip_time = (uint64_t)time(NULL) * 1000;
+      net_node_record_success(node);
+      ring_set_insert(network->rings, node, latency_us);
+    }
+    return;
+  }
+
+  // Not in cache — only probe if already connected
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, node_id);
+  if (peer != NULL && peer->connected) {
+    // Send Ping to measure latency — ring insertion deferred until PingResponse
+    wire_ping_t ping;
+    memset(&ping, 0, sizeof(ping));
+    ping.message_id = gossip_handle_next_query_id(&network->gossip);
+    memcpy(&ping.sender_id, &network->authority->local_id, sizeof(node_id_t));
+    ping.timestamp = (uint64_t)time(NULL) * 1000;
+
+    cbor_item_t* cbor = wire_ping_encode(&ping);
+    conn_state_send(network, peer, cbor);
+    cbor_decref(&cbor);
+  } else {
+    // Not connected — insert at latency=0 (outermost ring)
+    net_node_t* node = net_node_create(node_id, addr, port);
+    if (node != NULL) {
+      node->weight = FIND_BLOCK_MIN_WEIGHT;
+      node->last_gossip_time = (uint64_t)time(NULL) * 1000;
+      net_node_record_success(node);
+      ring_set_insert(network->rings, node, 0);
+    }
+  }
+}
+
+// --- Gossip tick handler (Meridian algorithm) ---
 
 static void network_handle_gossip_tick(network_t* network, message_t* msg) {
   (void)msg;
@@ -557,23 +599,117 @@ static void network_handle_gossip_tick(network_t* network, message_t* msg) {
   gossip_scheduler_tick(&network->gossip.scheduler, now_ms);
   if (!network->gossip.scheduler.should_gossip) return;
 
-  // Select gossip targets from ring table and send PingCapacity
-  // Walk all connected peers and send a PingCapacity exchange to each
-  for (size_t index = 0; index < network->conn_mgr.peer_count; index++) {
-    peer_connection_t* peer = network->conn_mgr.peers[index];
+  // Select 1 random node per ring as gossip targets (Meridian algorithm)
+  net_node_t targets[RING_MAX_RINGS];
+  size_t target_count = ring_set_get_random_nodes(
+      network->rings, targets, RING_MAX_RINGS,
+      &network->authority->local_id);
+
+  for (size_t index = 0; index < target_count; index++) {
+    peer_connection_t* peer = connection_manager_lookup(
+        &network->conn_mgr, &targets[index].id);
     if (peer == NULL || !peer->connected) continue;
 
-    wire_ping_capacity_t ping_cap;
-    memset(&ping_cap, 0, sizeof(ping_cap));
-    ping_cap.message_id = gossip_handle_next_query_id(&network->gossip);
-    memcpy(&ping_cap.source, &network->authority->local_id, sizeof(node_id_t));
-    ping_cap.capacity = atomic_load(&network->authority->capacity);
-    ping_cap.phase = atomic_load(&network->authority->phase);
+    // Build gossip message with ring membership (excluding target)
+    wire_gossip_t gossip;
+    memset(&gossip, 0, sizeof(gossip));
+    gossip.message_id = gossip_handle_next_query_id(&network->gossip);
+    memcpy(&gossip.sender_id, &network->authority->local_id, sizeof(node_id_t));
+    gossip.rendezvous_addr = 0;  // 0 until NAT detection fills this
+    gossip.rendezvous_port = 0;
 
-    cbor_item_t* cbor = wire_ping_capacity_encode(&ping_cap);
+    // Fill targets: 1 random node per ring, excluding the target itself
+    net_node_t ring_targets[RING_MAX_RINGS];
+    gossip.target_count = (uint8_t)ring_set_get_random_nodes(
+        network->rings, ring_targets, RING_MAX_RINGS, &targets[index].id);
+    for (uint8_t target_index = 0;
+         target_index < gossip.target_count && target_index < RING_MAX_RINGS;
+         target_index++) {
+      memcpy(&gossip.targets[target_index], &ring_targets[target_index],
+             sizeof(node_id_t));
+    }
+
+    cbor_item_t* cbor = wire_gossip_encode(&gossip);
+    conn_state_send(network, peer, cbor);
+    cbor_decref(&cbor);
+
+    if (network->log != NULL) {
+      message_log_record(network->log, WIRE_GOSSIP, MSG_DIRECTION_SENT,
+                         &targets[index].id, gossip.message_id, NULL,
+                         0, &network->hebbian);
+    }
+  }
+}
+
+// --- Gossip receipt handler (PUSHPULL: receive gossip, send pull response) ---
+
+static void network_handle_gossip_received(network_t* network, message_t* msg) {
+  wire_gossip_t* gossip = (wire_gossip_t*)msg->payload;
+  if (gossip == NULL) return;
+
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_GOSSIP, MSG_DIRECTION_RECEIVED,
+                       &gossip->sender_id, gossip->message_id, NULL,
+                       0, &network->hebbian);
+  }
+
+  // Add sender to ring table
+  network_add_node_to_ring(network, &gossip->sender_id,
+                            gossip->rendezvous_addr, gossip->rendezvous_port);
+
+  // Add all targets from the gossip packet
+  for (uint8_t index = 0; index < gossip->target_count && index < RING_MAX_RINGS; index++) {
+    network_add_node_to_ring(network, &gossip->targets[index], 0, 0);
+  }
+
+  // PUSHPULL: send our ring membership back to the sender
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &gossip->sender_id);
+  if (peer != NULL && peer->connected) {
+    wire_gossip_pull_t pull;
+    memset(&pull, 0, sizeof(pull));
+    pull.message_id = gossip_handle_next_query_id(&network->gossip);
+    memcpy(&pull.sender_id, &network->authority->local_id, sizeof(node_id_t));
+    pull.rendezvous_addr = 0;
+    pull.rendezvous_port = 0;
+
+    net_node_t ring_targets[RING_MAX_RINGS];
+    pull.target_count = (uint8_t)ring_set_get_random_nodes(
+        network->rings, ring_targets, RING_MAX_RINGS, &gossip->sender_id);
+    for (uint8_t target_index = 0;
+         target_index < pull.target_count && target_index < RING_MAX_RINGS;
+         target_index++) {
+      memcpy(&pull.targets[target_index], &ring_targets[target_index],
+             sizeof(node_id_t));
+    }
+
+    cbor_item_t* cbor = wire_gossip_pull_encode(&pull);
     conn_state_send(network, peer, cbor);
     cbor_decref(&cbor);
   }
+}
+
+// --- Gossip pull receipt handler (PUSHPULL: pull half, no response) ---
+
+static void network_handle_gossip_pull_received(network_t* network, message_t* msg) {
+  wire_gossip_pull_t* pull = (wire_gossip_pull_t*)msg->payload;
+  if (pull == NULL) return;
+
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_GOSSIP_PULL, MSG_DIRECTION_RECEIVED,
+                       &pull->sender_id, pull->message_id, NULL,
+                       0, &network->hebbian);
+  }
+
+  // Add sender to ring table
+  network_add_node_to_ring(network, &pull->sender_id,
+                            pull->rendezvous_addr, pull->rendezvous_port);
+
+  // Add all targets from the gossip pull packet
+  for (uint8_t index = 0; index < pull->target_count && index < RING_MAX_RINGS; index++) {
+    network_add_node_to_ring(network, &pull->targets[index], 0, 0);
+  }
+
+  // No response — this is the pull half of PUSHPULL
 }
 
 static void network_handle_gossip_expire(network_t* network, message_t* msg) {
