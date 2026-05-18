@@ -93,6 +93,15 @@ struct HebbianEntry {
   float weight;
 };
 
+/* ---- Per-process descriptor (for relay) ---- */
+
+struct Process {
+  pid_t pid = -1;
+  uint16_t control_port = 0;
+  int control_fd = -1;
+  std::string cache_dir;
+};
+
 /* ---- Per-node process descriptor ---- */
 
 struct TopologyNode {
@@ -396,14 +405,14 @@ protected:
       std::string cache = test_dir + "/cache_" + std::to_string(idx);
       std::filesystem::create_directories(cache);
       start_node(node_port, ctrl_port, relay_port, cache);
-      ASSERT_GT(nodes.back().pid, 0);
-      ASSERT_GE(nodes.back().control_fd, 0);
+      EXPECT_GT(nodes.back().pid, 0);
+      EXPECT_GE(nodes.back().control_fd, 0);
     }
 
     /* Wait for all nodes to connect to relay */
     for (size_t idx = 0; idx < (size_t)count; idx++) {
       size_t node_idx = nodes.size() - count + idx;
-      ASSERT_TRUE(wait_for_relay(nodes[node_idx].control_fd))
+      EXPECT_TRUE(wait_for_relay(nodes[node_idx].control_fd))
           << "Node " << idx << " failed to connect to relay";
     }
 
@@ -413,9 +422,9 @@ protected:
       std::string status = send_command(nodes[node_idx].control_fd, CTRL_STATUS);
       nodes[node_idx].node_id = parse_node_id_from_status(status);
       nodes[node_idx].endpoint_id = parse_endpoint_from_status(status);
-      ASSERT_FALSE(nodes[node_idx].node_id.empty())
+      EXPECT_FALSE(nodes[node_idx].node_id.empty())
           << "Node " << idx << " has empty node_id";
-      ASSERT_NE(nodes[node_idx].endpoint_id, 0u)
+      EXPECT_NE(nodes[node_idx].endpoint_id, 0u)
           << "Node " << idx << " has zero endpoint_id";
     }
 
@@ -437,7 +446,7 @@ protected:
     /* Wait for peers to connect */
     for (int idx = 0; idx < count - 1; idx++) {
       size_t node_idx = nodes.size() - count + idx;
-      ASSERT_TRUE(wait_for_peers(nodes[node_idx].control_fd, 1))
+      EXPECT_TRUE(wait_for_peers(nodes[node_idx].control_fd, 1))
           << "Node " << idx << " failed to get peer";
     }
 
@@ -460,14 +469,14 @@ protected:
       std::string cache = test_dir + "/cache_" + std::to_string(idx);
       std::filesystem::create_directories(cache);
       start_node(node_port, ctrl_port, relay_port, cache);
-      ASSERT_GT(nodes.back().pid, 0);
-      ASSERT_GE(nodes.back().control_fd, 0);
+      EXPECT_GT(nodes.back().pid, 0);
+      EXPECT_GE(nodes.back().control_fd, 0);
     }
 
     /* Wait for all nodes to connect to relay */
     for (int idx = 0; idx < count; idx++) {
       size_t node_idx = nodes.size() - count + idx;
-      ASSERT_TRUE(wait_for_relay(nodes[node_idx].control_fd))
+      EXPECT_TRUE(wait_for_relay(nodes[node_idx].control_fd))
           << "Node " << idx << " failed to connect to relay";
     }
 
@@ -477,9 +486,9 @@ protected:
       std::string status = send_command(nodes[node_idx].control_fd, CTRL_STATUS);
       nodes[node_idx].node_id = parse_node_id_from_status(status);
       nodes[node_idx].endpoint_id = parse_endpoint_from_status(status);
-      ASSERT_FALSE(nodes[node_idx].node_id.empty())
+      EXPECT_FALSE(nodes[node_idx].node_id.empty())
           << "Node " << idx << " has empty node_id";
-      ASSERT_NE(nodes[node_idx].endpoint_id, 0u)
+      EXPECT_NE(nodes[node_idx].endpoint_id, 0u)
           << "Node " << idx << " has zero endpoint_id";
     }
 
@@ -501,7 +510,7 @@ protected:
     /* Wait for all peers to connect */
     for (int idx = 0; idx < count; idx++) {
       size_t node_idx = nodes.size() - count + idx;
-      ASSERT_TRUE(wait_for_peers(nodes[node_idx].control_fd, count - 1))
+      EXPECT_TRUE(wait_for_peers(nodes[node_idx].control_fd, count - 1))
           << "Node " << idx << " failed to get all peers";
     }
 

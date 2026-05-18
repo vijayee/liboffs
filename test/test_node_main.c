@@ -621,7 +621,7 @@ static void handle_get_events(int client_fd, size_t cursor) {
   for (size_t idx = 0; idx < count; idx++) {
     message_event_t* ev = &events[idx];
     char peer_hex[NODE_ID_STRING_SIZE];
-    node_id_to_string(&ev->peer_id, peer_hex);
+    strncpy(peer_hex, ev->peer_id.str, NODE_ID_STRING_SIZE);
 
     /* Format first 8 bytes of block_hash as hex prefix for correlation */
     char hash_prefix[17];
@@ -768,7 +768,7 @@ static void handle_hebbian_cmd(int client_fd) {
 
   for (size_t idx = 0; idx < table->count; idx++) {
     char node_hex[NODE_ID_STRING_SIZE];
-    node_id_to_string(&table->entries[idx].peer_id, node_hex);
+    strncpy(node_hex, table->entries[idx].peer_id.str, NODE_ID_STRING_SIZE);
     offset += snprintf(response + offset, sizeof(response) - offset,
                       "%s:%.4f", node_hex, table->entries[idx].weight);
     if (idx + 1 < table->count) {
