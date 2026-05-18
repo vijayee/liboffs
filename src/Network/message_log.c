@@ -79,7 +79,6 @@ size_t message_log_query(const message_log_t* log, size_t after_cursor,
 void message_log_clear(message_log_t* log) {
   if (log == NULL) return;
   log->count = 0;
-  log->cursor = 0;
 }
 
 #endif // OFFS_TEST

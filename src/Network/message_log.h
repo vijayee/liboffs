@@ -23,7 +23,7 @@ typedef enum {
 typedef struct {
   uint8_t type;              // WIRE_FIND_BLOCK, etc.
   uint8_t direction;         // msg_direction_e
-  uint64_t timestamp_ms;     // monotonic timestamp
+  uint64_t timestamp_ms;     // wall-clock timestamp (ms since epoch)
   node_id_t peer_id;         // who we sent to / received from
   uint64_t message_id;       // correlation ID from wire message
   uint8_t block_hash[32];    // zeroed if not applicable
@@ -33,8 +33,7 @@ typedef struct {
 
 typedef struct {
   message_event_t events[MESSAGE_LOG_CAPACITY];
-  size_t count;              // total events written (may exceed capacity)
-  size_t cursor;             // index of oldest event (wraps)
+  size_t count;              // total events written (may exceed capacity, wraps via modulo)
 } message_log_t;
 
 void message_log_init(message_log_t* log);
