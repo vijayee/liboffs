@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
   timer_actor_t* timer = timer_actor_create();
 
   config_t config = config_default();
-  block_cache_t* bc = block_cache_create(config, (char*)cache_dir, standard, timer, pool);
+  block_cache_t* bc = block_cache_create(config, (char*)cache_dir, standard, timer, pool, NULL, 0);
 
   ofd_cache_t* ofd_cache = ofd_cache_create(pool, bc, 300000);
 

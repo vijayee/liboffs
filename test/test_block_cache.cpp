@@ -219,7 +219,7 @@ public:
 };
 
 TEST_F(TestBlockCache, TestBlockCache) {
-  block_cache = block_cache_create(config, location, type, timer_actor, NULL);
+  block_cache = block_cache_create(config, location, type, timer_actor, NULL, NULL, 0);
 
   /* Put all blocks */
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
@@ -279,7 +279,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
 }
 
 TEST_F(TestBlockCache, TestBlockCachePutOnly) {
-  block_cache = block_cache_create(config, location, type, timer_actor, NULL);
+  block_cache = block_cache_create(config, location, type, timer_actor, NULL, NULL, 0);
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
     int result = bc_put_sync(block_cache, blocks[i], NULL);
     EXPECT_EQ(result, CACHE_PUT_NEW);
@@ -288,7 +288,7 @@ TEST_F(TestBlockCache, TestBlockCachePutOnly) {
 }
 
 TEST_F(TestBlockCache, TestBlockCachePutGetOnly) {
-  block_cache = block_cache_create(config, location, type, timer_actor, NULL);
+  block_cache = block_cache_create(config, location, type, timer_actor, NULL, NULL, 0);
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
     int result = bc_put_sync(block_cache, blocks[i], NULL);
     EXPECT_EQ(result, CACHE_PUT_NEW);
@@ -302,7 +302,7 @@ TEST_F(TestBlockCache, TestBlockCachePutGetOnly) {
 }
 
 TEST_F(TestBlockCache, TestBlockCachePutRemoveOnly) {
-  block_cache = block_cache_create(config, location, type, timer_actor, NULL);
+  block_cache = block_cache_create(config, location, type, timer_actor, NULL, NULL, 0);
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
     int result = bc_put_sync(block_cache, blocks[i], NULL);
     EXPECT_EQ(result, CACHE_PUT_NEW);
@@ -353,7 +353,7 @@ public:
 };
 
 TEST_F(TestBlockCacheIntegration, TestLRUEjectionAndReload) {
-  block_cache = block_cache_create(config, location, type, timer_actor, pool);
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
 
   /* Put more blocks than LRU can hold */
   for (size_t i = 0; i < LRU_COUNT; i++) {
@@ -381,7 +381,7 @@ TEST_F(TestBlockCacheIntegration, TestLRUEjectionAndReload) {
 }
 
 TEST_F(TestBlockCacheIntegration, TestGetNonExistent) {
-  block_cache = block_cache_create(config, location, type, timer_actor, pool);
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
 
   block_t* result = bc_get_sync(block_cache, blocks[0]->hash, pool);
   EXPECT_EQ(result, nullptr);
@@ -392,7 +392,7 @@ TEST_F(TestBlockCacheIntegration, TestGetNonExistent) {
 }
 
 TEST_F(TestBlockCacheIntegration, TestPutDuplicate) {
-  block_cache = block_cache_create(config, location, type, timer_actor, pool);
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
 
   /* Put same block twice — should not create duplicate index entry */
   int result = bc_put_sync(block_cache, blocks[0], pool);
@@ -405,7 +405,7 @@ TEST_F(TestBlockCacheIntegration, TestPutDuplicate) {
 }
 
 TEST_F(TestBlockCacheIntegration, TestRemoveIdempotent) {
-  block_cache = block_cache_create(config, location, type, timer_actor, pool);
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
 
   int result = bc_put_sync(block_cache, blocks[0], pool);
   EXPECT_EQ(result, CACHE_PUT_NEW);
@@ -423,7 +423,7 @@ TEST_F(TestBlockCacheIntegration, TestRemoveIdempotent) {
 }
 
 TEST_F(TestBlockCacheIntegration, TestMiniBlocks) {
-  block_cache = block_cache_create(config, location, mini, timer_actor, pool);
+  block_cache = block_cache_create(config, location, mini, timer_actor, pool, NULL, 0);
 
   for (size_t i = 0; i < 10; i++) {
     block_t* mini_block = block_create_random_block_by_type(mini);

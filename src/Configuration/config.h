@@ -20,6 +20,7 @@ typedef struct {
   size_t descriptor_pad;
   size_t max_snapshots;
   size_t max_wals;
+  size_t max_capacity_bytes;
 } config_t;
 config_t config_default();
 #endif //OFFS_CONFIG_H

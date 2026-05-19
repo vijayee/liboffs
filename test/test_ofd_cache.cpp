@@ -54,7 +54,7 @@ protected:
         pool = scheduler_pool_create(4);
         scheduler_pool_start(pool);
         timer = timer_actor_create();
-        bc = block_cache_create(config, (char*)"/tmp/test_ofd_cache_basic", standard, timer, pool);
+        bc = block_cache_create(config, (char*)"/tmp/test_ofd_cache_basic", standard, timer, pool, NULL, 0);
         cache = ofd_cache_create(pool, bc, 300000);
     }
 

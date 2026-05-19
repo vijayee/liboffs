@@ -4,6 +4,7 @@
 
 #include "block_cache.h"
 #include "sections.h"
+#include "../Network/authority.h"
 #include "../Util/allocator.h"
 #include "../Util/hash.h"
 #include "../Util/path_join.h"
@@ -331,6 +332,8 @@ void block_cache_dispatch(void* state, message_t* msg) {
           refcounter_yield((refcounter_t*) entry);
           index_add(block_cache->index, entry);
           result_fib = entry->counter.fib;
+          block_cache->current_bytes += (size_t)block_cache->type;
+          block_cache_update_capacity(block_cache);
           p->result = CACHE_PUT_NEW;
         }
       } else {
@@ -447,6 +450,8 @@ void block_cache_dispatch(void* state, message_t* msg) {
         size_t section_id = entry->section_id;
         size_t section_index = entry->section_index;
         index_remove(block_cache->index, p->hash);
+        block_cache->current_bytes -= (size_t)block_cache->type;
+        block_cache_update_capacity(block_cache);
         block_lru_cache_delete(block_cache->lru, p->hash);
         section_deallocate_payload_t dealloc_payload;
         dealloc_payload.index = section_index;
@@ -518,11 +523,14 @@ void block_cache_dispatch(void* state, message_t* msg) {
 
 /* ---- block_cache implementation ---- */
 
-block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool) {
+block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool, authority_t* authority, size_t max_capacity_bytes) {
   block_cache_t* block_cache = get_clear_memory(sizeof(block_cache_t));
   refcounter_init_actor((refcounter_t*) block_cache);
   block_cache->type = type;
   block_cache->pool = pool;
+  block_cache->authority = authority;
+  block_cache->max_capacity_bytes = max_capacity_bytes;
+  block_cache->current_bytes = 0;
   char* folder;
   switch (type) {
     case standard:
@@ -544,6 +552,10 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
   block_cache->index = index_create(config.index_bucket_size, folder, timer_actor, config.index_wait, config.index_max_wait, config.max_snapshots, config.max_wals, &error_code);
   if (block_cache->index == NULL) {
     log_error("block_cache_create: index_create returned NULL (error_code=%d)", error_code);
+  }
+  if (max_capacity_bytes > 0) {
+    block_cache->current_bytes = index_count(block_cache->index) * (size_t)type;
+    block_cache_update_capacity(block_cache);
   }
   actor_init(&block_cache->actor, block_cache, block_cache_dispatch, pool);
   free(folder);
@@ -568,6 +580,24 @@ void block_cache_destroy(block_cache_t* block_cache) {
 
 size_t block_cache_count(block_cache_t* block_cache) {
   return index_count(block_cache->index);
+}
+
+void block_cache_update_capacity(block_cache_t* block_cache) {
+  if (block_cache == NULL) return;
+  if (block_cache->max_capacity_bytes == 0) return;
+  if (block_cache->authority == NULL) return;
+  float capacity = (float)block_cache->current_bytes / (float)block_cache->max_capacity_bytes;
+  if (capacity > 1.0f) capacity = 1.0f;
+  authority_update_capacity(block_cache->authority, capacity);
+}
+
+void block_cache_set_max_capacity(block_cache_t* block_cache, size_t max_capacity_bytes) {
+  if (block_cache == NULL) return;
+  block_cache->max_capacity_bytes = max_capacity_bytes;
+  if (max_capacity_bytes > 0) {
+    block_cache->current_bytes = index_count(block_cache->index) * (size_t)block_cache->type;
+    block_cache_update_capacity(block_cache);
+  }
 }
 
 /* ---- Async API ---- */

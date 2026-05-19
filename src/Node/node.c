@@ -41,7 +41,9 @@ int offs_node_start(offs_node_t* node) {
     "sections",
     standard,
     node->timer,
-    node->scheduler
+    node->scheduler,
+    node->authority,
+    node->config->max_capacity_bytes
   );
   if (node->block_cache == NULL) return -1;
 

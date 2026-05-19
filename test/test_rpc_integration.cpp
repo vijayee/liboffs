@@ -787,6 +787,14 @@ protected:
     return desc_hash_hex;
   }
 
+  /* Parse capacity from STATUS response.
+     Format: STATUS node_id=<id> peers=<n> blocks=<n> relay=<status> nat=<type> endpoint=<n> capacity=<float> */
+  float parse_capacity_from_status(const std::string& response) {
+    size_t pos = response.find("capacity=");
+    if (pos == std::string::npos) return -1.0f;
+    return strtof(response.c_str() + pos + 9, nullptr);
+  }
+
 private:
   int connect_control_socket(uint16_t port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -1741,6 +1749,58 @@ TEST_F(RpcIntegrationTest, RateLimitedBackoff) {
     EXPECT_TRUE(has_event(events_a, MSG_DIRECTION_RECEIVED_VAL, WIRE_RATE_LIMITED_VAL))
         << "Node A should have received RATE_LIMITED when rate limit is exceeded";
   }
+#endif
+}
+
+TEST_F(RpcIntegrationTest, BlockCapacityTracking) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  auto mesh = make_full_mesh(2);
+  ASSERT_EQ(mesh.size(), 2u);
+
+  // Set max capacity to 10 * standard block size = 1,280,000 bytes
+  // This enables block cache capacity tracking
+  std::string max_cap_resp = send_command(mesh[0].control_fd,
+      std::string(CTRL_SET_MAX_CAPACITY_BYTES) + " 1280000");
+  ASSERT_NE(max_cap_resp.find(CTRL_RESP_OK), std::string::npos)
+      << "SET_MAX_CAPACITY_BYTES on node A: " << max_cap_resp;
+
+  // Verify initial capacity is 0.0 (no blocks stored yet)
+  std::string status_before = send_command(mesh[0].control_fd, CTRL_STATUS);
+  float capacity_before = parse_capacity_from_status(status_before);
+  EXPECT_NEAR(capacity_before, 0.0f, 0.01f)
+      << "Capacity should be 0 before storing blocks: " << status_before;
+
+  // Store a file on Node A — this creates multiple standard blocks
+  std::string store_resp = send_command(mesh[0].control_fd,
+      std::string(CTRL_STORE_FILE) + " 128000 2 3");
+  ASSERT_NE(store_resp.find(CTRL_RESP_HASH), std::string::npos)
+      << "STORE_FILE on node A: " << store_resp;
+
+  // After storing, capacity should be > 0 (each block is 128000 bytes)
+  std::string status_after = send_command(mesh[0].control_fd, CTRL_STATUS);
+  float capacity_after = parse_capacity_from_status(status_after);
+  EXPECT_GT(capacity_after, 0.0f)
+      << "Capacity should be > 0 after storing blocks: " << status_after;
+
+  // Verify capacity is proportional to block count
+  // capacity = (block_count * 128000) / 1280000
+  size_t blocks_pos = status_after.find("blocks=");
+  ASSERT_NE(blocks_pos, std::string::npos) << "STATUS missing blocks=";
+  size_t blocks_end = status_after.find(' ', blocks_pos);
+  std::string blocks_str = status_after.substr(blocks_pos + 7, blocks_end - blocks_pos - 7);
+  size_t block_count = std::stoul(blocks_str);
+  float expected_capacity = (float)(block_count * 128000) / 1280000.0f;
+  if (expected_capacity > 1.0f) expected_capacity = 1.0f;
+  EXPECT_NEAR(capacity_after, expected_capacity, 0.05f)
+      << "Capacity should match (blocks * 128000 / 1280000): " << status_after;
+
+  // Node B should still have capacity 0.0 (no max_capacity_bytes set, tracking disabled)
+  std::string status_b = send_command(mesh[1].control_fd, CTRL_STATUS);
+  float capacity_b = parse_capacity_from_status(status_b);
+  EXPECT_NEAR(capacity_b, 0.0f, 0.01f)
+      << "Node B capacity should stay 0 (tracking disabled): " << status_b;
 #endif
 }
 

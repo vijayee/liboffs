@@ -201,9 +201,14 @@ static void handle_status(int client_fd) {
     nat = nat_type_string(g_node.network->local_nat_type);
   }
   const char* node_id_str = g_node.authority ? g_node.authority->local_id.str : "null";
-  snprintf(response, sizeof(response), "%s node_id=%s peers=%zu blocks=%zu relay=%s nat=%s endpoint=%u",
+  float capacity = 0.0f;
+  if (g_node.network && g_node.network->authority) {
+    capacity = atomic_load(&g_node.network->authority->capacity);
+  }
+  snprintf(response, sizeof(response), "%s node_id=%s peers=%zu blocks=%zu relay=%s nat=%s endpoint=%u capacity=%.4f",
            CTRL_RESP_STATUS, node_id_str, peers, blocks, relay_status, nat,
-           g_node.network->relay ? g_node.network->relay->local_endpoint_id : 0);
+           g_node.network->relay ? g_node.network->relay->local_endpoint_id : 0,
+           capacity);
   send_response(client_fd, response);
 }
 
@@ -1251,6 +1256,17 @@ static void handle_set_capacity_cmd(int client_fd, const char* args) {
   send_response(client_fd, CTRL_RESP_OK);
 }
 
+static void handle_set_max_capacity_bytes_cmd(int client_fd, const char* args) {
+  if (g_node.block_cache == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " no block cache");
+    return;
+  }
+
+  size_t max_bytes = (size_t)strtoull(args, NULL, 10);
+  block_cache_set_max_capacity(g_node.block_cache, max_bytes);
+  send_response(client_fd, CTRL_RESP_OK);
+}
+
 #endif // OFFS_TEST
 
 /* ---- Command dispatcher ---- */
@@ -1585,6 +1601,13 @@ static void handle_command(int client_fd, char* line) {
 #else
     send_response(client_fd, CTRL_RESP_ERROR " not available");
 #endif
+  } else if (strncmp(line, CTRL_SET_MAX_CAPACITY_BYTES " ",
+                strlen(CTRL_SET_MAX_CAPACITY_BYTES) + 1) == 0) {
+#ifdef OFFS_TEST
+    handle_set_max_capacity_bytes_cmd(client_fd, line + strlen(CTRL_SET_MAX_CAPACITY_BYTES) + 1);
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
   } else {
     send_response(client_fd, CTRL_RESP_ERROR " unknown command");
   }
@@ -1768,7 +1791,7 @@ int node_main(int argc, char* argv[]) {
     return 1;
   }
 
-  g_node.block_cache = block_cache_create(g_node.config, g_node.cache_dir, standard, g_node.timer, g_node.pool);
+  g_node.block_cache = block_cache_create(g_node.config, g_node.cache_dir, standard, g_node.timer, g_node.pool, g_node.authority, g_node.config.max_capacity_bytes);
   if (!g_node.block_cache) {
     fprintf(stderr, "node: block_cache_create failed\n");
     timer_actor_destroy(g_node.timer);

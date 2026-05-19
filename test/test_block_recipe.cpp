@@ -70,7 +70,7 @@ TEST(NewBlocksRecipe, PullCreatesBlock) {
   timer_actor_t* timer = timer_actor_create();
   block_cache_t* bc = block_cache_create(
       (config_t){.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0, .section_size = 128000, .section_wait = 0, .section_max_wait = 0, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
-      path, standard, timer, pool);
+      path, standard, timer, pool, NULL, 0);
 
   new_blocks_recipe_t* recipe = new_blocks_recipe_create(pool, bc, standard);
 
@@ -121,7 +121,7 @@ TEST(NewBlocksRecipe, PullMultipleBlocks) {
   timer_actor_t* timer = timer_actor_create();
   block_cache_t* bc = block_cache_create(
       (config_t){.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0, .section_size = 128000, .section_wait = 0, .section_max_wait = 0, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
-      path, standard, timer, pool);
+      path, standard, timer, pool, NULL, 0);
 
   new_blocks_recipe_t* recipe = new_blocks_recipe_create(pool, bc, standard);
 
@@ -189,7 +189,7 @@ TEST(RecyclerRecipe, PullFromDescriptor) {
   timer_actor_t* timer = timer_actor_create();
   block_cache_t* bc = block_cache_create(
       (config_t){.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0, .section_size = 128000, .section_wait = 0, .section_max_wait = 0, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
-      path, standard, timer, pool);
+      path, standard, timer, pool, NULL, 0);
 
   // Create random blocks and put them in the cache
   size_t tuple_size = 3;
@@ -332,7 +332,7 @@ TEST(BlockRecipeIntegration, WriteableOffStreamWithNewBlocksRecipe) {
   timer_actor_t* timer = timer_actor_create();
   block_cache_t* bc = block_cache_create(
       (config_t){.index_bucket_size = 10, .index_wait = 1000, .index_max_wait = 5000, .section_size = 128000, .section_wait = 1000, .section_max_wait = 5000, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
-      wstream_path, standard, timer, pool);
+      wstream_path, standard, timer, pool, NULL, 0);
   tuple_cache_t* tc = tuple_cache_create(100, pool);
 
   new_blocks_recipe_t* recipe = new_blocks_recipe_create(pool, bc, standard);

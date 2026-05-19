@@ -77,7 +77,7 @@ TEST(OffStreamIntegration, WriteableOffStreamEncodesData) {
   timer_actor_t* timer = timer_actor_create();
   block_cache_t* bc = block_cache_create(
       (config_t){.index_bucket_size = 10, .index_wait = 1000, .index_max_wait = 5000, .section_size = 128000, .section_wait = 1000, .section_max_wait = 5000, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
-      wstream_path, standard, timer, pool);
+      wstream_path, standard, timer, pool, NULL, 0);
   tuple_cache_t* tc = tuple_cache_create(100, pool);
 
   new_blocks_recipe_t* recipe = new_blocks_recipe_create(pool, bc, standard);
@@ -137,7 +137,7 @@ TEST(OffStreamIntegration, ReadableOffStreamDecodesBlock) {
   timer_actor_t* timer = timer_actor_create();
   block_cache_t* bc = block_cache_create(
       (config_t){.index_bucket_size = 10, .index_wait = 1000, .index_max_wait = 5000, .section_size = 128000, .section_wait = 1000, .section_max_wait = 5000, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
-      rstream_path, standard, timer, pool);
+      rstream_path, standard, timer, pool, NULL, 0);
   tuple_cache_t* tc = tuple_cache_create(100, pool);
 
   uint8_t origin_data[128000];

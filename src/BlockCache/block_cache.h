@@ -81,6 +81,8 @@ typedef struct pending_get_t {
   struct pending_get_t* next;
 } pending_get_t;
 
+typedef struct authority_t authority_t;
+
 typedef struct block_cache_t {
   refcounter_t refcounter;
   block_lru_cache_t* lru;
@@ -90,6 +92,9 @@ typedef struct block_cache_t {
   struct scheduler_pool_t* pool;
   actor_t actor;
   pending_get_t* pending_gets;
+  size_t current_bytes;
+  size_t max_capacity_bytes;
+  authority_t* authority;
 } block_cache_t;
 
 /* Result payload for CACHE_GET_RESULT */
@@ -113,9 +118,11 @@ typedef struct {
   actor_t* reply_to;
 } cache_remove_result_payload_t;
 
-block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool);
+block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool, authority_t* authority, size_t max_capacity_bytes);
 void block_cache_destroy(block_cache_t* block_cache);
 size_t block_cache_count(block_cache_t* block_cache);
+void block_cache_update_capacity(block_cache_t* block_cache);
+void block_cache_set_max_capacity(block_cache_t* block_cache, size_t max_capacity_bytes);
 void block_cache_dispatch(void* state, message_t* msg);
 
 /* Async API — send message and inject actor into scheduler */

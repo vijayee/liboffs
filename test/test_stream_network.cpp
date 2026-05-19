@@ -120,7 +120,7 @@ protected:
                    .index_max_wait = 5000, .section_size = 128000,
                    .section_wait = 1000, .section_max_wait = 5000,
                    .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
-        path, standard, timer, pool);
+        path, standard, timer, pool, NULL, 0);
     tc = tuple_cache_create(100, pool);
 
     // Create a minimal network_t for testing (only the actor field matters for dispatch)
@@ -371,7 +371,7 @@ protected:
                    .index_max_wait = 5000, .section_size = 128000,
                    .section_wait = 1000, .section_max_wait = 5000,
                    .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
-        path, standard, timer, pool);
+        path, standard, timer, pool, NULL, 0);
     tc = tuple_cache_create(100, pool);
 
     // Create a minimal network_t for testing

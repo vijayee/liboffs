@@ -13,7 +13,7 @@ TEST(ReadableDescriptor, TestCreateDestroy) {
 
   block_cache_t* bc = block_cache_create(
       (config_t){.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0, .section_size = 128000, .section_wait = 0, .section_max_wait = 0, .cache_size = 10, .max_tuple_size = 30, .lru_size = 10},
-      "/tmp/test_desc_bc", standard, NULL, NULL);
+      "/tmp/test_desc_bc", standard, NULL, NULL, NULL, 0);
 
   ori_t* ori = ori_create(256000);
   ori->block_type = standard;
@@ -48,7 +48,7 @@ TEST(ReadableDescriptor, TestOffsetCalculation) {
 
   block_cache_t* bc = block_cache_create(
       (config_t){.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0, .section_size = 128000, .section_wait = 0, .section_max_wait = 0, .cache_size = 10, .max_tuple_size = 30, .lru_size = 10},
-      "/tmp/test_desc_offset_bc", standard, NULL, NULL);
+      "/tmp/test_desc_offset_bc", standard, NULL, NULL, NULL, 0);
 
   ori_t* ori = ori_create(256000);
   ori->block_type = standard;

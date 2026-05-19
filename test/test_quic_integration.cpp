@@ -613,7 +613,7 @@ TEST(QuicIntegration, NetworkCreateDestroy) {
   timer_actor_t* timer = timer_actor_create();
   ASSERT_NE(timer, nullptr);
 
-  block_cache_t* cache = block_cache_create(config, (char*)"/tmp/test_quic_bc", standard, timer, pool);
+  block_cache_t* cache = block_cache_create(config, (char*)"/tmp/test_quic_bc", standard, timer, pool, NULL, 0);
   ASSERT_NE(cache, nullptr);
 
   network_t* network = network_create(authority, cache, timer, pool);
@@ -657,7 +657,7 @@ TEST(QuicIntegration, QuicListenerStartStop) {
   timer_actor_t* timer = timer_actor_create();
   ASSERT_NE(timer, nullptr);
 
-  block_cache_t* cache = block_cache_create(config, (char*)"/tmp/test_quic_bc2", standard, timer, pool);
+  block_cache_t* cache = block_cache_create(config, (char*)"/tmp/test_quic_bc2", standard, timer, pool, NULL, 0);
   ASSERT_NE(cache, nullptr);
 
   network_t* network = network_create(authority, cache, timer, pool);

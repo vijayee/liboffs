@@ -117,7 +117,7 @@ protected:
             .max_tuple_size = 30,
             .lru_size = 50
         };
-        bc = block_cache_create(config, cache_dir, standard, timer, pool);
+        bc = block_cache_create(config, cache_dir, standard, timer, pool, NULL, 0);
         ofd_cache = ofd_cache_create(pool, bc, 300000);
         server = http_server_create(pool, "127.0.0.1", port);
     }

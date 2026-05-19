@@ -19,5 +19,6 @@ config_t config_default() {
   config.descriptor_pad = 32;
   config.max_snapshots = 3;
   config.max_wals = 3;
+  config.max_capacity_bytes = 0;
   return config;
 }
