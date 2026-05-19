@@ -12,6 +12,7 @@
 #include "../src/Network/find_block.h"
 #include "../src/Util/log.h"
 #include "../src/BlockCache/block_cache.h"
+#include "../src/BlockCache/index.h"
 #include "../src/BlockCache/block.h"
 #include "../src/OFFStreams/writeable_off_stream.h"
 #include "../src/OFFStreams/readable_off_stream.h"
@@ -878,6 +879,362 @@ static void handle_measure_nodes_cmd(int client_fd, const char* args) {
            CTRL_RESP_OK);
   send_response(client_fd, response);
 }
+static void handle_ping_capacity_cmd(int client_fd, const char* node_id_hex) {
+  if (g_node.network == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " no network");
+    return;
+  }
+
+  node_id_t peer_id;
+  memset(&peer_id, 0, sizeof(peer_id));
+  if (node_id_from_string((char*)node_id_hex, &peer_id) != 0) {
+    send_response(client_fd, CTRL_RESP_ERROR " invalid node_id");
+    return;
+  }
+
+  peer_connection_t* peer = connection_manager_lookup(&g_node.network->conn_mgr, &peer_id);
+  if (peer == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " peer not found");
+    return;
+  }
+
+  wire_ping_capacity_t ping;
+  memset(&ping, 0, sizeof(ping));
+  ping.message_id = (uint64_t)(time(NULL)) ^ ((uint64_t)rand() << 32);
+  memcpy(&ping.source, &g_node.network->authority->local_id, sizeof(node_id_t));
+  ping.capacity = atomic_load(&g_node.network->authority->capacity);
+  ping.phase = atomic_load(&g_node.network->authority->phase);
+
+  cbor_item_t* cbor = wire_ping_capacity_encode(&ping);
+  if (cbor == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " encode failed");
+    return;
+  }
+
+  int result = conn_state_send(g_node.network, peer, cbor);
+  cbor_decref(&cbor);
+
+  if (result == 0) {
+    char response[128];
+    snprintf(response, sizeof(response), "%s %llu",
+             CTRL_RESP_OK, (unsigned long long)ping.message_id);
+    send_response(client_fd, response);
+  } else {
+    send_response(client_fd, CTRL_RESP_ERROR " send failed");
+  }
+}
+
+static void handle_ping_block_cmd(int client_fd, const char* args) {
+  if (g_node.network == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " no network");
+    return;
+  }
+
+  /* Parse: <node_id_hex> <block_hash_hex> */
+  char node_id_str[NODE_ID_STRING_SIZE];
+  char hash_hex[65];
+  if (sscanf(args, "%47s %64s", node_id_str, hash_hex) != 2) {
+    send_response(client_fd, CTRL_RESP_ERROR " invalid PING_BLOCK args");
+    return;
+  }
+
+  node_id_t peer_id;
+  memset(&peer_id, 0, sizeof(peer_id));
+  if (node_id_from_string(node_id_str, &peer_id) != 0) {
+    send_response(client_fd, CTRL_RESP_ERROR " invalid node_id");
+    return;
+  }
+
+  uint8_t block_hash[32];
+  if (strlen(hash_hex) != 64) {
+    send_response(client_fd, CTRL_RESP_ERROR " invalid hash length");
+    return;
+  }
+  for (int idx = 0; idx < 32; idx++) {
+    unsigned int byte;
+    if (sscanf(hash_hex + idx * 2, "%02x", &byte) != 1) {
+      send_response(client_fd, CTRL_RESP_ERROR " invalid hash hex");
+      return;
+    }
+    block_hash[idx] = (uint8_t)byte;
+  }
+
+  peer_connection_t* peer = connection_manager_lookup(&g_node.network->conn_mgr, &peer_id);
+  if (peer == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " peer not found");
+    return;
+  }
+
+  wire_ping_block_t ping;
+  memset(&ping, 0, sizeof(ping));
+  ping.message_id = (uint64_t)(time(NULL)) ^ ((uint64_t)rand() << 32);
+  memcpy(&ping.sender_id, &g_node.network->authority->local_id, sizeof(node_id_t));
+  memcpy(ping.block_hash, block_hash, 32);
+
+  cbor_item_t* cbor = wire_ping_block_encode(&ping);
+  if (cbor == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " encode failed");
+    return;
+  }
+
+  int result = conn_state_send(g_node.network, peer, cbor);
+  cbor_decref(&cbor);
+
+  if (result == 0) {
+    char response[128];
+    snprintf(response, sizeof(response), "%s %llu",
+             CTRL_RESP_OK, (unsigned long long)ping.message_id);
+    send_response(client_fd, response);
+  } else {
+    send_response(client_fd, CTRL_RESP_ERROR " send failed");
+  }
+}
+
+static void handle_find_node_cmd(int client_fd, const char* target_id_str) {
+  if (g_node.network == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " no network");
+    return;
+  }
+
+  node_id_t target_id;
+  memset(&target_id, 0, sizeof(target_id));
+  if (node_id_from_string((char*)target_id_str, &target_id) != 0) {
+    send_response(client_fd, CTRL_RESP_ERROR " invalid node_id");
+    return;
+  }
+
+  network_local_find_node_payload_t* payload =
+      get_clear_memory(sizeof(network_local_find_node_payload_t));
+  if (payload == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " allocation failed");
+    return;
+  }
+  memcpy(&payload->target_id, &target_id, sizeof(node_id_t));
+  payload->reply_to = &g_node.network->actor;
+
+  message_t msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.type = NETWORK_LOCAL_FIND_NODE;
+  msg.payload = payload;
+  msg.payload_destroy = network_local_find_node_payload_destroy;
+
+  actor_send(&g_node.network->actor, &msg);
+
+  send_response(client_fd, CTRL_RESP_OK);
+}
+
+static void handle_seeking_blocks_cmd(int client_fd, const char* args) {
+  if (g_node.network == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " no network");
+    return;
+  }
+
+  /* Parse: <capacity> [<exclude_hash1> <exclude_hash2> ...] */
+  float capacity = 1.0f;
+  uint8_t** exclude_hashes = NULL;
+  size_t exclude_count = 0;
+
+  char args_copy[2048];
+  strncpy(args_copy, args, sizeof(args_copy) - 1);
+  args_copy[sizeof(args_copy) - 1] = '\0';
+
+  char* saveptr = NULL;
+  char* token = strtok_r(args_copy, " ", &saveptr);
+
+  /* First token is capacity */
+  if (token != NULL) {
+    capacity = strtof(token, NULL);
+    token = strtok_r(NULL, " ", &saveptr);
+  }
+
+  /* Remaining tokens are exclude hashes (64-char hex) */
+  size_t hash_capacity = 8;
+  exclude_hashes = get_clear_memory(hash_capacity * sizeof(uint8_t*));
+  if (exclude_hashes == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " allocation failed");
+    return;
+  }
+
+  while (token != NULL) {
+    if (strlen(token) != 64) {
+      token = strtok_r(NULL, " ", &saveptr);
+      continue;
+    }
+    uint8_t* hash = get_clear_memory(32);
+    if (hash == NULL) break;
+    int valid = 1;
+    for (int idx = 0; idx < 32 && valid; idx++) {
+      unsigned int byte;
+      if (sscanf(token + idx * 2, "%02x", &byte) != 1) {
+        valid = 0;
+      } else {
+        hash[idx] = (uint8_t)byte;
+      }
+    }
+    if (!valid) {
+      free(hash);
+      token = strtok_r(NULL, " ", &saveptr);
+      continue;
+    }
+    if (exclude_count >= hash_capacity) {
+      hash_capacity *= 2;
+      uint8_t** new_hashes = realloc(exclude_hashes, hash_capacity * sizeof(uint8_t*));
+      if (new_hashes == NULL) break;
+      exclude_hashes = new_hashes;
+    }
+    exclude_hashes[exclude_count++] = hash;
+    token = strtok_r(NULL, " ", &saveptr);
+  }
+
+  /* Send to all connected peers */
+  wire_seeking_blocks_t seeking;
+  memset(&seeking, 0, sizeof(seeking));
+  seeking.message_id = (uint64_t)(time(NULL)) ^ ((uint64_t)rand() << 32);
+  memcpy(&seeking.sender_id, &g_node.network->authority->local_id, sizeof(node_id_t));
+  seeking.capacity = capacity;
+  seeking.exclude_hashes = exclude_hashes;
+  seeking.exclude_count = exclude_count;
+
+  int sent_count = 0;
+  for (size_t peer_idx = 0; peer_idx < g_node.network->conn_mgr.peer_count; peer_idx++) {
+    peer_connection_t* peer = g_node.network->conn_mgr.peers[peer_idx];
+    if (peer != NULL && peer->connected) {
+      cbor_item_t* cbor = wire_seeking_blocks_encode(&seeking);
+      if (cbor != NULL) {
+        conn_state_send(g_node.network, peer, cbor);
+        cbor_decref(&cbor);
+        sent_count++;
+      }
+    }
+  }
+
+  /* Free exclude hashes */
+  for (size_t idx = 0; idx < exclude_count; idx++) {
+    free(exclude_hashes[idx]);
+  }
+  free(exclude_hashes);
+
+  if (sent_count > 0) {
+    char response[128];
+    snprintf(response, sizeof(response), "%s seeking_blocks_sent_to_%d_peers",
+             CTRL_RESP_OK, sent_count);
+    send_response(client_fd, response);
+  } else {
+    send_response(client_fd, CTRL_RESP_ERROR " no connected peers");
+  }
+}
+
+static void handle_recall_block_cmd(int client_fd, const char* hash_hex) {
+  if (g_node.network == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " no network");
+    return;
+  }
+
+  uint8_t block_hash[32];
+  if (strlen(hash_hex) != 64) {
+    send_response(client_fd, CTRL_RESP_ERROR " invalid hash length");
+    return;
+  }
+  for (int idx = 0; idx < 32; idx++) {
+    unsigned int byte;
+    if (sscanf(hash_hex + idx * 2, "%02x", &byte) != 1) {
+      send_response(client_fd, CTRL_RESP_ERROR " invalid hash hex");
+      return;
+    }
+    block_hash[idx] = (uint8_t)byte;
+  }
+
+  wire_recall_block_t recall;
+  memset(&recall, 0, sizeof(recall));
+  recall.message_id = (uint64_t)(time(NULL)) ^ ((uint64_t)rand() << 32);
+  memcpy(&recall.sender_id, &g_node.network->authority->local_id, sizeof(node_id_t));
+  memcpy(recall.block_hash, block_hash, 32);
+
+  int sent_count = 0;
+  for (size_t peer_idx = 0; peer_idx < g_node.network->conn_mgr.peer_count; peer_idx++) {
+    peer_connection_t* peer = g_node.network->conn_mgr.peers[peer_idx];
+    if (peer != NULL && peer->connected) {
+      cbor_item_t* cbor = wire_recall_block_encode(&recall);
+      if (cbor != NULL) {
+        conn_state_send(g_node.network, peer, cbor);
+        cbor_decref(&cbor);
+        sent_count++;
+      }
+    }
+  }
+
+  if (sent_count > 0) {
+    char response[128];
+    snprintf(response, sizeof(response), "%s recall_sent_to_%d_peers",
+             CTRL_RESP_OK, sent_count);
+    send_response(client_fd, response);
+  } else {
+    send_response(client_fd, CTRL_RESP_ERROR " no connected peers");
+  }
+}
+
+static void handle_store_block_cmd(int client_fd, const char* args) {
+  if (g_node.network == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " no network");
+    return;
+  }
+
+  char hash_hex[65];
+  int carry_data_int = 0;
+  if (sscanf(args, "%64s %d", hash_hex, &carry_data_int) != 2) {
+    send_response(client_fd, CTRL_RESP_ERROR " invalid STORE_BLOCK args");
+    return;
+  }
+
+  uint8_t block_hash[32];
+  if (strlen(hash_hex) != 64) {
+    send_response(client_fd, CTRL_RESP_ERROR " invalid hash length");
+    return;
+  }
+  for (int idx = 0; idx < 32; idx++) {
+    unsigned int byte;
+    if (sscanf(hash_hex + idx * 2, "%02x", &byte) != 1) {
+      send_response(client_fd, CTRL_RESP_ERROR " invalid hash hex");
+      return;
+    }
+    block_hash[idx] = (uint8_t)byte;
+  }
+
+  buffer_t* hash_buf = buffer_create_from_pointer_copy(block_hash, 32);
+  if (hash_buf == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " allocation failed");
+    return;
+  }
+
+  network_local_store_block_payload_t* payload =
+      get_clear_memory(sizeof(network_local_store_block_payload_t));
+  if (payload == NULL) {
+    buffer_destroy(hash_buf);
+    send_response(client_fd, CTRL_RESP_ERROR " allocation failed");
+    return;
+  }
+
+  payload->hash = hash_buf;
+  payload->reply_to = NULL;  /* fire-and-forget */
+
+  /* Look up FIB counter from block cache index */
+  index_entry_t* entry = index_peek(g_node.block_cache->index, hash_buf);
+  payload->fib = (entry != NULL) ? entry->counter.fib : 0;
+
+  message_t msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.type = NETWORK_LOCAL_STORE_BLOCK;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+
+  actor_send(&g_node.network->actor, &msg);
+
+  char response[128];
+  snprintf(response, sizeof(response), "%s store_block_injected",
+           CTRL_RESP_OK);
+  send_response(client_fd, response);
+}
+
 #endif // OFFS_TEST
 
 /* ---- Command dispatcher ---- */
@@ -1160,6 +1517,48 @@ static void handle_command(int client_fd, char* line) {
                 strlen(CTRL_MEASURE_NODES) + 1) == 0) {
 #ifdef OFFS_TEST
     handle_measure_nodes_cmd(client_fd, line + strlen(CTRL_MEASURE_NODES) + 1);
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
+  } else if (strncmp(line, CTRL_PING_CAPACITY " ",
+                strlen(CTRL_PING_CAPACITY) + 1) == 0) {
+#ifdef OFFS_TEST
+    handle_ping_capacity_cmd(client_fd, line + strlen(CTRL_PING_CAPACITY) + 1);
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
+  } else if (strncmp(line, CTRL_PING_BLOCK " ",
+                strlen(CTRL_PING_BLOCK) + 1) == 0) {
+#ifdef OFFS_TEST
+    handle_ping_block_cmd(client_fd, line + strlen(CTRL_PING_BLOCK) + 1);
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
+  } else if (strncmp(line, CTRL_FIND_NODE " ",
+                strlen(CTRL_FIND_NODE) + 1) == 0) {
+#ifdef OFFS_TEST
+    handle_find_node_cmd(client_fd, line + strlen(CTRL_FIND_NODE) + 1);
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
+  } else if (strncmp(line, CTRL_SEEKING_BLOCKS " ",
+                strlen(CTRL_SEEKING_BLOCKS) + 1) == 0) {
+#ifdef OFFS_TEST
+    handle_seeking_blocks_cmd(client_fd, line + strlen(CTRL_SEEKING_BLOCKS) + 1);
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
+  } else if (strncmp(line, CTRL_RECALL_BLOCK " ",
+                strlen(CTRL_RECALL_BLOCK) + 1) == 0) {
+#ifdef OFFS_TEST
+    handle_recall_block_cmd(client_fd, line + strlen(CTRL_RECALL_BLOCK) + 1);
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
+  } else if (strncmp(line, CTRL_STORE_BLOCK " ",
+                strlen(CTRL_STORE_BLOCK) + 1) == 0) {
+#ifdef OFFS_TEST
+    handle_store_block_cmd(client_fd, line + strlen(CTRL_STORE_BLOCK) + 1);
 #else
     send_response(client_fd, CTRL_RESP_ERROR " not available");
 #endif
