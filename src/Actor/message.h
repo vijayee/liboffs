@@ -163,6 +163,7 @@ typedef enum message_type_e {
   NETWORK_MEASURE_NODES_RESPONSE,
   NETWORK_CLOSEST_NODES_PROGRESS,
   NETWORK_LOCAL_CLOSEST_NODES,
+  NETWORK_LOCAL_FIND_NODE,
   NETWORK_CLOSEST_NODES_RESULT,
 } message_type_e;
 
@@ -205,6 +206,14 @@ typedef struct {
 } network_local_closest_nodes_payload_t;
 
 void network_local_closest_nodes_payload_destroy(void* ptr);
+
+/* Stream-to-network: request FindNode from local network actor */
+typedef struct {
+  node_id_t target_id;
+  actor_t*  reply_to;
+} network_local_find_node_payload_t;
+
+void network_local_find_node_payload_destroy(void* ptr);
 
 /* Network-to-stream: result of ClosestNodes */
 typedef struct {

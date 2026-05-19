@@ -27,6 +27,7 @@
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include <cbor.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -82,6 +83,14 @@ static void network_find_block_result_destroy(void* ptr) {
 // Frees the heap-allocated payload for local closest-nodes requests.
 
 void network_local_closest_nodes_payload_destroy(void* ptr) {
+  if (ptr == NULL) return;
+  free(ptr);
+}
+
+// --- FindNode local payload destroy ---
+// Frees the heap-allocated payload for local find-node requests.
+
+void network_local_find_node_payload_destroy(void* ptr) {
   if (ptr == NULL) return;
   free(ptr);
 }
@@ -3122,6 +3131,28 @@ void network_dispatch(void* state, message_t* msg) {
     }
     case NETWORK_LOCAL_CLOSEST_NODES: {
       network_handle_local_closest_nodes(network, msg);
+      break;
+    }
+    case NETWORK_LOCAL_FIND_NODE: {
+      network_local_find_node_payload_t* payload =
+          (network_local_find_node_payload_t*)msg->payload;
+      if (payload == NULL) break;
+
+      /* Build a FindNode wire message and send to each connected peer */
+      wire_find_node_t find;
+      memset(&find, 0, sizeof(find));
+      find.message_id = (uint64_t)time(NULL) ^ ((uint64_t)rand() << 32);
+      memcpy(&find.sender_id, &network->authority->local_id, sizeof(node_id_t));
+      memcpy(&find.target_id, &payload->target_id, sizeof(node_id_t));
+
+      for (size_t peer_idx = 0; peer_idx < network->conn_mgr.peer_count; peer_idx++) {
+        peer_connection_t* peer = network->conn_mgr.peers[peer_idx];
+        if (peer != NULL && peer->connected) {
+          cbor_item_t* cbor = wire_find_node_encode(&find);
+          conn_state_send(network, peer, cbor);
+          cbor_decref(&cbor);
+        }
+      }
       break;
     }
     case NETWORK_CLOSEST_NODES_RESULT: {
