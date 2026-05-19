@@ -29,6 +29,8 @@ extern "C" {
 #include "Network/peer_connection.h"
 #include "Network/connection_manager.h"
 #include "Network/topology_metrics.h"
+#include "Network/closest_nodes.h"
+#include "Network/measure_nodes.h"
 #include "Configuration/config.h"
 #include "Util/allocator.h"
 }
@@ -2678,4 +2680,501 @@ TEST_F(WireGossipPullTest, ZeroTargets) {
   EXPECT_EQ(decoded.target_count, 0);
 
   cbor_decref(&encoded);
+}
+// === ClosestNodes wire tests ===
+
+class ClosestNodesWireTest : public ::testing::Test {
+protected:
+  void SetUp() override {}
+  void TearDown() override {}
+};
+
+TEST_F(ClosestNodesWireTest, Roundtrip) {
+  wire_closest_nodes_t original = {};
+  original.message_id = 0xABCDEF0123456789ULL;
+  node_id_from_string("cn-sender", &original.sender_id);
+  node_id_from_string("cn-target", &original.target_id);
+  original.count = 5;
+  original.beta_numerator = 3;
+  original.beta_denominator = 4;
+  original.ttl = 4;
+  memset(original.visited_bloom, 0xAB, CLOSEST_NODES_MAX_VISITED);
+  original.visited_count = 42;
+  node_id_from_string("cn-hop-1", &original.path[0]);
+  node_id_from_string("cn-hop-2", &original.path[1]);
+  original.path_len = 2;
+  original.start_time = 1234567890ULL;
+  node_id_from_string("cn-source", &original.original_source);
+
+  cbor_item_t* encoded = wire_closest_nodes_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  wire_closest_nodes_t decoded = {};
+  int rc = wire_closest_nodes_decode(encoded, &decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(decoded.message_id, original.message_id);
+  EXPECT_TRUE(node_id_equals(&decoded.sender_id, &original.sender_id));
+  EXPECT_TRUE(node_id_equals(&decoded.target_id, &original.target_id));
+  EXPECT_EQ(decoded.count, original.count);
+  EXPECT_EQ(decoded.beta_numerator, original.beta_numerator);
+  EXPECT_EQ(decoded.beta_denominator, original.beta_denominator);
+  EXPECT_EQ(decoded.ttl, original.ttl);
+  EXPECT_EQ(memcmp(decoded.visited_bloom, original.visited_bloom, CLOSEST_NODES_MAX_VISITED), 0);
+  EXPECT_EQ(decoded.visited_count, original.visited_count);
+  EXPECT_EQ(decoded.path_len, original.path_len);
+  EXPECT_TRUE(node_id_equals(&decoded.path[0], &original.path[0]));
+  EXPECT_TRUE(node_id_equals(&decoded.path[1], &original.path[1]));
+  EXPECT_EQ(decoded.start_time, original.start_time);
+  EXPECT_TRUE(node_id_equals(&decoded.original_source, &original.original_source));
+
+  cbor_decref(&encoded);
+}
+
+TEST_F(ClosestNodesWireTest, WrongTypeRejects) {
+  wire_closest_nodes_t original = {};
+  original.message_id = 1;
+  node_id_from_string("cn-sender-bad", &original.sender_id);
+  node_id_from_string("cn-target-bad", &original.target_id);
+  original.count = 1;
+  original.beta_numerator = 1;
+  original.beta_denominator = 2;
+  original.ttl = 2;
+
+  cbor_item_t* encoded = wire_closest_nodes_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  // Try decoding as wrong type — modify type byte
+  cbor_item_t* type_item = cbor_array_get(encoded, 0);
+  uint8_t wrong_type = 99;
+  cbor_item_t* wrong = cbor_build_uint8(wrong_type);
+  cbor_array_set(encoded, 0, wrong);
+  cbor_decref(&wrong);
+  cbor_decref(&type_item);
+
+  wire_closest_nodes_t decoded = {};
+  int rc = wire_closest_nodes_decode(encoded, &decoded);
+  EXPECT_NE(rc, 0);
+
+  cbor_decref(&encoded);
+}
+
+// === ClosestNodesResponse wire tests ===
+
+class ClosestNodesResponseWireTest : public ::testing::Test {
+protected:
+  void SetUp() override {}
+  void TearDown() override {}
+};
+
+TEST_F(ClosestNodesResponseWireTest, Roundtrip) {
+  wire_closest_nodes_response_t original = {};
+  original.message_id = 0xFEDCBA9876543210ULL;
+  node_id_from_string("cnr-sender", &original.sender_id);
+  node_id_from_string("cnr-target", &original.target_id);
+  original.found = 1;
+  node_id_from_string("cnr-closest", &original.closest);
+  original.closest_latency_us = 50000;
+  node_id_from_string("cnr-hop-a", &original.path[0]);
+  original.path_len = 1;
+  original.latency_us = 12345;
+  node_id_from_string("cnr-ring-1", &original.ring_nodes[0]);
+  node_id_from_string("cnr-ring-2", &original.ring_nodes[1]);
+  original.ring_latencies_us[0] = 10000;
+  original.ring_latencies_us[1] = 20000;
+  original.ring_count = 2;
+
+  cbor_item_t* encoded = wire_closest_nodes_response_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  wire_closest_nodes_response_t decoded = {};
+  int rc = wire_closest_nodes_response_decode(encoded, &decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(decoded.message_id, original.message_id);
+  EXPECT_TRUE(node_id_equals(&decoded.sender_id, &original.sender_id));
+  EXPECT_TRUE(node_id_equals(&decoded.target_id, &original.target_id));
+  EXPECT_EQ(decoded.found, original.found);
+  EXPECT_TRUE(node_id_equals(&decoded.closest, &original.closest));
+  EXPECT_EQ(decoded.closest_latency_us, original.closest_latency_us);
+  EXPECT_EQ(decoded.path_len, original.path_len);
+  EXPECT_TRUE(node_id_equals(&decoded.path[0], &original.path[0]));
+  EXPECT_EQ(decoded.latency_us, original.latency_us);
+  EXPECT_EQ(decoded.ring_count, original.ring_count);
+  EXPECT_TRUE(node_id_equals(&decoded.ring_nodes[0], &original.ring_nodes[0]));
+  EXPECT_TRUE(node_id_equals(&decoded.ring_nodes[1], &original.ring_nodes[1]));
+  EXPECT_EQ(decoded.ring_latencies_us[0], original.ring_latencies_us[0]);
+  EXPECT_EQ(decoded.ring_latencies_us[1], original.ring_latencies_us[1]);
+
+  cbor_decref(&encoded);
+}
+
+// === MeasureNodes wire tests ===
+
+class MeasureNodesWireTest : public ::testing::Test {
+protected:
+  void SetUp() override {}
+  void TearDown() override {}
+};
+
+TEST_F(MeasureNodesWireTest, Roundtrip) {
+  wire_measure_nodes_t original = {};
+  original.message_id = 0x1111222233334444ULL;
+  node_id_from_string("mn-sender", &original.sender_id);
+  original.probe_type = 1;
+  original.target_count = 3;
+  node_id_from_string("mn-target-a", &original.targets[0]);
+  node_id_from_string("mn-target-b", &original.targets[1]);
+  node_id_from_string("mn-target-c", &original.targets[2]);
+
+  cbor_item_t* encoded = wire_measure_nodes_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  wire_measure_nodes_t decoded = {};
+  int rc = wire_measure_nodes_decode(encoded, &decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(decoded.message_id, original.message_id);
+  EXPECT_TRUE(node_id_equals(&decoded.sender_id, &original.sender_id));
+  EXPECT_EQ(decoded.probe_type, original.probe_type);
+  EXPECT_EQ(decoded.target_count, 3);
+  EXPECT_TRUE(node_id_equals(&decoded.targets[0], &original.targets[0]));
+  EXPECT_TRUE(node_id_equals(&decoded.targets[1], &original.targets[1]));
+  EXPECT_TRUE(node_id_equals(&decoded.targets[2], &original.targets[2]));
+
+  cbor_decref(&encoded);
+}
+
+TEST_F(MeasureNodesWireTest, ZeroTargets) {
+  wire_measure_nodes_t original = {};
+  original.message_id = 0x5555666677778888ULL;
+  node_id_from_string("mn-sender-empty", &original.sender_id);
+  original.probe_type = 0;
+  original.target_count = 0;
+
+  cbor_item_t* encoded = wire_measure_nodes_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  wire_measure_nodes_t decoded = {};
+  int rc = wire_measure_nodes_decode(encoded, &decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(decoded.message_id, original.message_id);
+  EXPECT_EQ(decoded.target_count, 0);
+
+  cbor_decref(&encoded);
+}
+
+// === MeasureNodesResponse wire tests ===
+
+class MeasureNodesResponseWireTest : public ::testing::Test {
+protected:
+  void SetUp() override {}
+  void TearDown() override {}
+};
+
+TEST_F(MeasureNodesResponseWireTest, Roundtrip) {
+  wire_measure_nodes_response_t original = {};
+  original.message_id = 0xAAAABBBBCCCCDDDDULL;
+  node_id_from_string("mnr-sender", &original.sender_id);
+  original.target_count = 2;
+  node_id_from_string("mnr-target-1", &original.targets[0]);
+  node_id_from_string("mnr-target-2", &original.targets[1]);
+  original.latencies_us[0] = 15000;
+  original.latencies_us[1] = 30000;
+
+  cbor_item_t* encoded = wire_measure_nodes_response_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  wire_measure_nodes_response_t decoded = {};
+  int rc = wire_measure_nodes_response_decode(encoded, &decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(decoded.message_id, original.message_id);
+  EXPECT_TRUE(node_id_equals(&decoded.sender_id, &original.sender_id));
+  EXPECT_EQ(decoded.target_count, 2);
+  EXPECT_TRUE(node_id_equals(&decoded.targets[0], &original.targets[0]));
+  EXPECT_TRUE(node_id_equals(&decoded.targets[1], &original.targets[1]));
+  EXPECT_EQ(decoded.latencies_us[0], original.latencies_us[0]);
+  EXPECT_EQ(decoded.latencies_us[1], original.latencies_us[1]);
+
+  cbor_decref(&encoded);
+}
+
+// === ClosestNodesProgress wire tests ===
+
+class ClosestNodesProgressWireTest : public ::testing::Test {
+protected:
+  void SetUp() override {}
+  void TearDown() override {}
+};
+
+TEST_F(ClosestNodesProgressWireTest, Roundtrip) {
+  wire_closest_nodes_progress_t original = {};
+  original.message_id = 0x1234567890ABCDEFULL;
+  node_id_from_string("cnp-sender", &original.sender_id);
+  node_id_from_string("cnp-target", &original.target_id);
+  original.hop_count = 3;
+
+  cbor_item_t* encoded = wire_closest_nodes_progress_encode(&original);
+  ASSERT_NE(encoded, nullptr);
+
+  wire_closest_nodes_progress_t decoded = {};
+  int rc = wire_closest_nodes_progress_decode(encoded, &decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(decoded.message_id, original.message_id);
+  EXPECT_TRUE(node_id_equals(&decoded.sender_id, &original.sender_id));
+  EXPECT_TRUE(node_id_equals(&decoded.target_id, &original.target_id));
+  EXPECT_EQ(decoded.hop_count, original.hop_count);
+
+  cbor_decref(&encoded);
+}
+
+// === ClosestNodes execute tests ===
+
+class ClosestNodesExecuteTest : public ::testing::Test {
+protected:
+  eabf_table_t eabf_table;
+  eabf_ttl_table_t eabf_ttl;
+  ring_set_t* rings;
+  latency_cache_t* latency_cache;
+  node_id_t local_id;
+
+  void SetUp() override {
+    eabf_table_init(&eabf_table, 4);
+    eabf_ttl_table_init(&eabf_ttl, 16);
+    rings = ring_set_create(RING_K, RING_M, RING_ALPHA);
+    latency_cache = latency_cache_create(16);
+    memset(local_id.hash, 0x01, NODE_ID_HASH_SIZE);
+  }
+
+  void TearDown() override {
+    ring_set_destroy(rings);
+    latency_cache_destroy(latency_cache);
+    eabf_table_deinit(&eabf_table);
+    eabf_ttl_table_deinit(&eabf_ttl);
+  }
+};
+
+TEST_F(ClosestNodesExecuteTest, SelfIsTarget) {
+  wire_closest_nodes_t query = {};
+  query.message_id = 1;
+  query.sender_id = local_id;
+  query.target_id = local_id;  // Same as local_id
+  query.count = 3;
+  query.beta_numerator = 3;
+  query.beta_denominator = 4;
+  query.ttl = 4;
+
+  net_node_t* next_hops[CLOSEST_NODES_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  closest_nodes_result_e result = closest_nodes_execute(
+      &eabf_table, &eabf_ttl, NULL, rings, latency_cache, &local_id,
+      &query, next_hops, &next_hop_count);
+
+  EXPECT_EQ(result, CLOSEST_NODES_FOUND);
+  EXPECT_EQ(next_hop_count, 0u);
+}
+
+TEST_F(ClosestNodesExecuteTest, TTLExpired) {
+  wire_closest_nodes_t query = {};
+  query.message_id = 2;
+  node_id_from_string("cn-remote-target", &query.target_id);
+  query.ttl = 0;  // TTL expired
+
+  net_node_t* next_hops[CLOSEST_NODES_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  closest_nodes_result_e result = closest_nodes_execute(
+      &eabf_table, &eabf_ttl, NULL, rings, latency_cache, &local_id,
+      &query, next_hops, &next_hop_count);
+
+  EXPECT_EQ(result, CLOSEST_NODES_TTL_EXPIRED);
+}
+
+TEST_F(ClosestNodesExecuteTest, NoCandidatesReturnsNotFound) {
+  wire_closest_nodes_t query = {};
+  query.message_id = 3;
+  node_id_from_string("cn-no-cand-target", &query.target_id);
+  query.ttl = 4;
+  query.beta_numerator = 3;
+  query.beta_denominator = 4;
+
+  net_node_t* next_hops[CLOSEST_NODES_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  closest_nodes_result_e result = closest_nodes_execute(
+      &eabf_table, &eabf_ttl, NULL, rings, latency_cache, &local_id,
+      &query, next_hops, &next_hop_count);
+
+  EXPECT_EQ(result, CLOSEST_NODES_NOT_FOUND);
+}
+
+TEST_F(ClosestNodesExecuteTest, BetaConvergenceWhenLatencyCached) {
+  // Insert target into latency cache with some latency
+  node_id_t target_id;
+  node_id_from_string("cn-beta-target", &target_id);
+  latency_cache_insert(latency_cache, &target_id, 0x0A000001, 8080, 10.0f);
+
+  // With beta 3/4, we converge when current * 4 <= best * 3
+  // current = 10000us, best = 10000us => 10000*4=40000 <= 10000*3=30000 => FALSE (no convergence)
+  // So this should NOT converge with beta_numerator=3, beta_denominator=4
+  wire_closest_nodes_t query = {};
+  query.message_id = 4;
+  query.sender_id = local_id;
+  query.target_id = target_id;
+  query.count = 3;
+  query.beta_numerator = 3;
+  query.beta_denominator = 4;
+  query.ttl = 4;
+
+  net_node_t* next_hops[CLOSEST_NODES_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  closest_nodes_result_e result = closest_nodes_execute(
+      &eabf_table, &eabf_ttl, NULL, rings, latency_cache, &local_id,
+      &query, next_hops, &next_hop_count);
+
+  // Not converged, and no ring candidates, so NOT_FOUND
+  EXPECT_EQ(result, CLOSEST_NODES_NOT_FOUND);
+}
+
+TEST_F(ClosestNodesExecuteTest, BetaConvergenceWithTightRatio) {
+  // Insert target into latency cache with low latency
+  node_id_t target_id;
+  node_id_from_string("cn-converge-target", &target_id);
+  latency_cache_insert(latency_cache, &target_id, 0x0A000001, 8080, 10.0f);
+
+  // With beta 1/1, we converge when current * 1 <= best * 1 (i.e., exact match)
+  // current = best = 10000us => 10000 <= 10000 => TRUE (convergence)
+  wire_closest_nodes_t query = {};
+  query.message_id = 5;
+  query.sender_id = local_id;
+  query.target_id = target_id;
+  query.count = 3;
+  query.beta_numerator = 1;
+  query.beta_denominator = 1;
+  query.ttl = 4;
+
+  net_node_t* next_hops[CLOSEST_NODES_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  closest_nodes_result_e result = closest_nodes_execute(
+      &eabf_table, &eabf_ttl, NULL, rings, latency_cache, &local_id,
+      &query, next_hops, &next_hop_count);
+
+  EXPECT_EQ(result, CLOSEST_NODES_FOUND);
+}
+
+// === ClosestNodes beta convergence tests ===
+
+TEST(ClosestNodesBetaTest, ConvergedWhenCurrentEqualsBest) {
+  // current=100, best=100, beta=1/1 => 100*1 <= 100*1 => TRUE
+  EXPECT_TRUE(closest_nodes_beta_converged(100, 100, 1, 1));
+}
+
+TEST(ClosestNodesBetaTest, ConvergedWhenCurrentLessThanBest) {
+  // current=50, best=100, beta=3/4 => 50*4=200 <= 100*3=300 => TRUE
+  EXPECT_TRUE(closest_nodes_beta_converged(50, 100, 3, 4));
+}
+
+TEST(ClosestNodesBetaTest, NotConvergedWhenCurrentTooFar) {
+  // current=100, best=50, beta=3/4 => 100*4=400 <= 50*3=150 => FALSE
+  EXPECT_FALSE(closest_nodes_beta_converged(100, 50, 3, 4));
+}
+
+TEST(ClosestNodesBetaTest, ZeroBestLatencyConverges) {
+  // When best_latency is 0, we've found exact match => converge
+  EXPECT_TRUE(closest_nodes_beta_converged(100, 0, 3, 4));
+}
+
+TEST(ClosestNodesBetaTest, ZeroDenominatorIsSafe) {
+  // beta_denominator=0 is invalid => should return false (safety)
+  EXPECT_FALSE(closest_nodes_beta_converged(100, 100, 3, 0));
+}
+
+// === MeasureNodes execute tests ===
+
+class MeasureNodesExecuteTest : public ::testing::Test {
+protected:
+  latency_cache_t* latency_cache;
+
+  void SetUp() override {
+    latency_cache = latency_cache_create(16);
+  }
+
+  void TearDown() override {
+    latency_cache_destroy(latency_cache);
+  }
+};
+
+TEST_F(MeasureNodesExecuteTest, CachedLatencies) {
+  // Insert two nodes into the latency cache with distinct node IDs
+  node_id_t target_a = {}, target_b = {};
+  memset(target_a.hash, 0xAA, NODE_ID_HASH_SIZE);
+  memset(target_b.hash, 0xBB, NODE_ID_HASH_SIZE);
+  latency_cache_insert(latency_cache, &target_a, 0x0A000001, 8080, 15.5f);
+  latency_cache_insert(latency_cache, &target_b, 0x0A000002, 8081, 25.0f);
+
+  wire_measure_nodes_t query = {};
+  query.message_id = 1;
+  query.sender_id = target_a;
+  query.probe_type = 0;
+  query.target_count = 2;
+  query.targets[0] = target_a;
+  query.targets[1] = target_b;
+
+  uint32_t latencies_us[MEASURE_NODES_MAX_TARGETS] = {};
+  size_t count = measure_nodes_execute(latency_cache, &query, latencies_us);
+
+  EXPECT_EQ(count, 2u);
+  EXPECT_EQ(latencies_us[0], 15500u);  // 15.5ms * 1000 = 15500us
+  EXPECT_EQ(latencies_us[1], 25000u);  // 25.0ms * 1000 = 25000us
+}
+
+TEST_F(MeasureNodesExecuteTest, UnreachableTargetsReturnZero) {
+  node_id_t target_c = {};
+  memset(target_c.hash, 0xCC, NODE_ID_HASH_SIZE);
+
+  wire_measure_nodes_t query = {};
+  query.message_id = 2;
+  query.sender_id = target_c;
+  query.probe_type = 0;
+  query.target_count = 1;
+  query.targets[0] = target_c;  // Not in cache
+
+  uint32_t latencies_us[MEASURE_NODES_MAX_TARGETS] = {};
+  size_t count = measure_nodes_execute(latency_cache, &query, latencies_us);
+
+  EXPECT_EQ(count, 1u);
+  EXPECT_EQ(latencies_us[0], 0u);  // Not cached => 0
+}
+
+// === ClosestNodes visited bloom filter tests ===
+
+TEST(ClosestNodesVisitedTest, AddAndCheck) {
+  uint8_t bloom[CLOSEST_NODES_MAX_VISITED] = {};
+  uint16_t count = 0;
+  uint8_t hash[32];
+  memset(hash, 0xAB, 32);
+
+  EXPECT_FALSE(closest_nodes_is_visited(bloom, count, hash));
+
+  closest_nodes_add_visited(bloom, &count, hash);
+  EXPECT_TRUE(closest_nodes_is_visited(bloom, count, hash));
+  EXPECT_EQ(count, 1u);
+}
+
+TEST(ClosestNodesVisitedTest, DifferentHashNotVisited) {
+  uint8_t bloom[CLOSEST_NODES_MAX_VISITED] = {};
+  uint16_t count = 0;
+  uint8_t hash1[32], hash2[32];
+  memset(hash1, 0x11, 32);
+  memset(hash2, 0x22, 32);
+
+  closest_nodes_add_visited(bloom, &count, hash1);
+  EXPECT_TRUE(closest_nodes_is_visited(bloom, count, hash1));
+  EXPECT_FALSE(closest_nodes_is_visited(bloom, count, hash2));
 }

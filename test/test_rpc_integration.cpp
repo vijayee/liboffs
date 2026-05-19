@@ -45,6 +45,11 @@ static constexpr uint8_t WIRE_RECALL_DECLINE_VAL       = 18;
 static constexpr uint8_t WIRE_RATE_LIMITED_VAL          = 19;
 static constexpr uint8_t WIRE_GOSSIP_VAL              = 21;
 static constexpr uint8_t WIRE_GOSSIP_PULL_VAL          = 22;
+static constexpr uint8_t WIRE_CLOSEST_NODES_VAL           = 23;
+static constexpr uint8_t WIRE_CLOSEST_NODES_RESPONSE_VAL  = 24;
+static constexpr uint8_t WIRE_MEASURE_NODES_VAL           = 25;
+static constexpr uint8_t WIRE_MEASURE_NODES_RESPONSE_VAL  = 26;
+static constexpr uint8_t WIRE_CLOSEST_NODES_PROGRESS_VAL  = 27;
 
 /* Message direction constants (must match src/Network/message_log.h) */
 static constexpr uint8_t MSG_DIRECTION_SENT_VAL      = 0;
@@ -1236,6 +1241,105 @@ TEST_F(RpcIntegrationTest, GossipDiscoveryDiamond) {
   }
   EXPECT_LE(total_gossip_events, 40u)
       << "Total gossip traffic should be bounded, got " << total_gossip_events;
+#endif
+}
+
+TEST_F(RpcIntegrationTest, ClosestNodesDiamond) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  /* Create diamond topology: A-B-D, A-C-D */
+  auto diamond = make_diamond();
+  ASSERT_EQ(diamond.size(), 4u);
+
+  /* Let gossip establish ring membership first */
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    send_command(diamond[idx].control_fd, CTRL_GOSSIP);
+  }
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  /* Clear event logs */
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    clear_events(diamond[idx].control_fd);
+  }
+
+  /* Node A initiates closest-nodes query for Node D */
+  std::string closest_resp = send_command(diamond[0].control_fd,
+      std::string(CTRL_CLOSEST_NODES) + " " + diamond[3].node_id);
+  EXPECT_NE(closest_resp.find(CTRL_RESP_OK), std::string::npos)
+      << "CLOSEST_NODES from node A: " << closest_resp;
+
+  /* Wait for query propagation */
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  /* Verify WIRE_CLOSEST_NODES was sent by at least one node */
+  bool any_closest_sent = false;
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    auto events = get_events(diamond[idx].control_fd);
+    if (count_events(events, MSG_DIRECTION_SENT_VAL, WIRE_CLOSEST_NODES_VAL) > 0 ||
+        count_events(events, MSG_DIRECTION_FORWARDED_VAL, WIRE_CLOSEST_NODES_VAL) > 0) {
+      any_closest_sent = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(any_closest_sent) << "At least one node should have sent WIRE_CLOSEST_NODES";
+
+  /* Verify WIRE_CLOSEST_NODES_RESPONSE was received */
+  bool any_response_received = false;
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    auto events = get_events(diamond[idx].control_fd);
+    if (count_events(events, MSG_DIRECTION_RECEIVED_VAL, WIRE_CLOSEST_NODES_RESPONSE_VAL) > 0) {
+      any_response_received = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(any_response_received) << "At least one node should have received WIRE_CLOSEST_NODES_RESPONSE";
+#endif
+}
+
+TEST_F(RpcIntegrationTest, MeasureNodesLatency) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  /* Create 2-node mesh */
+  auto mesh = make_full_mesh(2);
+  ASSERT_EQ(mesh.size(), 2u);
+
+  /* Let ping/gossip establish latency cache */
+  for (size_t idx = 0; idx < mesh.size(); idx++) {
+    send_command(mesh[idx].control_fd, CTRL_GOSSIP);
+  }
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  /* Clear event logs */
+  for (size_t idx = 0; idx < mesh.size(); idx++) {
+    clear_events(mesh[idx].control_fd);
+  }
+
+  /* Node A measures latency to Node B */
+  std::string measure_resp = send_command(mesh[0].control_fd,
+      std::string(CTRL_MEASURE_NODES) + " " + mesh[1].node_id);
+  EXPECT_NE(measure_resp.find(CTRL_RESP_OK), std::string::npos)
+      << "MEASURE_NODES from node A: " << measure_resp;
+
+  /* Wait for response */
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+
+  /* Verify WIRE_MEASURE_NODES was sent */
+  auto events_a = get_events(mesh[0].control_fd);
+  EXPECT_GE(count_events(events_a, MSG_DIRECTION_SENT_VAL, WIRE_MEASURE_NODES_VAL), 1u)
+      << "Node A should have sent WIRE_MEASURE_NODES";
+
+  /* Verify WIRE_MEASURE_NODES_RESPONSE was received */
+  bool any_measure_response = false;
+  for (size_t idx = 0; idx < mesh.size(); idx++) {
+    auto events = get_events(mesh[idx].control_fd);
+    if (count_events(events, MSG_DIRECTION_RECEIVED_VAL, WIRE_MEASURE_NODES_RESPONSE_VAL) > 0) {
+      any_measure_response = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(any_measure_response) << "At least one node should have received WIRE_MEASURE_NODES_RESPONSE";
 #endif
 }
 

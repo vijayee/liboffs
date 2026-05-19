@@ -9,6 +9,8 @@
 
 _Static_assert(WIRE_MAX_VISITED_BLOOM == FIND_BLOCK_MAX_VISITED_BLOOM,
                "wire and find_block bloom sizes must match");
+_Static_assert(CLOSEST_NODES_MAX_VISITED == WIRE_MAX_VISITED_BLOOM,
+               "closest_nodes and wire bloom sizes must match");
 
 // --- Helper functions ---
 
@@ -1966,4 +1968,513 @@ void wire_relay_received_destroy(wire_relay_received_t* msg) {
   if (msg == NULL) return;
   free(msg->payload);
   free(msg);
+}
+
+// --- ClosestNodes (Meridian proximity routing) ---
+
+cbor_item_t* wire_closest_nodes_encode(const wire_closest_nodes_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(16);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(WIRE_CLOSEST_NODES);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32((uint32_t)(msg->message_id >> 32));
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32((uint32_t)(msg->message_id & 0xFFFFFFFF));
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->target_id);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->count);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint16(msg->beta_numerator);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint16(msg->beta_denominator);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->ttl);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_bytestring(msg->visited_bloom, CLOSEST_NODES_MAX_VISITED);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint16(msg->visited_count);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  cbor_item_t* path = cbor_new_definite_array(msg->path_len);
+  for (uint8_t index = 0; index < msg->path_len; index++) {
+    cbor_item_t* node_id = _node_id_encode(&msg->path[index]);
+    (void)cbor_array_push(path, node_id);
+    cbor_decref(&node_id);
+  }
+  (void)cbor_array_push(array, path);
+  cbor_decref(&path);
+
+  item = cbor_build_uint8(msg->path_len);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32((uint32_t)(msg->start_time >> 32));
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32((uint32_t)(msg->start_time & 0xFFFFFFFF));
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->original_source);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int wire_closest_nodes_decode(cbor_item_t* item, wire_closest_nodes_t* msg) {
+  if (cbor_array_size(item) < 16) return -1;
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (cbor_get_uint8(type_item) != WIRE_CLOSEST_NODES) { cbor_decref(&type_item); return -1; }
+  cbor_decref(&type_item);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
+  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  cbor_decref(&id_hi);
+  cbor_decref(&id_lo);
+  cbor_item_t* target = cbor_array_get(item, 4);
+  int target_rc = _node_id_decode(target, &msg->target_id);
+  cbor_decref(&target);
+  if (target_rc != 0) return target_rc;
+  cbor_item_t* count = cbor_array_get(item, 5);
+  msg->count = cbor_get_uint8(count);
+  cbor_decref(&count);
+  cbor_item_t* beta_num = cbor_array_get(item, 6);
+  msg->beta_numerator = (uint16_t)cbor_get_uint16(beta_num);
+  cbor_decref(&beta_num);
+  cbor_item_t* beta_den = cbor_array_get(item, 7);
+  msg->beta_denominator = (uint16_t)cbor_get_uint16(beta_den);
+  cbor_decref(&beta_den);
+  cbor_item_t* ttl = cbor_array_get(item, 8);
+  msg->ttl = cbor_get_uint8(ttl);
+  cbor_decref(&ttl);
+  cbor_item_t* visited = cbor_array_get(item, 9);
+  if (cbor_bytestring_length(visited) != CLOSEST_NODES_MAX_VISITED) { cbor_decref(&visited); return -1; }
+  memcpy(msg->visited_bloom, cbor_bytestring_handle(visited), CLOSEST_NODES_MAX_VISITED);
+  cbor_decref(&visited);
+  cbor_item_t* vcount = cbor_array_get(item, 10);
+  msg->visited_count = (uint16_t)cbor_get_uint16(vcount);
+  cbor_decref(&vcount);
+  cbor_item_t* path_arr = cbor_array_get(item, 11);
+  size_t path_len = cbor_array_size(path_arr);
+  if (path_len > CLOSEST_NODES_MAX_PATH) path_len = CLOSEST_NODES_MAX_PATH;
+  msg->path_len = (uint8_t)path_len;
+  for (size_t index = 0; index < path_len; index++) {
+    cbor_item_t* node_item = cbor_array_get(path_arr, index);
+    _node_id_decode(node_item, &msg->path[index]);
+    cbor_decref(&node_item);
+  }
+  cbor_decref(&path_arr);
+  cbor_item_t* path_len_item = cbor_array_get(item, 12);
+  uint8_t wire_path_len = cbor_get_uint8(path_len_item);
+  if (wire_path_len < msg->path_len) msg->path_len = wire_path_len;
+  cbor_decref(&path_len_item);
+  cbor_item_t* start_hi = cbor_array_get(item, 13);
+  cbor_item_t* start_lo = cbor_array_get(item, 14);
+  msg->start_time = ((uint64_t)cbor_get_uint64(start_hi) << 32) | (uint64_t)cbor_get_uint64(start_lo);
+  cbor_decref(&start_hi);
+  cbor_decref(&start_lo);
+  cbor_item_t* source = cbor_array_get(item, 15);
+  int source_rc = _node_id_decode(source, &msg->original_source);
+  cbor_decref(&source);
+  return source_rc;
+}
+
+// --- ClosestNodesResponse ---
+
+cbor_item_t* wire_closest_nodes_response_encode(const wire_closest_nodes_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(15);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(WIRE_CLOSEST_NODES_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32((uint32_t)(msg->message_id >> 32));
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32((uint32_t)(msg->message_id & 0xFFFFFFFF));
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->target_id);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->found);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->closest);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32(msg->closest_latency_us);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  cbor_item_t* path = cbor_new_definite_array(msg->path_len);
+  for (uint8_t index = 0; index < msg->path_len; index++) {
+    cbor_item_t* node_id = _node_id_encode(&msg->path[index]);
+    (void)cbor_array_push(path, node_id);
+    cbor_decref(&node_id);
+  }
+  (void)cbor_array_push(array, path);
+  cbor_decref(&path);
+
+  item = cbor_build_uint8(msg->path_len);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32((uint32_t)(msg->latency_us >> 32));
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32((uint32_t)(msg->latency_us & 0xFFFFFFFF));
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  cbor_item_t* ring_nodes = cbor_new_definite_array(msg->ring_count);
+  for (uint8_t index = 0; index < msg->ring_count; index++) {
+    cbor_item_t* node_id = _node_id_encode(&msg->ring_nodes[index]);
+    (void)cbor_array_push(ring_nodes, node_id);
+    cbor_decref(&node_id);
+  }
+  (void)cbor_array_push(array, ring_nodes);
+  cbor_decref(&ring_nodes);
+
+  cbor_item_t* ring_latencies = cbor_new_definite_array(msg->ring_count);
+  for (uint8_t index = 0; index < msg->ring_count; index++) {
+    cbor_item_t* latency = cbor_build_uint32(msg->ring_latencies_us[index]);
+    (void)cbor_array_push(ring_latencies, latency);
+    cbor_decref(&latency);
+  }
+  (void)cbor_array_push(array, ring_latencies);
+  cbor_decref(&ring_latencies);
+
+  item = cbor_build_uint8(msg->ring_count);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int wire_closest_nodes_response_decode(cbor_item_t* item, wire_closest_nodes_response_t* msg) {
+  if (cbor_array_size(item) < 15) return -1;
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (cbor_get_uint8(type_item) != WIRE_CLOSEST_NODES_RESPONSE) { cbor_decref(&type_item); return -1; }
+  cbor_decref(&type_item);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
+  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  cbor_decref(&id_hi);
+  cbor_decref(&id_lo);
+  cbor_item_t* target = cbor_array_get(item, 4);
+  int target_rc = _node_id_decode(target, &msg->target_id);
+  cbor_decref(&target);
+  if (target_rc != 0) return target_rc;
+  cbor_item_t* found = cbor_array_get(item, 5);
+  msg->found = cbor_get_uint8(found);
+  cbor_decref(&found);
+  cbor_item_t* closest = cbor_array_get(item, 6);
+  int closest_rc = _node_id_decode(closest, &msg->closest);
+  cbor_decref(&closest);
+  if (closest_rc != 0) return closest_rc;
+  cbor_item_t* closest_lat = cbor_array_get(item, 7);
+  msg->closest_latency_us = cbor_get_uint32(closest_lat);
+  cbor_decref(&closest_lat);
+  cbor_item_t* path_arr = cbor_array_get(item, 8);
+  size_t path_len = cbor_array_size(path_arr);
+  if (path_len > CLOSEST_NODES_MAX_PATH) path_len = CLOSEST_NODES_MAX_PATH;
+  msg->path_len = (uint8_t)path_len;
+  for (size_t index = 0; index < path_len; index++) {
+    cbor_item_t* node_item = cbor_array_get(path_arr, index);
+    _node_id_decode(node_item, &msg->path[index]);
+    cbor_decref(&node_item);
+  }
+  cbor_decref(&path_arr);
+  cbor_item_t* path_len_item = cbor_array_get(item, 9);
+  uint8_t wire_path_len = cbor_get_uint8(path_len_item);
+  if (wire_path_len < msg->path_len) msg->path_len = wire_path_len;
+  cbor_decref(&path_len_item);
+  cbor_item_t* lat_hi = cbor_array_get(item, 10);
+  cbor_item_t* lat_lo = cbor_array_get(item, 11);
+  msg->latency_us = ((uint64_t)cbor_get_uint64(lat_hi) << 32) | (uint64_t)cbor_get_uint64(lat_lo);
+  cbor_decref(&lat_hi);
+  cbor_decref(&lat_lo);
+  cbor_item_t* ring_nodes_arr = cbor_array_get(item, 12);
+  size_t ring_count = cbor_array_size(ring_nodes_arr);
+  if (ring_count > CLOSEST_NODES_MAX_RING_SAMPLES) ring_count = CLOSEST_NODES_MAX_RING_SAMPLES;
+  msg->ring_count = (uint8_t)ring_count;
+  for (size_t index = 0; index < ring_count; index++) {
+    cbor_item_t* node_item = cbor_array_get(ring_nodes_arr, index);
+    _node_id_decode(node_item, &msg->ring_nodes[index]);
+    cbor_decref(&node_item);
+  }
+  cbor_decref(&ring_nodes_arr);
+  cbor_item_t* ring_latencies_arr = cbor_array_get(item, 13);
+  size_t lat_count = cbor_array_size(ring_latencies_arr);
+  if (lat_count > CLOSEST_NODES_MAX_RING_SAMPLES) lat_count = CLOSEST_NODES_MAX_RING_SAMPLES;
+  for (size_t index = 0; index < lat_count; index++) {
+    cbor_item_t* lat_item = cbor_array_get(ring_latencies_arr, index);
+    msg->ring_latencies_us[index] = cbor_get_uint32(lat_item);
+    cbor_decref(&lat_item);
+  }
+  cbor_decref(&ring_latencies_arr);
+  cbor_item_t* ring_count_item = cbor_array_get(item, 14);
+  uint8_t wire_ring_count = cbor_get_uint8(ring_count_item);
+  if (wire_ring_count < msg->ring_count) msg->ring_count = wire_ring_count;
+  cbor_decref(&ring_count_item);
+  return 0;
+}
+
+// --- MeasureNodes ---
+
+cbor_item_t* wire_measure_nodes_encode(const wire_measure_nodes_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(6);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(WIRE_MEASURE_NODES);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32((uint32_t)(msg->message_id >> 32));
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32((uint32_t)(msg->message_id & 0xFFFFFFFF));
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->probe_type);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  cbor_item_t* targets = cbor_new_definite_array(msg->target_count);
+  for (uint8_t index = 0; index < msg->target_count; index++) {
+    cbor_item_t* node_id = _node_id_encode(&msg->targets[index]);
+    (void)cbor_array_push(targets, node_id);
+    cbor_decref(&node_id);
+  }
+  (void)cbor_array_push(array, targets);
+  cbor_decref(&targets);
+
+  return array;
+}
+
+int wire_measure_nodes_decode(cbor_item_t* item, wire_measure_nodes_t* msg) {
+  if (cbor_array_size(item) < 6) return -1;
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (cbor_get_uint8(type_item) != WIRE_MEASURE_NODES) { cbor_decref(&type_item); return -1; }
+  cbor_decref(&type_item);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
+  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  cbor_decref(&id_hi);
+  cbor_decref(&id_lo);
+  cbor_item_t* probe_type = cbor_array_get(item, 4);
+  msg->probe_type = cbor_get_uint8(probe_type);
+  cbor_decref(&probe_type);
+  cbor_item_t* targets_arr = cbor_array_get(item, 5);
+  size_t target_count = cbor_array_size(targets_arr);
+  if (target_count > MEASURE_NODES_MAX_TARGETS) target_count = MEASURE_NODES_MAX_TARGETS;
+  msg->target_count = (uint8_t)target_count;
+  for (size_t index = 0; index < target_count; index++) {
+    cbor_item_t* node_item = cbor_array_get(targets_arr, index);
+    _node_id_decode(node_item, &msg->targets[index]);
+    cbor_decref(&node_item);
+  }
+  cbor_decref(&targets_arr);
+  return 0;
+}
+
+// --- MeasureNodesResponse ---
+
+cbor_item_t* wire_measure_nodes_response_encode(const wire_measure_nodes_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(7);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(WIRE_MEASURE_NODES_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32((uint32_t)(msg->message_id >> 32));
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32((uint32_t)(msg->message_id & 0xFFFFFFFF));
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->target_count);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  cbor_item_t* targets = cbor_new_definite_array(msg->target_count);
+  for (uint8_t index = 0; index < msg->target_count; index++) {
+    cbor_item_t* node_id = _node_id_encode(&msg->targets[index]);
+    (void)cbor_array_push(targets, node_id);
+    cbor_decref(&node_id);
+  }
+  (void)cbor_array_push(array, targets);
+  cbor_decref(&targets);
+
+  cbor_item_t* latencies = cbor_new_definite_array(msg->target_count);
+  for (uint8_t index = 0; index < msg->target_count; index++) {
+    cbor_item_t* latency = cbor_build_uint32(msg->latencies_us[index]);
+    (void)cbor_array_push(latencies, latency);
+    cbor_decref(&latency);
+  }
+  (void)cbor_array_push(array, latencies);
+  cbor_decref(&latencies);
+
+  return array;
+}
+
+int wire_measure_nodes_response_decode(cbor_item_t* item, wire_measure_nodes_response_t* msg) {
+  if (cbor_array_size(item) < 7) return -1;
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (cbor_get_uint8(type_item) != WIRE_MEASURE_NODES_RESPONSE) { cbor_decref(&type_item); return -1; }
+  cbor_decref(&type_item);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
+  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  cbor_decref(&id_hi);
+  cbor_decref(&id_lo);
+  cbor_item_t* target_count_item = cbor_array_get(item, 4);
+  msg->target_count = cbor_get_uint8(target_count_item);
+  cbor_decref(&target_count_item);
+  if (msg->target_count > MEASURE_NODES_MAX_TARGETS) msg->target_count = MEASURE_NODES_MAX_TARGETS;
+  cbor_item_t* targets_arr = cbor_array_get(item, 5);
+  size_t targets_count = cbor_array_size(targets_arr);
+  if (targets_count > MEASURE_NODES_MAX_TARGETS) targets_count = MEASURE_NODES_MAX_TARGETS;
+  if (targets_count < msg->target_count) msg->target_count = (uint8_t)targets_count;
+  for (size_t index = 0; index < msg->target_count; index++) {
+    cbor_item_t* node_item = cbor_array_get(targets_arr, index);
+    _node_id_decode(node_item, &msg->targets[index]);
+    cbor_decref(&node_item);
+  }
+  cbor_decref(&targets_arr);
+  cbor_item_t* latencies_arr = cbor_array_get(item, 6);
+  size_t lat_count = cbor_array_size(latencies_arr);
+  if (lat_count > MEASURE_NODES_MAX_TARGETS) lat_count = MEASURE_NODES_MAX_TARGETS;
+  for (size_t index = 0; index < lat_count; index++) {
+    cbor_item_t* lat_item = cbor_array_get(latencies_arr, index);
+    msg->latencies_us[index] = cbor_get_uint32(lat_item);
+    cbor_decref(&lat_item);
+  }
+  cbor_decref(&latencies_arr);
+  return 0;
+}
+
+// --- ClosestNodesProgress ---
+
+cbor_item_t* wire_closest_nodes_progress_encode(const wire_closest_nodes_progress_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(6);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(WIRE_CLOSEST_NODES_PROGRESS);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->sender_id);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32((uint32_t)(msg->message_id >> 32));
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint32((uint32_t)(msg->message_id & 0xFFFFFFFF));
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _node_id_encode(&msg->target_id);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->hop_count);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int wire_closest_nodes_progress_decode(cbor_item_t* item, wire_closest_nodes_progress_t* msg) {
+  if (cbor_array_size(item) < 6) return -1;
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (cbor_get_uint8(type_item) != WIRE_CLOSEST_NODES_PROGRESS) { cbor_decref(&type_item); return -1; }
+  cbor_decref(&type_item);
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+  cbor_item_t* id_hi = cbor_array_get(item, 2);
+  cbor_item_t* id_lo = cbor_array_get(item, 3);
+  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  cbor_decref(&id_hi);
+  cbor_decref(&id_lo);
+  cbor_item_t* target = cbor_array_get(item, 4);
+  int target_rc = _node_id_decode(target, &msg->target_id);
+  cbor_decref(&target);
+  if (target_rc != 0) return target_rc;
+  cbor_item_t* hop_count = cbor_array_get(item, 5);
+  msg->hop_count = cbor_get_uint8(hop_count);
+  cbor_decref(&hop_count);
+  return 0;
 }

@@ -47,6 +47,14 @@
 #define WIRE_MAX_OFFERS           20
 #define WIRE_MAX_SAMPLES          8
 
+// Closest-N protocol limits
+#define CLOSEST_NODES_MAX_PATH       6
+#define CLOSEST_NODES_MAX_VISITED    256  // bytes = 2048 bits
+#define CLOSEST_NODES_MAX_COUNT      8
+#define CLOSEST_NODES_FORWARD_FANOUT 3
+#define CLOSEST_NODES_MAX_RING_SAMPLES 8
+#define MEASURE_NODES_MAX_TARGETS    8
+
 // --- Ping ---
 
 typedef struct {
@@ -308,6 +316,13 @@ typedef struct wire_addr_response_t {
 #define WIRE_GOSSIP            21
 #define WIRE_GOSSIP_PULL       22
 
+// --- Closest-N protocol (Meridian proximity routing) ---
+#define WIRE_CLOSEST_NODES             23
+#define WIRE_CLOSEST_NODES_RESPONSE    24
+#define WIRE_MEASURE_NODES             25
+#define WIRE_MEASURE_NODES_RESPONSE    26
+#define WIRE_CLOSEST_NODES_PROGRESS    27
+
 typedef struct {
   uint64_t  message_id;
   node_id_t sender_id;
@@ -325,6 +340,62 @@ typedef struct {
   node_id_t targets[RING_MAX_RINGS];
   uint8_t   target_count;
 } wire_gossip_pull_t;
+
+// --- ClosestNodes (Meridian proximity routing) ---
+
+typedef struct {
+  uint64_t message_id;
+  node_id_t sender_id;
+  node_id_t target_id;
+  uint8_t count;
+  uint16_t beta_numerator;
+  uint16_t beta_denominator;
+  uint8_t ttl;
+  uint8_t visited_bloom[CLOSEST_NODES_MAX_VISITED];
+  uint16_t visited_count;
+  node_id_t path[CLOSEST_NODES_MAX_PATH];
+  uint8_t path_len;
+  uint64_t start_time;
+  node_id_t original_source;
+} wire_closest_nodes_t;
+
+typedef struct {
+  uint64_t message_id;
+  node_id_t sender_id;
+  node_id_t target_id;
+  uint8_t found;
+  node_id_t closest;
+  uint32_t closest_latency_us;
+  node_id_t path[CLOSEST_NODES_MAX_PATH];
+  uint8_t path_len;
+  uint64_t latency_us;
+  node_id_t ring_nodes[CLOSEST_NODES_MAX_RING_SAMPLES];
+  uint32_t ring_latencies_us[CLOSEST_NODES_MAX_RING_SAMPLES];
+  uint8_t ring_count;
+} wire_closest_nodes_response_t;
+
+typedef struct {
+  uint64_t message_id;
+  node_id_t sender_id;
+  uint8_t probe_type;
+  node_id_t targets[MEASURE_NODES_MAX_TARGETS];
+  uint8_t target_count;
+} wire_measure_nodes_t;
+
+typedef struct {
+  uint64_t message_id;
+  node_id_t sender_id;
+  node_id_t targets[MEASURE_NODES_MAX_TARGETS];
+  uint32_t latencies_us[MEASURE_NODES_MAX_TARGETS];
+  uint8_t target_count;
+} wire_measure_nodes_response_t;
+
+typedef struct {
+  uint64_t message_id;
+  node_id_t sender_id;
+  node_id_t target_id;
+  uint8_t hop_count;
+} wire_closest_nodes_progress_t;
 
 // Encode functions — return CBOR item (caller must cbor_decref)
 cbor_item_t* wire_ping_encode(const wire_ping_t* msg);
@@ -353,6 +424,11 @@ cbor_item_t* wire_addr_request_encode(const wire_addr_request_t* msg);
 cbor_item_t* wire_addr_response_encode(const wire_addr_response_t* msg);
 cbor_item_t* wire_gossip_encode(const wire_gossip_t* msg);
 cbor_item_t* wire_gossip_pull_encode(const wire_gossip_pull_t* msg);
+cbor_item_t* wire_closest_nodes_encode(const wire_closest_nodes_t* msg);
+cbor_item_t* wire_closest_nodes_response_encode(const wire_closest_nodes_response_t* msg);
+cbor_item_t* wire_measure_nodes_encode(const wire_measure_nodes_t* msg);
+cbor_item_t* wire_measure_nodes_response_encode(const wire_measure_nodes_response_t* msg);
+cbor_item_t* wire_closest_nodes_progress_encode(const wire_closest_nodes_progress_t* msg);
 
 // Decode functions — fill existing struct, return 0 on success, -1 on error
 int wire_ping_decode(cbor_item_t* item, wire_ping_t* msg);
@@ -381,6 +457,11 @@ int wire_addr_request_decode(cbor_item_t* item, wire_addr_request_t* msg);
 int wire_addr_response_decode(cbor_item_t* item, wire_addr_response_t* msg);
 int wire_gossip_decode(cbor_item_t* item, wire_gossip_t* msg);
 int wire_gossip_pull_decode(cbor_item_t* item, wire_gossip_pull_t* msg);
+int wire_closest_nodes_decode(cbor_item_t* item, wire_closest_nodes_t* msg);
+int wire_closest_nodes_response_decode(cbor_item_t* item, wire_closest_nodes_response_t* msg);
+int wire_measure_nodes_decode(cbor_item_t* item, wire_measure_nodes_t* msg);
+int wire_measure_nodes_response_decode(cbor_item_t* item, wire_measure_nodes_response_t* msg);
+int wire_closest_nodes_progress_decode(cbor_item_t* item, wire_closest_nodes_progress_t* msg);
 
 // Helper: extract type byte from CBOR item
 uint8_t wire_get_type(cbor_item_t* item);

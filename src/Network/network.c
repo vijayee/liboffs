@@ -15,6 +15,8 @@
 #include "relay_client.h"
 #include "nat_detect.h"
 #include "conn_state.h"
+#include "closest_nodes.h"
+#include "measure_nodes.h"
 #include "msquic_singleton.h"
 #include "../Timer/timer_actor.h"
 #include "../Bloom/elastic_bloom_filter.h"
@@ -35,6 +37,12 @@
 static void network_sync_hebbian_to_rings(network_t* network);
 static void network_handle_local_find_block(network_t* network, message_t* msg);
 static void network_handle_ping_capacity_tick(network_t* network, message_t* msg);
+static void network_handle_closest_nodes(network_t* network, message_t* msg);
+static void network_handle_closest_nodes_response(network_t* network, message_t* msg);
+static void network_handle_measure_nodes(network_t* network, message_t* msg);
+static void network_handle_measure_nodes_response(network_t* network, message_t* msg);
+static void network_handle_closest_nodes_progress(network_t* network, message_t* msg);
+static void network_handle_local_closest_nodes(network_t* network, message_t* msg);
 
 // --- Payload destroy for cache PUT from network ---
 static void network_cache_put_payload_destroy(void* ptr) {
@@ -67,6 +75,22 @@ static void network_find_block_result_destroy(void* ptr) {
   if (result->hash != NULL) {
     buffer_destroy(result->hash);
   }
+  free(ptr);
+}
+
+// --- ClosestNodes local payload destroy ---
+// Frees the heap-allocated payload for local closest-nodes requests.
+
+void network_local_closest_nodes_payload_destroy(void* ptr) {
+  if (ptr == NULL) return;
+  free(ptr);
+}
+
+// --- ClosestNodes result payload destroy ---
+// Frees the heap-allocated result payload for closest-nodes results.
+
+void network_closest_nodes_result_payload_destroy(void* ptr) {
+  if (ptr == NULL) return;
   free(ptr);
 }
 
@@ -723,6 +747,382 @@ static void network_handle_gossip_pull_received(network_t* network, message_t* m
   }
 
   // No response — this is the pull half of PUSHPULL
+}
+
+// --- ClosestNodes handler ---
+// Receive a WIRE_CLOSEST_NODES query: execute routing logic, respond or forward.
+
+static void network_handle_closest_nodes(network_t* network, message_t* msg) {
+  wire_closest_nodes_t* query = (wire_closest_nodes_t*)msg->payload;
+  if (query == NULL) return;
+
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_CLOSEST_NODES, MSG_DIRECTION_RECEIVED,
+                       &query->sender_id, query->message_id, NULL,
+                       0, &network->hebbian);
+  }
+
+  net_node_t* next_hops[CLOSEST_NODES_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  closest_nodes_result_e result = closest_nodes_execute(
+      &network->eabf_table, &network->eabf_ttl, &network->conn_mgr,
+      network->rings, network->latency_cache, &network->authority->local_id,
+      query, next_hops, &next_hop_count);
+
+  switch (result) {
+    case CLOSEST_NODES_FOUND: {
+      // We are the target or beta-converged — respond with closest info
+      const node_id_t* reply_to = &query->original_source;
+      if (query->path_len > 0) {
+        reply_to = &query->path[query->path_len - 1];
+      }
+      peer_connection_t* reply_peer = connection_manager_lookup(&network->conn_mgr, reply_to);
+      if (reply_peer != NULL) {
+        wire_closest_nodes_response_t response;
+        memset(&response, 0, sizeof(response));
+        response.message_id = query->message_id;
+        memcpy(&response.sender_id, &network->authority->local_id, sizeof(node_id_t));
+        memcpy(&response.target_id, &query->target_id, sizeof(node_id_t));
+        response.found = 1;
+        memcpy(&response.closest, &network->authority->local_id, sizeof(node_id_t));
+        // Look up latency from cache
+        float latency_ms = 0.0f;
+        latency_cache_get(network->latency_cache, &query->target_id, &latency_ms);
+        response.closest_latency_us = (uint32_t)(latency_ms * 1000.0f);
+        // Reverse the path for response routing
+        memcpy(response.path, query->path, query->path_len * sizeof(node_id_t));
+        response.path_len = query->path_len;
+        response.latency_us = 0;
+        // Collect ring samples
+        response.ring_count = (uint8_t)closest_nodes_select_ring_samples(
+            network->rings, &network->authority->local_id,
+            response.ring_nodes, response.ring_latencies_us,
+            CLOSEST_NODES_MAX_RING_SAMPLES);
+
+        cbor_item_t* cbor = wire_closest_nodes_response_encode(&response);
+        conn_state_send(network, reply_peer, cbor);
+        cbor_decref(&cbor);
+
+        if (network->log != NULL) {
+          message_log_record(network->log, WIRE_CLOSEST_NODES_RESPONSE, MSG_DIRECTION_SENT,
+                             reply_to, query->message_id, NULL, 0, &network->hebbian);
+        }
+      }
+      break;
+    }
+
+    case CLOSEST_NODES_FORWARDING: {
+      // Forward the query to next hops
+      for (size_t hop = 0; hop < next_hop_count; hop++) {
+        wire_closest_nodes_t* forward = get_clear_memory(sizeof(wire_closest_nodes_t));
+        if (forward == NULL) continue;
+        forward->message_id = query->message_id;
+        memcpy(&forward->sender_id, &network->authority->local_id, sizeof(node_id_t));
+        memcpy(&forward->target_id, &query->target_id, sizeof(node_id_t));
+        forward->count = query->count;
+        forward->beta_numerator = query->beta_numerator;
+        forward->beta_denominator = query->beta_denominator;
+        forward->ttl = query->ttl - 1;
+        memcpy(forward->visited_bloom, query->visited_bloom, CLOSEST_NODES_MAX_VISITED);
+        forward->visited_count = query->visited_count;
+        closest_nodes_add_visited(forward->visited_bloom, &forward->visited_count,
+                                  network->authority->local_id.hash);
+        memcpy(forward->path, query->path, query->path_len * sizeof(node_id_t));
+        forward->path_len = query->path_len;
+        if (forward->path_len < CLOSEST_NODES_MAX_PATH) {
+          memcpy(&forward->path[forward->path_len], &network->authority->local_id, sizeof(node_id_t));
+          forward->path_len++;
+        }
+        forward->start_time = query->start_time;
+        memcpy(&forward->original_source, &query->original_source, sizeof(node_id_t));
+
+        peer_connection_t* next_peer = connection_manager_lookup(
+            &network->conn_mgr, &next_hops[hop]->id);
+        if (next_peer != NULL) {
+          cbor_item_t* cbor = wire_closest_nodes_encode(forward);
+          conn_state_send(network, next_peer, cbor);
+          cbor_decref(&cbor);
+        }
+        free(forward);
+
+        if (network->log != NULL) {
+          message_log_record(network->log, WIRE_CLOSEST_NODES, MSG_DIRECTION_FORWARDED,
+                             &next_hops[hop]->id, query->message_id, NULL,
+                             1, &network->hebbian);
+        }
+      }
+      break;
+    }
+
+    case CLOSEST_NODES_TTL_EXPIRED:
+    case CLOSEST_NODES_NOT_FOUND: {
+      // Send NOT_FOUND response back along the path
+      const node_id_t* reply_to = &query->original_source;
+      if (query->path_len > 0) {
+        reply_to = &query->path[query->path_len - 1];
+      }
+      peer_connection_t* reply_peer = connection_manager_lookup(&network->conn_mgr, reply_to);
+      if (reply_peer != NULL) {
+        wire_closest_nodes_response_t response;
+        memset(&response, 0, sizeof(response));
+        response.message_id = query->message_id;
+        memcpy(&response.sender_id, &network->authority->local_id, sizeof(node_id_t));
+        memcpy(&response.target_id, &query->target_id, sizeof(node_id_t));
+        response.found = 0;
+        memcpy(response.path, query->path, query->path_len * sizeof(node_id_t));
+        response.path_len = query->path_len;
+
+        cbor_item_t* cbor = wire_closest_nodes_response_encode(&response);
+        conn_state_send(network, reply_peer, cbor);
+        cbor_decref(&cbor);
+
+        if (network->log != NULL) {
+          message_log_record(network->log, WIRE_CLOSEST_NODES_RESPONSE, MSG_DIRECTION_SENT,
+                             reply_to, query->message_id, NULL,
+                             2, &network->hebbian);
+        }
+      }
+      break;
+    }
+  }
+}
+
+// --- ClosestNodes response handler ---
+// Receive WIRE_CLOSEST_NODES_RESPONSE: update latency cache and forward along path or deliver locally.
+
+static void network_handle_closest_nodes_response(network_t* network, message_t* msg) {
+  wire_closest_nodes_response_t* response = (wire_closest_nodes_response_t*)msg->payload;
+  if (response == NULL) return;
+
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_CLOSEST_NODES_RESPONSE, MSG_DIRECTION_RECEIVED,
+                       &response->sender_id, response->message_id, NULL,
+                       response->found ? 0 : 2, &network->hebbian);
+  }
+
+  // Update latency cache with ring sample latencies
+  for (uint8_t index = 0; index < response->ring_count && index < CLOSEST_NODES_MAX_RING_SAMPLES; index++) {
+    if (response->ring_latencies_us[index] > 0) {
+      float latency_ms = (float)response->ring_latencies_us[index] / 1000.0f;
+      latency_cache_insert(network->latency_cache, &response->ring_nodes[index],
+                           0, 0, latency_ms);
+    }
+  }
+
+  if (response->found && response->closest_latency_us > 0) {
+    // Also update latency for the closest node
+    float latency_ms = (float)response->closest_latency_us / 1000.0f;
+    latency_cache_insert(network->latency_cache, &response->closest,
+                         0, 0, latency_ms);
+  }
+
+  // Forward response along the path (pop the last hop to route back)
+  if (response->path_len > 0) {
+    // The last node in the path is the next hop toward the origin
+    const node_id_t* next_hop = &response->path[response->path_len - 1];
+    peer_connection_t* reply_peer = connection_manager_lookup(&network->conn_mgr, next_hop);
+    if (reply_peer != NULL) {
+      // Remove our hop from the path before forwarding
+      wire_closest_nodes_response_t forward;
+      memset(&forward, 0, sizeof(forward));
+      forward.message_id = response->message_id;
+      memcpy(&forward.sender_id, &response->sender_id, sizeof(node_id_t));
+      memcpy(&forward.target_id, &response->target_id, sizeof(node_id_t));
+      forward.found = response->found;
+      memcpy(&forward.closest, &response->closest, sizeof(node_id_t));
+      forward.closest_latency_us = response->closest_latency_us;
+      memcpy(forward.path, response->path, (response->path_len - 1) * sizeof(node_id_t));
+      forward.path_len = response->path_len - 1;
+      forward.latency_us = response->latency_us;
+      memcpy(forward.ring_nodes, response->ring_nodes,
+             response->ring_count * sizeof(node_id_t));
+      memcpy(forward.ring_latencies_us, response->ring_latencies_us,
+             response->ring_count * sizeof(uint32_t));
+      forward.ring_count = response->ring_count;
+
+      cbor_item_t* cbor = wire_closest_nodes_response_encode(&forward);
+      conn_state_send(network, reply_peer, cbor);
+      cbor_decref(&cbor);
+    }
+  } else {
+    // We are the origin — deliver result to local stream
+    network_closest_nodes_result_payload_t* result =
+        get_clear_memory(sizeof(network_closest_nodes_result_payload_t));
+    if (result != NULL) {
+      result->found = response->found;
+      memcpy(&result->closest, &response->closest, sizeof(node_id_t));
+      result->closest_latency_us = response->closest_latency_us;
+      result->ring_count = response->ring_count;
+      if (result->ring_count > CLOSEST_NODES_MAX_RING_SAMPLES_MSG) {
+        result->ring_count = CLOSEST_NODES_MAX_RING_SAMPLES_MSG;
+      }
+      memcpy(result->ring_nodes, response->ring_nodes, result->ring_count * sizeof(node_id_t));
+      memcpy(result->ring_latencies_us, response->ring_latencies_us,
+             result->ring_count * sizeof(uint32_t));
+      // No reply_to in the response path case — the origin's local
+      // query table lookup will happen separately. Free the unused result.
+      free(result);
+    }
+  }
+}
+
+// --- MeasureNodes handler ---
+// Receive WIRE_MEASURE_NODES: look up latencies and send response back to sender.
+
+static void network_handle_measure_nodes(network_t* network, message_t* msg) {
+  wire_measure_nodes_t* measure = (wire_measure_nodes_t*)msg->payload;
+  if (measure == NULL) return;
+
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_MEASURE_NODES, MSG_DIRECTION_RECEIVED,
+                       &measure->sender_id, measure->message_id, NULL,
+                       0, &network->hebbian);
+  }
+
+  // Build response
+  wire_measure_nodes_response_t response;
+  memset(&response, 0, sizeof(response));
+  response.message_id = measure->message_id;
+  memcpy(&response.sender_id, &network->authority->local_id, sizeof(node_id_t));
+  response.target_count = (uint8_t)measure_nodes_execute(
+      network->latency_cache, measure, response.latencies_us);
+  memcpy(response.targets, measure->targets, measure->target_count * sizeof(node_id_t));
+
+  // Send response back to sender
+  peer_connection_t* sender_peer = connection_manager_lookup(&network->conn_mgr, &measure->sender_id);
+  if (sender_peer != NULL) {
+    cbor_item_t* cbor = wire_measure_nodes_response_encode(&response);
+    conn_state_send(network, sender_peer, cbor);
+    cbor_decref(&cbor);
+  }
+}
+
+// --- MeasureNodes response handler ---
+// Receive WIRE_MEASURE_NODES_RESPONSE: update latency cache with measured latencies.
+
+static void network_handle_measure_nodes_response(network_t* network, message_t* msg) {
+  wire_measure_nodes_response_t* response = (wire_measure_nodes_response_t*)msg->payload;
+  if (response == NULL) return;
+
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_MEASURE_NODES_RESPONSE, MSG_DIRECTION_RECEIVED,
+                       &response->sender_id, response->message_id, NULL,
+                       0, &network->hebbian);
+  }
+
+  // Update latency cache with each target/latency pair
+  for (uint8_t index = 0; index < response->target_count && index < MEASURE_NODES_MAX_TARGETS; index++) {
+    if (response->latencies_us[index] > 0) {
+      float latency_ms = (float)response->latencies_us[index] / 1000.0f;
+      latency_cache_insert(network->latency_cache, &response->targets[index],
+                           0, 0, latency_ms);
+    }
+  }
+}
+
+// --- ClosestNodes progress handler ---
+// Receive WIRE_CLOSEST_NODES_PROGRESS: log the progress update.
+
+static void network_handle_closest_nodes_progress(network_t* network, message_t* msg) {
+  wire_closest_nodes_progress_t* progress = (wire_closest_nodes_progress_t*)msg->payload;
+  if (progress == NULL) return;
+
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_CLOSEST_NODES_PROGRESS, MSG_DIRECTION_RECEIVED,
+                       &progress->sender_id, progress->message_id, NULL,
+                       0, &network->hebbian);
+  }
+
+  // Progress messages are informational only — no forwarding needed
+}
+
+// --- Local ClosestNodes handler ---
+// Stream requests closest-nodes query: initiate a WIRE_CLOSEST_NODES query.
+
+static void network_handle_local_closest_nodes(network_t* network, message_t* msg) {
+  network_local_closest_nodes_payload_t* payload =
+      (network_local_closest_nodes_payload_t*)msg->payload;
+  if (payload == NULL) return;
+
+  // Build wire message from local request
+  wire_closest_nodes_t wire_query;
+  memset(&wire_query, 0, sizeof(wire_query));
+  wire_query.message_id = (uint64_t)time(NULL) * 1000;
+  memcpy(&wire_query.sender_id, &network->authority->local_id, sizeof(node_id_t));
+  memcpy(&wire_query.target_id, &payload->target_id, sizeof(node_id_t));
+  wire_query.count = payload->count;
+  wire_query.beta_numerator = payload->beta_numerator;
+  wire_query.beta_denominator = payload->beta_denominator;
+  wire_query.ttl = CLOSEST_NODES_FORWARD_FANOUT;
+  closest_nodes_add_visited(wire_query.visited_bloom, &wire_query.visited_count,
+                            network->authority->local_id.hash);
+  memcpy(&wire_query.path[0], &network->authority->local_id, sizeof(node_id_t));
+  wire_query.path_len = 1;
+  wire_query.start_time = (uint64_t)time(NULL) * 1000;
+  memcpy(&wire_query.original_source, &network->authority->local_id, sizeof(node_id_t));
+
+  // Execute routing logic to find next hops
+  net_node_t* next_hops[CLOSEST_NODES_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  closest_nodes_result_e result = closest_nodes_execute(
+      &network->eabf_table, &network->eabf_ttl, &network->conn_mgr,
+      network->rings, network->latency_cache, &network->authority->local_id,
+      &wire_query, next_hops, &next_hop_count);
+
+  if (result == CLOSEST_NODES_FOUND) {
+    // We are the closest — deliver result immediately
+    network_closest_nodes_result_payload_t* cn_result =
+        get_clear_memory(sizeof(network_closest_nodes_result_payload_t));
+    if (cn_result != NULL) {
+      cn_result->found = 1;
+      memcpy(&cn_result->closest, &network->authority->local_id, sizeof(node_id_t));
+      cn_result->closest_latency_us = 0;
+      cn_result->ring_count = (uint8_t)closest_nodes_select_ring_samples(
+          network->rings, &network->authority->local_id,
+          cn_result->ring_nodes, cn_result->ring_latencies_us,
+          CLOSEST_NODES_MAX_RING_SAMPLES_MSG);
+      cn_result->reply_to = payload->reply_to;
+
+      message_t result_msg = {0};
+      result_msg.type = NETWORK_CLOSEST_NODES_RESULT;
+      result_msg.payload = cn_result;
+      result_msg.payload_destroy = network_closest_nodes_result_payload_destroy;
+      actor_send(payload->reply_to, &result_msg);
+    }
+  } else if (result == CLOSEST_NODES_FORWARDING) {
+    // Forward to next hops
+    for (size_t hop = 0; hop < next_hop_count; hop++) {
+      peer_connection_t* peer = connection_manager_lookup(
+          &network->conn_mgr, &next_hops[hop]->id);
+      if (peer != NULL) {
+        cbor_item_t* cbor = wire_closest_nodes_encode(&wire_query);
+        conn_state_send(network, peer, cbor);
+        cbor_decref(&cbor);
+
+        if (network->log != NULL) {
+          message_log_record(network->log, WIRE_CLOSEST_NODES, MSG_DIRECTION_SENT,
+                             &next_hops[hop]->id, wire_query.message_id, NULL,
+                             0, &network->hebbian);
+        }
+      }
+    }
+  } else {
+    // Not found — send failure result to local stream
+    network_closest_nodes_result_payload_t* cn_result =
+        get_clear_memory(sizeof(network_closest_nodes_result_payload_t));
+    if (cn_result != NULL) {
+      cn_result->found = 0;
+      cn_result->reply_to = payload->reply_to;
+
+      message_t result_msg = {0};
+      result_msg.type = NETWORK_CLOSEST_NODES_RESULT;
+      result_msg.payload = cn_result;
+      result_msg.payload_destroy = network_closest_nodes_result_payload_destroy;
+      actor_send(payload->reply_to, &result_msg);
+    }
+  }
 }
 
 static void network_handle_gossip_expire(network_t* network, message_t* msg) {
@@ -2503,6 +2903,66 @@ void network_dispatch(void* state, message_t* msg) {
           }
           break;
         }
+        case WIRE_CLOSEST_NODES: {
+          wire_closest_nodes_t* payload = get_clear_memory(sizeof(wire_closest_nodes_t));
+          if (payload != NULL) {
+            if (wire_closest_nodes_decode(wire_msg, payload) == 0) {
+              dispatch_msg.payload = payload;
+              network_handle_closest_nodes(network, &dispatch_msg);
+            } else {
+              free(payload);
+            }
+          }
+          break;
+        }
+        case WIRE_CLOSEST_NODES_RESPONSE: {
+          wire_closest_nodes_response_t* payload = get_clear_memory(sizeof(wire_closest_nodes_response_t));
+          if (payload != NULL) {
+            if (wire_closest_nodes_response_decode(wire_msg, payload) == 0) {
+              dispatch_msg.payload = payload;
+              network_handle_closest_nodes_response(network, &dispatch_msg);
+            } else {
+              free(payload);
+            }
+          }
+          break;
+        }
+        case WIRE_MEASURE_NODES: {
+          wire_measure_nodes_t* payload = get_clear_memory(sizeof(wire_measure_nodes_t));
+          if (payload != NULL) {
+            if (wire_measure_nodes_decode(wire_msg, payload) == 0) {
+              dispatch_msg.payload = payload;
+              network_handle_measure_nodes(network, &dispatch_msg);
+            } else {
+              free(payload);
+            }
+          }
+          break;
+        }
+        case WIRE_MEASURE_NODES_RESPONSE: {
+          wire_measure_nodes_response_t* payload = get_clear_memory(sizeof(wire_measure_nodes_response_t));
+          if (payload != NULL) {
+            if (wire_measure_nodes_response_decode(wire_msg, payload) == 0) {
+              dispatch_msg.payload = payload;
+              network_handle_measure_nodes_response(network, &dispatch_msg);
+            } else {
+              free(payload);
+            }
+          }
+          break;
+        }
+        case WIRE_CLOSEST_NODES_PROGRESS: {
+          wire_closest_nodes_progress_t* payload = get_clear_memory(sizeof(wire_closest_nodes_progress_t));
+          if (payload != NULL) {
+            if (wire_closest_nodes_progress_decode(wire_msg, payload) == 0) {
+              dispatch_msg.payload = payload;
+              network_handle_closest_nodes_progress(network, &dispatch_msg);
+            } else {
+              free(payload);
+            }
+          }
+          break;
+        }
         default:
           break;
       }
@@ -2657,6 +3117,15 @@ void network_dispatch(void* state, message_t* msg) {
     }
     case NETWORK_STORE_BLOCK_RESULT: {
       // Network returns StoreBlock result to stream
+      // Handled by stream actor — dispatch routes to reply_to
+      break;
+    }
+    case NETWORK_LOCAL_CLOSEST_NODES: {
+      network_handle_local_closest_nodes(network, msg);
+      break;
+    }
+    case NETWORK_CLOSEST_NODES_RESULT: {
+      // Network returns ClosestNodes result to stream
       // Handled by stream actor — dispatch routes to reply_to
       break;
     }
@@ -2955,6 +3424,66 @@ void network_dispatch(void* state, message_t* msg) {
               if (wire_gossip_pull_decode(wire_msg, payload) == 0) {
                 dispatch_msg.payload = payload;
                 network_handle_gossip_pull_received(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_CLOSEST_NODES: {
+            wire_closest_nodes_t* payload = get_clear_memory(sizeof(wire_closest_nodes_t));
+            if (payload != NULL) {
+              if (wire_closest_nodes_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_closest_nodes(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_CLOSEST_NODES_RESPONSE: {
+            wire_closest_nodes_response_t* payload = get_clear_memory(sizeof(wire_closest_nodes_response_t));
+            if (payload != NULL) {
+              if (wire_closest_nodes_response_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_closest_nodes_response(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_MEASURE_NODES: {
+            wire_measure_nodes_t* payload = get_clear_memory(sizeof(wire_measure_nodes_t));
+            if (payload != NULL) {
+              if (wire_measure_nodes_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_measure_nodes(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_MEASURE_NODES_RESPONSE: {
+            wire_measure_nodes_response_t* payload = get_clear_memory(sizeof(wire_measure_nodes_response_t));
+            if (payload != NULL) {
+              if (wire_measure_nodes_response_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_measure_nodes_response(network, &dispatch_msg);
+              } else {
+                free(payload);
+              }
+            }
+            break;
+          }
+          case WIRE_CLOSEST_NODES_PROGRESS: {
+            wire_closest_nodes_progress_t* payload = get_clear_memory(sizeof(wire_closest_nodes_progress_t));
+            if (payload != NULL) {
+              if (wire_closest_nodes_progress_decode(wire_msg, payload) == 0) {
+                dispatch_msg.payload = payload;
+                network_handle_closest_nodes_progress(network, &dispatch_msg);
               } else {
                 free(payload);
               }

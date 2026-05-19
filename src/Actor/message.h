@@ -6,6 +6,10 @@
 #define OFFS_MESSAGE_H
 
 #include <stdint.h>
+#include "../Network/node_id.h"
+
+/* Maximum ring samples included in ClosestNodes results */
+#define CLOSEST_NODES_MAX_RING_SAMPLES_MSG 8
 
 /* Forward declarations for payload structs — avoids circular include with actor.h */
 typedef struct buffer_t buffer_t;
@@ -152,6 +156,14 @@ typedef enum message_type_e {
   NETWORK_FIND_BLOCK_RESULT,      /* Network actor sends this back to stream */
   NETWORK_LOCAL_STORE_BLOCK,      /* Stream sends this to network actor on CACHE_PUT_NEW */
   NETWORK_STORE_BLOCK_RESULT,     /* Network actor sends this back to stream */
+  /* Closest-N protocol messages */
+  NETWORK_CLOSEST_NODES,
+  NETWORK_CLOSEST_NODES_RESPONSE,
+  NETWORK_MEASURE_NODES,
+  NETWORK_MEASURE_NODES_RESPONSE,
+  NETWORK_CLOSEST_NODES_PROGRESS,
+  NETWORK_LOCAL_CLOSEST_NODES,
+  NETWORK_CLOSEST_NODES_RESULT,
 } message_type_e;
 
 /* Stream-to-network: request block from peers */
@@ -182,6 +194,30 @@ typedef struct {
   uint32_t  replicas;   /* number of replicas stored */
   actor_t*  reply_to;   /* NULL for fire-and-forget */
 } network_store_block_result_payload_t;
+
+/* Stream-to-network: request closest nodes query */
+typedef struct {
+  node_id_t target_id;      /* target node to find closest peers for */
+  uint8_t count;            /* number of closest nodes requested */
+  uint16_t beta_numerator;  /* beta convergence numerator */
+  uint16_t beta_denominator; /* beta convergence denominator */
+  actor_t*  reply_to;        /* stream actor to notify */
+} network_local_closest_nodes_payload_t;
+
+void network_local_closest_nodes_payload_destroy(void* ptr);
+
+/* Network-to-stream: result of ClosestNodes */
+typedef struct {
+  uint8_t found;             /* 1 = found closest, 0 = not found */
+  node_id_t closest;         /* closest node found */
+  uint32_t closest_latency_us; /* latency to closest node */
+  node_id_t ring_nodes[CLOSEST_NODES_MAX_RING_SAMPLES_MSG];
+  uint32_t ring_latencies_us[CLOSEST_NODES_MAX_RING_SAMPLES_MSG];
+  uint8_t ring_count;
+  actor_t*  reply_to;        /* stream actor to notify */
+} network_closest_nodes_result_payload_t;
+
+void network_closest_nodes_result_payload_destroy(void* ptr);
 
 typedef struct message_t {
   uint32_t type;

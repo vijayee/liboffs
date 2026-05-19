@@ -33,6 +33,8 @@
 #ifdef OFFS_TEST
 #include "../src/Network/message_log.h"
 #include "../src/Network/wire.h"
+#include "../src/Network/closest_nodes.h"
+#include "../src/Network/measure_nodes.h"
 #endif
 #include <stdio.h>
 #include <stdlib.h>
@@ -782,6 +784,100 @@ static void handle_hebbian_cmd(int client_fd) {
 
   send_response(client_fd, response);
 }
+
+static void handle_closest_nodes_cmd(int client_fd, const char* target_id_str) {
+  if (g_node.network == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " no network");
+    return;
+  }
+
+  node_id_t target_id;
+  memset(&target_id, 0, sizeof(target_id));
+  if (node_id_from_string((char*)target_id_str, &target_id) != 0) {
+    send_response(client_fd, CTRL_RESP_ERROR " invalid node_id");
+    return;
+  }
+
+  network_local_closest_nodes_payload_t* payload =
+      get_clear_memory(sizeof(network_local_closest_nodes_payload_t));
+  if (payload == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " allocation failed");
+    return;
+  }
+  memcpy(&payload->target_id, &target_id, sizeof(node_id_t));
+  payload->count = 3;
+  payload->beta_numerator = 3;
+  payload->beta_denominator = 4;
+  payload->reply_to = &g_node.network->actor;
+
+  message_t msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.type = NETWORK_LOCAL_CLOSEST_NODES;
+  msg.payload = payload;
+  msg.payload_destroy = network_local_closest_nodes_payload_destroy;
+
+  actor_send(&g_node.network->actor, &msg);
+
+  char response[128];
+  snprintf(response, sizeof(response), "%s closest_nodes_injected",
+           CTRL_RESP_OK);
+  send_response(client_fd, response);
+}
+
+static void handle_measure_nodes_cmd(int client_fd, const char* args) {
+  if (g_node.network == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " no network");
+    return;
+  }
+
+  /* Parse space-separated target node_id strings */
+  wire_measure_nodes_t* payload = get_clear_memory(sizeof(wire_measure_nodes_t));
+  if (payload == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " allocation failed");
+    return;
+  }
+
+  memcpy(&payload->sender_id, &g_node.network->authority->local_id, sizeof(node_id_t));
+  payload->message_id = (uint64_t)(time(NULL)) ^ ((uint64_t)rand() << 32);
+  payload->probe_type = 0;
+  payload->target_count = 0;
+
+  /* Parse target node IDs from space-separated string */
+  char args_copy[512];
+  strncpy(args_copy, args, sizeof(args_copy) - 1);
+  args_copy[sizeof(args_copy) - 1] = '\0';
+
+  char* saveptr = NULL;
+  char* token = strtok_r(args_copy, " ", &saveptr);
+  while (token != NULL && payload->target_count < MEASURE_NODES_MAX_TARGETS) {
+    node_id_t target_id;
+    memset(&target_id, 0, sizeof(target_id));
+    if (node_id_from_string(token, &target_id) == 0) {
+      memcpy(&payload->targets[payload->target_count], &target_id, sizeof(node_id_t));
+      payload->target_count++;
+    }
+    token = strtok_r(NULL, " ", &saveptr);
+  }
+
+  if (payload->target_count == 0) {
+    free(payload);
+    send_response(client_fd, CTRL_RESP_ERROR " no valid target node_ids");
+    return;
+  }
+
+  message_t msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.type = NETWORK_MEASURE_NODES;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+
+  actor_send(&g_node.network->actor, &msg);
+
+  char response[128];
+  snprintf(response, sizeof(response), "%s measure_nodes_injected",
+           CTRL_RESP_OK);
+  send_response(client_fd, response);
+}
 #endif // OFFS_TEST
 
 /* ---- Command dispatcher ---- */
@@ -1050,6 +1146,20 @@ static void handle_command(int client_fd, char* line) {
     } else {
       send_response(client_fd, CTRL_RESP_ERROR " no network");
     }
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
+  } else if (strncmp(line, CTRL_CLOSEST_NODES " ",
+                strlen(CTRL_CLOSEST_NODES) + 1) == 0) {
+#ifdef OFFS_TEST
+    handle_closest_nodes_cmd(client_fd, line + strlen(CTRL_CLOSEST_NODES) + 1);
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
+  } else if (strncmp(line, CTRL_MEASURE_NODES " ",
+                strlen(CTRL_MEASURE_NODES) + 1) == 0) {
+#ifdef OFFS_TEST
+    handle_measure_nodes_cmd(client_fd, line + strlen(CTRL_MEASURE_NODES) + 1);
 #else
     send_response(client_fd, CTRL_RESP_ERROR " not available");
 #endif
