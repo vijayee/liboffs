@@ -1299,6 +1299,12 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         if (find->path_len > 0) {
           reply_to = &find->path[find->path_len - 1];
         }
+        // Hebbian: holder strengthens weight toward predecessor
+        {
+          float delta_w = hebbian_compute_delta(GOSSIP_TIMEOUT_MS, HEBBIAN_FIND_BLOCK_MULTIPLIER);
+          hebbian_frequency(&network->hebbian, reply_to, delta_w);
+          network_sync_hebbian_to_rings(network);
+        }
         peer_connection_t* reply_peer = connection_manager_lookup(&network->conn_mgr, reply_to);
         if (reply_peer != NULL) {
           wire_find_block_response_t found_resp;
@@ -1308,8 +1314,13 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
           found_resp.found = 1;
           memcpy(&found_resp.holder, &network->authority->local_id, sizeof(node_id_t));
           found_resp.fib = entry->counter.fib;
+          // Build response path: incoming path + self (holder)
           memcpy(found_resp.path, find->path, find->path_len * sizeof(node_id_t));
           found_resp.path_len = find->path_len;
+          if (found_resp.path_len < WIRE_MAX_PATH) {
+            memcpy(&found_resp.path[found_resp.path_len], &network->authority->local_id, sizeof(node_id_t));
+            found_resp.path_len++;
+          }
           found_resp.latency_ms = 0;
 
           /* Include block data from LRU cache so the requester can store it */
@@ -1449,8 +1460,12 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
           peer_eabf_subscribe(peer, state.block_hash, 32);
         }
       }
-      // Add self to visited bloom
+      // Add self to visited bloom and path
       find_block_add_visited(state.visited_bloom, &state.visited_count, network->authority->local_id.hash);
+      if (state.path_len < FIND_BLOCK_MAX_PATH) {
+        memcpy(&state.path[state.path_len], &network->authority->local_id, sizeof(node_id_t));
+        state.path_len++;
+      }
       // Decrement TTL
       state.ttl--;
 
@@ -1527,6 +1542,32 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
       peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &response->path[index + 1]);
       if (peer != NULL) {
         peer_eabf_subscribe(peer, response->block_hash, 32);
+      }
+    }
+
+    // Relay found response upstream if we are an intermediate hop.
+    // Find self in the path; if we're not the first node, relay to predecessor.
+    {
+      int self_index = -1;
+      for (int index = 0; index < (int)response->path_len; index++) {
+        if (node_id_equals(&response->path[index], &network->authority->local_id)) {
+          self_index = index;
+          break;
+        }
+      }
+      if (self_index > 0) {
+        const node_id_t* predecessor = &response->path[self_index - 1];
+        peer_connection_t* relay_peer = connection_manager_lookup(&network->conn_mgr, predecessor);
+        if (relay_peer != NULL) {
+          cbor_item_t* cbor = wire_find_block_response_encode(response);
+          conn_state_send(network, relay_peer, cbor);
+          cbor_decref(&cbor);
+          if (network->log != NULL) {
+            message_log_record(network->log, WIRE_FIND_BLOCK_RESPONSE, MSG_DIRECTION_FORWARDED,
+                               predecessor, response->message_id, response->block_hash,
+                               2, &network->hebbian);
+          }
+        }
       }
     }
 
