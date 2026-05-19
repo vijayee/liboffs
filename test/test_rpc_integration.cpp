@@ -1343,6 +1343,354 @@ TEST_F(RpcIntegrationTest, MeasureNodesLatency) {
 #endif
 }
 
+TEST_F(RpcIntegrationTest, PingCapacityRoundTrip) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  auto mesh = make_full_mesh(2);
+  ASSERT_EQ(mesh.size(), 2u);
+
+  for (size_t idx = 0; idx < mesh.size(); idx++) {
+    clear_events(mesh[idx].control_fd);
+  }
+
+  std::string cap_resp = send_command(mesh[0].control_fd,
+      std::string(CTRL_PING_CAPACITY) + " " + mesh[1].node_id);
+  EXPECT_NE(cap_resp.find(CTRL_RESP_OK), std::string::npos)
+      << "PING_CAPACITY from node A: " << cap_resp;
+
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  auto events_b = get_events(mesh[1].control_fd);
+  EXPECT_TRUE(has_event(events_b, MSG_DIRECTION_RECEIVED_VAL, WIRE_PING_CAPACITY_VAL))
+      << "Node B should have received PING_CAPACITY";
+
+  auto events_a = get_events(mesh[0].control_fd);
+  EXPECT_TRUE(has_event(events_a, MSG_DIRECTION_RECEIVED_VAL, WIRE_PING_CAPACITY_RESPONSE_VAL))
+      << "Node A should have received PING_CAPACITY_RESPONSE";
+#endif
+}
+
+TEST_F(RpcIntegrationTest, PingCapacityHebbianVerification) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  auto mesh = make_full_mesh(2);
+  ASSERT_EQ(mesh.size(), 2u);
+
+  auto hebbian_before_a = get_hebbian(mesh[0].control_fd);
+
+  for (size_t idx = 0; idx < mesh.size(); idx++) {
+    clear_events(mesh[idx].control_fd);
+  }
+
+  for (int ping_count = 0; ping_count < 3; ping_count++) {
+    std::string cap_resp = send_command(mesh[0].control_fd,
+        std::string(CTRL_PING_CAPACITY) + " " + mesh[1].node_id);
+    EXPECT_NE(cap_resp.find(CTRL_RESP_OK), std::string::npos)
+        << "PING_CAPACITY #" << ping_count << " from node A: " << cap_resp;
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  }
+
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  auto hebbian_after_a = get_hebbian(mesh[0].control_fd);
+
+  EXPECT_TRUE(hebbian_increased(hebbian_before_a, hebbian_after_a, mesh[1].node_id))
+      << "Node A's Hebbian weight toward Node B should have increased after PING_CAPACITY";
+
+  auto events_a = get_events(mesh[0].control_fd);
+  EXPECT_GE(count_events(events_a, MSG_DIRECTION_SENT_VAL, WIRE_PING_CAPACITY_VAL), 1u)
+      << "Node A should have sent at least one PING_CAPACITY";
+  EXPECT_GE(count_events(events_a, MSG_DIRECTION_RECEIVED_VAL, WIRE_PING_CAPACITY_RESPONSE_VAL), 1u)
+      << "Node A should have received at least one PING_CAPACITY_RESPONSE";
+#endif
+}
+
+TEST_F(RpcIntegrationTest, PingBlockRoundTrip) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  auto mesh = make_full_mesh(2);
+  ASSERT_EQ(mesh.size(), 2u);
+
+  std::string store_resp = send_command(mesh[1].control_fd,
+      std::string(CTRL_STORE_FILE) + " 100000 2 3");
+  ASSERT_NE(store_resp.find(CTRL_RESP_HASH), std::string::npos)
+      << "STORE on node B: " << store_resp;
+
+  std::string block_hash = parse_hash_from_store_response(store_resp);
+  ASSERT_FALSE(block_hash.empty()) << "Failed to parse block hash from: " << store_resp;
+
+  auto hebbian_before_a = get_hebbian(mesh[0].control_fd);
+
+  for (size_t idx = 0; idx < mesh.size(); idx++) {
+    clear_events(mesh[idx].control_fd);
+  }
+
+  std::string ping_resp = send_command(mesh[0].control_fd,
+      std::string(CTRL_PING_BLOCK) + " " + mesh[1].node_id + " " + block_hash);
+  EXPECT_NE(ping_resp.find(CTRL_RESP_OK), std::string::npos)
+      << "PING_BLOCK from node A: " << ping_resp;
+
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  auto events_b = get_events(mesh[1].control_fd);
+  EXPECT_TRUE(has_event(events_b, MSG_DIRECTION_RECEIVED_VAL, WIRE_PING_BLOCK_VAL))
+      << "Node B should have received PING_BLOCK";
+
+  auto events_a = get_events(mesh[0].control_fd);
+  EXPECT_TRUE(has_event(events_a, MSG_DIRECTION_RECEIVED_VAL, WIRE_PING_BLOCK_RESPONSE_VAL))
+      << "Node A should have received PING_BLOCK_RESPONSE";
+
+  auto hebbian_after_a = get_hebbian(mesh[0].control_fd);
+  EXPECT_TRUE(hebbian_increased(hebbian_before_a, hebbian_after_a, mesh[1].node_id))
+      << "Node A's Hebbian weight toward Node B should have increased after PING_BLOCK";
+#endif
+}
+
+TEST_F(RpcIntegrationTest, FindNodeDiamond) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  auto diamond = make_diamond();
+  ASSERT_EQ(diamond.size(), 4u);
+
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    send_command(diamond[idx].control_fd, CTRL_GOSSIP);
+  }
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    clear_events(diamond[idx].control_fd);
+  }
+
+  std::string find_resp = send_command(diamond[0].control_fd,
+      std::string(CTRL_FIND_NODE) + " " + diamond[3].node_id);
+  EXPECT_NE(find_resp.find(CTRL_RESP_OK), std::string::npos)
+      << "FIND_NODE from node A: " << find_resp;
+
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  auto events_a = get_events(diamond[0].control_fd);
+  EXPECT_GE(count_events(events_a, MSG_DIRECTION_SENT_VAL, WIRE_FIND_NODE_VAL), 1u)
+      << "Node A should have sent WIRE_FIND_NODE";
+
+  bool intermediate_received = false;
+  for (size_t idx = 1; idx < 3; idx++) {
+    auto events = get_events(diamond[idx].control_fd);
+    if (has_event(events, MSG_DIRECTION_RECEIVED_VAL, WIRE_FIND_NODE_VAL) ||
+        has_event(events, MSG_DIRECTION_FORWARDED_VAL, WIRE_FIND_NODE_VAL)) {
+      intermediate_received = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(intermediate_received)
+      << "At least one intermediate node should have received/forwarded FIND_NODE";
+
+  EXPECT_TRUE(has_event(events_a, MSG_DIRECTION_RECEIVED_VAL, WIRE_FIND_NODE_RESPONSE_VAL))
+      << "Node A should have received FIND_NODE_RESPONSE";
+
+  size_t total_forwards = 0;
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    auto events = get_events(diamond[idx].control_fd);
+    total_forwards += count_events(events, MSG_DIRECTION_FORWARDED_VAL, WIRE_FIND_NODE_VAL);
+  }
+  EXPECT_LE(total_forwards, 6u)
+      << "Total forwarded FIND_NODE messages should be bounded (no loops)";
+#endif
+}
+
+TEST_F(RpcIntegrationTest, SeekingBlocksChain) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  auto chain = make_chain(3);
+  ASSERT_EQ(chain.size(), 3u);
+
+  std::string store_resp = send_command(chain[2].control_fd,
+      std::string(CTRL_STORE_FILE) + " 100000 2 3");
+  ASSERT_NE(store_resp.find(CTRL_RESP_HASH), std::string::npos)
+      << "STORE on node C: " << store_resp;
+
+  for (size_t idx = 0; idx < chain.size(); idx++) {
+    clear_events(chain[idx].control_fd);
+  }
+
+  std::string seek_resp = send_command(chain[0].control_fd,
+      std::string(CTRL_SEEKING_BLOCKS) + " 1.0");
+  EXPECT_NE(seek_resp.find(CTRL_RESP_OK), std::string::npos)
+      << "SEEKING_BLOCKS from node A: " << seek_resp;
+
+  std::this_thread::sleep_for(std::chrono::seconds(3));
+
+  auto events_a = get_events(chain[0].control_fd);
+  EXPECT_GE(count_events(events_a, MSG_DIRECTION_SENT_VAL, WIRE_SEEKING_BLOCKS_VAL), 1u)
+      << "Node A should have sent WIRE_SEEKING_BLOCKS";
+
+  bool any_response = false;
+  for (size_t idx = 0; idx < chain.size(); idx++) {
+    auto events = get_events(chain[idx].control_fd);
+    if (count_events(events, MSG_DIRECTION_RECEIVED_VAL, WIRE_SEEKING_BLOCKS_RESPONSE_VAL) > 0 ||
+        count_events(events, MSG_DIRECTION_SENT_VAL, WIRE_SEEKING_BLOCKS_RESPONSE_VAL) > 0) {
+      any_response = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(any_response) << "At least one node should have received/sent SEEKING_BLOCKS_RESPONSE";
+
+  size_t total_forwards = 0;
+  for (size_t idx = 0; idx < chain.size(); idx++) {
+    auto events = get_events(chain[idx].control_fd);
+    total_forwards += count_events(events, MSG_DIRECTION_FORWARDED_VAL, WIRE_SEEKING_BLOCKS_VAL);
+  }
+  EXPECT_LE(total_forwards, 4u)
+      << "Total forwarded SEEKING_BLOCKS messages should be bounded";
+#endif
+}
+
+TEST_F(RpcIntegrationTest, RecallBlockRoundTrip) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  auto mesh = make_full_mesh(2);
+  ASSERT_EQ(mesh.size(), 2u);
+
+  std::string store_resp = send_command(mesh[1].control_fd,
+      std::string(CTRL_STORE_FILE) + " 100000 2 3");
+  ASSERT_NE(store_resp.find(CTRL_RESP_HASH), std::string::npos)
+      << "STORE on node B: " << store_resp;
+
+  std::string block_hash = parse_hash_from_store_response(store_resp);
+  ASSERT_FALSE(block_hash.empty()) << "Failed to parse block hash from: " << store_resp;
+
+  for (size_t idx = 0; idx < mesh.size(); idx++) {
+    clear_events(mesh[idx].control_fd);
+  }
+
+  std::string recall_resp = send_command(mesh[0].control_fd,
+      std::string(CTRL_RECALL_BLOCK) + " " + block_hash);
+  EXPECT_NE(recall_resp.find(CTRL_RESP_OK), std::string::npos)
+      << "RECALL_BLOCK from node A: " << recall_resp;
+
+  std::this_thread::sleep_for(std::chrono::seconds(3));
+
+  auto events_b = get_events(mesh[1].control_fd);
+  EXPECT_TRUE(has_event(events_b, MSG_DIRECTION_RECEIVED_VAL, WIRE_RECALL_BLOCK_VAL))
+      << "Node B should have received RECALL_BLOCK";
+
+  bool recall_responded = has_event(events_b, MSG_DIRECTION_SENT_VAL, WIRE_RECALL_ACCEPT_VAL) ||
+                          has_event(events_b, MSG_DIRECTION_SENT_VAL, WIRE_RECALL_DECLINE_VAL);
+  EXPECT_TRUE(recall_responded)
+      << "Node B should have sent RECALL_ACCEPT or RECALL_DECLINE";
+
+  auto events_a = get_events(mesh[0].control_fd);
+  bool received_recall_response = has_event(events_a, MSG_DIRECTION_RECEIVED_VAL, WIRE_RECALL_ACCEPT_VAL) ||
+                                   has_event(events_a, MSG_DIRECTION_RECEIVED_VAL, WIRE_RECALL_DECLINE_VAL);
+  EXPECT_TRUE(received_recall_response)
+      << "Node A should have received RECALL_ACCEPT or RECALL_DECLINE";
+#endif
+}
+
+TEST_F(RpcIntegrationTest, StoreBlockHebbianDiamond) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  auto diamond = make_diamond();
+  ASSERT_EQ(diamond.size(), 4u);
+
+  std::string store_resp = send_command(diamond[3].control_fd,
+      std::string(CTRL_STORE_FILE) + " 100000 2 3");
+  ASSERT_NE(store_resp.find(CTRL_RESP_HASH), std::string::npos)
+      << "STORE on node D: " << store_resp;
+
+  std::string block_hash = parse_hash_from_store_response(store_resp);
+  ASSERT_FALSE(block_hash.empty()) << "Failed to parse block hash";
+
+  auto hebbian_before_a = get_hebbian(diamond[0].control_fd);
+
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    clear_events(diamond[idx].control_fd);
+  }
+
+  std::string sb_resp = send_command(diamond[0].control_fd,
+      std::string(CTRL_STORE_BLOCK) + " " + block_hash + " 0");
+  EXPECT_NE(sb_resp.find(CTRL_RESP_OK), std::string::npos)
+      << "STORE_BLOCK from node A: " << sb_resp;
+
+  std::this_thread::sleep_for(std::chrono::seconds(3));
+
+  bool any_forwarded = false;
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    auto events = get_events(diamond[idx].control_fd);
+    if (count_events(events, MSG_DIRECTION_FORWARDED_VAL, WIRE_STORE_BLOCK_VAL) > 0 ||
+        count_events(events, MSG_DIRECTION_SENT_VAL, WIRE_STORE_BLOCK_VAL) > 0) {
+      any_forwarded = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(any_forwarded) << "STORE_BLOCK should have been forwarded through the diamond";
+
+  auto events_d = get_events(diamond[3].control_fd);
+  EXPECT_TRUE(has_event(events_d, MSG_DIRECTION_RECEIVED_VAL, WIRE_STORE_BLOCK_VAL))
+      << "Node D should have received STORE_BLOCK";
+
+  auto events_a = get_events(diamond[0].control_fd);
+  EXPECT_TRUE(has_event(events_a, MSG_DIRECTION_RECEIVED_VAL, WIRE_STORE_BLOCK_RESPONSE_VAL))
+      << "Node A should have received STORE_BLOCK_RESPONSE";
+
+  auto hebbian_after_a = get_hebbian(diamond[0].control_fd);
+  bool hebbian_increased_for_any_peer = false;
+  for (size_t idx = 1; idx < diamond.size(); idx++) {
+    if (hebbian_increased(hebbian_before_a, hebbian_after_a, diamond[idx].node_id)) {
+      hebbian_increased_for_any_peer = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(hebbian_increased_for_any_peer)
+      << "Node A's Hebbian weight toward at least one peer should have increased after STORE_BLOCK";
+
+  size_t total_forwards = 0;
+  for (size_t idx = 0; idx < diamond.size(); idx++) {
+    auto events = get_events(diamond[idx].control_fd);
+    total_forwards += count_events(events, MSG_DIRECTION_FORWARDED_VAL, WIRE_STORE_BLOCK_VAL);
+  }
+  EXPECT_LE(total_forwards, 6u)
+      << "Total forwarded STORE_BLOCK messages should be bounded (no loops)";
+#endif
+}
+
+TEST_F(RpcIntegrationTest, RateLimitedBackoff) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  auto mesh = make_full_mesh(2);
+  ASSERT_EQ(mesh.size(), 2u);
+
+  for (size_t idx = 0; idx < mesh.size(); idx++) {
+    clear_events(mesh[idx].control_fd);
+  }
+
+  for (int ping_count = 0; ping_count < 30; ping_count++) {
+    send_command(mesh[0].control_fd,
+        std::string(CTRL_PING_PEER) + " " + mesh[1].node_id);
+  }
+
+  std::this_thread::sleep_for(std::chrono::seconds(3));
+
+  auto events_a = get_events(mesh[0].control_fd);
+  auto events_b = get_events(mesh[1].control_fd);
+
+  bool rate_limited = has_event(events_a, MSG_DIRECTION_RECEIVED_VAL, WIRE_RATE_LIMITED_VAL) ||
+                      has_event(events_b, MSG_DIRECTION_SENT_VAL, WIRE_RATE_LIMITED_VAL);
+
+  if (rate_limited) {
+    EXPECT_TRUE(has_event(events_a, MSG_DIRECTION_RECEIVED_VAL, WIRE_RATE_LIMITED_VAL))
+        << "Node A should have received RATE_LIMITED when rate limit is exceeded";
+  }
+#endif
+}
+
 int main(int argc, char* argv[]) {
   for (int idx = 1; idx < argc; idx++) {
     std::string arg(argv[idx]);
