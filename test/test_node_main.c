@@ -1235,6 +1235,22 @@ static void handle_store_block_cmd(int client_fd, const char* args) {
   send_response(client_fd, response);
 }
 
+static void handle_set_capacity_cmd(int client_fd, const char* args) {
+  if (g_node.network == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " no network");
+    return;
+  }
+
+  float capacity = strtof(args, NULL);
+  if (capacity < 0.0f || capacity > 1.0f) {
+    send_response(client_fd, CTRL_RESP_ERROR " capacity must be 0.0-1.0");
+    return;
+  }
+
+  authority_update_capacity(g_node.network->authority, capacity);
+  send_response(client_fd, CTRL_RESP_OK);
+}
+
 #endif // OFFS_TEST
 
 /* ---- Command dispatcher ---- */
@@ -1559,6 +1575,13 @@ static void handle_command(int client_fd, char* line) {
                 strlen(CTRL_STORE_BLOCK) + 1) == 0) {
 #ifdef OFFS_TEST
     handle_store_block_cmd(client_fd, line + strlen(CTRL_STORE_BLOCK) + 1);
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
+  } else if (strncmp(line, CTRL_SET_CAPACITY " ",
+                strlen(CTRL_SET_CAPACITY) + 1) == 0) {
+#ifdef OFFS_TEST
+    handle_set_capacity_cmd(client_fd, line + strlen(CTRL_SET_CAPACITY) + 1);
 #else
     send_response(client_fd, CTRL_RESP_ERROR " not available");
 #endif
