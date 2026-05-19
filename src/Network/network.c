@@ -1783,6 +1783,21 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
         }
       }
 
+      // Apply Hebbian learning: the accepting node strengthens weight toward
+      // the immediate predecessor that sent this block
+      {
+        const node_id_t* predecessor = &store->path[0];
+        if (store->path_len > 0) {
+          predecessor = &store->path[store->path_len - 1];
+        }
+        uint64_t now_ms = (uint64_t)time(NULL) * 1000;
+        uint64_t latency_ms = (now_ms > state.start_time_ms)
+            ? (now_ms - state.start_time_ms) : 0;
+        float delta_w = hebbian_compute_delta((float)latency_ms, HEBBIAN_STORE_BLOCK_EXHALE_MULTIPLIER);
+        hebbian_frequency(&network->hebbian, predecessor, delta_w);
+        network_sync_hebbian_to_rings(network);
+      }
+
       // Respond with StoreBlockResponse(accepted=true) to the sender
       {
         wire_store_block_response_t accept_resp;
@@ -1941,6 +1956,33 @@ static void network_handle_store_block_response(network_t* network, message_t* m
       peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &response->path[index + 1]);
       if (peer != NULL) {
         peer_eabf_subscribe(peer, response->block_hash, 32);
+      }
+    }
+
+    // Relay accepted response upstream if we are an intermediate hop.
+    // Find self in the path; if we're not the first node, relay to our predecessor.
+    {
+      int self_index = -1;
+      for (int index = 0; index < (int)response->path_len; index++) {
+        if (node_id_equals(&response->path[index], &network->authority->local_id)) {
+          self_index = index;
+          break;
+        }
+      }
+      if (self_index > 0) {
+        // We are an intermediate hop — relay response to predecessor
+        const node_id_t* predecessor = &response->path[self_index - 1];
+        peer_connection_t* relay_peer = connection_manager_lookup(&network->conn_mgr, predecessor);
+        if (relay_peer != NULL) {
+          cbor_item_t* cbor = wire_store_block_response_encode(response);
+          conn_state_send(network, relay_peer, cbor);
+          cbor_decref(&cbor);
+          if (network->log != NULL) {
+            message_log_record(network->log, WIRE_STORE_BLOCK_RESPONSE, MSG_DIRECTION_FORWARDED,
+                               predecessor, response->message_id, response->block_hash,
+                               2, &network->hebbian);
+          }
+        }
       }
     }
 

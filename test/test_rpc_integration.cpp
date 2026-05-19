@@ -1635,6 +1635,8 @@ TEST_F(RpcIntegrationTest, StoreBlockHebbianDiamond) {
       << "SET_CAPACITY on node A: " << cap_resp;
 
   auto hebbian_before_a = get_hebbian(diamond[0].control_fd);
+  auto hebbian_before_b = get_hebbian(diamond[1].control_fd);
+  auto hebbian_before_c = get_hebbian(diamond[2].control_fd);
 
   for (size_t idx = 0; idx < diamond.size(); idx++) {
     clear_events(diamond[idx].control_fd);
@@ -1690,6 +1692,15 @@ TEST_F(RpcIntegrationTest, StoreBlockHebbianDiamond) {
   }
   EXPECT_TRUE(hebbian_increased_for_any_peer)
       << "Node A's Hebbian weight toward at least one peer should have increased after STORE_BLOCK";
+
+  // Intermediate nodes B and C should strengthen Hebbian weight toward A
+  // (the predecessor that sent the STORE_BLOCK) on acceptance
+  auto hebbian_after_b = get_hebbian(diamond[1].control_fd);
+  EXPECT_TRUE(hebbian_increased(hebbian_before_b, hebbian_after_b, diamond[0].node_id))
+      << "Node B's Hebbian weight toward A should have increased after accepting STORE_BLOCK";
+  auto hebbian_after_c = get_hebbian(diamond[2].control_fd);
+  EXPECT_TRUE(hebbian_increased(hebbian_before_c, hebbian_after_c, diamond[0].node_id))
+      << "Node C's Hebbian weight toward A should have increased after accepting STORE_BLOCK";
 
   // Verify forwarding is bounded (no loops via visited bloom filter)
   size_t total_forwards = 0;
