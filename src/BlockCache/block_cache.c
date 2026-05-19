@@ -293,6 +293,27 @@ void block_cache_dispatch(void* state, message_t* msg) {
       /* Save hash reference before block is destroyed in async path */
       buffer_t* result_hash = (buffer_t*)refcounter_reference((refcounter_t*)p->block->hash);
       index_entry_t* entry = index_peek(block_cache->index, p->block->hash);
+      /* Reject new blocks if cache is at capacity */
+      if (entry == NULL && block_cache->max_capacity_bytes > 0 &&
+          block_cache->current_bytes + (size_t)block_cache->type > block_cache->max_capacity_bytes) {
+        /* No room for a new block */
+        if (is_async) { block_destroy(p->block); p->block = NULL; }
+        DESTROY(result_hash, buffer);
+        p->result = CACHE_PUT_FULL;
+        if (p->reply_to != NULL) {
+          cache_put_result_payload_t* result = get_clear_memory(sizeof(cache_put_result_payload_t));
+          result->result = p->result;
+          result->fib = 0;
+          result->hash = NULL;
+          result->reply_to = NULL;
+          message_t reply;
+          reply.type = CACHE_PUT_RESULT;
+          reply.payload = result;
+          reply.payload_destroy = free;
+          actor_send(p->reply_to, &reply);
+        }
+        break;
+      }
       if (entry == NULL) {
         entry = index_entry_create(p->block->hash);
         /* Set incoming FIB on new entry (0 for local puts, network-provided for remote) */

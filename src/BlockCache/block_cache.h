@@ -43,6 +43,7 @@ index_entry_t* block_lru_cache_peek_entry(block_lru_cache_t* lru, buffer_t* hash
 #define CACHE_PUT_NEW         0   /* Block was newly stored */
 #define CACHE_PUT_EXISTS      1   /* Block already existed, no-op */
 #define CACHE_PUT_ERROR      -1   /* sections_write failed */
+#define CACHE_PUT_FULL       -2   /* Cache at capacity, cannot store */
 
 /* Payload for CACHE_PUT message.
    When reply_to is NULL (sync), result is filled by dispatch.
