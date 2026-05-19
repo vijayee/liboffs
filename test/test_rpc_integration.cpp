@@ -1593,7 +1593,7 @@ TEST_F(RpcIntegrationTest, RecallBlockRoundTrip) {
 #endif
 }
 
-TEST_F(RpcIntegrationTest, StoreBlockForwardingDiamond) {
+TEST_F(RpcIntegrationTest, StoreBlockHebbianDiamond) {
 #ifndef HAS_MSQUIC
   GTEST_SKIP() << "msquic not available";
 #else
@@ -1634,6 +1634,8 @@ TEST_F(RpcIntegrationTest, StoreBlockForwardingDiamond) {
   ASSERT_NE(cap_resp.find(CTRL_RESP_OK), std::string::npos)
       << "SET_CAPACITY on node A: " << cap_resp;
 
+  auto hebbian_before_a = get_hebbian(diamond[0].control_fd);
+
   for (size_t idx = 0; idx < diamond.size(); idx++) {
     clear_events(diamond[idx].control_fd);
   }
@@ -1671,6 +1673,24 @@ TEST_F(RpcIntegrationTest, StoreBlockForwardingDiamond) {
   EXPECT_TRUE(intermediate_received)
       << "At least one intermediate node (B or C) should have received STORE_BLOCK";
 
+  // Node A should receive STORE_BLOCK_RESPONSE(accepted=1) from accepting peers
+  auto events_a = get_events(diamond[0].control_fd);
+  EXPECT_TRUE(has_event(events_a, MSG_DIRECTION_RECEIVED_VAL, WIRE_STORE_BLOCK_RESPONSE_VAL))
+      << "Node A should have received STORE_BLOCK_RESPONSE";
+
+  // Hebbian weight should increase toward at least one peer after
+  // receiving an accepted STORE_BLOCK_RESPONSE
+  auto hebbian_after_a = get_hebbian(diamond[0].control_fd);
+  bool hebbian_increased_for_any_peer = false;
+  for (size_t idx = 1; idx < diamond.size(); idx++) {
+    if (hebbian_increased(hebbian_before_a, hebbian_after_a, diamond[idx].node_id)) {
+      hebbian_increased_for_any_peer = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(hebbian_increased_for_any_peer)
+      << "Node A's Hebbian weight toward at least one peer should have increased after STORE_BLOCK";
+
   // Verify forwarding is bounded (no loops via visited bloom filter)
   size_t total_forwards = 0;
   for (size_t idx = 0; idx < diamond.size(); idx++) {
@@ -1679,12 +1699,6 @@ TEST_F(RpcIntegrationTest, StoreBlockForwardingDiamond) {
   }
   EXPECT_LE(total_forwards, 6u)
       << "Total forwarded STORE_BLOCK messages should be bounded (no loops)";
-
-  // Note: Hebbian weight increase is not verified here because the current
-  // protocol does not send STORE_BLOCK_RESPONSE on acceptance — only on
-  // decline. The hebbian_apply_success path in network_handle_store_block_response
-  // requires an accepted response, which never occurs. Hebbian learning for
-  // STORE_BLOCK is expected to work once acceptance acknowledgments are added.
 #endif
 }
 

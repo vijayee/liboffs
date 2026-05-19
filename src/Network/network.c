@@ -1782,6 +1782,46 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
           buffer_destroy(hash_buf);
         }
       }
+
+      // Respond with StoreBlockResponse(accepted=true) to the sender
+      {
+        wire_store_block_response_t accept_resp;
+        memset(&accept_resp, 0, sizeof(accept_resp));
+        accept_resp.message_id = store->message_id;
+        accept_resp.accepted = 1;
+        memcpy(&accept_resp.holder, &network->authority->local_id, sizeof(node_id_t));
+        memcpy(accept_resp.block_hash, store->block_hash, 32);
+        accept_resp.replicas_remaining = (uint8_t)state.replicas_needed;
+
+        // Build response path: incoming path + self
+        uint8_t resp_path_len = state.path_len;
+        if (resp_path_len < WIRE_MAX_PATH) {
+          memcpy(&accept_resp.path[resp_path_len], &network->authority->local_id, sizeof(node_id_t));
+          resp_path_len++;
+        }
+        memcpy(accept_resp.path, state.path, state.path_len * sizeof(node_id_t));
+        accept_resp.path_len = resp_path_len;
+
+        uint64_t now_ms = (uint64_t)time(NULL) * 1000;
+        accept_resp.latency_ms = (now_ms > state.start_time_ms)
+            ? (uint64_t)(now_ms - state.start_time_ms) : 0;
+
+        const node_id_t* reply_to = &store->path[0];
+        if (store->path_len > 0) {
+          reply_to = &store->path[store->path_len - 1];
+        }
+        peer_connection_t* reply_peer = connection_manager_lookup(&network->conn_mgr, reply_to);
+        if (reply_peer != NULL) {
+          cbor_item_t* cbor = wire_store_block_response_encode(&accept_resp);
+          conn_state_send(network, reply_peer, cbor);
+          cbor_decref(&cbor);
+          if (network->log != NULL) {
+            message_log_record(network->log, WIRE_STORE_BLOCK_RESPONSE, MSG_DIRECTION_SENT,
+                               reply_to, store->message_id, store->block_hash,
+                               0, &network->hebbian);
+          }
+        }
+      }
       break;
     }
 
