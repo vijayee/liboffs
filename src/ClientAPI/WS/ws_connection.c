@@ -525,29 +525,31 @@ static void _ws_put_on_descriptor_close(void* ctx, void* unused) {
   free(ori_string);
   off_url_destroy(url);
 
-  /* Deferred deref the streams, then free pipeline */
+  /* Deferred deref the streams, then free pipeline if refcount reaches zero */
   refcounter_dereference((refcounter_t*)pipeline->recipe);
   scheduler_pool_defer_cleanup(((stream_t*)pipeline->ws)->pool, pipeline->recipe,
                                (void (*)(void*))new_blocks_recipe_destroy);
   stream_deferred_deref((stream_t*)pipeline->desc);
   stream_deferred_deref((stream_t*)pipeline->ws);
 
-  if (pipeline->content_type != NULL) {
-    free(pipeline->content_type);
+  if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
+    if (pipeline->content_type != NULL) {
+      free(pipeline->content_type);
+    }
+    if (pipeline->file_name != NULL) {
+      free(pipeline->file_name);
+    }
+    if (pipeline->server_address != NULL) {
+      free(pipeline->server_address);
+    }
+    if (pipeline->file_hash != NULL) {
+      DESTROY(pipeline->file_hash, buffer);
+    }
+    if (pipeline->descriptor_hash != NULL) {
+      DESTROY(pipeline->descriptor_hash, buffer);
+    }
+    free(pipeline);
   }
-  if (pipeline->file_name != NULL) {
-    free(pipeline->file_name);
-  }
-  if (pipeline->server_address != NULL) {
-    free(pipeline->server_address);
-  }
-  if (pipeline->file_hash != NULL) {
-    DESTROY(pipeline->file_hash, buffer);
-  }
-  if (pipeline->descriptor_hash != NULL) {
-    DESTROY(pipeline->descriptor_hash, buffer);
-  }
-  free(pipeline);
 }
 
 static void _ws_put_on_descriptor_data(void* ctx, void* data) {
@@ -579,9 +581,6 @@ static void _ws_put_on_stream_data(void* ctx, void* data) {
     writeable_descriptor_write(pipeline->desc, tuple);
     DESTROY(tuple, tuple);
   }
-
-  /* Also pass data to writeable_off_stream (it handles block storage) */
-  writeable_off_stream_write(pipeline->ws, buf);
 }
 
 static void _ws_put_on_stream_error(void* ctx, void* error) {
@@ -686,7 +685,7 @@ static void _ws_handle_get(ws_connection_t* conn, cbor_item_t* frame) {
   ws_get_pipeline_t* pipeline = _ws_get_pipeline_create(conn, ori);
   REFERENCE(pipeline, ws_get_pipeline_t);
 
-  size_t descriptor_pad = 0;
+  size_t descriptor_pad = 32;
 
   readable_off_stream_t* rs = readable_off_stream_create(
     conn->pool, conn->bc, conn->tc, REFERENCE(ori, ori_t), descriptor_pad, NULL);
@@ -738,15 +737,16 @@ static void _ws_handle_put(ws_connection_t* conn, cbor_item_t* frame) {
 
   /* Create writeable streams */
   block_size_e block_type = standard;
-  size_t tuple_size = 128000;
+  size_t tuple_size = 3;
+  size_t descriptor_pad = 32;
 
   vec_block_recipe_t recipes;
   vec_init(&recipes);
 
   writeable_off_stream_t* ws = writeable_off_stream_create(
-    conn->pool, conn->bc, conn->tc, block_type, tuple_size, 32, recipes, NULL);
+    conn->pool, conn->bc, conn->tc, block_type, tuple_size, descriptor_pad, recipes, NULL);
   writeable_descriptor_t* desc = writeable_descriptor_create(
-    conn->pool, conn->bc, block_type, 0, tuple_size, msg.stream_length, NULL);
+    conn->pool, conn->bc, block_type, descriptor_pad, tuple_size, msg.stream_length, NULL);
 
   new_blocks_recipe_t* recipe = new_blocks_recipe_create(conn->pool, conn->bc, block_type);
 
@@ -773,14 +773,16 @@ static void _ws_handle_put(ws_connection_t* conn, cbor_item_t* frame) {
     msg.data = NULL;
     msg.data_size = 0;
   } else {
-    /* Streaming PUT — store state in connection for subsequent PUT_DATA frames */
+    /* Streaming PUT — store copies of strings in connection for subsequent PUT_DATA frames.
+     * The pipeline owns the original pointers; the connection needs its own copies
+     * to avoid double-free when the pipeline frees its strings. */
     conn->put_ws = ws;
     conn->put_desc = desc;
     conn->put_streaming = 1;
-    conn->put_content_type = pipeline->content_type;
-    conn->put_file_name = pipeline->file_name;
+    conn->put_content_type = strdup(pipeline->content_type);
+    conn->put_file_name = strdup(pipeline->file_name);
     conn->put_stream_length = msg.stream_length;
-    conn->put_server_address = msg.server_address;
+    conn->put_server_address = msg.server_address != NULL ? strdup(msg.server_address) : NULL;
   }
 
   /* msg.content_type / file_name / server_address are now owned by pipeline,
@@ -1267,7 +1269,19 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
     pd_watcher_t* claimed = ATOMIC_EXCHANGE(&connection->watcher, NULL);
     if (claimed != NULL) {
       pd_watcher_stop(claimed);
-      pd_watcher_destroy(claimed);
+      /* Defer watcher destruction through server actor's destroy stack */
+      if (connection->transport != NULL) {
+        ws_watcher_update_payload_t* payload = get_clear_memory(sizeof(ws_watcher_update_payload_t));
+        payload->watcher = claimed;
+        payload->events = 0;
+        message_t stop_msg;
+        stop_msg.type = WS_SERVER_STOP_WATCHER;
+        stop_msg.payload = payload;
+        stop_msg.payload_destroy = free;
+        actor_send(&connection->transport->actor, &stop_msg);
+      } else {
+        pd_watcher_destroy(claimed);
+      }
     }
     return;
   }

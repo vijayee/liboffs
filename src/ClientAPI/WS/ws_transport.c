@@ -224,10 +224,6 @@ void ws_transport_destroy(ws_transport_t* transport) {
   for (int i = 0; i < transport->connections.length; i++) {
     ws_connection_t* conn = transport->connections.data[i];
     conn->is_closing = 1;
-    if (conn->ssl != NULL) {
-      SSL_free(conn->ssl);
-      conn->ssl = NULL;
-    }
     if (conn->fd >= 0) {
       close(conn->fd);
       conn->fd = -1;
@@ -250,6 +246,10 @@ void ws_transport_destroy(ws_transport_t* transport) {
         pd_watcher_stop(watcher);
         pd_watcher_destroy(watcher);
       }
+    }
+    if (conn->ssl != NULL) {
+      SSL_free(conn->ssl);
+      conn->ssl = NULL;
     }
     if (conn->upgrade_buf != NULL) {
       DESTROY(conn->upgrade_buf, buffer);

@@ -56,14 +56,14 @@ void _unix_server_dispatch(void* state, message_t* msg) {
   unix_transport_t* transport = (unix_transport_t*)state;
   switch (msg->type) {
     case UNIX_SERVER_UPDATE_WATCHER: {
-      watcher_update_payload_t* payload = (watcher_update_payload_t*)msg->payload;
+      unix_watcher_update_payload_t* payload = (unix_watcher_update_payload_t*)msg->payload;
       if (payload->watcher != NULL) {
         pd_watcher_update(payload->watcher, payload->events);
       }
       break;
     }
     case UNIX_SERVER_STOP_WATCHER: {
-      watcher_update_payload_t* payload = (watcher_update_payload_t*)msg->payload;
+      unix_watcher_update_payload_t* payload = (unix_watcher_update_payload_t*)msg->payload;
       if (payload->watcher != NULL) {
         pd_watcher_stop(payload->watcher);
         _destroy_stack_push(transport, payload->watcher);

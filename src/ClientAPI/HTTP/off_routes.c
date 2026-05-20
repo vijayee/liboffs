@@ -112,12 +112,13 @@ static range_request_t parse_range_header(const char* range_header, size_t file_
 
 off_routes_context_t* off_routes_context_create(scheduler_pool_t* pool,
                                                   block_cache_t* bc,
-                                                  ofd_cache_t* ofd_cache) {
+                                                  ofd_cache_t* ofd_cache,
+                                                  tuple_cache_t* tc) {
     off_routes_context_t* ctx = get_clear_memory(sizeof(off_routes_context_t));
     ctx->pool = pool;
     ctx->bc = bc;
     ctx->ofd_cache = ofd_cache;
-    ctx->tc = tuple_cache_create(100, pool);
+    ctx->tc = tc;
     return ctx;
 }
 
@@ -803,8 +804,8 @@ static void _off_post_handler(http_request_t* request, http_response_t* response
 }
 
 void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
-                         block_cache_t* bc, ofd_cache_t* ofd_cache) {
-    off_routes_context_t* ctx = off_routes_context_create(pool, bc, ofd_cache);
+                         block_cache_t* bc, ofd_cache_t* ofd_cache, tuple_cache_t* tc) {
+    off_routes_context_t* ctx = off_routes_context_create(pool, bc, ofd_cache, tc);
 
     cors_config_t* cors_config = cors_config_offsystem();
     http_server_use(server, cors_middleware, cors_config,

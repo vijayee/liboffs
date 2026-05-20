@@ -18,11 +18,12 @@ typedef struct {
 } off_routes_context_t;
 
 void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
-                         block_cache_t* bc, ofd_cache_t* ofd_cache);
+                         block_cache_t* bc, ofd_cache_t* ofd_cache, tuple_cache_t* tc);
 
 off_routes_context_t* off_routes_context_create(scheduler_pool_t* pool,
                                                   block_cache_t* bc,
-                                                  ofd_cache_t* ofd_cache);
+                                                  ofd_cache_t* ofd_cache,
+                                                  tuple_cache_t* tc);
 void off_routes_context_destroy(off_routes_context_t* ctx);
 
 #endif //OFFS_OFF_ROUTES_H

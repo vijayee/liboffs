@@ -7,6 +7,7 @@ extern "C" {
 #include "../src/ClientAPI/HTTP/http_response.h"
 #include "../src/OFFStreams/off_url.h"
 #include "../src/OFFStreams/ofd_cache.h"
+#include "../src/OFFStreams/tuple_cache.h"
 #include "../src/BlockCache/block_cache.h"
 #include "../src/BlockCache/block.h"
 #include "../src/Buffer/buffer.h"
@@ -92,6 +93,7 @@ protected:
     http_server_t* server;
     block_cache_t* bc;
     ofd_cache_t* ofd_cache;
+    tuple_cache_t* tc;
     timer_actor_t* timer;
     uint16_t port;
     char* cache_dir;
@@ -119,6 +121,7 @@ protected:
         };
         bc = block_cache_create(config, cache_dir, standard, timer, pool, NULL, 0);
         ofd_cache = ofd_cache_create(pool, bc, 300000);
+        tc = tuple_cache_create(100, pool);
         server = http_server_create(pool, "127.0.0.1", port);
     }
 
@@ -127,6 +130,7 @@ protected:
             http_server_stop(server);
         }
         ofd_cache_destroy(ofd_cache);
+        tuple_cache_destroy(tc);
         block_cache_destroy(bc);
         timer_actor_destroy(timer);
         scheduler_pool_wait_for_idle(pool);
@@ -141,7 +145,7 @@ protected:
 };
 
 TEST_F(TestOffRoutes, PutMissingHeaders) {
-    off_routes_register(server, pool, bc, ofd_cache);
+    off_routes_register(server, pool, bc, ofd_cache, tc);
     http_server_listen(server);
 
     int fd = -1;
@@ -162,7 +166,7 @@ TEST_F(TestOffRoutes, PutMissingHeaders) {
 }
 
 TEST_F(TestOffRoutes, GetInvalidUrl) {
-    off_routes_register(server, pool, bc, ofd_cache);
+    off_routes_register(server, pool, bc, ofd_cache, tc);
     http_server_listen(server);
 
     int fd = -1;
@@ -184,7 +188,7 @@ TEST_F(TestOffRoutes, GetInvalidUrl) {
 }
 
 TEST_F(TestOffRoutes, DeleteInvalidUrl) {
-    off_routes_register(server, pool, bc, ofd_cache);
+    off_routes_register(server, pool, bc, ofd_cache, tc);
     http_server_listen(server);
 
     int fd = -1;
@@ -206,7 +210,7 @@ TEST_F(TestOffRoutes, DeleteInvalidUrl) {
 }
 
 TEST_F(TestOffRoutes, PutAndGetRoundTrip) {
-    off_routes_register(server, pool, bc, ofd_cache);
+    off_routes_register(server, pool, bc, ofd_cache, tc);
     http_server_listen(server);
 
     int fd = -1;

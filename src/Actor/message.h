@@ -200,6 +200,10 @@ typedef enum message_type_e {
   /* WebSocket server watcher messages */
   WS_SERVER_UPDATE_WATCHER,
   WS_SERVER_STOP_WATCHER,
+  /* WebTransport connection messages */
+  WT_CONNECTION_DATA,
+  WT_CONNECTION_HANGUP,
+  WT_CONNECTION_ERROR,
 } message_type_e;
 
 /* Stream-to-network: request block from peers */

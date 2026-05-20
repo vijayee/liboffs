@@ -1,17 +1,18 @@
 //
 // Created by victor on 5/20/26.
 //
-#ifndef OFFS_UNIX_CONNECTION_H
-#define OFFS_UNIX_CONNECTION_H
+#ifndef OFFS_WT_CONNECTION_H
+#define OFFS_WT_CONNECTION_H
 
 #include <stdint.h>
 #include <stddef.h>
+
+#ifdef HAS_MSQUIC
+#include <msquic.h>
 #include "../../RefCounter/refcounter.h"
 #include "../../Buffer/buffer.h"
-#include "../../Util/vec.h"
 #include "../../Util/atomic_compat.h"
 #include "../../Actor/actor.h"
-#include "../../Network/stream_framer.h"
 #include "../../OFFStreams/off_url.h"
 #include "../../OFFStreams/ori.h"
 #include "../../OFFStreams/readable_off_stream.h"
@@ -23,35 +24,36 @@
 #include "../../OFFStreams/tuple_cache.h"
 #include "../../BlockCache/block_cache.h"
 #include "../../Scheduler/scheduler.h"
-#include <poll-dancer/poll-dancer.h>
+#include "../../Network/stream_framer.h"
 
-typedef struct unix_transport_t unix_transport_t;
+typedef struct wt_transport_t wt_transport_t;
 
+/* Send complete context for async QUIC stream sends */
 typedef struct {
-  pd_watcher_t* watcher;
-  pd_event_t events;
-} unix_watcher_update_payload_t;
+  uint8_t* frame;
+  QUIC_BUFFER buf;
+} send_complete_context_t;
 
 typedef enum {
-  UNIX_GET_RESOLVE_DIR,
-  UNIX_GET_RESOLVE_INDEX,
-  UNIX_GET_FETCH_RAW_OFD
-} unix_get_phase_t;
+  WT_GET_RESOLVE_DIR,
+  WT_GET_RESOLVE_INDEX,
+  WT_GET_FETCH_RAW_OFD
+} wt_get_phase_e;
 
-typedef struct unix_connection_t {
+typedef struct wt_connection_t {
   refcounter_t refcounter;
   actor_t actor;
-  int fd;
-  ATOMIC(pd_watcher_t*) watcher;
+  HQUIC connection;
+  HQUIC stream;
   stream_framer_t* framer;
   buffer_t* write_buffer;
-  uint8_t write_pending;
   uint8_t is_closing;
-  unix_transport_t* transport;
+  wt_transport_t* transport;
   scheduler_pool_t* pool;
   block_cache_t* bc;
   ofd_cache_t* ofd_cache;
   tuple_cache_t* tc;
+
   /* Streaming PUT state */
   writeable_off_stream_t* put_ws;
   writeable_descriptor_t* put_desc;
@@ -63,17 +65,18 @@ typedef struct unix_connection_t {
   buffer_t* put_file_hash;
   buffer_t* put_descriptor_hash;
   uint8_t put_streaming;
+
   /* Async GET state */
   off_url_t* resolve_url;
   char* resolve_path;
-  uint8_t get_phase;
-} unix_connection_t;
+  wt_get_phase_e get_phase;
+} wt_connection_t;
 
-unix_connection_t* unix_connection_create(unix_transport_t* transport, int fd);
-void unix_connection_destroy(unix_connection_t* connection);
+wt_connection_t* wt_connection_create(wt_transport_t* transport, HQUIC connection, HQUIC stream);
+void wt_connection_destroy(wt_connection_t* connection);
+void wt_connection_dispatch(void* state, message_t* msg);
+void wt_connection_send_frame(wt_connection_t* connection, cbor_item_t* frame);
+void wt_connection_send_error(wt_connection_t* connection, uint8_t status_code, const char* message);
 
-void unix_connection_dispatch(void* state, message_t* msg);
-void unix_connection_write(unix_connection_t* connection, const uint8_t* data, size_t length);
-void unix_connection_close(unix_connection_t* connection);
-
-#endif // OFFS_UNIX_CONNECTION_H
+#endif /* HAS_MSQUIC */
+#endif /* OFFS_WT_CONNECTION_H */

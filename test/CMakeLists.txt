@@ -37,7 +37,11 @@ if (BUILD_TESTING)
             test_stream_framer.cpp
             test_nat_detect.cpp
             test_conn_state.cpp
-            test_quic_integration.cpp)
+            test_quic_integration.cpp
+            test_unix_transport.cpp
+            test_tcp_transport.cpp
+            test_ws_transport.cpp
+            test_offs_client.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
