@@ -21,6 +21,7 @@ typedef struct {
   ori_t* ori;
 } ofd_resolve_completion_t;
 
+__attribute__((unused))
 static void ofd_resolve_completion_dispatch(void* state, message_t* msg) {
   ofd_resolve_completion_t* cs = (ofd_resolve_completion_t*)state;
   if (msg->type == OFD_CACHE_RESOLVE_RESULT) {

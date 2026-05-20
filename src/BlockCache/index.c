@@ -158,7 +158,7 @@ void index_node_destroy(index_node_t* node) {
       index_node_destroy(node->left);
       index_node_destroy(node->right);
     } else {
-      for (size_t i = 0; i < node->bucket->length; i++) {
+      for (int i = 0; i < node->bucket->length; i++) {
         index_entry_destroy(node->bucket->data[i]);
       }
       vec_deinit(node->bucket);
@@ -206,8 +206,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
 
   if (files != NULL && files->length > 0) {
     vec_sort(files, _sort_indexes);
-    char id[20];
-    for (int i = files->length - 1; i >= 0; i--) { //loop through index files to find first valid file
+    for (int i = (int)files->length - 1; i >= 0; i--) { //loop through index files to find first valid file
       //Get index's crc
       char* last = files->data[i];
       uint64_t last_id = 0;
@@ -224,29 +223,29 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
       int32_t index_fd = open(index_file_location, O_RDWR | O_CREAT, 0644);
 #endif
       free(index_file_location);
-      int32_t size = lseek(index_fd, 0,SEEK_END);
+      off_t size = lseek(index_fd, 0,SEEK_END);
       if(size < 0) {
-        log_error("index file %lu empty", i);
+        log_error("index file %d empty", i);
         *error_code= -1;
         close(index_fd);
         continue;
       }
       if (lseek(index_fd, 0, SEEK_SET) < 0) {
-        log_error("index file %lu failed to seek start", i);
+        log_error("index file %d failed to seek start", i);
         *error_code= -2;
         close(index_fd);
         continue;
       }
-      uint8_t* buffer = get_clear_memory(size);
+      uint8_t* buffer = get_clear_memory((size_t)size);
       if (buffer == NULL) {
-        log_error("index file %lu failed to allocate read buffer", i);
+        log_error("index file %d failed to allocate read buffer", i);
         *error_code = -3;
         close(index_fd);
         continue;
       }
-      size_t bytes = read(index_fd, buffer, size);
+      size_t bytes = read(index_fd, buffer, (size_t)size);
 
-      if (size != bytes) {
+      if ((size_t)size != bytes) {
         log_error("index file %lu failed to read file", i);
         *error_code= -3;
         free(buffer);
@@ -255,7 +254,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
       }
       struct cbor_load_result result;
 
-      cbor_item_t* cbor = cbor_load(buffer, size, &result);
+      cbor_item_t* cbor = cbor_load(buffer, (size_t)size, &result);
       free(buffer);
       close(index_fd);
 
@@ -287,10 +286,10 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
         log_error("index_create: CRC mismatch for file %d (%s): computed=%lu, expected=%lu", i, last, crc, last_crc);
         DESTROY(index, index);
         continue;
-      } else { // Index is valid rebuild if it is not the most recent index
-        if (i != (files->length - 1)) { //incorporate every wal's changes until we get to the most recent index
+      } else {
+        if (i != (int)(files->length - 1)) {
           index->is_rebuilding = 1;
-          for (size_t j = i + 1; j < files->length; j++) {
+          for (int j = i + 1; j < files->length; j++) {
             char* next = files->data[j];
             uint64_t next_id = 0;
             uint64_t next_crc = 0;
@@ -301,7 +300,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
             uint64_t cursor;
             int32_t wal_size;
             int read_result = wal_read(wal, &type, &data, &cursor, &wal_size);
-            while ((read_result == 0) && (cursor <= wal_size)) {
+            while ((read_result == 0) && (cursor <= (uint64_t)wal_size)) {
               struct cbor_load_result result;
               cbor_item_t* cbor;
               switch (type) {
@@ -410,7 +409,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
             }
 
             DESTROY(wal, wal);
-            if ((read_result != -3) || (cursor != wal_size)) { // some error other than end of file
+            if ((read_result != -3) || (cursor != (uint64_t)wal_size)) {
               DESTROY(index, index);
               *error_code = read_result;
               destroy_files(files);
@@ -449,7 +448,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
         }
       }
     }
-    log_warn("index_create: all %d index files were invalid, creating empty index", files->length);
+    log_warn("index_create: all %zu index files were invalid, creating empty index", files->length);
     destroy_files(files);
     free(index_location);
     free(parent_location);
@@ -499,7 +498,7 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root, char* locatio
   hashmap_set_key_alloc_funcs(&index->ranks, duplicate_uint32, (void*)free);
   refcounter_init((refcounter_t*) index);
   index_entry_vec_t* entries = index_to_array(index);
-  for (size_t i = 0; i < entries->length; i++) {
+  for (int i = 0; i < entries->length; i++) {
     index_entry_t* entry = entries->data[i];
     uint32_t key = entry->counter.fib;
     index_entry_vec_t* rank = hashmap_get(&index->ranks, &key);
@@ -538,7 +537,7 @@ void index_node_to_array(index_node_t* node, index_entry_vec_t* entries) {
     index_node_to_array(node->left, entries);
     index_node_to_array(node->right, entries);
   } else {
-    for (size_t i =0; i < node->bucket->length; i++) {
+    for (int i = 0; i < node->bucket->length; i++) {
       index_entry_t* cur_entry = node->bucket->data[i];
       vec_push(entries, (index_entry_t*) refcounter_reference((refcounter_t*) cur_entry));
     }
@@ -571,7 +570,7 @@ cbor_item_t* index_node_to_cbor(index_node_t* node) {
     cbor_item_t* array = cbor_new_definite_array(1);
     cbor_item_t* bucket_array = cbor_new_definite_array(node->bucket->length);
     bool success = true;
-    for (size_t i = 0; i < node->bucket->length; i++) {
+    for (int i = 0; i < node->bucket->length; i++) {
       index_entry_t* cur_entry = node->bucket->data[i];
       success &= cbor_array_push(bucket_array, cbor_move(index_entry_to_cbor(cur_entry)));
     }
@@ -639,7 +638,7 @@ int _index_node_to_crc(index_node_t* node, XXH64_state_t* const state) {
       return _index_node_to_crc(node->right, state);
     }
   } else {
-    for (size_t i =0; i < node->bucket->length; i++) {
+    for (int i = 0; i < node->bucket->length; i++) {
       index_entry_t* cur_entry = node->bucket->data[i];
       if (XXH64_update(state, cur_entry->hash->data, cur_entry->hash->size) == XXH_ERROR) {
         log_error("failed to update crc with hash");
@@ -699,7 +698,7 @@ void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node,
        index_add_to_node(index, entry, node->left, current + 1);
      }
    } else {
-     for (size_t i = 0; i < node->bucket->length; i++) {
+     for (int i = 0; i < node->bucket->length; i++) {
        index_entry_t* cur_entry = node->bucket->data[i];
        if (buffer_compare(cur_entry->hash, entry->hash) == 0) {
          if(!index->is_rebuilding) {
@@ -722,7 +721,7 @@ void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node,
        }
      }
 
-     if (node->bucket->length < index->bucket_size) {
+     if ((size_t)node->bucket->length < index->bucket_size) {
        if(!index->is_rebuilding) {
          cbor_item_t* cbor_entry = index_entry_to_cbor(entry);
          uint8_t* cbor_data;
@@ -849,7 +848,7 @@ index_entry_t* index_get_from_node(index_t* index, buffer_t* hash, index_node_t*
       return index_get_from_node(index, hash, node->left, current + 1);
     }
   } else {
-    for (size_t i = 0; i < node->bucket->length; i++) {
+    for (int i = 0; i < node->bucket->length; i++) {
       index_entry_t* cur_entry = node->bucket->data[i];
       if (buffer_compare(cur_entry->hash, hash) == 0) {
         _index_increment(index, cur_entry);
@@ -876,7 +875,7 @@ index_entry_t* index_find_in_node(index_t* index, buffer_t* hash, index_node_t* 
       return index_find_in_node(index, hash, node->left, current + 1);
     }
   } else {
-    for (size_t i = 0; i < node->bucket->length; i++) {
+    for (int i = 0; i < node->bucket->length; i++) {
       index_entry_t* cur_entry = node->bucket->data[i];
       if (buffer_compare(cur_entry->hash, hash) == 0) {
         return cur_entry;
@@ -905,7 +904,7 @@ void index_remove_from_node(index_t* index, buffer_t* hash, index_node_t* node, 
       index_remove_from_node(index, hash, node->left, current + 1);
     }
   } else {
-    for (size_t i = 0; i < node->bucket->length; i++) {
+    for (int i = 0; i < node->bucket->length; i++) {
       index_entry_t* cur_entry = node->bucket->data[i];
       if (buffer_compare(cur_entry->hash, hash) == 0) {
         if (!index->is_rebuilding) {
@@ -947,13 +946,16 @@ void index_destroy(index_t* index) {
     refcounter_destroy_lock((refcounter_t*) index);
     index_destroy_node(index, index->root);
     index_entry_vec_t *rank;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
     hashmap_foreach_data(rank, &index->ranks) {
-      for (size_t i = 0; i < rank->length; i++) {
+      for (int i = 0; i < rank->length; i++) {
         index_entry_destroy(rank->data[i]);
       }
       vec_deinit(rank);
       free(rank);
     }
+#pragma GCC diagnostic pop
     hashmap_cleanup(&index->ranks);
     wal_destroy(index->wal);
     free(index->location);
@@ -973,7 +975,7 @@ void index_destroy_node(index_t* index, index_node_t* node) {
     index_destroy_node(index, node->left);
     index_destroy_node(index, node->right);
   } else {
-    for (size_t i = 0; i < node->bucket->length; i++) {
+    for (int i = 0; i < node->bucket->length; i++) {
       index_entry_t* cur_entry = node->bucket->data[i];
       index_entry_destroy(cur_entry);
     }
@@ -1060,8 +1062,8 @@ static uint64_t _index_prune_old_snapshots(index_t* index) {
 
   vec_sort(files, _sort_indexes);
 
-  size_t delete_count = files->length > index->max_snapshots
-                      ? files->length - index->max_snapshots
+  size_t delete_count = (size_t)files->length > index->max_snapshots
+                      ? (size_t)files->length - index->max_snapshots
                       : 0;
 
   uint64_t first_kept_id = 0;
@@ -1073,7 +1075,7 @@ static uint64_t _index_prune_old_snapshots(index_t* index) {
     free(filepath);
   }
 
-  if (delete_count < files->length) {
+  if (delete_count < (size_t)files->length) {
     uint64_t crc;
     _index_get_id_crc(files->data[delete_count], &first_kept_id, &crc);
   }
@@ -1094,7 +1096,7 @@ static void _index_prune_old_wals(index_t* index, uint64_t first_kept_id) {
 
   vec_sort(files, _sort_indexes);
 
-  for (size_t i = 0; i < files->length; i++) {
+  for (int i = 0; i < files->length; i++) {
     uint64_t wal_id = strtoull(files->data[i], NULL, 10);
     if (wal_id < first_kept_id) {
       char* filepath = path_join(wal_dir, files->data[i]);

@@ -2,7 +2,9 @@
 // Created by victor on 5/8/25.
 //
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "off_routes.h"
 #include "http_response.h"
 #include "http_request.h"

@@ -2028,7 +2028,7 @@ TEST_F(ConnectionManagerTest, GravityWellSearch) {
   memset(id2.hash, 0xBB, NODE_ID_HASH_SIZE);
 
   peer_connection_t* peer1 = connection_manager_add(&mgr, &id1, NULL, NULL);
-  peer_connection_t* peer2 = connection_manager_add(&mgr, &id2, NULL, NULL);
+  (void)connection_manager_add(&mgr, &id2, NULL, NULL);
 
   uint8_t topic[32];
   memset(topic, 0xDD, 32);
@@ -2748,7 +2748,7 @@ TEST_F(ClosestNodesWireTest, WrongTypeRejects) {
   cbor_item_t* type_item = cbor_array_get(encoded, 0);
   uint8_t wrong_type = 99;
   cbor_item_t* wrong = cbor_build_uint8(wrong_type);
-  cbor_array_set(encoded, 0, wrong);
+  (void)cbor_array_set(encoded, 0, wrong);
   cbor_decref(&wrong);
   cbor_decref(&type_item);
 

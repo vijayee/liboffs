@@ -1592,8 +1592,6 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
 
   if (response->found) {
     // Block found — apply Hebbian learning rules along the response path
-    // Use latency from start_time to now as the total search time
-    uint64_t now_ms = (uint64_t)time(NULL) * 1000;
     uint64_t latency_ms = 0;
     if (response->latency_ms > 0) {
       latency_ms = response->latency_ms;
@@ -2168,7 +2166,7 @@ static void network_handle_seeking_blocks(network_t* network, message_t* msg) {
   if (entries != NULL) {
     // Sort entries by FIB counter descending (highest FIB = most important)
     size_t entry_count = 0;
-    for (size_t index = 0; index < entries->length && entry_count < WIRE_MAX_OFFERS; index++) {
+    for (size_t index = 0; index < entries->length && entry_count < (size_t)WIRE_MAX_OFFERS; index++) {
       index_entry_t* entry = entries->data[index];
       if (entry == NULL || entry->hash == NULL) continue;
 

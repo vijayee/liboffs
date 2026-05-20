@@ -49,7 +49,7 @@ static constexpr uint8_t WIRE_CLOSEST_NODES_VAL           = 23;
 static constexpr uint8_t WIRE_CLOSEST_NODES_RESPONSE_VAL  = 24;
 static constexpr uint8_t WIRE_MEASURE_NODES_VAL           = 25;
 static constexpr uint8_t WIRE_MEASURE_NODES_RESPONSE_VAL  = 26;
-static constexpr uint8_t WIRE_CLOSEST_NODES_PROGRESS_VAL  = 27;
+static constexpr uint8_t WIRE_CLOSEST_NODES_PROGRESS_VAL  [[maybe_unused]] = 27;
 
 /* Message direction constants (must match src/Network/message_log.h) */
 static constexpr uint8_t MSG_DIRECTION_SENT_VAL      = 0;

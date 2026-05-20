@@ -63,6 +63,7 @@ block_t* block_create_existing_data(buffer_t* data) {
 }
 
 block_t* block_create_existing_data_by_type(buffer_t* data, block_size_e type) {
+  (void)type;
   if ((data->size != standard) && (data->size != mega) && (data->size != nano) && (data->size != mini)) {
     return NULL;
   }
@@ -78,6 +79,7 @@ block_t* block_create_existing_data_hash(buffer_t* data, buffer_t* hash) {
 }
 
 block_t* block_create_existing_data_hash_by_type(buffer_t* data, buffer_t* hash, block_size_e type) {
+  (void)type;
   if ((data->size != standard) && (data->size != mega) && (data->size != nano) && (data->size != mini)) {
     return NULL;
   }

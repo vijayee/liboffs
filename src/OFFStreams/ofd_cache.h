@@ -22,7 +22,7 @@ typedef struct {
     uint64_t expires_at;
 } ofd_cache_entry_t;
 
-typedef HASHMAP(buffer_t, ofd_cache_entry_t*) ofd_map_t;
+typedef HASHMAP(buffer_t, ofd_cache_entry_t) ofd_map_t;
 
 typedef struct {
     scheduler_pool_t* pool;

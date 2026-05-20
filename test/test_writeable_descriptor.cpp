@@ -14,7 +14,7 @@ TEST(WriteableDescriptor, TestCreateDestroy) {
 
   block_cache_t* bc = block_cache_create(
       (config_t){.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0, .section_size = 128000, .section_wait = 0, .section_max_wait = 0, .cache_size = 10, .max_tuple_size = 30, .lru_size = 10},
-      "/tmp/test_wdesc_bc", standard, NULL, NULL, NULL, 0);
+      (char*)"/tmp/test_wdesc_bc", standard, NULL, NULL, NULL, 0);
 
   writeable_descriptor_t* desc = writeable_descriptor_create(
       pool, bc, standard, 32, 3, 256000, NULL);

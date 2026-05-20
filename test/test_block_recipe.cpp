@@ -212,6 +212,7 @@ TEST(RecyclerRecipe, PullFromDescriptor) {
   // Then it concatenates front + back for serving
   // Descriptor data must be full block size for block_create_existing_data_by_type
   size_t hash_region_size = tuple_size * descriptor_pad;
+  (void)hash_region_size;
   buffer_t* desc_data = buffer_create(128000);
   desc_data->size = 128000;
   memset(desc_data->data, 0, 128000);

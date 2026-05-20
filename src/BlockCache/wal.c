@@ -94,7 +94,7 @@ int wal_read(wal_t* wal, wal_type_e* type, buffer_t** data, uint64_t* cursor, in
     if (lseek(wal->log, 0, SEEK_SET) < 0) {
       return -2;
     }
-  } else if (*cursor >= *wal_size) {
+  } else if (*cursor >= (uint64_t)*wal_size) {
       return -3;
   }
   lseek(wal->log, *cursor, SEEK_SET);

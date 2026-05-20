@@ -92,11 +92,14 @@ block_lru_cache_t* block_lru_cache_create(size_t size) {
 
 void block_lru_cache_destroy(block_lru_cache_t* lru) {
   block_lru_node_t* node;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
   hashmap_foreach_data(node, &lru->cache) {
     block_destroy(node->value);
     index_entry_destroy(node->entry);
     free(node);
   }
+#pragma GCC diagnostic pop
   hashmap_cleanup(&lru->cache);
   free(lru);
 }
@@ -499,7 +502,6 @@ void block_cache_dispatch(void* state, message_t* msg) {
       if (entry == NULL) {
         p->result = 0;
       } else {
-        size_t section_id = entry->section_id;
         size_t section_index = entry->section_index;
         index_remove(block_cache->index, p->hash);
         block_cache->current_bytes -= (size_t)block_cache->type;
@@ -649,8 +651,8 @@ void block_cache_update_capacity(block_cache_t* block_cache) {
       if (entries != NULL && entries->length > 0) {
         respiration_exhale_payload_t* payload = get_clear_memory(sizeof(respiration_exhale_payload_t));
         payload->count = (size_t)entries->length;
-        payload->hashes = get_clear_memory(sizeof(buffer_t*) * entries->length);
-        payload->ejection_dates = get_clear_memory(sizeof(uint64_t) * entries->length);
+        payload->hashes = get_clear_memory(sizeof(buffer_t*) * (size_t)entries->length);
+        payload->ejection_dates = get_clear_memory(sizeof(uint64_t) * (size_t)entries->length);
         payload->capacity = capacity;
         for (int idx = 0; idx < entries->length; idx++) {
           payload->hashes[idx] = (buffer_t*)refcounter_reference((refcounter_t*)entries->data[idx]->hash);

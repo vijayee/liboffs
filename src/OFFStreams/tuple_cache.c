@@ -80,6 +80,8 @@ tuple_cache_lru_t* tuple_cache_lru_create(size_t capacity) {
 
 void tuple_cache_lru_destroy(tuple_cache_lru_t* lru) {
   tuple_cache_lru_node_t* node;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
   hashmap_foreach_data(node, &lru->cache) {
     if (node->value != NULL) {
       DESTROY(node->value, buffer);
@@ -87,6 +89,7 @@ void tuple_cache_lru_destroy(tuple_cache_lru_t* lru) {
     DESTROY(node->key, tuple);
     free(node);
   }
+#pragma GCC diagnostic pop
   hashmap_cleanup(&lru->cache);
   free(lru);
 }

@@ -33,6 +33,7 @@ static buffer_t* make_hash(const uint8_t* data, size_t len) {
 }
 
 // Error event handler that just absorbs the error without crashing
+__attribute__((unused))
 static void on_error_silence(void* ctx, void* data) {
   (void)ctx;
   if (data != nullptr) {
@@ -41,6 +42,7 @@ static void on_error_silence(void* ctx, void* data) {
   }
 }
 
+__attribute__((unused))
 static void on_close_silence(void* ctx, void* data) {
   (void)ctx;
   (void)data;
@@ -61,8 +63,10 @@ TEST(StreamNetwork, WantedListDedupTwoStreamSameHash) {
   buffer_t* hash = make_hash(hash_data, 32);
 
   // Two different actors requesting the same hash
-  actor_t actor1 = {0};
-  actor_t actor2 = {0};
+  actor_t actor1;
+  memset(&actor1, 0, sizeof(actor1));
+  actor_t actor2;
+  memset(&actor2, 0, sizeof(actor2));
 
   wanted_list_add(wl, hash, &actor1);
   wanted_list_add(wl, hash, &actor2);
@@ -562,7 +566,8 @@ TEST(StreamNetwork, WantedListAddSameActorTwice) {
                          0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,
                          0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef};
   buffer_t* hash = make_hash(hash_data, 32);
-  actor_t actor1 = {0};
+  actor_t actor1;
+  memset(&actor1, 0, sizeof(actor1));
 
   // Add the same actor twice for the same hash — should dedup
   wanted_list_add(wl, hash, &actor1);
@@ -596,8 +601,10 @@ TEST(StreamNetwork, WantedListDifferentHashesAreIndependent) {
   buffer_t* hash_a = make_hash(hash_a_data, 32);
   buffer_t* hash_b = make_hash(hash_b_data, 32);
 
-  actor_t actor1 = {0};
-  actor_t actor2 = {0};
+  actor_t actor1;
+  memset(&actor1, 0, sizeof(actor1));
+  actor_t actor2;
+  memset(&actor2, 0, sizeof(actor2));
 
   wanted_list_add(wl, hash_a, &actor1);
   wanted_list_add(wl, hash_b, &actor2);

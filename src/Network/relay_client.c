@@ -39,7 +39,7 @@ static void _destroy_stack_init(relay_client_t* client) {
   client->destroy_head = NULL;
 }
 
-static void _destroy_stack_push(relay_client_t* client, pd_watcher_t* watcher) {
+static void __attribute__((unused)) _destroy_stack_push(relay_client_t* client, pd_watcher_t* watcher) {
   relay_client_destroy_node_t* node = get_clear_memory(sizeof(relay_client_destroy_node_t));
   if (node == NULL) {
     log_error("relay_client: failed to allocate destroy stack node");
@@ -165,6 +165,7 @@ static void _relay_client_process_message(
 
 static QUIC_STATUS QUIC_API _relay_client_stream_callback(
     HQUIC stream, void* context, QUIC_STREAM_EVENT* event) {
+  (void)stream;
   relay_client_t* client = (relay_client_t*)context;
 
   switch (event->Type) {

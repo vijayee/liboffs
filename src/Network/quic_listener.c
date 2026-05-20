@@ -47,7 +47,7 @@ static void _destroy_stack_init(quic_listener_t* listener) {
   listener->destroy_head = NULL;
 }
 
-static void _destroy_stack_push(quic_listener_t* listener, pd_watcher_t* watcher) {
+static void __attribute__((unused)) _destroy_stack_push(quic_listener_t* listener, pd_watcher_t* watcher) {
   quic_destroy_node_t* node = get_clear_memory(sizeof(quic_destroy_node_t));
   node->watcher = watcher;
   platform_lock(&listener->destroy_lock);
@@ -195,6 +195,7 @@ static void _quic_process_deframed(quic_stream_context_t* stream_ctx,
 // QUIC stream callback — receives framed data, deframes, and forwards to network actor
 static QUIC_STATUS QUIC_API quic_stream_callback(
     HQUIC stream, void* context, QUIC_STREAM_EVENT* event) {
+  (void)stream;
   quic_stream_context_t* stream_ctx = (quic_stream_context_t*)context;
   switch (event->Type) {
     case QUIC_STREAM_EVENT_RECEIVE: {
@@ -437,6 +438,7 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
 // QUIC listener callback — accepts new connections
 static QUIC_STATUS QUIC_API quic_listener_callback(
     HQUIC listener_handle, void* context, QUIC_LISTENER_EVENT* event) {
+  (void)listener_handle;
   quic_listener_t* listener = (quic_listener_t*)context;
   switch (event->Type) {
     case QUIC_LISTENER_EVENT_NEW_CONNECTION: {

@@ -21,6 +21,7 @@ extern "C" {
 #include "../src/Util/rm_rf.h"
 }
 
+__attribute__((unused))
 static void on_close_set_promise(void* ctx, void*) {
   auto* prom = static_cast<std::promise<void>*>(ctx);
   prom->set_value();

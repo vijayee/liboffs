@@ -76,7 +76,8 @@ void http_response_destroy(http_response_t* response) {
 }
 
 void _http_response_dispatch(void* state, message_t* msg) {
-  http_response_t* response = (http_response_t*)state;
+  (void)state;
+  (void)msg;
   switch (msg->type) {
     default:
       break;

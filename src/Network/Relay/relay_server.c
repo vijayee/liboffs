@@ -30,7 +30,7 @@ static void _destroy_stack_init(relay_server_t* server) {
   server->destroy_head = NULL;
 }
 
-static void _destroy_stack_push(relay_server_t* server, pd_watcher_t* watcher) {
+static void __attribute__((unused)) _destroy_stack_push(relay_server_t* server, pd_watcher_t* watcher) {
   relay_destroy_node_t* node = get_clear_memory(sizeof(relay_destroy_node_t));
   if (node == NULL) {
     log_error("relay: failed to allocate destroy stack node");
@@ -78,6 +78,7 @@ static relay_client_entry_t* _relay_find_client_by_endpoint(
 }
 
 static void _relay_remove_client(relay_server_t* server, relay_client_entry_t* client) {
+  (void)server;
   if (client == NULL) return;
   client->active = 0;
   if (client->framer != NULL) {
@@ -197,6 +198,7 @@ static void _relay_handle_addr_request(
 static void _relay_handle_relay_send(
     relay_server_t* server, relay_client_entry_t* src_client,
     wire_relay_send_t* relay_send) {
+  (void)src_client;
   platform_lock(&server->clients_lock);
   relay_client_entry_t* dest_client = _relay_find_client_by_endpoint(
       server, relay_send->dest_endpoint_id);
@@ -291,6 +293,7 @@ static void _relay_process_message(
 
 static QUIC_STATUS QUIC_API _relay_stream_callback(
     HQUIC stream, void* context, QUIC_STREAM_EVENT* event) {
+  (void)stream;
   relay_stream_context_t* ctx = (relay_stream_context_t*)context;
   relay_server_t* server = ctx->server;
   relay_client_entry_t* client = ctx->client;
@@ -460,6 +463,7 @@ static QUIC_STATUS QUIC_API _relay_connection_callback(
 
 static QUIC_STATUS QUIC_API _relay_listener_callback(
     HQUIC listener_handle, void* context, QUIC_LISTENER_EVENT* event) {
+  (void)listener_handle;
   relay_server_t* server = (relay_server_t*)context;
 
   switch (event->Type) {

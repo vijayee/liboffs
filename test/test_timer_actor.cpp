@@ -110,7 +110,7 @@ TEST(TestTimerActor, TestCancelTimer) {
   actor_init(&target, &state, completion_dispatch, NULL);
 
   /* Set a one-shot timer with 500ms timeout */
-  uint64_t timer_id = timer_actor_set(ta, 500, 0, &target, COMPLETION_FIRE);
+  (void)timer_actor_set(ta, 500, 0, &target, COMPLETION_FIRE);
 
   /* We can't get the real timer_id synchronously (it's filled in on the timer
      thread), so we wait briefly for the dispatch to create it, then read the

@@ -484,6 +484,7 @@ void http_connection_dispatch(void* state, message_t* msg) {
 static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                        pd_event_t events, void* user_data) {
   (void)loop;
+  (void)watcher;
   http_connection_t* connection = (http_connection_t*)user_data;
 
   if (events & PD_EVENT_WRITE) {

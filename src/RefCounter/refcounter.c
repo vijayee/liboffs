@@ -184,5 +184,7 @@ refcounter_t* refcounter_consume(refcounter_t** refcounter) {
 void refcounter_destroy_lock(refcounter_t* refcounter) {
 #ifndef OFFS_ATOMIC
   platform_lock_destroy(&refcounter->lock);
+#else
+  (void)refcounter;
 #endif
 }

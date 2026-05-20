@@ -368,6 +368,8 @@ void http_server_use(http_server_t* server, http_middleware_t middleware, void* 
 
 static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                              pd_event_t events, void* user_data) {
+  (void)loop;
+  (void)watcher;
   http_server_t* server = (http_server_t*)user_data;
 
   if (events & PD_EVENT_READ) {

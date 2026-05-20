@@ -75,7 +75,7 @@ buffer_t* ofd_encode(ofd_t* ofd) {
     // Version
     cbor_item_t* version = cbor_build_uint8(1);
     cbor_item_t* version_key = cbor_build_string("v");
-    cbor_map_add(root, (struct cbor_pair){.key = version_key, .value = version});
+    (void)cbor_map_add(root, (struct cbor_pair){.key = version_key, .value = version});
     cbor_decref(&version_key);
     cbor_decref(&version);
 
@@ -90,14 +90,14 @@ buffer_t* ofd_encode(ofd_t* ofd) {
         // name
         cbor_item_t* name_key = cbor_build_string("n");
         cbor_item_t* name_val = cbor_build_string(entry->name);
-        cbor_map_add(entry_map, (struct cbor_pair){.key = name_key, .value = name_val});
+        (void)cbor_map_add(entry_map, (struct cbor_pair){.key = name_key, .value = name_val});
         cbor_decref(&name_key);
         cbor_decref(&name_val);
 
         // type
         cbor_item_t* type_key = cbor_build_string("t");
         cbor_item_t* type_val = cbor_build_uint8(entry->type == OFD_ENTRY_DIRECTORY ? 1 : 0);
-        cbor_map_add(entry_map, (struct cbor_pair){.key = type_key, .value = type_val});
+        (void)cbor_map_add(entry_map, (struct cbor_pair){.key = type_key, .value = type_val});
         cbor_decref(&type_key);
         cbor_decref(&type_val);
 
@@ -105,22 +105,22 @@ buffer_t* ofd_encode(ofd_t* ofd) {
         if (entry->type == OFD_ENTRY_FILE) {
             cbor_item_t* file_key = cbor_build_string("f");
             cbor_item_t* file_val = buffer_to_cbor(entry->file_ori->file_hash);
-            cbor_map_add(entry_map, (struct cbor_pair){.key = file_key, .value = file_val});
+            (void)cbor_map_add(entry_map, (struct cbor_pair){.key = file_key, .value = file_val});
             cbor_decref(&file_key);
             cbor_decref(&file_val);
         } else {
             cbor_item_t* dir_key = cbor_build_string("d");
             cbor_item_t* dir_val = buffer_to_cbor(entry->dir_hash);
-            cbor_map_add(entry_map, (struct cbor_pair){.key = dir_key, .value = dir_val});
+            (void)cbor_map_add(entry_map, (struct cbor_pair){.key = dir_key, .value = dir_val});
             cbor_decref(&dir_key);
             cbor_decref(&dir_val);
         }
 
-        cbor_array_push(entries_arr, entry_map);
+        (void)cbor_array_push(entries_arr, entry_map);
         cbor_decref(&entry_map);
     }
 
-    cbor_map_add(root, (struct cbor_pair){.key = entries_key, .value = entries_arr});
+    (void)cbor_map_add(root, (struct cbor_pair){.key = entries_key, .value = entries_arr});
     cbor_decref(&entries_key);
     cbor_decref(&entries_arr);
 

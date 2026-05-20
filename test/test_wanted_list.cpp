@@ -2,6 +2,7 @@
 // Created by victor on 5/15/25.
 //
 #include <gtest/gtest.h>
+#include <cstring>
 extern "C" {
 #include "../src/Network/wanted_list.h"
 #include "../src/Buffer/buffer.h"
@@ -38,7 +39,8 @@ TEST(TestWantedList, AddAndCheck) {
                          0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,
                          0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef};
   buffer_t* hash = make_hash(hash_data, 32);
-  actor_t dummy_actor = {0};
+  actor_t dummy_actor;
+  memset(&dummy_actor, 0, sizeof(dummy_actor));
   wanted_list_add(wl, hash, &dummy_actor);
   EXPECT_TRUE(wanted_list_check(wl, hash));
   wanted_list_destroy(wl);
@@ -52,8 +54,10 @@ TEST(TestWantedList, AddMultipleRequesters) {
                          0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,
                          0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef};
   buffer_t* hash = make_hash(hash_data, 32);
-  actor_t actor1 = {0};
-  actor_t actor2 = {0};
+  actor_t actor1;
+  memset(&actor1, 0, sizeof(actor1));
+  actor_t actor2;
+  memset(&actor2, 0, sizeof(actor2));
   wanted_list_add(wl, hash, &actor1);
   wanted_list_add(wl, hash, &actor2);
   wanted_entry_t* entry = wanted_list_find(wl, hash);
@@ -74,8 +78,10 @@ TEST(TestWantedList, RemoveReturnsRequesters) {
                          0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,
                          0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef};
   buffer_t* hash = make_hash(hash_data, 32);
-  actor_t actor1 = {0};
-  actor_t actor2 = {0};
+  actor_t actor1;
+  memset(&actor1, 0, sizeof(actor1));
+  actor_t actor2;
+  memset(&actor2, 0, sizeof(actor2));
   wanted_list_add(wl, hash, &actor1);
   wanted_list_add(wl, hash, &actor2);
   wanted_requester_t* requesters = wanted_list_remove(wl, hash);
@@ -96,7 +102,8 @@ TEST(TestWantedList, ClearRequestersKeepsBloom) {
                          0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,
                          0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef};
   buffer_t* hash = make_hash(hash_data, 32);
-  actor_t actor1 = {0};
+  actor_t actor1;
+  memset(&actor1, 0, sizeof(actor1));
   wanted_list_add(wl, hash, &actor1);
   wanted_requester_t* requesters = wanted_list_clear_requesters(wl, hash);
   /* Bloom should still contain the hash */
@@ -117,8 +124,10 @@ TEST(TestWantedList, RetryAfterFailure) {
                          0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,
                          0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef};
   buffer_t* hash = make_hash(hash_data, 32);
-  actor_t actor1 = {0};
-  actor_t actor2 = {0};
+  actor_t actor1;
+  memset(&actor1, 0, sizeof(actor1));
+  actor_t actor2;
+  memset(&actor2, 0, sizeof(actor2));
   /* First request */
   wanted_list_add(wl, hash, &actor1);
   /* Fail: clear requesters but keep bloom */

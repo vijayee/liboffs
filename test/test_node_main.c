@@ -2,7 +2,9 @@
 // Created by victor on 5/16/26.
 //
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "test_control_protocol.h"
 #include "../src/Network/network.h"
 #include "../src/Network/authority.h"

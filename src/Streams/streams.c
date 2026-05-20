@@ -621,16 +621,19 @@ void _readable_push_stream_on_pipe(stream_t* rs, stream_t* ws) {
 }
 
 void _readable_push_stream_piped_notify(stream_t* stream, void* payload) {
+  (void)payload;
   if (stream->on_push != NULL) {
     readable_push_stream_push(stream);
   }
 }
 
 void _readable_push_stream_error_notify(stream_t* stream, void* payload) {
+  (void)payload;
   stream_deactivate(stream, (async_error_t*) payload);
 }
 
 void _readable_push_stream_close_notify(stream_t* stream, void* payload) {
+  (void)payload;
   stream_close(stream);
 }
 
@@ -698,13 +701,15 @@ void _writeable_push_stream_error_notify(stream_t* stream, void* payload) {
 }
 
 void _writeable_push_stream_close_notify(stream_t* stream, void* payload) {
+  (void)payload;
   if (!stream->is_deactivated) {
     stream_close(stream);
   }
 }
 
 void _writeable_push_stream_complete_notify(stream_t* stream, void* payload) {
-  /* no-op: stream completed */
+  (void)stream;
+  (void)payload;
 }
 
 /* ---- pull stream piping ---- */
@@ -812,22 +817,27 @@ void _readable_pull_stream_on_piped(stream_t* rs, stream_t* ws) {
 }
 
 void _readable_pull_stream_error_notify(stream_t* stream, void* payload) {
+  (void)payload;
   stream_deactivate(stream, (async_error_t*) payload);
 }
 
 void _readable_pull_stream_close_notify(stream_t* stream, void* payload) {
+  (void)payload;
   stream_close(stream);
 }
 
 void _readable_pull_stream_finish_notify(stream_t* stream, void* payload) {
-  /* no-op */
+  (void)stream;
+  (void)payload;
 }
 
 void _writeable_pull_stream_error_notify(stream_t* stream, void* payload) {
+  (void)payload;
   stream_deactivate(stream, (async_error_t*) payload);
 }
 
 void _writeable_pull_stream_piped_notify(stream_t* stream, void* payload) {
+  (void)payload;
   stream_set_pulling_payload_t* pulling_payload = get_clear_memory(sizeof(stream_set_pulling_payload_t));
   pulling_payload->is_pulling = 1;
   message_t msg;
@@ -838,10 +848,12 @@ void _writeable_pull_stream_piped_notify(stream_t* stream, void* payload) {
 }
 
 void _writeable_pull_stream_close_notify(stream_t* stream, void* payload) {
+  (void)payload;
   stream_close(stream);
 }
 
 void _writeable_pull_stream_complete_notify(stream_t* stream, void* payload) {
+  (void)payload;
   stream_set_pulling_payload_t* pulling_payload = get_clear_memory(sizeof(stream_set_pulling_payload_t));
   pulling_payload->is_pulling = 0;
   message_t msg;

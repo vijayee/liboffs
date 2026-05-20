@@ -51,7 +51,7 @@ off_url_t* off_url_parse(const char* url_string) {
         if (!slash) break;
         const char* after_slash = slash + 1;
         char* endp;
-        long stream_length = strtol(after_slash, &endp, 10);
+        (void)strtol(after_slash, &endp, 10);
         if (endp != after_slash && *endp == '/') {
             const char* hash_start = endp + 1;
             if (*hash_start != '\0' && is_base58_char(*hash_start)) {

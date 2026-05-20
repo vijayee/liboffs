@@ -53,7 +53,8 @@ void http_request_destroy(http_request_t* request) {
 }
 
 void _http_request_dispatch(void* state, message_t* msg) {
-  http_request_t* request = (http_request_t*)state;
+  (void)state;
+  (void)msg;
   switch (msg->type) {
     default:
       break;

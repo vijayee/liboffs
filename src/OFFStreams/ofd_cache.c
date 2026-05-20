@@ -35,10 +35,13 @@ void ofd_cache_destroy(ofd_cache_t* cache) {
     if (!cache) return;
 
     ofd_cache_entry_t* entry;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
     hashmap_foreach_data(entry, &cache->cache) {
         ofd_destroy(entry->ofd);
         free(entry);
     }
+#pragma GCC diagnostic pop
     hashmap_cleanup(&cache->cache);
     free(cache);
 }
@@ -193,7 +196,6 @@ static void _resolver_dispatch(void* state, message_t* msg) {
     switch (msg->type) {
         case OFD_CACHE_RESOLVE: {
             /* Initial message to start resolution */
-            ofd_resolve_result_t* payload = (ofd_resolve_result_t*)msg->payload;
 
             /* Check in-memory cache for root hash */
             ofd_t* cached = ofd_cache_get(resolver->cache, resolver->root_hash);

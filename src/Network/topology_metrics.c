@@ -38,6 +38,7 @@ void topology_metrics_destroy(topology_metrics_t* metrics) {
 void topology_metrics_dispatch(void* state, message_t* msg) {
   if (state == NULL || msg == NULL) return;
   topology_metrics_t* metrics = (topology_metrics_t*)state;
+  (void)metrics;
 
   switch (msg->type) {
     case TOPOLOGY_METRICS_UPDATE: {

@@ -30,6 +30,8 @@ extern "C" {
 namespace http_test {
 
 static void _test_get_handler(http_request_t* request, http_response_t* response, void* user_data) {
+  (void)request;
+  (void)user_data;
   http_response_set_status(response, HTTP_STATUS_OK);
   http_response_set_header(response, "Content-Type", "text/plain");
   http_response_write(response, "Hello, World!", 13);
@@ -37,20 +39,27 @@ static void _test_get_handler(http_request_t* request, http_response_t* response
 }
 
 static void _test_post_handler(http_request_t* request, http_response_t* response, void* user_data) {
+  (void)request;
+  (void)user_data;
   http_response_set_status(response, HTTP_STATUS_CREATED);
   http_response_end(response);
 }
 
 static void _test_put_handler(http_request_t* request, http_response_t* response, void* user_data) {
+  (void)request;
+  (void)user_data;
   http_response_set_status(response, HTTP_STATUS_OK);
   http_response_end(response);
 }
 
 static void _test_delete_handler(http_request_t* request, http_response_t* response, void* user_data) {
+  (void)request;
+  (void)user_data;
   http_response_set_status(response, HTTP_STATUS_OK);
   http_response_end(response);
 }
 
+__attribute__((unused))
 static void _test_param_handler(http_request_t* request, http_response_t* response, void* user_data) {
   const char* name = http_request_param(request, 1);
   if (name != NULL) {
@@ -63,6 +72,7 @@ static void _test_param_handler(http_request_t* request, http_response_t* respon
 }
 
 static void _test_echo_body_handler(http_request_t* request, http_response_t* response, void* user_data) {
+  (void)user_data;
   http_response_set_status(response, HTTP_STATUS_OK);
   if (request->body != NULL && request->body->size > 0) {
     http_response_write(response, (const char*)request->body->data, request->body->size);
@@ -395,6 +405,8 @@ TEST_F(TestHttpServer, TestNotFoundRoute) {
 // --- Middleware Tests ---
 
 static int _test_middleware_stop(http_request_t* request, http_response_t* response, void* user_data) {
+  (void)request;
+  (void)user_data;
   http_response_set_status(response, HTTP_STATUS_OK);
   http_response_set_header(response, "X-Middleware", "stopped");
   http_response_end(response);
@@ -402,6 +414,8 @@ static int _test_middleware_stop(http_request_t* request, http_response_t* respo
 }
 
 static int _test_middleware_continue(http_request_t* request, http_response_t* response, void* user_data) {
+  (void)request;
+  (void)user_data;
   http_response_set_header(response, "X-Middleware", "passed");
   return 0;
 }

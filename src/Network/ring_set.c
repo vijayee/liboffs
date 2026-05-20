@@ -175,7 +175,7 @@ size_t ring_set_get_random_nodes(const ring_set_t* set,
   for (size_t ring_index = 0;
        ring_index < set->ring_count && count < max_nodes;
        ring_index++) {
-    ring_t* ring = &set->rings[ring_index];
+    const ring_t* ring = &set->rings[ring_index];
     if (ring->primary.length == 0) continue;
     // Select a random node from this ring's primary list
     int node_index = rand() % ring->primary.length;
