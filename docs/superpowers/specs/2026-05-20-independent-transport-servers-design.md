@@ -58,7 +58,8 @@ All binary transports use the same CBOR wire format defined in `client_api_wire.
 
 - **Framing**: 4-byte big-endian length prefix + CBOR payload (via `stream_framer_t`)
 - **Message format**: CBOR array with type tag at index 0
-- **Types**: PUT_REQUEST(1), PUT_DATA(2), PUT_END(3), PUT_RESPONSE(4), GET_REQUEST(5), GET_RESPONSE_START(6), GET_DATA(7), GET_END(8), DELETE_REQUEST(9), DELETE_RESPONSE(10), ERROR(11)
+- **Types**: PUT_REQUEST(1), PUT_DATA(2), PUT_END(3), PUT_RESPONSE(4), GET_REQUEST(5), GET_RESPONSE_START(6), GET_DATA(7), GET_END(8), ERROR(11)
+- **No DELETE**: Blocks are shared across files — deleting blocks for one file would corrupt others. DELETE is not implemented in any transport.
 
 WebSocket and WebTransport don't need the length prefix (they have their own framing).
 
@@ -89,6 +90,10 @@ These adapter-layer files are deleted:
 - `client_api_handler.h/.c` — no shared handler, each transport has its own
 - `client_api_session.h/.c` — no shared session, each transport has its own connection actor
 - `http_api_adapter.h/.c` — no HTTP adapter, HTTP stays as-is
+
+## HTTP DELETE Handler
+
+The existing DELETE handler in `off_routes.c` calls `block_cache_remove()`, which is dangerous: blocks are shared across files, so deleting blocks for one file corrupts others. The DELETE route must be disabled in the HTTP server. No DELETE operation is implemented in any transport.
 
 ## Create Functions
 
@@ -155,7 +160,6 @@ Each phase must build and pass valgrind before moving to the next.
 3. For each frame: `cbor_load(data, len)` → extract type byte → dispatch:
    - `PUT_REQUEST` → set up `writeable_off_stream` + `writeable_descriptor` pipeline, write data if buffered, store `put_context` if streaming
    - `GET_REQUEST` → parse ORI from CBOR, set up `readable_off_stream` + `readable_descriptor` pipeline, subscribe to data events → encode `GET_DATA` frames → write to fd
-   - `DELETE_REQUEST` → `block_cache_remove()` → encode `DELETE_RESPONSE` → write to fd
    - `PUT_DATA` → `writeable_off_stream_write()` with chunk data
    - `PUT_END` → `writeable_off_stream_finalize()`
 4. Pipeline callbacks encode CBOR responses and write to the connection fd
@@ -219,17 +223,6 @@ conn->put_context = NULL;
 conn->put_streaming = 0;
 ```
 
-## DELETE Flow
-
-```c
-static void _unix_handle_delete(unix_connection_t* conn, client_api_request_t* request) {
-    // Parse ORI from request
-    // block_cache_remove(conn->bc, url->file_hash, NULL)
-    // Encode DELETE_RESPONSE(10) with status
-    // Write to fd
-}
-```
-
 ## Async Directory Resolution (GET with ofd_cache)
 
 For OFD directory resolution, the connection actor receives `OFD_CACHE_RESOLVE_RESULT` messages:
@@ -254,3 +247,114 @@ static void _unix_connection_dispatch(void* state, message_t* msg) {
 ```
 
 This mirrors the pattern in `off_routes.c`'s `_off_get_dispatch`.
+
+## ClientLib (C)
+
+A C client library that connects to OFFS servers via any transport. Reuses `client_api_wire.h/.c` for CBOR encoding/decoding. Lives in `src/ClientLibs/c/`.
+
+### File Structure
+
+```
+src/ClientLibs/c/
+  offs_client.h          — Public C header (FFI surface)
+  offs_client.c           — Implementation
+  CMakeLists.txt          — Builds static + shared library, installs headers
+```
+
+### API Surface
+
+```c
+// Opaque handle
+typedef struct offs_client_t offs_client_t;
+
+// Callbacks
+typedef void (*offs_put_response_cb_t)(void* ctx, const char* ori_string);
+typedef void (*offs_get_data_cb_t)(void* ctx, const uint8_t* data, size_t len);
+typedef void (*offs_get_end_cb_t)(void* ctx);
+typedef void (*offs_error_cb_t)(void* ctx, uint8_t status_code, const char* message);
+
+// Connection lifecycle
+offs_client_t* offs_client_connect(const char* transport_url);  // "unix:///path", "tcp://host:port", "ws://host:port"
+void offs_client_disconnect(offs_client_t* client);
+
+// Operations (PUT data in, GET data out)
+int offs_client_put(offs_client_t* client,
+                    const char* content_type,
+                    const char* file_name,
+                    size_t stream_length,
+                    const uint8_t* data,
+                    size_t data_len,
+                    offs_put_response_cb_t callback,
+                    void* ctx);
+
+int offs_client_put_stream_start(offs_client_t* client,
+                                  const char* content_type,
+                                  const char* file_name,
+                                  size_t stream_length);
+int offs_client_put_stream_data(offs_client_t* client,
+                                 const uint8_t* data,
+                                 size_t len);
+int offs_client_put_stream_end(offs_client_t* client,
+                                offs_put_response_cb_t callback,
+                                void* ctx);
+
+int offs_client_get(offs_client_t* client,
+                     const char* ori_string,
+                     offs_get_data_cb_t data_cb,
+                     offs_get_end_cb_t end_cb,
+                     offs_error_cb_t error_cb,
+                     void* ctx);
+
+// Optional: range request
+int offs_client_get_range(offs_client_t* client,
+                          const char* ori_string,
+                          size_t range_start,
+                          size_t range_end,
+                          offs_get_data_cb_t data_cb,
+                          offs_get_end_cb_t end_cb,
+                          offs_error_cb_t error_cb,
+                          void* ctx);
+
+// Error callback (global)
+void offs_client_on_error(offs_client_t* client, offs_error_cb_t cb, void* ctx);
+```
+
+### Internal Structure
+
+```c
+struct offs_client_t {
+    int fd;                     // Socket fd (Unix/TCP)
+    uint8_t connected;
+    uint8_t is_ws;              // 1 if WebSocket transport
+    stream_framer_t* framer;    // Length-prefix frame decoder
+    buffer_t* write_buffer;    // Pending writes
+    PLATFORMLOCKTYPE(lock);
+    PLATFORMTHREADTYPE(recv_thread);
+    volatile uint8_t running;
+    uint8_t read_buf[65536];
+    size_t read_len;
+    // Callbacks
+    offs_put_response_cb_t put_cb;     void* put_cb_ctx;
+    offs_get_data_cb_t get_data_cb;    void* get_data_cb_ctx;
+    offs_get_end_cb_t get_end_cb;      void* get_end_cb_ctx;
+    offs_error_cb_t error_cb;          void* error_cb_ctx;
+};
+```
+
+### How it works
+
+1. `offs_client_connect()` parses the URL prefix (`unix://`, `tcp://`, `ws://`), opens the appropriate socket, and starts a background receive thread
+2. For Unix/TCP: the receive thread reads from `fd`, feeds bytes into `stream_framer_t`, extracts CBOR frames, decodes them, and invokes the appropriate callback
+3. For WebSocket: the receive thread handles WS frame parsing (opcodes, masking), extracts the inner CBOR payload
+4. `offs_client_put()` encodes a `PUT_REQUEST` frame, sends it (with data for buffered, without for streaming), receives `PUT_RESPONSE` with the ORI string
+5. `offs_client_get()` encodes a `GET_REQUEST` frame, then the receive thread calls `get_data_cb` for each `GET_DATA` frame and `get_end_cb` on `GET_END`
+6. Streaming PUT: `put_stream_start` → `put_stream_data` (sends `PUT_DATA` frames) → `put_stream_end` (sends `PUT_END`)
+
+### Language Bindings (Future)
+
+The C header is the canonical FFI surface. Future language bindings:
+- **Python**: cffi ABI-mode, loads `liboffs_client.so`, wraps in Pythonic class
+- **Node.js**: Pure JS WebSocket client that speaks the same CBOR wire format
+- **Swift**: XPC or direct TCP connection with native CBOR codec
+
+Each binding reuses `client_api_wire.h/.c` for the wire format but implements its own transport layer.
