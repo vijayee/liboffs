@@ -4,9 +4,9 @@
 #ifndef OFFS_HTTP_RESPONSE_H
 #define OFFS_HTTP_RESPONSE_H
 
-#include "../Streams/stream.h"
-#include "../RefCounter/refcounter.h"
-#include "../Buffer/buffer.h"
+#include "../../Streams/stream.h"
+#include "../../RefCounter/refcounter.h"
+#include "../../Buffer/buffer.h"
 #include "http_headers.h"
 #include "http_status.h"
 

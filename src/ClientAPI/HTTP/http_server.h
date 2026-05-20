@@ -8,11 +8,11 @@
 #include <stddef.h>
 #include <openssl/ssl.h>
 #include <http_parser.h>
-#include "../Actor/actor.h"
-#include "../Util/atomic_compat.h"
-#include "../Util/vec.h"
+#include "../../Actor/actor.h"
+#include "../../Util/atomic_compat.h"
+#include "../../Util/vec.h"
 #include <poll-dancer/poll-dancer.h>
-#include "../Scheduler/scheduler.h"
+#include "../../Scheduler/scheduler.h"
 #include "http_route.h"
 #include "http_connection.h"
 

@@ -11,23 +11,23 @@
 #include "http_connection.h"
 #include "http_server.h"
 #include "cors.h"
-#include "../OFFStreams/off_url.h"
-#include "../OFFStreams/readable_off_stream.h"
-#include "../OFFStreams/readable_descriptor.h"
-#include "../OFFStreams/writeable_off_stream.h"
-#include "../OFFStreams/writeable_descriptor.h"
-#include "../OFFStreams/block_recipe.h"
-#include "../Scheduler/scheduler.h"
-#include "../OFFStreams/ori.h"
-#include "../OFFStreams/tuple_cache.h"
-#include "../OFFStreams/tuple.h"
-#include "../OFFStreams/ofd.h"
-#include "../BlockCache/block_cache.h"
-#include "../BlockCache/block.h"
-#include "../Buffer/buffer.h"
-#include "../Util/allocator.h"
-#include "../Actor/actor.h"
-#include "../Actor/message.h"
+#include "../../OFFStreams/off_url.h"
+#include "../../OFFStreams/readable_off_stream.h"
+#include "../../OFFStreams/readable_descriptor.h"
+#include "../../OFFStreams/writeable_off_stream.h"
+#include "../../OFFStreams/writeable_descriptor.h"
+#include "../../OFFStreams/block_recipe.h"
+#include "../../Scheduler/scheduler.h"
+#include "../../OFFStreams/ori.h"
+#include "../../OFFStreams/tuple_cache.h"
+#include "../../OFFStreams/tuple.h"
+#include "../../OFFStreams/ofd.h"
+#include "../../BlockCache/block_cache.h"
+#include "../../BlockCache/block.h"
+#include "../../Buffer/buffer.h"
+#include "../../Util/allocator.h"
+#include "../../Actor/actor.h"
+#include "../../Actor/message.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -784,22 +784,6 @@ static int _off_put_headers_complete(http_connection_t* connection,
     return 1;
 }
 
-static void _off_delete_handler(http_request_t* request, http_response_t* response, void* user_data) {
-    off_routes_context_t* ctx = (off_routes_context_t*)user_data;
-
-    off_url_t* url = off_url_parse(request->path);
-    if (!url) {
-        http_response_set_status(response, 400);
-        http_response_end(response);
-        return;
-    }
-
-    block_cache_remove(ctx->bc, url->file_hash, NULL);
-    http_response_set_status(response, 200);
-    http_response_end(response);
-    off_url_destroy(url);
-}
-
 static void _off_post_handler(http_request_t* request, http_response_t* response, void* user_data) {
     off_routes_context_t* ctx = (off_routes_context_t*)user_data;
     (void)ctx;
@@ -833,8 +817,6 @@ void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
                                _off_put_handler, ctx, NULL);
     http_route_t* put_route = &server->routes.data[server->routes.length - 1];
     put_route->headers_complete_handler = _off_put_headers_complete;
-    http_server_delete_with_data(server, OFF_GET_PATTERN,
-                                  _off_delete_handler, ctx, NULL);
     http_server_post_with_data(server, OFF_GET_PATTERN,
                                 _off_post_handler, ctx, NULL);
 }

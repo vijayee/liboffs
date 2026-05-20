@@ -4,10 +4,10 @@
 #ifndef OFFS_HTTP_REQUEST_H
 #define OFFS_HTTP_REQUEST_H
 
-#include "../Streams/stream.h"
-#include "../RefCounter/refcounter.h"
-#include "../Buffer/buffer.h"
-#include "../Util/vec.h"
+#include "../../Streams/stream.h"
+#include "../../RefCounter/refcounter.h"
+#include "../../Buffer/buffer.h"
+#include "../../Util/vec.h"
 #include "http_headers.h"
 #include "http_route.h"
 #include <http_parser.h>

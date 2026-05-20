@@ -2,9 +2,9 @@
 // Created by victor on 5/8/26.
 //
 
-#include "HTTP/http_server.h"
-#include "HTTP/off_routes.h"
-#include "HTTP/cors.h"
+#include "ClientAPI/HTTP/http_server.h"
+#include "ClientAPI/HTTP/off_routes.h"
+#include "ClientAPI/HTTP/cors.h"
 #include "BlockCache/block_cache.h"
 #include "OFFStreams/ofd_cache.h"
 #include "Scheduler/scheduler.h"

@@ -2,7 +2,7 @@
 // Created by victor on 5/8/26.
 //
 #include "cors.h"
-#include "../Util/allocator.h"
+#include "../../Util/allocator.h"
 #include <string.h>
 
 cors_config_t* cors_config_default(void) {

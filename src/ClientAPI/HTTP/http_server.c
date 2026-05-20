@@ -6,10 +6,10 @@
 #include "http_response.h"
 #include "http_connection.h"
 #include "http_route.h"
-#include "../Util/allocator.h"
-#include "../Util/threadding.h"
-#include "../Actor/message.h"
-#include "../Actor/message_queue.h"
+#include "../../Util/allocator.h"
+#include "../../Util/threadding.h"
+#include "../../Actor/message.h"
+#include "../../Actor/message_queue.h"
 #include <poll-dancer/poll-dancer.h>
 #include <string.h>
 #include <stdio.h>

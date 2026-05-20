@@ -4,7 +4,7 @@
 
 #include "node.h"
 #include "../BlockCache/block_cache.h"
-#include "../HTTP/http_server.h"
+#include "../ClientAPI/HTTP/http_server.h"
 #include "../Network/network.h"
 #include "../Util/allocator.h"
 #include <stdlib.h>

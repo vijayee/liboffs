@@ -1,10 +1,10 @@
 #include <gtest/gtest.h>
 #include <cstring>
 extern "C" {
-#include "../src/HTTP/off_routes.h"
-#include "../src/HTTP/http_server.h"
-#include "../src/HTTP/http_request.h"
-#include "../src/HTTP/http_response.h"
+#include "../src/ClientAPI/HTTP/off_routes.h"
+#include "../src/ClientAPI/HTTP/http_server.h"
+#include "../src/ClientAPI/HTTP/http_request.h"
+#include "../src/ClientAPI/HTTP/http_response.h"
 #include "../src/OFFStreams/off_url.h"
 #include "../src/OFFStreams/ofd_cache.h"
 #include "../src/BlockCache/block_cache.h"

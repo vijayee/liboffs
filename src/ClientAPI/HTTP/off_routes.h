@@ -6,9 +6,9 @@
 #define OFFS_OFF_ROUTES_H
 
 #include "http_server.h"
-#include "../OFFStreams/ofd_cache.h"
-#include "../OFFStreams/tuple_cache.h"
-#include "../BlockCache/block_cache.h"
+#include "../../OFFStreams/ofd_cache.h"
+#include "../../OFFStreams/tuple_cache.h"
+#include "../../BlockCache/block_cache.h"
 
 typedef struct {
     scheduler_pool_t* pool;

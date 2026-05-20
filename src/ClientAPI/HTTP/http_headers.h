@@ -4,7 +4,7 @@
 #ifndef OFFS_HTTP_HEADERS_H
 #define OFFS_HTTP_HEADERS_H
 
-#include "../Util/vec.h"
+#include "../../Util/vec.h"
 
 typedef struct {
   char* name;

@@ -3,13 +3,13 @@
 //
 #include <gtest/gtest.h>
 extern "C" {
-#include "../src/HTTP/http_server.h"
-#include "../src/HTTP/http_request.h"
-#include "../src/HTTP/http_response.h"
-#include "../src/HTTP/http_connection.h"
-#include "../src/HTTP/http_route.h"
-#include "../src/HTTP/http_headers.h"
-#include "../src/HTTP/cors.h"
+#include "../src/ClientAPI/HTTP/http_server.h"
+#include "../src/ClientAPI/HTTP/http_request.h"
+#include "../src/ClientAPI/HTTP/http_response.h"
+#include "../src/ClientAPI/HTTP/http_connection.h"
+#include "../src/ClientAPI/HTTP/http_route.h"
+#include "../src/ClientAPI/HTTP/http_headers.h"
+#include "../src/ClientAPI/HTTP/cors.h"
 #include "../src/Scheduler/scheduler.h"
 #include <sys/socket.h>
 #include <netinet/in.h>

@@ -4,8 +4,8 @@
 #include "http_response.h"
 #include "http_connection.h"
 #include "http_request.h"
-#include "../Util/allocator.h"
-#include "../Buffer/buffer.h"
+#include "../../Util/allocator.h"
+#include "../../Buffer/buffer.h"
 #include <poll-dancer/poll-dancer.h>
 #include <stdio.h>
 #include <string.h>
