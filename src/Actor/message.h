@@ -180,6 +180,16 @@ typedef enum message_type_e {
   /* Unix server watcher messages */
   UNIX_SERVER_UPDATE_WATCHER,
   UNIX_SERVER_STOP_WATCHER,
+  /* TCP connection messages */
+  TCP_CONNECTION_DATA,
+  TCP_CONNECTION_HANGUP,
+  TCP_CONNECTION_ERROR,
+  TCP_CONNECTION_WRITE,
+  TCP_CONNECTION_WRITABLE,
+  TCP_CONNECTION_CLOSE,
+  /* TCP server watcher messages */
+  TCP_SERVER_UPDATE_WATCHER,
+  TCP_SERVER_STOP_WATCHER,
 } message_type_e;
 
 /* Stream-to-network: request block from peers */
