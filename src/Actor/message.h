@@ -190,6 +190,16 @@ typedef enum message_type_e {
   /* TCP server watcher messages */
   TCP_SERVER_UPDATE_WATCHER,
   TCP_SERVER_STOP_WATCHER,
+  /* WebSocket connection messages */
+  WS_CONNECTION_DATA,
+  WS_CONNECTION_HANGUP,
+  WS_CONNECTION_ERROR,
+  WS_CONNECTION_WRITE,
+  WS_CONNECTION_WRITABLE,
+  WS_CONNECTION_CLOSE,
+  /* WebSocket server watcher messages */
+  WS_SERVER_UPDATE_WATCHER,
+  WS_SERVER_STOP_WATCHER,
 } message_type_e;
 
 /* Stream-to-network: request block from peers */
