@@ -38,9 +38,18 @@ off_url_t* off_url_parse(const char* url_string) {
 
     const char* prefix = "/offsystem/v3/";
     size_t prefix_len = strlen(prefix);
-    if (strncmp(url_string, prefix, prefix_len) != 0) return NULL;
+    const char* prefix_pos = strstr(url_string, prefix);
+    if (!prefix_pos) return NULL;
 
-    const char* cursor = url_string + prefix_len;
+    /* Extract server_address from everything before /offsystem/v3/ */
+    size_t server_len = prefix_pos - url_string;
+    char* server_address = NULL;
+    if (server_len > 0) {
+        server_address = get_clear_memory(server_len + 1);
+        memcpy(server_address, url_string, server_len);
+    }
+
+    const char* cursor = prefix_pos + prefix_len;
 
     // Content type may contain '/' (e.g., "application/octet-stream").
     // Find the segment boundary by scanning for /<digits>/<Base58>/
@@ -61,7 +70,7 @@ off_url_t* off_url_parse(const char* url_string) {
         }
         search = after_slash;
     }
-    if (!type_end) return NULL;
+    if (!type_end) { free(server_address); return NULL; }
 
     size_t type_len = type_end - cursor;
     char* content_type_raw = get_clear_memory(type_len + 1);
@@ -83,38 +92,51 @@ off_url_t* off_url_parse(const char* url_string) {
     cursor = type_end + 1;
     char* endp;
     long stream_length = strtol(cursor, &endp, 10);
-    if (endp == cursor) { free(decoded_type); return NULL; }
+    if (endp == cursor) { free(decoded_type); free(server_address); return NULL; }
     cursor = endp + 1;
 
     const char* slash3 = strchr(cursor, '/');
-    if (!slash3) { free(decoded_type); return NULL; }
+    if (!slash3) { free(decoded_type); free(server_address); return NULL; }
     size_t hash1_len = slash3 - cursor;
     char* file_hash_b58 = get_clear_memory(hash1_len + 1);
     memcpy(file_hash_b58, cursor, hash1_len);
     for (size_t i = 0; i < hash1_len; i++) {
-        if (!is_base58_char(file_hash_b58[i])) { free(file_hash_b58); free(decoded_type); return NULL; }
+        if (!is_base58_char(file_hash_b58[i])) { free(file_hash_b58); free(decoded_type); free(server_address); return NULL; }
     }
 
     cursor = slash3 + 1;
     const char* slash4 = strchr(cursor, '/');
-    if (!slash4) { free(file_hash_b58); free(decoded_type); return NULL; }
+    if (!slash4) { free(file_hash_b58); free(decoded_type); free(server_address); return NULL; }
     size_t hash2_len = slash4 - cursor;
     char* descriptor_hash_b58 = get_clear_memory(hash2_len + 1);
     memcpy(descriptor_hash_b58, cursor, hash2_len);
     for (size_t i = 0; i < hash2_len; i++) {
-        if (!is_base58_char(descriptor_hash_b58[i])) { free(descriptor_hash_b58); free(file_hash_b58); free(decoded_type); return NULL; }
+        if (!is_base58_char(descriptor_hash_b58[i])) { free(descriptor_hash_b58); free(file_hash_b58); free(decoded_type); free(server_address); return NULL; }
     }
 
     cursor = slash4 + 1;
     size_t name_len = strlen(cursor);
-    char* file_name = get_clear_memory(name_len + 1);
-    memcpy(file_name, cursor, name_len);
+    char* name_raw = get_clear_memory(name_len + 1);
+    memcpy(name_raw, cursor, name_len);
+    char* file_name = malloc(name_len + 1);
+    size_t decoded_name_len = 0;
+    for (size_t i = 0; i < name_len; i++) {
+        if (name_raw[i] == '%' && i + 2 < name_len && isxdigit((unsigned char)name_raw[i+1]) && isxdigit((unsigned char)name_raw[i+2])) {
+            char hex[3] = {name_raw[i+1], name_raw[i+2], 0};
+            file_name[decoded_name_len++] = (char)strtol(hex, NULL, 16);
+            i += 2;
+        } else {
+            file_name[decoded_name_len++] = name_raw[i];
+        }
+    }
+    file_name[decoded_name_len] = '\0';
+    free(name_raw);
 
     size_t decoded_len = base58_decoded_length(hash1_len);
     uint8_t* file_hash_raw = get_clear_memory(decoded_len);
     size_t file_hash_bytes = 0;
     if (base58_decode(file_hash_b58, file_hash_raw, decoded_len, &file_hash_bytes) != 0) {
-        free(file_hash_raw); free(file_hash_b58); free(descriptor_hash_b58); free(file_name); free(decoded_type);
+        free(file_hash_raw); free(file_hash_b58); free(descriptor_hash_b58); free(file_name); free(decoded_type); free(server_address);
         return NULL;
     }
     buffer_t* file_hash = buffer_create_from_existing_memory(file_hash_raw, file_hash_bytes);
@@ -123,7 +145,7 @@ off_url_t* off_url_parse(const char* url_string) {
     uint8_t* desc_hash_raw = get_clear_memory(decoded_len);
     size_t desc_hash_bytes = 0;
     if (base58_decode(descriptor_hash_b58, desc_hash_raw, decoded_len, &desc_hash_bytes) != 0) {
-        buffer_destroy(file_hash); free(file_hash_b58); free(descriptor_hash_b58); free(file_name); free(decoded_type);
+        buffer_destroy(file_hash); free(file_hash_b58); free(descriptor_hash_b58); free(file_name); free(decoded_type); free(server_address);
         return NULL;
     }
     buffer_t* descriptor_hash = buffer_create_from_existing_memory(desc_hash_raw, desc_hash_bytes);
@@ -136,6 +158,10 @@ off_url_t* off_url_parse(const char* url_string) {
     url->descriptor_hash = descriptor_hash;
     free(url->file_name);
     url->file_name = file_name;
+    if (server_address != NULL) {
+        free(url->server_address);
+        url->server_address = server_address;
+    }
 
     free(file_hash_b58);
     free(descriptor_hash_b58);

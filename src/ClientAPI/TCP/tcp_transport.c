@@ -223,10 +223,6 @@ void tcp_transport_destroy(tcp_transport_t* transport) {
   for (int i = 0; i < transport->connections.length; i++) {
     tcp_connection_t* conn = transport->connections.data[i];
     conn->is_closing = 1;
-    if (conn->ssl != NULL) {
-      SSL_free(conn->ssl);
-      conn->ssl = NULL;
-    }
     if (conn->fd >= 0) {
       close(conn->fd);
       conn->fd = -1;
@@ -249,6 +245,10 @@ void tcp_transport_destroy(tcp_transport_t* transport) {
         pd_watcher_stop(watcher);
         pd_watcher_destroy(watcher);
       }
+    }
+    if (conn->ssl != NULL) {
+      SSL_free(conn->ssl);
+      conn->ssl = NULL;
     }
     if (conn->framer != NULL) {
       stream_framer_destroy(conn->framer);

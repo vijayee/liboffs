@@ -65,6 +65,19 @@ static int _send_frame(int fd, cbor_item_t* frame) {
 static cbor_item_t* _recv_frame(int fd, stream_framer_t* framer, int timeout_ms = 10000) {
     uint8_t buf[65536];
     for (int attempts = 0; attempts < timeout_ms / 10; attempts++) {
+        /* Check framer for buffered frames before polling the socket */
+        size_t frame_len;
+        uint8_t* frame_data = stream_framer_next(framer, &frame_len);
+        if (frame_data != NULL) {
+            struct cbor_load_result load_result;
+            cbor_item_t* item = cbor_load(frame_data, frame_len, &load_result);
+            free(frame_data);
+            if (item != NULL && load_result.error.code == CBOR_ERR_NONE) {
+                return item;
+            }
+            if (item != NULL) cbor_decref(&item);
+        }
+
         struct pollfd poll_fd;
         poll_fd.fd = fd;
         poll_fd.events = POLLIN;
@@ -74,17 +87,6 @@ static cbor_item_t* _recv_frame(int fd, stream_framer_t* framer, int timeout_ms 
             ssize_t received = recv(fd, buf, sizeof(buf), 0);
             if (received <= 0) return nullptr;
             stream_framer_feed(framer, buf, (size_t)received);
-            size_t frame_len;
-            uint8_t* frame_data = stream_framer_next(framer, &frame_len);
-            if (frame_data != NULL) {
-                struct cbor_load_result load_result;
-                cbor_item_t* item = cbor_load(frame_data, frame_len, &load_result);
-                free(frame_data);
-                if (item != NULL && load_result.error.code == CBOR_ERR_NONE) {
-                    return item;
-                }
-                if (item != NULL) cbor_decref(&item);
-            }
         }
     }
     return nullptr;

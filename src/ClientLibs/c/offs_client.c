@@ -148,6 +148,7 @@ static void* _recv_thread(void* arg) {
     while ((frame_data = stream_framer_next(client->framer, &frame_len)) != NULL) {
       struct cbor_load_result load_result;
       cbor_item_t* cbor_item = cbor_load(frame_data, frame_len, &load_result);
+      free(frame_data);
       if (cbor_item == NULL || load_result.error.code != CBOR_ERR_NONE) {
         if (cbor_item != NULL) {
           cbor_decref(&cbor_item);

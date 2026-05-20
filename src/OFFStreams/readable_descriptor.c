@@ -137,8 +137,7 @@ static int _process_descriptor(readable_descriptor_t* desc, buffer_t* block_data
     if (tuple_size(desc->current_tuple) == desc->ori->tuple_size) {
       tuple_t* tuple = desc->current_tuple;
       desc->current_tuple = NULL;
-      tuple_t* ref = REFERENCE(tuple, tuple_t);
-      stream_notify((stream_t*)desc, data_event, ref, (void (*)(void*))tuple_destroy);
+      stream_notify((stream_t*)desc, data_event, CONSUME(tuple, tuple_t), (void (*)(void*))tuple_destroy);
       desc->tuple_counter++;
 
       if (desc->tuple_counter >= desc->tuple_count) {
@@ -181,6 +180,7 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
                              : (buffer_t*)refcounter_reference((refcounter_t*)desc->ori->descriptor_hash);
         desc->next_descriptor_hash = NULL;
         _fetch_descriptor_block(desc, hash);
+        DESTROY(hash, buffer);
       }
       break;
     }
@@ -254,7 +254,7 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
         buffer_t* hash = desc->next_descriptor_hash;
         desc->next_descriptor_hash = NULL;
         _fetch_descriptor_block(desc, hash);
-        /* hash reference is consumed by _fetch_descriptor_block */
+        DESTROY(hash, buffer);
       }
       break;
     }

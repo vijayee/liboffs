@@ -161,6 +161,7 @@ static void _unix_get_on_rs_close(void* ctx, void* unused) {
   cbor_item_t* frame = client_api_get_end_encode();
   _unix_connection_send_frame(pipeline->connection, frame);
   stream_deferred_deref((stream_t*)pipeline->rs);
+  ori_destroy(pipeline->ori);
   if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
     DESTROY(pipeline->ori, ori);
     free(pipeline);
@@ -172,16 +173,13 @@ static void _unix_get_on_rs_error(void* ctx, void* error) {
   unix_get_pipeline_t* pipeline = (unix_get_pipeline_t*)ctx;
   _unix_connection_send_error(pipeline->connection, CLIENT_API_STATUS_INTERNAL_ERROR, "Stream error");
   stream_deactivate((stream_t*)pipeline->rs, NULL);
-  if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
-    DESTROY(pipeline->ori, ori);
-    free(pipeline);
-  }
 }
 
 static void _unix_get_on_desc_close(void* ctx, void* unused) {
   (void)unused;
   unix_get_pipeline_t* pipeline = (unix_get_pipeline_t*)ctx;
   stream_deferred_deref((stream_t*)pipeline->desc);
+  ori_destroy(pipeline->ori);
   if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
     DESTROY(pipeline->ori, ori);
     free(pipeline);
@@ -194,10 +192,6 @@ static void _unix_get_on_desc_error(void* ctx, void* error) {
   _unix_connection_send_error(pipeline->connection, CLIENT_API_STATUS_NOT_FOUND, "Not found");
   stream_deactivate((stream_t*)pipeline->rs, NULL);
   stream_deactivate((stream_t*)pipeline->desc, NULL);
-  if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
-    DESTROY(pipeline->ori, ori);
-    free(pipeline);
-  }
 }
 
 static unix_get_pipeline_t* _unix_get_pipeline_create(unix_connection_t* conn, ori_t* ori) {
@@ -278,6 +272,19 @@ static void _unix_put_on_stream_close(void* ctx, void* unused) {
   (void)unused;
   unix_put_pipeline_t* pipeline = (unix_put_pipeline_t*)ctx;
   writeable_descriptor_close(pipeline->desc);
+  if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
+    refcounter_dereference((refcounter_t*)pipeline->recipe);
+    scheduler_pool_defer_cleanup(((stream_t*)pipeline->ws)->pool, pipeline->recipe,
+                                 (void (*)(void*))new_blocks_recipe_destroy);
+    stream_deferred_deref((stream_t*)pipeline->desc);
+    stream_deferred_deref((stream_t*)pipeline->ws);
+    if (pipeline->content_type != NULL) free(pipeline->content_type);
+    if (pipeline->file_name != NULL) free(pipeline->file_name);
+    if (pipeline->server_address != NULL) free(pipeline->server_address);
+    if (pipeline->file_hash != NULL) DESTROY(pipeline->file_hash, buffer);
+    if (pipeline->descriptor_hash != NULL) DESTROY(pipeline->descriptor_hash, buffer);
+    free(pipeline);
+  }
 }
 
 static void _unix_put_on_stream_data(void* ctx, void* data) {
@@ -300,23 +307,6 @@ static void _unix_put_on_stream_error(void* ctx, void* error) {
   unix_put_pipeline_t* pipeline = (unix_put_pipeline_t*)ctx;
   _unix_connection_send_error(pipeline->connection, CLIENT_API_STATUS_INTERNAL_ERROR, "PUT stream error");
   stream_deactivate((stream_t*)pipeline->ws, NULL);
-  /* stream_deactivate will also trigger close_event on ws, which calls
-     _unix_put_on_stream_close -> writeable_descriptor_close, and that
-     may trigger desc close/error. Use refcounter so only the last
-     callback frees the pipeline. */
-  if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
-    refcounter_dereference((refcounter_t*)pipeline->recipe);
-    scheduler_pool_defer_cleanup(((stream_t*)pipeline->ws)->pool, pipeline->recipe,
-                                 (void (*)(void*))new_blocks_recipe_destroy);
-    stream_deferred_deref((stream_t*)pipeline->desc);
-    stream_deferred_deref((stream_t*)pipeline->ws);
-    if (pipeline->content_type != NULL) free(pipeline->content_type);
-    if (pipeline->file_name != NULL) free(pipeline->file_name);
-    if (pipeline->server_address != NULL) free(pipeline->server_address);
-    if (pipeline->file_hash != NULL) DESTROY(pipeline->file_hash, buffer);
-    if (pipeline->descriptor_hash != NULL) DESTROY(pipeline->descriptor_hash, buffer);
-    free(pipeline);
-  }
 }
 
 static void _unix_put_on_descriptor_error(void* ctx, void* error) {
@@ -324,19 +314,7 @@ static void _unix_put_on_descriptor_error(void* ctx, void* error) {
   unix_put_pipeline_t* pipeline = (unix_put_pipeline_t*)ctx;
   _unix_connection_send_error(pipeline->connection, CLIENT_API_STATUS_INTERNAL_ERROR, "PUT descriptor error");
   stream_deactivate((stream_t*)pipeline->desc, NULL);
-  if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
-    refcounter_dereference((refcounter_t*)pipeline->recipe);
-    scheduler_pool_defer_cleanup(((stream_t*)pipeline->ws)->pool, pipeline->recipe,
-                                 (void (*)(void*))new_blocks_recipe_destroy);
-    stream_deferred_deref((stream_t*)pipeline->ws);
-    stream_deferred_deref((stream_t*)pipeline->desc);
-    if (pipeline->content_type != NULL) free(pipeline->content_type);
-    if (pipeline->file_name != NULL) free(pipeline->file_name);
-    if (pipeline->server_address != NULL) free(pipeline->server_address);
-    if (pipeline->file_hash != NULL) DESTROY(pipeline->file_hash, buffer);
-    if (pipeline->descriptor_hash != NULL) DESTROY(pipeline->descriptor_hash, buffer);
-    free(pipeline);
-  }
+  stream_deactivate((stream_t*)pipeline->ws, NULL);
 }
 
 /* --- Frame handlers --- */
@@ -375,6 +353,8 @@ static void _unix_handle_get(unix_connection_t* conn, cbor_item_t* frame) {
 
   /* Synchronous GET path */
   ori_t* ori = ori_create(url->stream_length);
+  ori->block_type = standard;
+  ori->tuple_size = 3;
   if (url->descriptor_hash != NULL) {
     ori->descriptor_hash = REFERENCE(url->descriptor_hash, buffer_t);
   }
@@ -456,15 +436,15 @@ static void _unix_handle_put(unix_connection_t* conn, cbor_item_t* frame) {
   size_t tuple_size = 3;
   size_t descriptor_pad = 32;
 
+  new_blocks_recipe_t* recipe = new_blocks_recipe_create(conn->pool, conn->bc, block_type);
   vec_block_recipe_t recipes;
   vec_init(&recipes);
+  vec_push(&recipes, (block_recipe_t*)recipe);
 
   writeable_off_stream_t* ws = writeable_off_stream_create(
     conn->pool, conn->bc, conn->tc, block_type, tuple_size, descriptor_pad, recipes, NULL);
   writeable_descriptor_t* desc = writeable_descriptor_create(
     conn->pool, conn->bc, block_type, descriptor_pad, tuple_size, msg.stream_length, NULL);
-
-  new_blocks_recipe_t* recipe = new_blocks_recipe_create(conn->pool, conn->bc, block_type);
 
   pipeline->ws = ws;
   pipeline->desc = desc;
@@ -483,11 +463,12 @@ static void _unix_handle_put(unix_connection_t* conn, cbor_item_t* frame) {
   if (msg.data != NULL && msg.data_size > 0) {
     /* Buffered PUT — write data and finalize immediately */
     buffer_t* data = buffer_create_from_pointer_copy(msg.data, msg.data_size);
+    free(msg.data);
+    msg.data = NULL;
+    msg.data_size = 0;
     writeable_off_stream_write(ws, data);
     DESTROY(data, buffer);
     writeable_off_stream_finalize(ws);
-    msg.data = NULL;
-    msg.data_size = 0;
   } else {
     /* Streaming PUT — store copies of strings in connection for subsequent PUT_DATA frames.
      * The pipeline owns the original pointers; the connection needs its own copies
