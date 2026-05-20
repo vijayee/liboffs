@@ -5,6 +5,8 @@
 #include "block_cache.h"
 #include "sections.h"
 #include "../Network/authority.h"
+#include "../Network/respiration.h"
+#include "../Network/respiration_actor.h"
 #include "../Util/allocator.h"
 #include "../Util/hash.h"
 #include "../Util/path_join.h"
@@ -14,6 +16,23 @@
 #include "../Util/log.h"
 #include <stdatomic.h>
 #include <time.h>
+
+void respiration_exhale_payload_destroy(void* ptr) {
+  respiration_exhale_payload_t* payload = (respiration_exhale_payload_t*)ptr;
+  if (payload == NULL) return;
+  if (payload->hashes != NULL) {
+    for (size_t idx = 0; idx < payload->count; idx++) {
+      if (payload->hashes[idx] != NULL) {
+        DESTROY(payload->hashes[idx], buffer);
+      }
+    }
+    free(payload->hashes);
+  }
+  if (payload->ejection_dates != NULL) {
+    free(payload->ejection_dates);
+  }
+  free(payload);
+}
 
 static void cache_put_payload_destroy(void* ptr) {
   cache_put_payload_t* payload = (cache_put_payload_t*)ptr;
@@ -610,6 +629,33 @@ void block_cache_update_capacity(block_cache_t* block_cache) {
   float capacity = (float)block_cache->current_bytes / (float)block_cache->max_capacity_bytes;
   if (capacity > 1.0f) capacity = 1.0f;
   authority_update_capacity(block_cache->authority, capacity);
+  authority_update_phase(block_cache->authority, capacity);
+  if (respiration_should_exhale(capacity) && block_cache->respiration != NULL) {
+    respiration_actor_t* respiration = block_cache->respiration;
+    if (atomic_load(&respiration->state) == RESPIRATION_IDLE) {
+      index_entry_vec_t* entries = index_entries_by_ejection_date(block_cache->index);
+      if (entries != NULL && entries->length > 0) {
+        respiration_exhale_payload_t* payload = get_clear_memory(sizeof(respiration_exhale_payload_t));
+        payload->count = (size_t)entries->length;
+        payload->hashes = get_clear_memory(sizeof(buffer_t*) * entries->length);
+        payload->ejection_dates = get_clear_memory(sizeof(uint64_t) * entries->length);
+        payload->capacity = capacity;
+        for (int idx = 0; idx < entries->length; idx++) {
+          payload->hashes[idx] = (buffer_t*)refcounter_reference((refcounter_t*)entries->data[idx]->hash);
+          payload->ejection_dates[idx] = entries->data[idx]->ejection_date;
+        }
+        message_t msg;
+        msg.type = RESPIRATION_EXHALE_TRIGGER;
+        msg.payload = payload;
+        msg.payload_destroy = respiration_exhale_payload_destroy;
+        actor_send(&respiration->actor, &msg);
+      }
+      if (entries != NULL) {
+        vec_deinit(entries);
+        free(entries);
+      }
+    }
+  }
 }
 
 void block_cache_set_max_capacity(block_cache_t* block_cache, size_t max_capacity_bytes) {

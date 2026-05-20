@@ -8,6 +8,7 @@
 #include "ring_set.h"
 #include "net_node.h"
 #include "pem_key.h"
+#include "respiration.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include "../Util/base58.h"
@@ -456,4 +457,17 @@ int authority_load_peers(authority_t* authority, network_t* network) {
 void authority_update_capacity(authority_t* authority, float capacity) {
   if (authority == NULL) return;
   ATOMIC_STORE(&authority->capacity, capacity);
+}
+
+void authority_update_phase(authority_t* authority, float capacity) {
+  if (authority == NULL) return;
+  node_phase_e phase;
+  if (capacity >= RESPIRATION_EXHALE_THRESHOLD) {
+    phase = NODE_PHASE_EXHALE;
+  } else if (capacity < RESPIRATION_INHALE_THRESHOLD) {
+    phase = NODE_PHASE_INHALE;
+  } else {
+    phase = NODE_PHASE_NEUTRAL;
+  }
+  ATOMIC_STORE(&authority->phase, phase);
 }

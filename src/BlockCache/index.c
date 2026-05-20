@@ -1239,6 +1239,27 @@ int _index_get_id_crc(char* filename, uint64_t* id, uint64_t* crc) {
   }
 }
 
+static int _compare_ejection_date(const void* left, const void* right) {
+  const index_entry_t* entry_left = *(const index_entry_t**)left;
+  const index_entry_t* entry_right = *(const index_entry_t**)right;
+  uint64_t date_left = entry_left->ejection_date;
+  uint64_t date_right = entry_right->ejection_date;
+  if (date_left == 0 && date_right == 0) return 0;
+  if (date_left == 0) return 1;   /* never ejected → last */
+  if (date_right == 0) return -1;
+  if (date_left < date_right) return -1;
+  if (date_left > date_right) return 1;
+  return 0;
+}
+
+index_entry_vec_t* index_entries_by_ejection_date(index_t* index) {
+  index_entry_vec_t* entries = index_to_array(index);
+  if (entries != NULL && entries->length > 0) {
+    vec_sort(entries, _compare_ejection_date);
+  }
+  return entries;
+}
+
 int _sort_indexes( const void *str1, const void *str2 ){
   char *const *pp1 = str1;
   char *const *pp2 = str2;

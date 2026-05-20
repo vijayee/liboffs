@@ -165,6 +165,11 @@ typedef enum message_type_e {
   NETWORK_LOCAL_CLOSEST_NODES,
   NETWORK_LOCAL_FIND_NODE,
   NETWORK_CLOSEST_NODES_RESULT,
+  /* Respiration actor messages */
+  RESPIRATION_EXHALE_TRIGGER,
+  RESPIRATION_FIND_BLOCK_RESULT,
+  RESPIRATION_STORE_BLOCK_RESULT,
+  RESPIRATION_EXHALE_DELETE,
 } message_type_e;
 
 /* Stream-to-network: request block from peers */
@@ -189,10 +194,13 @@ typedef struct {
   actor_t*  reply_to;   /* stream actor to notify (NULL = fire-and-forget) */
 } network_local_store_block_payload_t;
 
+void network_local_store_block_payload_destroy(void* ptr);
+
 /* Network-to-stream: result of StoreBlock */
 typedef struct {
   int       accepted;   /* 1 = accepted by network, 0 = declined */
   uint32_t  replicas;   /* number of replicas stored */
+  buffer_t* hash;       /* hash of the stored block (referenced) */
   actor_t*  reply_to;   /* NULL for fire-and-forget */
 } network_store_block_result_payload_t;
 
@@ -227,6 +235,28 @@ typedef struct {
 } network_closest_nodes_result_payload_t;
 
 void network_closest_nodes_result_payload_destroy(void* ptr);
+
+/* Respiration actor: block cache triggers exhale */
+typedef struct {
+  buffer_t** hashes;          /* sorted by ejection date, oldest first */
+  uint64_t* ejection_dates;   /* parallel array of ejection dates */
+  size_t count;               /* number of hashes */
+  float capacity;             /* current capacity when triggered */
+} respiration_exhale_payload_t;
+
+void respiration_exhale_payload_destroy(void* ptr);
+
+/* Respiration actor: find-block result for a specific hash */
+typedef struct {
+  buffer_t* hash;
+  uint8_t found;             /* 1 = found elsewhere, 0 = not found */
+} respiration_find_result_payload_t;
+
+/* Respiration actor: store-block result for a specific hash */
+typedef struct {
+  buffer_t* hash;
+  uint8_t accepted;          /* 1 = peer accepted, 0 = declined */
+} respiration_store_result_payload_t;
 
 typedef struct message_t {
   uint32_t type;

@@ -65,5 +65,6 @@ int authority_save_peers(const authority_t* authority, const network_t* network)
 int authority_load_peers(authority_t* authority, network_t* network);
 
 void authority_update_capacity(authority_t* authority, float capacity);
+void authority_update_phase(authority_t* authority, float capacity);
 
 #endif // OFFS_AUTHORITY_H

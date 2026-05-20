@@ -8,6 +8,7 @@
 #include "find_block.h"
 #include "store_block.h"
 #include "respiration.h"
+#include "respiration_actor.h"
 #include "peer_connection.h"
 #include "timing_wheel.h"
 #include "topology_metrics.h"
@@ -61,6 +62,15 @@ static void network_cache_put_payload_destroy(void* ptr) {
 void network_local_find_block_payload_destroy(void* ptr) {
   if (ptr == NULL) return;
   network_local_find_block_payload_t* payload = (network_local_find_block_payload_t*)ptr;
+  if (payload->hash != NULL) {
+    buffer_destroy(payload->hash);
+  }
+  free(payload);
+}
+
+void network_local_store_block_payload_destroy(void* ptr) {
+  if (ptr == NULL) return;
+  network_local_store_block_payload_t* payload = (network_local_store_block_payload_t*)ptr;
   if (payload->hash != NULL) {
     buffer_destroy(payload->hash);
   }
@@ -141,6 +151,9 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
 
   actor_init(&network->actor, network, network_dispatch, pool);
 
+  network->respiration = respiration_actor_create(network, pool);
+  block_cache->respiration = network->respiration;
+
   // Start gossip timer: first tick in init_interval_s, then recurring
   network->gossip_timer_id = timer_actor_set(timer,
       (uint64_t)GOSSIP_INIT_INTERVAL_S * 1000,
@@ -208,6 +221,9 @@ void network_destroy(network_t* network) {
     nat_detect_destroy(network->nat_detect);
     network->nat_detect = NULL;
   }
+  respiration_actor_destroy(network->respiration);
+  network->respiration = NULL;
+
   // Free any remaining pending QUIC connections (never saluted)
   pending_quic_t* pending = network->pending_connections;
   while (pending != NULL) {
@@ -3230,12 +3246,13 @@ void network_dispatch(void* state, message_t* msg) {
         }
 
         // Notify the stream actor if a reply_to was provided
-        if (result == STORE_BLOCK_ACCEPTED && payload->reply_to != NULL) {
+        if (payload->reply_to != NULL) {
           network_store_block_result_payload_t* result_payload =
               get_clear_memory(sizeof(network_store_block_result_payload_t));
           if (result_payload != NULL) {
-            result_payload->accepted = 1;
-            result_payload->replicas = (uint32_t)next_hop_count;
+            result_payload->accepted = (result == STORE_BLOCK_ACCEPTED) ? 1 : 0;
+            result_payload->replicas = (result == STORE_BLOCK_ACCEPTED) ? (uint32_t)next_hop_count : 0;
+            result_payload->hash = REFERENCE(payload->hash, buffer_t);
             result_payload->reply_to = NULL;
             message_t result_msg = {0};
             result_msg.type = NETWORK_STORE_BLOCK_RESULT;

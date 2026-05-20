@@ -202,13 +202,15 @@ static void handle_status(int client_fd) {
   }
   const char* node_id_str = g_node.authority ? g_node.authority->local_id.str : "null";
   float capacity = 0.0f;
+  int phase = 1; /* NEUTRAL */
   if (g_node.network && g_node.network->authority) {
     capacity = atomic_load(&g_node.network->authority->capacity);
+    phase = (int)atomic_load(&g_node.network->authority->phase);
   }
-  snprintf(response, sizeof(response), "%s node_id=%s peers=%zu blocks=%zu relay=%s nat=%s endpoint=%u capacity=%.4f",
+  snprintf(response, sizeof(response), "%s node_id=%s peers=%zu blocks=%zu relay=%s nat=%s endpoint=%u capacity=%.4f phase=%d",
            CTRL_RESP_STATUS, node_id_str, peers, blocks, relay_status, nat,
            g_node.network->relay ? g_node.network->relay->local_endpoint_id : 0,
-           capacity);
+           capacity, phase);
   send_response(client_fd, response);
 }
 

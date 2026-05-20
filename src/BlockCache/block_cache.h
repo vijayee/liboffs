@@ -83,6 +83,7 @@ typedef struct pending_get_t {
 } pending_get_t;
 
 typedef struct authority_t authority_t;
+typedef struct respiration_actor_t respiration_actor_t;
 
 typedef struct block_cache_t {
   refcounter_t refcounter;
@@ -96,6 +97,7 @@ typedef struct block_cache_t {
   size_t current_bytes;
   size_t max_capacity_bytes;
   authority_t* authority;
+  respiration_actor_t* respiration;
 } block_cache_t;
 
 /* Result payload for CACHE_GET_RESULT */

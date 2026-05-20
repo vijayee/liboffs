@@ -86,4 +86,5 @@ index_t* cbor_to_index(cbor_item_t* cbor, char* location, timer_actor_t* timer_a
 void index_set_entry_ejection(index_t* index, index_entry_t* entry, uint64_t date);
 int _sort_indexes(const void *str1, const void *str2);
 int index_to_crc(index_t* index, uint64_t* crc);
+index_entry_vec_t* index_entries_by_ejection_date(index_t* index);
 #endif //OFFS_INDEX_H
