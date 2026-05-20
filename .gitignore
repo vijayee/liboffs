@@ -28,3 +28,4 @@ examples/off_client/pubspec.lock
 examples/off_client/test/
 examples/off_client/.metadata
 Testing/
+vgcore.*
