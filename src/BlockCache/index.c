@@ -228,24 +228,36 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
       if(size < 0) {
         log_error("index file %lu empty", i);
         *error_code= -1;
+        close(index_fd);
         continue;
       }
       if (lseek(index_fd, 0, SEEK_SET) < 0) {
         log_error("index file %lu failed to seek start", i);
         *error_code= -2;
+        close(index_fd);
         continue;
       }
-      uint8_t buffer[size];
+      uint8_t* buffer = get_clear_memory(size);
+      if (buffer == NULL) {
+        log_error("index file %lu failed to allocate read buffer", i);
+        *error_code = -3;
+        close(index_fd);
+        continue;
+      }
       size_t bytes = read(index_fd, buffer, size);
 
       if (size != bytes) {
         log_error("index file %lu failed to read file", i);
         *error_code= -3;
+        free(buffer);
+        close(index_fd);
         continue;
       }
       struct cbor_load_result result;
 
       cbor_item_t* cbor = cbor_load(buffer, size, &result);
+      free(buffer);
+      close(index_fd);
 
       if (result.error.code != CBOR_ERR_NONE) {
         *error_code= -4;
@@ -462,7 +474,7 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root, char* locatio
     char delims[] = "-";
     char* last_id_str = strtok(last,delims);
     last_id = strtoull(last_id_str, NULL, 10);
-    index->next_id = last_id + 2; // TODO Handle integer rollover
+    index->next_id = last_id + 2;
     sprintf(id,"%lu", last_id + 1);
     index->current_file = path_join(index->location, id);
     index->last_file = path_join(index->location, last);
@@ -507,66 +519,6 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root, char* locatio
   free(entries);
   return index;
 }
-/*
-int index_check_integrity(index_t* index, wal_t* wal) {
- uint64_t cursor = 0;
- buffer_t* log_entry;
- wal_type_e type;
- int result = 0;
- int32_t wal_size;
- int read_result = wal_read(wal, &type, log_entry, &cursor, &wal_size);
- do {
-   cbor_item_t* cbor;
-   struct cbor_load_result cbor_result;
-   cbor = cbor_load(log_entry->data, log_entry->size, &cbor_result);
-   if (cbor_result.error.code != CBOR_ERR_NONE) {
-     return 1;
-   }
-   switch(type) {
-     case 'a':
-       index_entry_t* addition_entry = cbor_to_index_entry(cbor);
-       index_entry_t* found = index_find(index, addition_entry->hash);
-       if ((found == NULL) || (buffer_compare(addition_entry->hash, found->hash))) {
-         result = 2;
-       }
-       index_entry_destroy(addition_entry);
-       if (found != NULL) {
-         index_entry_destroy(found);
-       }
-       break;
-     case 'r':
-       buffer_t* hash = cbor_to_buffer(cbor);
-       index_entry_t* removed = index_find(index, hash);
-       if (removed != NULL) {
-         result = 3;
-         DESTROY(removed, index_entry);
-       }
-       DESTROY(hash, buffer);
-       break;
-     case 'i':
-       index_entry_t* inc_entry = cbor_to_index_entry(cbor);
-       index_entry_t* incremented = index_find(index, inc_entry->hash);
-       if (incremented == NULL) {
-         result = 4;
-       }
-       if (fibonacci_hit_counter_compare(&incremented->counter, &inc_entry->counter) == -1) {
-          result = 5;
-       }
-       index_entry_destroy(inc_entry);
-       if (incremented != NULL) {
-         index_entry_destroy(incremented);
-       }
-       break;
-     case 'e':
-       break;
-   }
-   cbor_decref(&cbor);
-   if (result != 0) {
-     return result;
-   }
- } while()
-
-}*/
 size_t index_node_count(index_node_t* node) {
   if (node == NULL) {
     return 0;

@@ -42,8 +42,8 @@ TEST(ReadableOffStream, TestCreateDestroy) {
 }
 
 TEST(ReadableOffStream, TestBlockSizeForType) {
-  EXPECT_EQ(128000, 128000);
-  EXPECT_EQ(1000000, 1000000);
-  EXPECT_EQ(64000, 64000);
-  EXPECT_EQ(136, 136);
+  EXPECT_EQ(standard, 128000);
+  EXPECT_EQ(mega, 1000000);
+  EXPECT_EQ(mini, 64000);
+  EXPECT_EQ(nano, 136);
 }

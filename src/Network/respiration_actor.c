@@ -26,7 +26,10 @@ static void _respiration_add_redundant(respiration_actor_t* actor, buffer_t* has
   if (actor->redundant_count >= actor->redundant_capacity) {
     size_t new_capacity = actor->redundant_capacity == 0 ? 16 : actor->redundant_capacity * 2;
     buffer_t** new_hashes = realloc(actor->redundant_hashes, sizeof(buffer_t*) * new_capacity);
-    if (new_hashes == NULL) return;
+    if (new_hashes == NULL) {
+      DESTROY(hash, buffer);
+      return;
+    }
     actor->redundant_hashes = new_hashes;
     actor->redundant_capacity = new_capacity;
   }
@@ -36,13 +39,17 @@ static void _respiration_add_redundant(respiration_actor_t* actor, buffer_t* has
 static void _respiration_add_preserved(respiration_actor_t* actor, buffer_t* hash, uint64_t ejection_date) {
   if (actor->preserved_count >= actor->preserved_capacity) {
     size_t new_capacity = actor->preserved_capacity == 0 ? 16 : actor->preserved_capacity * 2;
-    buffer_t** new_hashes = realloc(actor->preserved_hashes, sizeof(buffer_t*) * new_capacity);
-    if (new_hashes == NULL) return;
-    actor->preserved_hashes = new_hashes;
+    respiration_preserved_t* new_entries = realloc(actor->preserved, sizeof(respiration_preserved_t) * new_capacity);
+    if (new_entries == NULL) {
+      DESTROY(hash, buffer);
+      return;
+    }
+    actor->preserved = new_entries;
     actor->preserved_capacity = new_capacity;
   }
-  actor->preserved_hashes[actor->preserved_count++] = hash;
-  (void)ejection_date;
+  actor->preserved[actor->preserved_count].hash = hash;
+  actor->preserved[actor->preserved_count].ejection_date = ejection_date;
+  actor->preserved_count++;
 }
 
 static void _respiration_delete_redundant(respiration_actor_t* actor);
@@ -90,9 +97,9 @@ void respiration_actor_dispatch(void* state, message_t* msg) {
         }
         actor->redundant_count = 0;
       }
-      if (actor->preserved_hashes != NULL) {
+      if (actor->preserved != NULL) {
         for (size_t idx = 0; idx < actor->preserved_count; idx++) {
-          DESTROY(actor->preserved_hashes[idx], buffer);
+          DESTROY(actor->preserved[idx].hash, buffer);
         }
         actor->preserved_count = 0;
       }
@@ -277,7 +284,7 @@ static void _respiration_delete_redundant(respiration_actor_t* actor) {
   if (capacity < RESPIRATION_EXHALE_THRESHOLD) {
     /* Capacity is below threshold — done, go idle */
     for (size_t idx = 0; idx < actor->preserved_count; idx++) {
-      DESTROY(actor->preserved_hashes[idx], buffer);
+      DESTROY(actor->preserved[idx].hash, buffer);
     }
     actor->preserved_count = 0;
     atomic_store(&actor->state, RESPIRATION_IDLE);
@@ -298,14 +305,14 @@ static void _respiration_delete_redundant(respiration_actor_t* actor) {
         actor->pending = new_pending;
         actor->pending_capacity = new_capacity;
       }
-      actor->pending[actor->pending_count].hash = actor->preserved_hashes[idx];
-      actor->pending[actor->pending_count].ejection_date = 0;
+      actor->pending[actor->pending_count].hash = actor->preserved[idx].hash;
+      actor->pending[actor->pending_count].ejection_date = actor->preserved[idx].ejection_date;
       actor->pending_count++;
       moved_count++;
     }
     /* Free any preserved hashes that couldn't be moved (best effort) */
     for (size_t idx = moved_count; idx < actor->preserved_count; idx++) {
-      DESTROY(actor->preserved_hashes[idx], buffer);
+      DESTROY(actor->preserved[idx].hash, buffer);
     }
     actor->preserved_count = 0;
 
@@ -359,7 +366,7 @@ respiration_actor_t* respiration_actor_create(network_t* network, scheduler_pool
   actor->redundant_hashes = NULL;
   actor->redundant_count = 0;
   actor->redundant_capacity = 0;
-  actor->preserved_hashes = NULL;
+  actor->preserved = NULL;
   actor->preserved_count = 0;
   actor->preserved_capacity = 0;
   actor->pending = NULL;
@@ -399,15 +406,15 @@ void respiration_actor_destroy(respiration_actor_t* actor) {
     actor->redundant_capacity = 0;
   }
 
-  /* Free preserved hashes */
-  if (actor->preserved_hashes != NULL) {
+  /* Free preserved entries */
+  if (actor->preserved != NULL) {
     for (size_t index = 0; index < actor->preserved_count; index++) {
-      if (actor->preserved_hashes[index] != NULL) {
-        DESTROY(actor->preserved_hashes[index], buffer);
+      if (actor->preserved[index].hash != NULL) {
+        DESTROY(actor->preserved[index].hash, buffer);
       }
     }
-    free(actor->preserved_hashes);
-    actor->preserved_hashes = NULL;
+    free(actor->preserved);
+    actor->preserved = NULL;
     actor->preserved_count = 0;
     actor->preserved_capacity = 0;
   }

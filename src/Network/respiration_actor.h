@@ -22,6 +22,11 @@ typedef struct respiration_pending_t {
   uint64_t ejection_date;
 } respiration_pending_t;
 
+typedef struct respiration_preserved_t {
+  buffer_t* hash;
+  uint64_t ejection_date;
+} respiration_preserved_t;
+
 typedef struct respiration_actor_t {
   actor_t actor;
   struct network_t* network;
@@ -32,7 +37,7 @@ typedef struct respiration_actor_t {
   size_t redundant_count;
   size_t redundant_capacity;
   /* Blocks not found elsewhere (must store to peers before deleting) */
-  buffer_t** preserved_hashes;
+  respiration_preserved_t* preserved;
   size_t preserved_count;
   size_t preserved_capacity;
   /* Pending find-block or store-block queries in flight */

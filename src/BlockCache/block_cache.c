@@ -34,6 +34,17 @@ void respiration_exhale_payload_destroy(void* ptr) {
   free(payload);
 }
 
+static void cache_get_result_payload_destroy(void* ptr) {
+  cache_get_result_payload_t* payload = (cache_get_result_payload_t*)ptr;
+  if (payload->hash != NULL) {
+    DESTROY(payload->hash, buffer);
+  }
+  if (payload->block != NULL) {
+    block_destroy(payload->block);
+  }
+  free(payload);
+}
+
 static void cache_put_payload_destroy(void* ptr) {
   cache_put_payload_t* payload = (cache_put_payload_t*)ptr;
   if (payload->block != NULL) {
@@ -281,10 +292,11 @@ static void _block_cache_resolve_pending_gets(block_cache_t* block_cache,
       message_t reply;
       reply.type = CACHE_GET_RESULT;
       reply.payload = result;
-      reply.payload_destroy = free;
+      reply.payload_destroy = cache_get_result_payload_destroy;
       actor_send(found->reply_to, &reply);
 
       index_entry_destroy(found->entry);
+      found->hash = NULL;
       free(found);
       /* Don't advance current - the list head may have changed */
     } else {
@@ -419,7 +431,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
           message_t reply;
           reply.type = CACHE_GET_RESULT;
           reply.payload = result;
-          reply.payload_destroy = free;
+          reply.payload_destroy = cache_get_result_payload_destroy;
           actor_send(p->reply_to, &reply);
         }
       } else {
@@ -468,7 +480,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
             message_t reply;
             reply.type = CACHE_GET_RESULT;
             reply.payload = result;
-            reply.payload_destroy = free;
+            reply.payload_destroy = cache_get_result_payload_destroy;
             actor_send(p->reply_to, &reply);
           } else {
             p->result = block;

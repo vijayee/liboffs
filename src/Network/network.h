@@ -33,6 +33,13 @@ typedef struct relay_client_t relay_client_t;
 typedef struct nat_detect_t nat_detect_t;
 typedef struct quic_listener_t quic_listener_t;
 
+#define CLOSEST_NODES_PENDING_MAX 32
+
+typedef struct closest_nodes_pending_t {
+  uint64_t message_id;
+  actor_t* reply_to;
+} closest_nodes_pending_t;
+
 // Pending QUIC connections awaiting salutation identity handshake
 typedef struct pending_quic_t {
   void* quic_connection;           // HQUIC handle
@@ -71,6 +78,9 @@ typedef struct network_t {
   nat_type_e local_nat_type;      /* Detected NAT type */
 
   pending_quic_t* pending_connections;  /* QUIC connections awaiting salutation */
+
+  closest_nodes_pending_t closest_pending[CLOSEST_NODES_PENDING_MAX];
+  size_t closest_pending_count;
 
   quic_listener_t* quic_listener;      /* QUIC listener for direct P2P connections */
 

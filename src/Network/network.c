@@ -913,6 +913,12 @@ static void network_handle_closest_nodes(network_t* network, message_t* msg) {
   }
 }
 
+// --- ClosestNodes pending reply tracking ---
+
+static void network_closest_pending_add(network_t* network, uint64_t message_id,
+                                         actor_t* reply_to);
+static actor_t* network_closest_pending_remove(network_t* network, uint64_t message_id);
+
 // --- ClosestNodes response handler ---
 // Receive WIRE_CLOSEST_NODES_RESPONSE: update latency cache and forward along path or deliver locally.
 
@@ -971,23 +977,30 @@ static void network_handle_closest_nodes_response(network_t* network, message_t*
       cbor_decref(&cbor);
     }
   } else {
-    // We are the origin — deliver result to local stream
-    network_closest_nodes_result_payload_t* result =
-        get_clear_memory(sizeof(network_closest_nodes_result_payload_t));
-    if (result != NULL) {
-      result->found = response->found;
-      memcpy(&result->closest, &response->closest, sizeof(node_id_t));
-      result->closest_latency_us = response->closest_latency_us;
-      result->ring_count = response->ring_count;
-      if (result->ring_count > CLOSEST_NODES_MAX_RING_SAMPLES_MSG) {
-        result->ring_count = CLOSEST_NODES_MAX_RING_SAMPLES_MSG;
+    // We are the origin — deliver result to the local requestor
+    actor_t* reply_to = network_closest_pending_remove(network, response->message_id);
+    if (reply_to != NULL) {
+      network_closest_nodes_result_payload_t* result =
+          get_clear_memory(sizeof(network_closest_nodes_result_payload_t));
+      if (result != NULL) {
+        result->found = response->found;
+        memcpy(&result->closest, &response->closest, sizeof(node_id_t));
+        result->closest_latency_us = response->closest_latency_us;
+        result->ring_count = response->ring_count;
+        if (result->ring_count > CLOSEST_NODES_MAX_RING_SAMPLES_MSG) {
+          result->ring_count = CLOSEST_NODES_MAX_RING_SAMPLES_MSG;
+        }
+        memcpy(result->ring_nodes, response->ring_nodes, result->ring_count * sizeof(node_id_t));
+        memcpy(result->ring_latencies_us, response->ring_latencies_us,
+               result->ring_count * sizeof(uint32_t));
+        result->reply_to = NULL;
+
+        message_t result_msg = {0};
+        result_msg.type = NETWORK_CLOSEST_NODES_RESULT;
+        result_msg.payload = result;
+        result_msg.payload_destroy = network_closest_nodes_result_payload_destroy;
+        actor_send(reply_to, &result_msg);
       }
-      memcpy(result->ring_nodes, response->ring_nodes, result->ring_count * sizeof(node_id_t));
-      memcpy(result->ring_latencies_us, response->ring_latencies_us,
-             result->ring_count * sizeof(uint32_t));
-      // No reply_to in the response path case — the origin's local
-      // query table lookup will happen separately. Free the unused result.
-      free(result);
     }
   }
 }
@@ -1062,6 +1075,54 @@ static void network_handle_closest_nodes_progress(network_t* network, message_t*
   // Progress messages are informational only — no forwarding needed
 }
 
+// --- ClosestNodes pending reply tracking ---
+
+static void network_closest_pending_add(network_t* network, uint64_t message_id,
+                                         actor_t* reply_to) {
+  if (network->closest_pending_count >= CLOSEST_NODES_PENDING_MAX) {
+    size_t oldest = 0;
+    for (size_t idx = 1; idx < network->closest_pending_count; idx++) {
+      if (network->closest_pending[idx].message_id <
+          network->closest_pending[oldest].message_id) {
+        oldest = idx;
+      }
+    }
+    // Deliver "not found" to the evicted requestor
+    actor_t* evicted_reply_to = network->closest_pending[oldest].reply_to;
+    if (evicted_reply_to != NULL) {
+      network_closest_nodes_result_payload_t* evicted_result =
+          get_clear_memory(sizeof(network_closest_nodes_result_payload_t));
+      if (evicted_result != NULL) {
+        evicted_result->found = 0;
+        evicted_result->reply_to = NULL;
+        message_t evicted_msg = {0};
+        evicted_msg.type = NETWORK_CLOSEST_NODES_RESULT;
+        evicted_msg.payload = evicted_result;
+        evicted_msg.payload_destroy = network_closest_nodes_result_payload_destroy;
+        actor_send(evicted_reply_to, &evicted_msg);
+      }
+    }
+    network->closest_pending[oldest].message_id = message_id;
+    network->closest_pending[oldest].reply_to = reply_to;
+    return;
+  }
+  network->closest_pending[network->closest_pending_count].message_id = message_id;
+  network->closest_pending[network->closest_pending_count].reply_to = reply_to;
+  network->closest_pending_count++;
+}
+
+static actor_t* network_closest_pending_remove(network_t* network, uint64_t message_id) {
+  for (size_t idx = 0; idx < network->closest_pending_count; idx++) {
+    if (network->closest_pending[idx].message_id == message_id) {
+      actor_t* reply_to = network->closest_pending[idx].reply_to;
+      network->closest_pending[idx] = network->closest_pending[network->closest_pending_count - 1];
+      network->closest_pending_count--;
+      return reply_to;
+    }
+  }
+  return NULL;
+}
+
 // --- Local ClosestNodes handler ---
 // Stream requests closest-nodes query: initiate a WIRE_CLOSEST_NODES query.
 
@@ -1073,7 +1134,8 @@ static void network_handle_local_closest_nodes(network_t* network, message_t* ms
   // Build wire message from local request
   wire_closest_nodes_t wire_query;
   memset(&wire_query, 0, sizeof(wire_query));
-  wire_query.message_id = (uint64_t)time(NULL) * 1000;
+  uint64_t now_ts = (uint64_t)time(NULL) * 1000;
+  wire_query.message_id = now_ts;
   memcpy(&wire_query.sender_id, &network->authority->local_id, sizeof(node_id_t));
   memcpy(&wire_query.target_id, &payload->target_id, sizeof(node_id_t));
   wire_query.count = payload->count;
@@ -1084,7 +1146,7 @@ static void network_handle_local_closest_nodes(network_t* network, message_t* ms
                             network->authority->local_id.hash);
   memcpy(&wire_query.path[0], &network->authority->local_id, sizeof(node_id_t));
   wire_query.path_len = 1;
-  wire_query.start_time = (uint64_t)time(NULL) * 1000;
+  wire_query.start_time = now_ts;
   memcpy(&wire_query.original_source, &network->authority->local_id, sizeof(node_id_t));
 
   // Execute routing logic to find next hops
@@ -1117,6 +1179,8 @@ static void network_handle_local_closest_nodes(network_t* network, message_t* ms
       actor_send(payload->reply_to, &result_msg);
     }
   } else if (result == CLOSEST_NODES_FORWARDING) {
+    // Track reply_to so we can deliver the result when response arrives
+    network_closest_pending_add(network, wire_query.message_id, payload->reply_to);
     // Forward to next hops
     for (size_t hop = 0; hop < next_hop_count; hop++) {
       peer_connection_t* peer = connection_manager_lookup(
@@ -1280,6 +1344,9 @@ static void network_handle_find_node_response(network_t* network, message_t* msg
 
   // Insert responding peers into our ring table based on measured latency
   for (uint8_t index = 0; index < response->closest_count; index++) {
+    if (ring_set_find_by_id(network->rings, &response->closest_nodes[index]) != NULL) {
+      continue;
+    }
     float latency_ms = 0;
     latency_cache_get(network->latency_cache, &response->closest_nodes[index], &latency_ms);
     uint32_t latency_us = (uint32_t)(latency_ms * 1000);
@@ -1288,7 +1355,6 @@ static void network_handle_find_node_response(network_t* network, message_t* msg
       ring_set_insert(network->rings, node, latency_us);
     }
   }
-  (void)network;
 }
 
 // --- FindBlock handler ---
@@ -1458,12 +1524,6 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
     }
 
     case FIND_BLOCK_FORWARDING: {
-      // Add self to path
-      if (state.path_len < FIND_BLOCK_MAX_PATH) {
-        memcpy(&state.path[state.path_len], &network->authority->local_id, sizeof(node_id_t));
-        state.path_len++;
-      }
-
       // When forwarding FindBlock, insert block_hash into the requesting peer's EABF
       // at level 0. The requesting peer is the last node in the path.
       {
@@ -2230,13 +2290,14 @@ static void network_handle_rank_block(network_t* network, message_t* msg) {
     // Build a FindBlock message to search for this block
     wire_find_block_t* find = get_clear_memory(sizeof(wire_find_block_t));
     if (find != NULL) {
-      find->message_id = (uint64_t)time(NULL) * 1000 + rank->count;
+      uint64_t now_ts = (uint64_t)time(NULL) * 1000;
+      find->message_id = now_ts + rank->count;
       memcpy(find->block_hash, rank->block_hash, 32);
       find->ttl = FIND_BLOCK_FORWARD_FANOUT;
       memset(find->visited_bloom, 0, WIRE_MAX_VISITED_BLOOM);
       find->visited_count = 0;
       find->path_len = 0;
-      find->start_time = (uint64_t)time(NULL) * 1000;
+      find->start_time = now_ts;
       memcpy(&find->original_source, &network->authority->local_id, sizeof(node_id_t));
 
       message_t find_msg;
@@ -2455,7 +2516,7 @@ static void network_handle_recall_decline(network_t* network, message_t* msg) {
   for (size_t index = 0; index < network->eabf_table.count; index++) {
     eabf_t* eabf = network->eabf_table.entries[index].eabf;
     if (eabf != NULL) {
-      eabf_subscribe(eabf, decline->block_hash, 32);
+      eabf_unsubscribe(eabf, decline->block_hash, 32);
     }
   }
 }
@@ -2567,10 +2628,11 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
   // Step 4: Execute FindBlock routing
   find_block_state_t state;
   memset(&state, 0, sizeof(state));
-  state.message_id = (uint64_t)time(NULL) * 1000;
+  uint64_t now_ts = (uint64_t)time(NULL) * 1000;
+  state.message_id = now_ts;
   memcpy(state.block_hash, payload->hash->data, 32);
   state.ttl = FIND_BLOCK_FORWARD_FANOUT;
-  state.start_time_ms = (uint64_t)time(NULL) * 1000;
+  state.start_time_ms = now_ts;
   memcpy(&state.original_source, &network->authority->local_id, sizeof(node_id_t));
 
   net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
@@ -3191,7 +3253,8 @@ void network_dispatch(void* state, message_t* msg) {
         // Build store_block_state for local block announcement
         store_block_state_t state;
         memset(&state, 0, sizeof(state));
-        state.message_id = (uint64_t)time(NULL) * 1000;
+        uint64_t now_ts = (uint64_t)time(NULL) * 1000;
+        state.message_id = now_ts;
         memcpy(state.block_hash, payload->hash->data, 32);
         state.block_fib = payload->fib;
         state.replicas_needed = STORE_BLOCK_FORWARD_FANOUT;
@@ -3199,7 +3262,7 @@ void network_dispatch(void* state, message_t* msg) {
         state.visited_count = 0;
         memcpy(&state.path[0], &network->authority->local_id, sizeof(node_id_t));
         state.path_len = 1;
-        state.start_time_ms = (uint64_t)time(NULL) * 1000;
+        state.start_time_ms = now_ts;
         state.carry_data = 0;
 
         float local_capacity = atomic_load(&network->authority->capacity);
