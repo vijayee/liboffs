@@ -101,6 +101,9 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
   transport->listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (transport->listen_fd < 0) {
     perror("socket");
+    pd_loop_destroy(transport->loop);
+    _destroy_stack_destroy(transport);
+    actor_destroy(&transport->actor);
     free(transport->socket_path);
     free(transport);
     return NULL;
@@ -119,6 +122,9 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
   if (bind(transport->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
     perror("bind");
     close(transport->listen_fd);
+    pd_loop_destroy(transport->loop);
+    _destroy_stack_destroy(transport);
+    actor_destroy(&transport->actor);
     free(transport->socket_path);
     free(transport);
     return NULL;
@@ -127,6 +133,9 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
   if (listen(transport->listen_fd, 128) < 0) {
     perror("listen");
     close(transport->listen_fd);
+    pd_loop_destroy(transport->loop);
+    _destroy_stack_destroy(transport);
+    actor_destroy(&transport->actor);
     free(transport->socket_path);
     free(transport);
     return NULL;

@@ -49,6 +49,7 @@ typedef struct {
 
 /* Pipeline context for PUT requests */
 typedef struct {
+  refcounter_t refcounter;
   unix_connection_t* connection;
   writeable_off_stream_t* ws;
   writeable_descriptor_t* desc;
@@ -192,6 +193,7 @@ static void _unix_get_on_desc_error(void* ctx, void* error) {
   unix_get_pipeline_t* pipeline = (unix_get_pipeline_t*)ctx;
   _unix_connection_send_error(pipeline->connection, CLIENT_API_STATUS_NOT_FOUND, "Not found");
   stream_deactivate((stream_t*)pipeline->rs, NULL);
+  stream_deactivate((stream_t*)pipeline->desc, NULL);
   if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
     DESTROY(pipeline->ori, ori);
     free(pipeline);
@@ -298,24 +300,44 @@ static void _unix_put_on_stream_error(void* ctx, void* error) {
   (void)error;
   unix_put_pipeline_t* pipeline = (unix_put_pipeline_t*)ctx;
   _unix_connection_send_error(pipeline->connection, CLIENT_API_STATUS_INTERNAL_ERROR, "PUT stream error");
-  if (pipeline->content_type != NULL) free(pipeline->content_type);
-  if (pipeline->file_name != NULL) free(pipeline->file_name);
-  if (pipeline->server_address != NULL) free(pipeline->server_address);
-  if (pipeline->file_hash != NULL) DESTROY(pipeline->file_hash, buffer);
-  if (pipeline->descriptor_hash != NULL) DESTROY(pipeline->descriptor_hash, buffer);
-  free(pipeline);
+  stream_deactivate((stream_t*)pipeline->ws, NULL);
+  /* stream_deactivate will also trigger close_event on ws, which calls
+     _unix_put_on_stream_close -> writeable_descriptor_close, and that
+     may trigger desc close/error. Use refcounter so only the last
+     callback frees the pipeline. */
+  if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
+    refcounter_dereference((refcounter_t*)pipeline->recipe);
+    scheduler_pool_defer_cleanup(((stream_t*)pipeline->ws)->pool, pipeline->recipe,
+                                 (void (*)(void*))new_blocks_recipe_destroy);
+    stream_deferred_deref((stream_t*)pipeline->desc);
+    stream_deferred_deref((stream_t*)pipeline->ws);
+    if (pipeline->content_type != NULL) free(pipeline->content_type);
+    if (pipeline->file_name != NULL) free(pipeline->file_name);
+    if (pipeline->server_address != NULL) free(pipeline->server_address);
+    if (pipeline->file_hash != NULL) DESTROY(pipeline->file_hash, buffer);
+    if (pipeline->descriptor_hash != NULL) DESTROY(pipeline->descriptor_hash, buffer);
+    free(pipeline);
+  }
 }
 
 static void _unix_put_on_descriptor_error(void* ctx, void* error) {
   (void)error;
   unix_put_pipeline_t* pipeline = (unix_put_pipeline_t*)ctx;
   _unix_connection_send_error(pipeline->connection, CLIENT_API_STATUS_INTERNAL_ERROR, "PUT descriptor error");
-  if (pipeline->content_type != NULL) free(pipeline->content_type);
-  if (pipeline->file_name != NULL) free(pipeline->file_name);
-  if (pipeline->server_address != NULL) free(pipeline->server_address);
-  if (pipeline->file_hash != NULL) DESTROY(pipeline->file_hash, buffer);
-  if (pipeline->descriptor_hash != NULL) DESTROY(pipeline->descriptor_hash, buffer);
-  free(pipeline);
+  stream_deactivate((stream_t*)pipeline->desc, NULL);
+  if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
+    refcounter_dereference((refcounter_t*)pipeline->recipe);
+    scheduler_pool_defer_cleanup(((stream_t*)pipeline->ws)->pool, pipeline->recipe,
+                                 (void (*)(void*))new_blocks_recipe_destroy);
+    stream_deferred_deref((stream_t*)pipeline->ws);
+    stream_deferred_deref((stream_t*)pipeline->desc);
+    if (pipeline->content_type != NULL) free(pipeline->content_type);
+    if (pipeline->file_name != NULL) free(pipeline->file_name);
+    if (pipeline->server_address != NULL) free(pipeline->server_address);
+    if (pipeline->file_hash != NULL) DESTROY(pipeline->file_hash, buffer);
+    if (pipeline->descriptor_hash != NULL) DESTROY(pipeline->descriptor_hash, buffer);
+    free(pipeline);
+  }
 }
 
 /* --- Frame handlers --- */
@@ -402,8 +424,6 @@ static void _unix_handle_get(unix_connection_t* conn, cbor_item_t* frame) {
 
   /* Start the descriptor pull */
   readable_descriptor_push(desc);
-
-  DEREFERENCE(pipeline);
 }
 
 static void _unix_handle_put(unix_connection_t* conn, cbor_item_t* frame) {
@@ -422,6 +442,7 @@ static void _unix_handle_put(unix_connection_t* conn, cbor_item_t* frame) {
 
   /* Create pipeline context */
   unix_put_pipeline_t* pipeline = get_clear_memory(sizeof(unix_put_pipeline_t));
+  refcounter_init((refcounter_t*)pipeline);
   pipeline->connection = conn;
   pipeline->content_type = msg.content_type;
   pipeline->file_name = msg.file_name;
@@ -448,6 +469,8 @@ static void _unix_handle_put(unix_connection_t* conn, cbor_item_t* frame) {
   pipeline->ws = ws;
   pipeline->desc = desc;
   pipeline->recipe = recipe;
+  /* Reference count: 1 base + 1 for error callbacks that may both fire */
+  refcounter_reference((refcounter_t*)pipeline);
 
   /* Subscribe to stream events (5-arg signature) */
   stream_subscribe((stream_t*)ws, close_event, pipeline, _unix_put_on_stream_close, NULL);
@@ -494,6 +517,7 @@ static void _unix_handle_put_data(unix_connection_t* conn, cbor_item_t* frame) {
   memset(&msg, 0, sizeof(msg));
   if (client_api_put_data_decode(frame, &msg) != 0) {
     _unix_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Invalid PUT_DATA frame");
+    free(msg.data);
     return;
   }
 
