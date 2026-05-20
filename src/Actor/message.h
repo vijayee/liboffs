@@ -170,6 +170,16 @@ typedef enum message_type_e {
   RESPIRATION_FIND_BLOCK_RESULT,
   RESPIRATION_STORE_BLOCK_RESULT,
   RESPIRATION_EXHALE_DELETE,
+  /* Unix connection messages */
+  UNIX_CONNECTION_DATA,
+  UNIX_CONNECTION_HANGUP,
+  UNIX_CONNECTION_ERROR,
+  UNIX_CONNECTION_WRITE,
+  UNIX_CONNECTION_WRITABLE,
+  UNIX_CONNECTION_CLOSE,
+  /* Unix server watcher messages */
+  UNIX_SERVER_UPDATE_WATCHER,
+  UNIX_SERVER_STOP_WATCHER,
 } message_type_e;
 
 /* Stream-to-network: request block from peers */

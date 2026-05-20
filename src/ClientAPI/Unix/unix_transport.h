@@ -1,0 +1,52 @@
+//
+// Created by victor on 5/20/26.
+//
+#ifndef OFFS_UNIX_TRANSPORT_H
+#define OFFS_UNIX_TRANSPORT_H
+
+#include <stdint.h>
+#include <stddef.h>
+#include "../../Actor/actor.h"
+#include "../../Util/atomic_compat.h"
+#include "../../Util/vec.h"
+#include "../../Scheduler/scheduler.h"
+#include <poll-dancer/poll-dancer.h>
+#include "unix_connection.h"
+
+typedef vec_t(unix_connection_t*) vec_unix_connection_t;
+
+typedef struct unix_transport_destroy_node_t {
+  pd_watcher_t* watcher;
+  struct unix_transport_destroy_node_t* next;
+} unix_transport_destroy_node_t;
+
+typedef struct unix_transport_t {
+  actor_t actor;
+  pd_loop_t* loop;
+  PLATFORMTHREADTYPE thread;
+  ATOMIC(uint8_t) running;
+  int listen_fd;
+  pd_watcher_t* listen_watcher;
+  vec_unix_connection_t connections;
+  scheduler_pool_t* pool;
+  block_cache_t* bc;
+  ofd_cache_t* ofd_cache;
+  tuple_cache_t* tc;
+  size_t max_connections;
+  ATOMIC(size_t) active_connections;
+  PLATFORMLOCKTYPE(destroy_lock);
+  unix_transport_destroy_node_t* destroy_head;
+  char* socket_path;
+} unix_transport_t;
+
+unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
+                                         block_cache_t* bc,
+                                         ofd_cache_t* ofd_cache,
+                                         tuple_cache_t* tc,
+                                         const char* socket_path);
+void unix_transport_destroy(unix_transport_t* transport);
+void unix_transport_start(unix_transport_t* transport);
+void unix_transport_stop(unix_transport_t* transport);
+void unix_transport_set_max_connections(unix_transport_t* transport, size_t max_connections);
+
+#endif // OFFS_UNIX_TRANSPORT_H
