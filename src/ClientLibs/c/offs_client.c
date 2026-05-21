@@ -47,6 +47,7 @@ struct offs_client_t {
     struct {
       int fd;
       SSL* ssl;
+      SSL_CTX* ssl_ctx;
       uint8_t is_ssl;
       buffer_t* recv_buf;
     } ws;
@@ -656,13 +657,16 @@ offs_client_t* offs_client_connect(const char* transport_url) {
         return NULL;
       }
       client->transport.ws.ssl = ssl;
-      /* SSL_CTX freed automatically when all SSL connections are freed */
+      client->transport.ws.ssl_ctx = ssl_ctx;
     }
 
     /* addr_copy still alive here — ws_host points into it */
     if (_ws_upgrade(client) != 0) {
       if (client->transport.ws.ssl != NULL) {
         SSL_free(client->transport.ws.ssl);
+      }
+      if (client->transport.ws.ssl_ctx != NULL) {
+        SSL_CTX_free(client->transport.ws.ssl_ctx);
       }
       free(addr_copy);
       close(client->transport.ws.fd);
@@ -888,6 +892,9 @@ void offs_client_disconnect(offs_client_t* client) {
       if (client->transport.ws.is_ssl && client->transport.ws.ssl != NULL) {
         SSL_shutdown(client->transport.ws.ssl);
         SSL_free(client->transport.ws.ssl);
+      }
+      if (client->transport.ws.ssl_ctx != NULL) {
+        SSL_CTX_free(client->transport.ws.ssl_ctx);
       }
       if (client->transport.ws.fd >= 0) {
         shutdown(client->transport.ws.fd, SHUT_RDWR);

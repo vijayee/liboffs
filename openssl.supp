@@ -1,0 +1,13 @@
+# OpenSSL one-time initialization leak from CONF_modules_load
+# This is allocated during OPENSSL_init_crypto and only freed by OPENSSL_cleanup()
+# which we don't call because it's a global operation that would break other OpenSSL users
+{
+   openssl_conf_modules_load_init_leak
+   Memcheck:Leak
+   match-leak-kinds: definite
+   fun:malloc
+   fun:CRYPTO_zalloc
+   ...
+   fun:CONF_modules_load
+   ...
+}
