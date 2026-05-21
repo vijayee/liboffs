@@ -29,6 +29,22 @@
 
 #define READ_BUFFER_SIZE 65536
 
+/* OpenSSL is initialized once per process and never cleaned up — the 240-byte
+ * CONF_modules_load allocation is a one-time global cost that persists until
+ * process exit. Calling OPENSSL_cleanup() would break other OpenSSL users in
+ * the same process (e.g. the WS transport server). */
+static pthread_mutex_t _ssl_init_lock = PTHREAD_MUTEX_INITIALIZER;
+static int _ssl_initialized = 0;
+
+static void _ssl_init(void) {
+  pthread_mutex_lock(&_ssl_init_lock);
+  if (!_ssl_initialized) {
+    OPENSSL_init_ssl(0, NULL);
+    _ssl_initialized = 1;
+  }
+  pthread_mutex_unlock(&_ssl_init_lock);
+}
+
 typedef enum {
   OFFS_TRANSPORT_UNIX,
   OFFS_TRANSPORT_TCP,
@@ -633,9 +649,12 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       return NULL;
     }
 
+    _ssl_init(); /* Needed for SHA1 in WS upgrade handshake (and TLS if wss://) */
+
     if (is_ssl) {
       SSL_CTX* ssl_ctx = SSL_CTX_new(TLS_client_method());
       if (ssl_ctx == NULL) {
+
         free(addr_copy);
         close(client->transport.ws.fd);
         stream_framer_destroy(client->framer);
@@ -649,6 +668,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       if (SSL_connect(ssl) <= 0) {
         SSL_free(ssl);
         SSL_CTX_free(ssl_ctx);
+
         free(addr_copy);
         close(client->transport.ws.fd);
         stream_framer_destroy(client->framer);
