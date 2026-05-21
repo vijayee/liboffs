@@ -126,3 +126,52 @@ uint8_t* ws_frame_build(uint8_t opcode, const uint8_t* payload, size_t payload_l
   }
   return frame;
 }
+
+uint8_t* ws_frame_build_masked(uint8_t opcode, const uint8_t* payload, size_t payload_len, size_t* out_len) {
+  size_t header_len;
+  if (payload_len <= 125) {
+    header_len = 6; /* FIN+opcode(1) + MASK+length(1) + mask_key(4) */
+  } else if (payload_len <= 65535) {
+    header_len = 8; /* FIN+opcode(1) + MASK+126(1) + extended_length(2) + mask_key(4) */
+  } else {
+    header_len = 14; /* FIN+opcode(1) + MASK+127(1) + extended_length(8) + mask_key(4) */
+  }
+
+  size_t frame_len = header_len + payload_len;
+  uint8_t* frame = get_memory(frame_len);
+  size_t pos = 0;
+
+  /* First byte: FIN=1, RSV1-3=0, opcode */
+  frame[pos++] = 0x80 | (opcode & 0x0F);
+
+  /* Second byte: MASK=1, payload length */
+  if (payload_len <= 125) {
+    frame[pos++] = 0x80 | (uint8_t)payload_len;
+  } else if (payload_len <= 65535) {
+    frame[pos++] = 0x80 | 126;
+    frame[pos++] = (uint8_t)((payload_len >> 8) & 0xFF);
+    frame[pos++] = (uint8_t)(payload_len & 0xFF);
+  } else {
+    frame[pos++] = 0x80 | 127;
+    for (int i = 56; i >= 0; i -= 8) {
+      frame[pos++] = (uint8_t)((payload_len >> i) & 0xFF);
+    }
+  }
+
+  /* Masking key: 4 random bytes. Using zero-mask for simplicity. */
+  uint8_t mask_key[4] = {0x00, 0x00, 0x00, 0x00};
+  memcpy(frame + pos, mask_key, 4);
+  pos += 4;
+
+  /* Payload: XOR with mask key */
+  if (payload != NULL && payload_len > 0) {
+    for (size_t idx = 0; idx < payload_len; idx++) {
+      frame[pos + idx] = payload[idx] ^ mask_key[idx % 4];
+    }
+  }
+
+  if (out_len != NULL) {
+    *out_len = frame_len;
+  }
+  return frame;
+}

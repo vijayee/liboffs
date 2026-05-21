@@ -2,6 +2,7 @@
 #include <cstring>
 extern "C" {
 #include "../src/ClientAPI/WS/ws_transport.h"
+#include "../src/ClientAPI/WS/ws_frame.h"
 #include "../src/ClientAPI/client_api_wire.h"
 #include "../src/Network/stream_framer.h"
 #include "../src/BlockCache/block_cache.h"
@@ -349,6 +350,28 @@ TEST_F(TestWsTransport, GetInvalidOri) {
     }
     cbor_decref(&response);
     close(fd);
+}
+
+TEST(TestWsFrame, BuildMaskedRoundTrip) {
+    const uint8_t payload[] = {0x01, 0x02, 0x03, 0x04, 0x05};
+    size_t frame_len;
+    uint8_t* frame = ws_frame_build_masked(WS_OPCODE_BINARY, payload, sizeof(payload), &frame_len);
+    ASSERT_NE(frame, nullptr);
+    EXPECT_GT(frame_len, sizeof(payload));
+
+    ws_frame_t parsed;
+    size_t needed;
+    ssize_t consumed = ws_frame_parse(frame, frame_len, &parsed, &needed);
+    EXPECT_EQ(consumed, (ssize_t)frame_len);
+    EXPECT_EQ(parsed.fin, 1);
+    EXPECT_EQ(parsed.opcode, WS_OPCODE_BINARY);
+    EXPECT_EQ(parsed.mask, 1);
+    EXPECT_EQ(parsed.payload_len, sizeof(payload));
+    ASSERT_NE(parsed.payload, nullptr);
+    EXPECT_EQ(memcmp(parsed.payload, payload, sizeof(payload)), 0);
+
+    free(frame);
+    ws_frame_destroy(&parsed);
 }
 
 } // namespace ws_transport_test

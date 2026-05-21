@@ -33,6 +33,11 @@ ssize_t ws_frame_parse(const uint8_t* data, size_t len, ws_frame_t* frame, size_
  * Sets *out_len to the frame length. */
 uint8_t* ws_frame_build(uint8_t opcode, const uint8_t* payload, size_t payload_len, size_t* out_len);
 
+/* Build a client-side WebSocket frame (masked, as required by RFC 6455).
+ * Returns heap-allocated buffer with frame bytes, caller must free().
+ * Sets *out_len to the frame length. */
+uint8_t* ws_frame_build_masked(uint8_t opcode, const uint8_t* payload, size_t payload_len, size_t* out_len);
+
 void ws_frame_destroy(ws_frame_t* frame);
 
 #endif // OFFS_WS_FRAME_H
