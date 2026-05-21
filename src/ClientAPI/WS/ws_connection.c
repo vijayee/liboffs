@@ -946,19 +946,27 @@ void ws_connection_dispatch(void* state, message_t* msg) {
 
         int headers_end = _find_headers_end(connection->upgrade_buf->data, connection->upgrade_buf->size);
         if (headers_end > 0) {
+          /* Save remaining data (after headers) before _ws_handle_upgrade frees upgrade_buf */
+          size_t remaining = connection->upgrade_buf->size - (size_t)headers_end;
+          buffer_t* post_headers_data = NULL;
+          if (remaining > 0) {
+            post_headers_data = buffer_create_from_pointer_copy(
+              connection->upgrade_buf->data + headers_end, remaining);
+          }
+
           /* We have a complete HTTP upgrade request — process it */
           _ws_handle_upgrade(connection, connection->upgrade_buf->data, (size_t)headers_end);
 
-          /* Any data after the headers is WebSocket frame data */
-          size_t remaining = connection->upgrade_buf->size - (size_t)headers_end;
-          if (remaining > 0 && connection->state == WS_STATE_CONNECTED) {
-            /* Save remaining data to recv_buf for WS frame parsing */
-            buffer_t* remaining_data = buffer_create_from_pointer_copy(
-              connection->upgrade_buf->data + headers_end, remaining);
-            connection->recv_buf = remaining_data;
-          }
-          DESTROY(connection->upgrade_buf, buffer);
+          /* _ws_handle_upgrade destroys upgrade_buf, so don't access it anymore */
           connection->upgrade_buf = NULL;
+
+          /* Any data after the headers is WebSocket frame data */
+          if (post_headers_data != NULL && connection->state == WS_STATE_CONNECTED) {
+            connection->recv_buf = post_headers_data;
+            post_headers_data = NULL;
+          } else if (post_headers_data != NULL) {
+            DESTROY(post_headers_data, buffer);
+          }
 
           /* Process any buffered recv data as WebSocket frames */
           if (connection->recv_buf != NULL && connection->recv_buf->size > 0) {

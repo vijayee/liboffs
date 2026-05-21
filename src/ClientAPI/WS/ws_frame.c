@@ -14,8 +14,12 @@ void ws_frame_destroy(ws_frame_t* frame) {
 }
 
 ssize_t ws_frame_parse(const uint8_t* data, size_t len, ws_frame_t* frame, size_t* needed) {
-  if (data == NULL || len == 0 || frame == NULL) {
+  if (frame == NULL) {
     return -1;
+  }
+  if (data == NULL || len == 0) {
+    if (needed != NULL) *needed = 2;
+    return 0;
   }
 
   memset(frame, 0, sizeof(ws_frame_t));
