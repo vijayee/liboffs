@@ -22,6 +22,11 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
+#ifdef HAS_MSQUIC
+#include <msquic.h>
+#include "../../Network/msquic_singleton.h"
+#endif
+
 #define READ_BUFFER_SIZE 65536
 
 typedef enum {
@@ -50,6 +55,7 @@ struct offs_client_t {
       void* configuration;
       void* connection;
       void* stream;
+      void* msquic;
       uint8_t stream_open;
       pthread_mutex_t recv_lock;
       pthread_cond_t recv_cond;
@@ -79,6 +85,87 @@ struct offs_client_t {
   offs_error_cb_t error_cb;
   void* error_cb_ctx;
 };
+
+/* Forward declaration — needed for MsQuic callbacks that call _handle_frame */
+static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* frame);
+
+#ifdef HAS_MSQUIC
+typedef struct {
+  uint8_t* frame;
+  QUIC_BUFFER buf;
+} wt_send_context_t;
+
+typedef struct {
+  offs_client_t* client;
+  HQUIC connection;
+  uint8_t connected_event;
+} wt_connect_context_t;
+#endif
+
+#ifdef HAS_MSQUIC
+static QUIC_STATUS QUIC_API _wt_stream_callback(
+    HQUIC stream, void* context, QUIC_STREAM_EVENT* event) {
+  offs_client_t* client = (offs_client_t*)context;
+  (void)stream;
+
+  switch (event->Type) {
+    case QUIC_STREAM_EVENT_RECEIVE: {
+      pthread_mutex_lock(&client->lock);
+      const QUIC_BUFFER* buffers = event->RECEIVE.Buffers;
+      uint32_t buffer_count = event->RECEIVE.BufferCount;
+      for (uint32_t idx = 0; idx < buffer_count; idx++) {
+        stream_framer_feed(client->framer, buffers[idx].Buffer, buffers[idx].Length);
+        uint8_t* frame_data;
+        size_t frame_len;
+        while ((frame_data = stream_framer_next(client->framer, &frame_len)) != NULL) {
+          struct cbor_load_result load_result;
+          cbor_item_t* cbor_item = cbor_load(frame_data, frame_len, &load_result);
+          free(frame_data);
+          if (cbor_item != NULL && load_result.error.code == CBOR_ERR_NONE) {
+            uint8_t type = client_api_wire_get_type(cbor_item);
+            _handle_frame(client, type, cbor_item);
+            cbor_decref(&cbor_item);
+          } else if (cbor_item != NULL) {
+            cbor_decref(&cbor_item);
+          }
+        }
+      }
+      pthread_mutex_unlock(&client->lock);
+      break;
+    }
+    case QUIC_STREAM_EVENT_SEND_COMPLETE: {
+      if (event->SEND_COMPLETE.ClientContext != NULL) {
+        wt_send_context_t* send_ctx = (wt_send_context_t*)event->SEND_COMPLETE.ClientContext;
+        if (send_ctx->frame != NULL) {
+          free(send_ctx->frame);
+        }
+        free(send_ctx);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+  return QUIC_STATUS_SUCCESS;
+}
+
+static QUIC_STATUS QUIC_API _wt_connection_callback(
+    HQUIC connection, void* context, QUIC_CONNECTION_EVENT* event) {
+  wt_connect_context_t* connect_ctx = (wt_connect_context_t*)context;
+  (void)connection;
+
+  switch (event->Type) {
+    case QUIC_CONNECTION_EVENT_CONNECTED:
+      connect_ctx->connected_event = 1;
+      break;
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
+      break;
+    default:
+      break;
+  }
+  return QUIC_STATUS_SUCCESS;
+}
+#endif /* HAS_MSQUIC */
 
 static int _raw_send(offs_client_t* client, const uint8_t* data, size_t len) {
   ssize_t sent = send(client->transport.raw.fd, data, len, MSG_NOSIGNAL);
@@ -133,8 +220,39 @@ static void _send_frame(offs_client_t* client, cbor_item_t* frame) {
     }
     pthread_mutex_unlock(&client->lock);
     free(framed);
+  } else if (client->transport_type == OFFS_TRANSPORT_WT) {
+    /* WT: length-prefix frame + MsQuic StreamSend */
+    framed = stream_frame_encode(cbor_buf, cbor_len, &framed_len);
+    free(cbor_buf);
+    if (framed == NULL) return;
+
+#ifdef HAS_MSQUIC
+    wt_send_context_t* send_ctx = get_clear_memory(sizeof(wt_send_context_t));
+    if (send_ctx == NULL) {
+      free(framed);
+      return;
+    }
+    send_ctx->frame = framed;
+    send_ctx->buf.Buffer = framed;
+    send_ctx->buf.Length = (uint32_t)framed_len;
+
+    pthread_mutex_lock(&client->lock);
+    const struct QUIC_API_TABLE* msquic = (const struct QUIC_API_TABLE*)client->transport.wt.msquic;
+    QUIC_STATUS status = msquic->StreamSend(
+        (HQUIC)client->transport.wt.stream, &send_ctx->buf, 1, QUIC_SEND_FLAG_NONE, send_ctx);
+    if (QUIC_FAILED(status)) {
+      free(framed);
+      free(send_ctx);
+      client->connected = 0;
+    }
+    pthread_mutex_unlock(&client->lock);
+    /* send_ctx and framed are freed in SEND_COMPLETE callback */
+#else
+    free(framed);
+    client->connected = 0;
+#endif
   } else {
-    /* unix/tcp/wt: length-prefix framing */
+    /* unix/tcp: length-prefix framing + send() */
     framed = stream_frame_encode(cbor_buf, cbor_len, &framed_len);
     free(cbor_buf);
     if (framed == NULL) return;
@@ -565,11 +683,172 @@ offs_client_t* offs_client_connect(const char* transport_url) {
     pthread_create(&client->recv_thread, NULL, _recv_thread, client);
     return client;
   } else if (strncmp(transport_url, "wt://", 5) == 0 || strncmp(transport_url, "wts://", 6) == 0) {
-    /* WT -- not yet implemented */
+#ifdef HAS_MSQUIC
+    uint8_t is_secure = (transport_url[4] == 's');
+    const char* addr_start = is_secure ? transport_url + 6 : transport_url + 5;
+    char* addr_copy = get_memory(strlen(addr_start) + 1);
+    strcpy(addr_copy, addr_start);
+
+    /* Extract host and port */
+    char* colon = strrchr(addr_copy, ':');
+    uint16_t port;
+    const char* wt_host;
+    if (colon != NULL) {
+      *colon = '\0';
+      port = (uint16_t)atoi(colon + 1);
+      wt_host = addr_copy;
+    } else {
+      port = 443;
+      wt_host = addr_copy;
+    }
+
+    const struct QUIC_API_TABLE* msquic = offs_msquic_open();
+    if (msquic == NULL) {
+      free(addr_copy);
+      stream_framer_destroy(client->framer);
+      pthread_mutex_destroy(&client->lock);
+      free(client);
+      return NULL;
+    }
+
+    /* Registration */
+    QUIC_REGISTRATION_CONFIG reg_config = { "offs-client", QUIC_EXECUTION_PROFILE_LOW_LATENCY };
+    HQUIC registration = NULL;
+    if (QUIC_FAILED(msquic->RegistrationOpen(&reg_config, &registration))) {
+      offs_msquic_close();
+      free(addr_copy);
+      stream_framer_destroy(client->framer);
+      pthread_mutex_destroy(&client->lock);
+      free(client);
+      return NULL;
+    }
+
+    /* Configuration */
+    HQUIC configuration = NULL;
+    QUIC_SETTINGS settings = {0};
+    settings.PeerBidiStreamCount = 1;
+    settings.IsSet.PeerBidiStreamCount = TRUE;
+
+    QUIC_BUFFER alpn = { sizeof("offs") - 1, (uint8_t*)"offs" };
+
+    QUIC_CREDENTIAL_CONFIG cred_config = {0};
+    cred_config.Type = QUIC_CREDENTIAL_TYPE_NONE;
+    cred_config.Flags = QUIC_CREDENTIAL_FLAG_CLIENT;
+    if (!is_secure) {
+      cred_config.Flags |= QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    }
+
+    if (QUIC_FAILED(msquic->ConfigurationOpen(registration, &alpn, 1, &settings, sizeof(settings), NULL, &configuration))) {
+      msquic->RegistrationClose(registration);
+      offs_msquic_close();
+      free(addr_copy);
+      stream_framer_destroy(client->framer);
+      pthread_mutex_destroy(&client->lock);
+      free(client);
+      return NULL;
+    }
+    if (QUIC_FAILED(msquic->ConfigurationLoadCredential(configuration, &cred_config))) {
+      msquic->ConfigurationClose(configuration);
+      msquic->RegistrationClose(registration);
+      offs_msquic_close();
+      free(addr_copy);
+      stream_framer_destroy(client->framer);
+      pthread_mutex_destroy(&client->lock);
+      free(client);
+      return NULL;
+    }
+
+    /* Open connection */
+    HQUIC connection = NULL;
+    wt_connect_context_t connect_ctx = { client, NULL, 0 };
+    if (QUIC_FAILED(msquic->ConnectionOpen(registration, _wt_connection_callback, &connect_ctx, &connection))) {
+      msquic->ConfigurationClose(configuration);
+      msquic->RegistrationClose(registration);
+      offs_msquic_close();
+      free(addr_copy);
+      stream_framer_destroy(client->framer);
+      pthread_mutex_destroy(&client->lock);
+      free(client);
+      return NULL;
+    }
+
+    /* Start connection */
+    if (QUIC_FAILED(msquic->ConnectionStart(connection, configuration, QUIC_ADDRESS_FAMILY_INET, wt_host, port))) {
+      msquic->ConnectionClose(connection);
+      msquic->ConfigurationClose(configuration);
+      msquic->RegistrationClose(registration);
+      offs_msquic_close();
+      free(addr_copy);
+      stream_framer_destroy(client->framer);
+      pthread_mutex_destroy(&client->lock);
+      free(client);
+      return NULL;
+    }
+
+    /* Wait for connection (poll with timeout) */
+    for (int attempts = 0; attempts < 200 && !connect_ctx.connected_event; attempts++) {
+      usleep(10000);
+    }
+    if (!connect_ctx.connected_event) {
+      msquic->ConnectionClose(connection);
+      msquic->ConfigurationClose(configuration);
+      msquic->RegistrationClose(registration);
+      offs_msquic_close();
+      free(addr_copy);
+      stream_framer_destroy(client->framer);
+      pthread_mutex_destroy(&client->lock);
+      free(client);
+      return NULL;
+    }
+
+    /* Open bidirectional stream */
+    HQUIC stream = NULL;
+    if (QUIC_FAILED(msquic->StreamOpen(connection, QUIC_STREAM_OPEN_FLAG_NONE, _wt_stream_callback, client, &stream))) {
+      msquic->ConnectionClose(connection);
+      msquic->ConfigurationClose(configuration);
+      msquic->RegistrationClose(registration);
+      offs_msquic_close();
+      free(addr_copy);
+      stream_framer_destroy(client->framer);
+      pthread_mutex_destroy(&client->lock);
+      free(client);
+      return NULL;
+    }
+
+    /* Start the stream */
+    if (QUIC_FAILED(msquic->StreamStart(stream, QUIC_STREAM_START_FLAG_NONE))) {
+      msquic->StreamClose(stream);
+      msquic->ConnectionClose(connection);
+      msquic->ConfigurationClose(configuration);
+      msquic->RegistrationClose(registration);
+      offs_msquic_close();
+      free(addr_copy);
+      stream_framer_destroy(client->framer);
+      pthread_mutex_destroy(&client->lock);
+      free(client);
+      return NULL;
+    }
+
+    client->transport_type = OFFS_TRANSPORT_WT;
+    client->transport.wt.registration = registration;
+    client->transport.wt.configuration = configuration;
+    client->transport.wt.connection = connection;
+    client->transport.wt.stream = stream;
+    client->transport.wt.msquic = (void*)msquic;
+    client->transport.wt.stream_open = 1;
+    /* recv_lock, recv_cond, recv_buf, etc. are zeroed by get_clear_memory */
+    client->connected = 1;
+    client->running = 1;
+    free(addr_copy);
+    /* WT doesn't use a recv thread — data arrives via MsQuic stream callback */
+    return client;
+#else
+    /* WT not supported — MsQuic not available */
     stream_framer_destroy(client->framer);
     pthread_mutex_destroy(&client->lock);
     free(client);
     return NULL;
+#endif
   } else {
     stream_framer_destroy(client->framer);
     pthread_mutex_destroy(&client->lock);
@@ -619,7 +898,26 @@ void offs_client_disconnect(offs_client_t* client) {
       }
       break;
     case OFFS_TRANSPORT_WT:
-      /* WT cleanup -- implemented later */
+#ifdef HAS_MSQUIC
+      {
+        const struct QUIC_API_TABLE* msquic = (const struct QUIC_API_TABLE*)client->transport.wt.msquic;
+        if (client->transport.wt.stream != NULL) {
+          msquic->StreamClose((HQUIC)client->transport.wt.stream);
+        }
+        if (client->transport.wt.connection != NULL) {
+          msquic->ConnectionClose((HQUIC)client->transport.wt.connection);
+        }
+        if (client->transport.wt.configuration != NULL) {
+          msquic->ConfigurationClose((HQUIC)client->transport.wt.configuration);
+        }
+        if (client->transport.wt.registration != NULL) {
+          msquic->RegistrationClose((HQUIC)client->transport.wt.registration);
+        }
+        offs_msquic_close();
+      }
+#else
+      /* WT not available — nothing to clean up */
+#endif
       break;
   }
 
