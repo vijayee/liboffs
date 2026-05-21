@@ -413,6 +413,14 @@ static void* _recv_thread(void* arg) {
           client->connected = 0;
           ws_frame_destroy(&parsed);
           goto cleanup;
+        } else if (parsed.opcode == WS_OPCODE_PING) {
+          /* RFC 6455: respond to PING with PONG */
+          size_t pong_len;
+          uint8_t* pong = ws_frame_build(WS_OPCODE_PONG, parsed.payload, parsed.payload_len, &pong_len);
+          if (pong != NULL) {
+            _ws_send(client, pong, pong_len);
+            free(pong);
+          }
         }
         ws_frame_destroy(&parsed);
       }
@@ -510,7 +518,7 @@ static char* _ws_compute_accept_key(const char* client_key) {
   return accept_key;
 }
 
-static int _ws_upgrade(offs_client_t* client) {
+static int _ws_upgrade(offs_client_t* client, const char* ws_host) {
   /* Generate a 16-byte random key and base64 encode */
   uint8_t raw_key[16];
   FILE* urandom = fopen("/dev/urandom", "rb");
@@ -535,19 +543,24 @@ static int _ws_upgrade(offs_client_t* client) {
   client_key[key_len] = '\0';
   BIO_free_all(bio);
 
+  /* Compute expected accept key for response validation */
+  char* expected_accept = _ws_compute_accept_key(client_key);
+
   /* Build and send upgrade request */
   char request[1024];
   snprintf(request, sizeof(request),
     "GET /offs HTTP/1.1\r\n"
-    "Host: 127.0.0.1\r\n"
+    "Host: %s\r\n"
     "Upgrade: websocket\r\n"
     "Connection: Upgrade\r\n"
     "Sec-WebSocket-Key: %s\r\n"
     "Sec-WebSocket-Version: 13\r\n\r\n",
-    client_key);
+    ws_host, client_key);
+
+  free(client_key);
 
   if (_ws_send(client, (const uint8_t*)request, strlen(request)) < 0) {
-    free(client_key);
+    free(expected_accept);
     return -1;
   }
 
@@ -560,14 +573,38 @@ static int _ws_upgrade(offs_client_t* client) {
     received = recv(client->transport.ws.fd, response, sizeof(response) - 1, 0);
   }
 
-  free(client_key);
-
-  if (received <= 0) return -1;
+  if (received <= 0) {
+    free(expected_accept);
+    return -1;
+  }
   response[received] = '\0';
 
   /* Check for 101 Switching Protocols */
-  if (strstr(response, "101") == NULL) return -1;
+  if (strstr(response, "101") == NULL) {
+    free(expected_accept);
+    return -1;
+  }
 
+  /* Validate Sec-WebSocket-Accept header */
+  const char* accept_header = strstr(response, "Sec-WebSocket-Accept:");
+  if (accept_header == NULL) {
+    accept_header = strstr(response, "sec-websocket-accept:");
+  }
+  if (accept_header != NULL && expected_accept != NULL) {
+    accept_header += strlen("Sec-WebSocket-Accept:");
+    while (*accept_header == ' ') accept_header++;
+    char* crlf = strstr(accept_header, "\r\n");
+    if (crlf != NULL) {
+      size_t accept_len = (size_t)(crlf - accept_header);
+      if (accept_len != strlen(expected_accept) ||
+          memcmp(accept_header, expected_accept, accept_len) != 0) {
+        free(expected_accept);
+        return -1;
+      }
+    }
+  }
+
+  free(expected_accept);
   return 0;
 }
 
@@ -681,7 +718,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
     }
 
     /* addr_copy still alive here — ws_host points into it */
-    if (_ws_upgrade(client) != 0) {
+    if (_ws_upgrade(client, ws_host) != 0) {
       if (client->transport.ws.ssl != NULL) {
         SSL_free(client->transport.ws.ssl);
       }
