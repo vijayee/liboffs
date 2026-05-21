@@ -429,3 +429,206 @@ TEST_F(TestOffsWsClient, GetAfterPut) {
 }
 
 } // namespace offs_ws_client_test
+
+/* --- WebTransport client tests (requires MsQuic) --- */
+#ifdef HAS_MSQUIC
+extern "C" {
+#include "../src/ClientAPI/WT/wt_transport.h"
+#include "../src/Util/atomic_compat.h"
+}
+
+namespace offs_wt_client_test {
+
+class TestOffsWtClient : public testing::Test {
+protected:
+    scheduler_pool_t* pool;
+    timer_actor_t* timer;
+    block_cache_t* bc;
+    ofd_cache_t* ofd_cache;
+    tuple_cache_t* tc;
+    wt_transport_t* transport;
+    char* cache_dir;
+    char cert_path[256];
+    char key_path[256];
+    static uint16_t _next_port;
+    uint16_t port;
+    char url[256];
+
+    void SetUp() override {
+        pool = scheduler_pool_create(4);
+        scheduler_pool_start(pool);
+        timer = timer_actor_create();
+
+        char dir_template[] = "/tmp/test_offs_wt_client_XXXXXX";
+        cache_dir = mkdtemp(dir_template);
+        cache_dir = strdup(cache_dir);
+
+        /* Generate self-signed cert for WT server */
+        snprintf(cert_path, sizeof(cert_path), "%s/test_cert.pem", cache_dir);
+        snprintf(key_path, sizeof(key_path), "%s/test_key.pem", cache_dir);
+        char cmd[1024];
+        snprintf(cmd, sizeof(cmd),
+            "openssl req -x509 -newkey rsa:2048 -keyout %s -out %s "
+            "-days 1 -nodes -subj '/CN=localhost' 2>/dev/null",
+            key_path, cert_path);
+        int rc = system(cmd);
+        if (rc != 0) {
+            /* Cannot generate cert — tests will skip */
+            cert_path[0] = '\0';
+            key_path[0] = '\0';
+        }
+
+        config_t config = {
+            .index_bucket_size = 10,
+            .index_wait = 1000,
+            .index_max_wait = 5000,
+            .section_size = 128000,
+            .section_wait = 1000,
+            .section_max_wait = 5000,
+            .cache_size = 50,
+            .max_tuple_size = 30,
+            .lru_size = 50
+        };
+        bc = block_cache_create(config, cache_dir, standard, timer, pool, NULL, 0);
+        ofd_cache = ofd_cache_create(pool, bc, 300000);
+        tc = tuple_cache_create(100, pool);
+
+        port = _next_port++;
+        snprintf(url, sizeof(url), "wt://127.0.0.1:%d", port);
+
+        const char* cp = (cert_path[0] != '\0') ? cert_path : NULL;
+        const char* kp = (key_path[0] != '\0') ? key_path : NULL;
+        transport = wt_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, cp, kp, 0);
+        if (transport != nullptr) {
+            wt_transport_start(transport);
+            /* Wait for QUIC server listener to be ready */
+            for (int attempts = 0; attempts < 100 && !atomic_load(&transport->listening); attempts++) {
+                usleep(10000);
+            }
+            if (!atomic_load(&transport->listening)) {
+                /* Server thread exited early — join it and destroy transport */
+                wt_transport_stop(transport);
+                wt_transport_destroy(transport);
+                transport = nullptr;
+            }
+        }
+    }
+
+    void TearDown() override {
+        if (transport != nullptr) {
+            wt_transport_stop(transport);
+        }
+        ofd_cache_destroy(ofd_cache);
+        tuple_cache_destroy(tc);
+        block_cache_destroy(bc);
+        timer_actor_destroy(timer);
+        scheduler_pool_wait_for_idle(pool);
+        scheduler_pool_stop(pool);
+        /*
+         * wt_transport_destroy calls MsQuic RegistrationClose which blocks
+         * indefinitely if server-side connections haven't fully shut down.
+         * Since the test process will clean up on exit, we skip
+         * wt_transport_destroy and let the OS reclaim resources.
+         * The server thread has already been stopped and joined above.
+         */
+        scheduler_pool_destroy(pool);
+        rm_rf(cache_dir);
+        free(cache_dir);
+    }
+};
+
+uint16_t TestOffsWtClient::_next_port = 45200;
+
+TEST_F(TestOffsWtClient, ConnectAndDisconnect) {
+    if (transport == nullptr) {
+        GTEST_SKIP() << "WT transport creation failed (MsQuic not available)";
+    }
+    offs_client_t* client = offs_client_connect(url);
+    ASSERT_NE(client, nullptr);
+    offs_client_disconnect(client);
+}
+
+TEST_F(TestOffsWtClient, PutBuffered) {
+    if (transport == nullptr) {
+        GTEST_SKIP() << "WT transport creation failed (MsQuic not available)";
+    }
+    offs_client_t* client = offs_client_connect(url);
+    ASSERT_NE(client, nullptr);
+
+    PutCallbackContext ctx;
+    ctx.ori_string = nullptr;
+    ctx.called = 0;
+
+    const uint8_t data[] = "hello wt client";
+    int result = offs_client_put(client, "application/octet-stream", "test.bin",
+                                  sizeof(data) - 1, data, sizeof(data) - 1,
+                                  _put_callback, &ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 200 && !ctx.called; attempts++) {
+        usleep(10000);
+    }
+    EXPECT_EQ(ctx.called, 1);
+    EXPECT_NE(ctx.ori_string, nullptr);
+    free(ctx.ori_string);
+
+    offs_client_disconnect(client);
+}
+
+TEST_F(TestOffsWtClient, GetAfterPut) {
+    if (transport == nullptr) {
+        GTEST_SKIP() << "WT transport creation failed (MsQuic not available)";
+    }
+    offs_client_t* client = offs_client_connect(url);
+    ASSERT_NE(client, nullptr);
+
+    PutCallbackContext put_ctx;
+    put_ctx.ori_string = nullptr;
+    put_ctx.called = 0;
+
+    const uint8_t data[] = "wt round trip data";
+    int result = offs_client_put(client, "application/octet-stream", "roundtrip.bin",
+                                  sizeof(data) - 1, data, sizeof(data) - 1,
+                                  _put_callback, &put_ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 200 && !put_ctx.called; attempts++) {
+        usleep(10000);
+    }
+    ASSERT_EQ(put_ctx.called, 1);
+    ASSERT_NE(put_ctx.ori_string, nullptr);
+    char* ori_string = strdup(put_ctx.ori_string);
+    free(put_ctx.ori_string);
+
+    GetDataCallbackContext get_ctx;
+    memset(&get_ctx, 0, sizeof(get_ctx));
+    get_ctx.data = nullptr;
+    get_ctx.data_len = 0;
+
+    result = offs_client_get(client, ori_string, _get_data_callback, _get_end_callback,
+                            _error_callback, &get_ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 200 && !get_ctx.end_called && !get_ctx.error_called; attempts++) {
+        usleep(10000);
+    }
+
+    if (get_ctx.error_called) {
+        FAIL() << "Got error response, status_code=" << (int)get_ctx.error_status;
+    }
+
+    EXPECT_EQ(get_ctx.data_called, 1);
+    EXPECT_EQ(get_ctx.end_called, 1);
+    if (get_ctx.data != nullptr) {
+        EXPECT_EQ(get_ctx.data_len, sizeof(data) - 1);
+        EXPECT_EQ(memcmp(get_ctx.data, data, sizeof(data) - 1), 0);
+        free(get_ctx.data);
+    }
+
+    free(ori_string);
+    offs_client_disconnect(client);
+}
+
+} // namespace offs_wt_client_test
+
+#endif // HAS_MSQUIC

@@ -34,6 +34,7 @@ typedef struct wt_transport_t {
   ofd_cache_t* ofd_cache;
   tuple_cache_t* tc;
   ATOMIC(uint8_t) running;
+  ATOMIC(uint8_t) listening;
   PLATFORMTHREADTYPE thread;
   pd_loop_t* loop;
   PLATFORMLOCKTYPE(destroy_lock);

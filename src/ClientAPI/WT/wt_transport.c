@@ -89,6 +89,7 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
   transport->loop = pd_loop_create(NULL);
   vec_init(&transport->connections);
   transport->running = 0;
+  atomic_store(&transport->listening, 0);
   transport->listener = NULL;
   transport->registration = NULL;
   transport->configuration = NULL;
@@ -100,10 +101,18 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
   transport->host = get_memory(strlen(host) + 1);
   memcpy(transport->host, host, strlen(host) + 1);
   transport->port = port;
-  transport->cert_path = get_memory(strlen(cert_path) + 1);
-  memcpy(transport->cert_path, cert_path, strlen(cert_path) + 1);
-  transport->key_path = get_memory(strlen(key_path) + 1);
-  memcpy(transport->key_path, key_path, strlen(key_path) + 1);
+  if (cert_path != NULL) {
+    transport->cert_path = get_memory(strlen(cert_path) + 1);
+    memcpy(transport->cert_path, cert_path, strlen(cert_path) + 1);
+  } else {
+    transport->cert_path = NULL;
+  }
+  if (key_path != NULL) {
+    transport->key_path = get_memory(strlen(key_path) + 1);
+    memcpy(transport->key_path, key_path, strlen(key_path) + 1);
+  } else {
+    transport->key_path = NULL;
+  }
 
   transport->msquic = offs_msquic_open();
   if (transport->msquic == NULL) {
@@ -353,12 +362,18 @@ static void* _server_thread(void* arg) {
 
   /* Load credentials */
   QUIC_CREDENTIAL_CONFIG cred_config = {0};
-  cred_config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
-  cred_config.CertificateFile = &(QUIC_CERTIFICATE_FILE){
-    .CertificateFile = transport->cert_path,
-    .PrivateKeyFile = transport->key_path
-  };
-  cred_config.Flags = QUIC_CREDENTIAL_FLAG_NONE;
+  if (transport->cert_path != NULL && transport->key_path != NULL) {
+    cred_config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
+    cred_config.CertificateFile = &(QUIC_CERTIFICATE_FILE){
+      .CertificateFile = transport->cert_path,
+      .PrivateKeyFile = transport->key_path
+    };
+    cred_config.Flags = QUIC_CREDENTIAL_FLAG_NONE;
+  } else {
+    /* Self-signed / insecure mode for testing */
+    cred_config.Type = QUIC_CREDENTIAL_TYPE_NONE;
+    cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+  }
 
   status = transport->msquic->ConfigurationLoadCredential(transport->configuration, &cred_config);
   if (QUIC_FAILED(status)) {
@@ -385,7 +400,7 @@ static void* _server_thread(void* arg) {
   }
 
   QUIC_ADDR addr = {0};
-  QuicAddrSetFamily(&addr, QUIC_ADDRESS_FAMILY_UNSPEC);
+  QuicAddrSetFamily(&addr, QUIC_ADDRESS_FAMILY_INET);
   QuicAddrSetPort(&addr, transport->port);
 
   status = transport->msquic->ListenerStart(transport->listener, &alpn, 1, &addr);
@@ -400,6 +415,8 @@ static void* _server_thread(void* arg) {
     atomic_store(&transport->running, 0);
     return NULL;
   }
+
+  atomic_store(&transport->listening, 1);
 
   while (atomic_load(&transport->running)) {
     _destroy_stack_drain(transport);
