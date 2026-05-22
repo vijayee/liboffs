@@ -10,6 +10,7 @@
 #include "../Util/get_dir.h"
 #include "../Util/portable_endian.h"
 #include "../Actor/message.h"
+#include "../Platform/platform.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <errno.h>
@@ -945,8 +946,8 @@ void index_destroy(index_t* index) {
     refcounter_destroy_lock((refcounter_t*) index);
     index_destroy_node(index, index->root);
     index_entry_vec_t *rank;
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+    PLATFORM_DIAGNOSTIC_PUSH
+    PLATFORM_DIAGNOSTIC_IGNORE(-Wmissing-field-initializers)
     hashmap_foreach_data(rank, &index->ranks) {
       for (int i = 0; i < rank->length; i++) {
         index_entry_destroy(rank->data[i]);
@@ -954,7 +955,7 @@ void index_destroy(index_t* index) {
       vec_deinit(rank);
       free(rank);
     }
-#pragma GCC diagnostic pop
+    PLATFORM_DIAGNOSTIC_POP
     hashmap_cleanup(&index->ranks);
     wal_destroy(index->wal);
     free(index->location);

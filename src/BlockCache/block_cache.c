@@ -14,6 +14,7 @@
 #include "../Actor/message.h"
 #include "../Scheduler/scheduler.h"
 #include "../Util/log.h"
+#include "../Platform/platform.h"
 #include <stdatomic.h>
 #include <time.h>
 
@@ -92,14 +93,14 @@ block_lru_cache_t* block_lru_cache_create(size_t size) {
 
 void block_lru_cache_destroy(block_lru_cache_t* lru) {
   block_lru_node_t* node;
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+  PLATFORM_DIAGNOSTIC_PUSH
+  PLATFORM_DIAGNOSTIC_IGNORE(-Wmissing-field-initializers)
   hashmap_foreach_data(node, &lru->cache) {
     block_destroy(node->value);
     index_entry_destroy(node->entry);
     free(node);
   }
-#pragma GCC diagnostic pop
+  PLATFORM_DIAGNOSTIC_POP
   hashmap_cleanup(&lru->cache);
   free(lru);
 }

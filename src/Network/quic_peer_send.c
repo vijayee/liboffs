@@ -9,6 +9,7 @@
 #include "msquic_singleton.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
+#include "../Platform/platform.h"
 #include <cbor.h>
 #include <string.h>
 
@@ -27,7 +28,7 @@ typedef struct {
 
 #ifdef HAS_MSQUIC
 
-static QUIC_STATUS QUIC_API __attribute__((unused)) _quic_send_complete_callback(
+static QUIC_STATUS QUIC_API PLATFORM_UNUSED _quic_send_complete_callback(
     HQUIC stream, void* context, QUIC_STREAM_EVENT* event) {
   (void)stream;
   if (event->Type == QUIC_STREAM_EVENT_SEND_COMPLETE) {

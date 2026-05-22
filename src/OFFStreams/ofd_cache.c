@@ -11,12 +11,10 @@
 #include "../Scheduler/scheduler.h"
 #include <hashmap.h>
 #include <string.h>
-#include <time.h>
+#include "../Platform/platform.h"
 
 static uint64_t _now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+    return platform_monotonic_ns() / UINT64_C(1000000);
 }
 
 ofd_cache_t* ofd_cache_create(scheduler_pool_t* pool, block_cache_t* bc, uint64_t ttl_ms) {
@@ -35,13 +33,13 @@ void ofd_cache_destroy(ofd_cache_t* cache) {
     if (!cache) return;
 
     ofd_cache_entry_t* entry;
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+    PLATFORM_DIAGNOSTIC_PUSH
+    PLATFORM_DIAGNOSTIC_IGNORE(-Wmissing-field-initializers)
     hashmap_foreach_data(entry, &cache->cache) {
         ofd_destroy(entry->ofd);
         free(entry);
     }
-#pragma GCC diagnostic pop
+    PLATFORM_DIAGNOSTIC_POP
     hashmap_cleanup(&cache->cache);
     free(cache);
 }

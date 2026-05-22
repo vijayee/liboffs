@@ -518,13 +518,7 @@ static char* _ws_compute_accept_key(const char* client_key) {
 static int _ws_upgrade(offs_client_t* client, const char* ws_host) {
   /* Generate a 16-byte random key and base64 encode */
   uint8_t raw_key[16];
-  FILE* urandom = fopen("/dev/urandom", "rb");
-  if (urandom == NULL) return -1;
-  if (fread(raw_key, 1, 16, urandom) != 16) {
-    fclose(urandom);
-    return -1;
-  }
-  fclose(urandom);
+  if (platform_random_bytes(raw_key, sizeof(raw_key)) != 0) return -1;
 
   BIO* b64 = BIO_new(BIO_f_base64());
   BIO* bio = BIO_new(BIO_s_mem());
@@ -863,7 +857,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
 
     /* Wait for connection (poll with timeout) */
     for (int attempts = 0; attempts < 200 && !connect_ctx.connected_event; attempts++) {
-      usleep(10000);
+      platform_sleep_ms(10);
     }
     if (!connect_ctx.connected_event) {
       msquic->ConnectionClose(connection);

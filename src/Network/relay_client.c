@@ -39,7 +39,7 @@ static void _destroy_stack_init(relay_client_t* client) {
   client->destroy_head = NULL;
 }
 
-static void __attribute__((unused)) _destroy_stack_push(relay_client_t* client, pd_watcher_t* watcher) {
+static void PLATFORM_UNUSED _destroy_stack_push(relay_client_t* client, pd_watcher_t* watcher) {
   relay_client_destroy_node_t* node = get_clear_memory(sizeof(relay_client_destroy_node_t));
   if (node == NULL) {
     log_error("relay_client: failed to allocate destroy stack node");
@@ -640,7 +640,7 @@ void relay_client_dispatch(void* state, message_t* msg) {
       log_info("relay_client: retrying connection to %s:%u (delayed %lums)",
                client->relay_host ? client->relay_host : "127.0.0.1",
                client->relay_port, delay_ms);
-      usleep(delay_ms * 1000);
+      platform_sleep_ms(delay_ms);
       relay_client_connect(client, client->relay_host, client->relay_port,
                            client->shared_registration);
       break;

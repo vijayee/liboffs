@@ -7,6 +7,7 @@
 #include "../Actor/actor.h"
 #include "../Actor/message.h"
 #include "../Scheduler/scheduler.h"
+#include "../Platform/platform.h"
 #include <string.h>
 
 /* Hash and compare functions for tuple_t keys in the hashmap */
@@ -80,8 +81,8 @@ tuple_cache_lru_t* tuple_cache_lru_create(size_t capacity) {
 
 void tuple_cache_lru_destroy(tuple_cache_lru_t* lru) {
   tuple_cache_lru_node_t* node;
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+  PLATFORM_DIAGNOSTIC_PUSH
+  PLATFORM_DIAGNOSTIC_IGNORE(-Wmissing-field-initializers)
   hashmap_foreach_data(node, &lru->cache) {
     if (node->value != NULL) {
       DESTROY(node->value, buffer);
@@ -89,7 +90,7 @@ void tuple_cache_lru_destroy(tuple_cache_lru_t* lru) {
     DESTROY(node->key, tuple);
     free(node);
   }
-#pragma GCC diagnostic pop
+  PLATFORM_DIAGNOSTIC_POP
   hashmap_cleanup(&lru->cache);
   free(lru);
 }

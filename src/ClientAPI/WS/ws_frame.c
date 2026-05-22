@@ -3,9 +3,8 @@
 //
 #include "ws_frame.h"
 #include "../../Util/allocator.h"
+#include "../../Platform/platform.h"
 #include <string.h>
-#include <unistd.h>
-#include <time.h>
 
 void ws_frame_destroy(ws_frame_t* frame) {
   if (frame == NULL) return;
@@ -176,13 +175,7 @@ uint8_t* ws_frame_build_masked(uint8_t opcode, const uint8_t* payload, size_t pa
 
   /* Masking key: 4 random bytes per RFC 6455 Section 5.3 */
   uint8_t mask_key[4];
-  if (getentropy(mask_key, sizeof(mask_key)) != 0) {
-    /* Fallback: use PID-based seed if getentropy fails */
-    mask_key[0] = (uint8_t)(getpid() & 0xFF);
-    mask_key[1] = (uint8_t)((getpid() >> 8) & 0xFF);
-    mask_key[2] = (uint8_t)(clock() & 0xFF);
-    mask_key[3] = (uint8_t)((uintptr_t)frame & 0xFF);
-  }
+  (void)platform_random_bytes(mask_key, sizeof(mask_key));
   memcpy(frame + pos, mask_key, 4);
   pos += 4;
 

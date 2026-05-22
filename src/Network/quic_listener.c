@@ -47,7 +47,7 @@ static void _destroy_stack_init(quic_listener_t* listener) {
   listener->destroy_head = NULL;
 }
 
-static void __attribute__((unused)) _destroy_stack_push(quic_listener_t* listener, pd_watcher_t* watcher) {
+static void PLATFORM_UNUSED _destroy_stack_push(quic_listener_t* listener, pd_watcher_t* watcher) {
   quic_destroy_node_t* node = get_clear_memory(sizeof(quic_destroy_node_t));
   node->watcher = watcher;
   platform_mutex_lock(listener->destroy_lock);

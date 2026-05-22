@@ -34,13 +34,13 @@ sections_lru_cache_t* sections_lru_cache_create(size_t size) {
 
 void sections_lru_cache_destroy(sections_lru_cache_t* lru) {
   sections_lru_node_t* node;
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+  PLATFORM_DIAGNOSTIC_PUSH
+  PLATFORM_DIAGNOSTIC_IGNORE(-Wmissing-field-initializers)
   hashmap_foreach_data(node, &lru->cache) {
     section_destroy(node->value);
     free(node);
   }
-#pragma GCC diagnostic pop
+  PLATFORM_DIAGNOSTIC_POP
   hashmap_cleanup(&lru->cache);
   free(lru);
 }
@@ -337,15 +337,15 @@ void sections_dispatch(void* state, message_t* msg) {
     }
     case SECTION_WRITE_META: {
       sections_lru_node_t* node;
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+      PLATFORM_DIAGNOSTIC_PUSH
+      PLATFORM_DIAGNOSTIC_IGNORE(-Wmissing-field-initializers)
       hashmap_foreach_data(node, &sections->lru->cache) {
         if (atomic_load(&node->value->dirty)) {
           section_save_meta(node->value);
           atomic_store(&node->value->dirty, 0);
         }
       }
-#pragma GCC diagnostic pop
+      PLATFORM_DIAGNOSTIC_POP
       break;
     }
     case SECTION_WRITE_RESULT:

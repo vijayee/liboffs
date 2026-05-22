@@ -48,9 +48,9 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <signal.h>
 #include <errno.h>
 #include <time.h>
+#include "../src/Platform/platform.h"
 
 /* ---- BLAKE3 helpers ---- */
 
@@ -307,7 +307,7 @@ static void handle_store_file(int client_fd, const char* args) {
 
   /* Generate random data */
   uint8_t* file_data = get_clear_memory(stream_length);
-  srand((unsigned int)time(NULL) ^ (unsigned int)getpid());
+  srand((unsigned int)time(NULL) ^ (unsigned int)platform_getpid());
   for (size_t idx = 0; idx < stream_length; idx++) {
     file_data[idx] = (uint8_t)(rand() & 0xFF);
   }
@@ -1401,7 +1401,7 @@ static void handle_command(int client_fd, char* line) {
         found = 1;
         break;
       }
-      usleep(CTRL_POLL_INTERVAL_MS * 1000);
+      platform_sleep_ms(CTRL_POLL_INTERVAL_MS);
     }
     if (found) {
       send_response(client_fd, CTRL_RESP_OK);
@@ -1752,8 +1752,6 @@ static void parse_args(int argc, char* argv[]) {
 /* ---- Main entry point ---- */
 
 int node_main(int argc, char* argv[]) {
-  signal(SIGPIPE, SIG_IGN);
-
   node_state_init(&g_node);
   parse_args(argc, argv);
 
@@ -1860,7 +1858,7 @@ int node_main(int argc, char* argv[]) {
 
   /* Main loop: wait for shutdown */
   while (g_node.running) {
-    usleep(CTRL_POLL_INTERVAL_MS * 1000);
+    platform_sleep_ms(CTRL_POLL_INTERVAL_MS);
   }
 
   /* Wait for control thread to finish */

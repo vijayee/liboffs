@@ -30,7 +30,7 @@ static void _destroy_stack_init(relay_server_t* server) {
   server->destroy_head = NULL;
 }
 
-static void __attribute__((unused)) _destroy_stack_push(relay_server_t* server, pd_watcher_t* watcher) {
+static void PLATFORM_UNUSED _destroy_stack_push(relay_server_t* server, pd_watcher_t* watcher) {
   relay_destroy_node_t* node = get_clear_memory(sizeof(relay_destroy_node_t));
   if (node == NULL) {
     log_error("relay: failed to allocate destroy stack node");
