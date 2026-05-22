@@ -78,8 +78,14 @@ generated.
 
 ### Phase 6: Flush & Persist
 
-- Flush section bitmaps to disk (existing `section_flush()` or equivalent)
-- Save peer list (existing `save_peers_to_file()`)
+- **Index/WAL flush:** Call `index_debounce()` to write a final snapshot and rotate
+  the WAL, then call a new `wal_sync()` to `fsync`/`FlushFileBuffers` the WAL file.
+  Currently neither `wal_write` nor `index_debounce` calls fsync — writes go to the
+  OS page cache only. `wal_sync()` ensures crash durability.
+- **Platform sync API:** Add `platform_file_sync(platform_file_t*)` to the platform
+  layer (`fsync`/`fdatasync` on POSIX, `FlushFileBuffers` on Windows).
+- Flush section bitmaps to disk.
+- Save peer list (existing `save_peers_to_file()`).
 
 ### Phase 7: Stop Scheduler
 
@@ -115,6 +121,10 @@ After deadline exceeded in any phase, skip directly to Phase 7 (force stop).
 | `src/Node/node.h` | Add `OFFS_ERROR_DRAINING` error code |
 | `src/ClientAPI/HTTP/http_server.h` | Add `http_server_drain()` declaration |
 | `src/ClientAPI/HTTP/http_server.c` | Add draining flag, drain function, active request counter |
+| `src/Platform/platform_file.h` | Add `platform_file_sync()` declaration |
+| `src/Platform/platform_file.c` | Add `platform_file_sync()` (POSIX `fsync` + Win32 `FlushFileBuffers`) |
+| `src/BlockCache/wal.h` | Add `wal_sync()` declaration |
+| `src/BlockCache/wal.c` | Add `wal_sync()` — calls `platform_file_sync()` on the WAL file |
 
 ## Testing
 
@@ -124,4 +134,7 @@ After deadline exceeded in any phase, skip directly to Phase 7 (force stop).
 - Integration: full shutdown sequence with in-flight PUT completes without data loss
 - Integration: deadline exceeded skips drain phases
 - Integration: zero timeout blocks until idle (backward compatible)
+- Unit: `platform_file_sync()` calls fsync and returns success code
+- Unit: `wal_sync()` calls platform_file_sync on the WAL file handle
+- Unit: `wal_sync()` returns 0 on success, error code on failure
 - Pre-existing: all existing tests continue to pass
