@@ -123,6 +123,7 @@ typedef struct {
 
 block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool, authority_t* authority, size_t max_capacity_bytes);
 void block_cache_destroy(block_cache_t* block_cache);
+void block_cache_sync(block_cache_t* block_cache);
 size_t block_cache_count(block_cache_t* block_cache);
 void block_cache_update_capacity(block_cache_t* block_cache);
 void block_cache_set_max_capacity(block_cache_t* block_cache, size_t max_capacity_bytes);

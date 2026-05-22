@@ -14,6 +14,7 @@
 #include "../Actor/message.h"
 #include "../Scheduler/scheduler.h"
 #include "../Util/log.h"
+#include "../Timer/timer_actor.h"
 #include "../Platform/platform.h"
 #include <stdatomic.h>
 #include <time.h>
@@ -725,4 +726,23 @@ void block_cache_remove(block_cache_t* block_cache, buffer_t* hash, actor_t* rep
   msg.payload_destroy = cache_remove_payload_destroy;
 
   actor_send(&block_cache->actor, &msg);
+}
+
+void block_cache_sync(block_cache_t* block_cache) {
+  if (block_cache == NULL) return;
+
+  /* Flush the index debounce timer — sends INDEX_SAVE immediately
+     through the index actor's normal dispatch path. */
+  timer_actor_debounce_flush(block_cache->index->timer_actor,
+                             &block_cache->index->actor, INDEX_SAVE);
+
+  /* Wait briefly for the actor to process the INDEX_SAVE message,
+     then wait for all workers to go idle. */
+  platform_sleep_ms(100);
+  scheduler_pool_wait_for_idle(block_cache->pool);
+
+  /* Sync the WAL to disk for crash durability. */
+  if (block_cache->index->wal != NULL) {
+    wal_sync(block_cache->index->wal);
+  }
 }

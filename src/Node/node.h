@@ -28,6 +28,7 @@ typedef struct offs_node_t {
   scheduler_pool_t* scheduler;
   timer_actor_t* timer;
   ATOMIC(uint8_t) running;
+  ATOMIC(uint8_t) draining;
 } offs_node_t;
 
 offs_node_t* offs_node_create(config_t* config, authority_t* authority);
