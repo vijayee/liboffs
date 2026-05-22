@@ -49,6 +49,7 @@ typedef struct http_server_t {
   scheduler_pool_t* pool;
   size_t max_connections;
   ATOMIC(size_t) active_connections;
+  ATOMIC(uint8_t) draining;
   platform_mutex_t* destroy_lock;
   server_destroy_node_t* destroy_head;
 } http_server_t;
@@ -71,6 +72,7 @@ void http_server_delete_with_data(http_server_t* server, const char* pattern, ht
 
 void http_server_listen(http_server_t* server);
 void http_server_stop(http_server_t* server);
+void http_server_drain(http_server_t* server);
 void http_server_set_max_connections(http_server_t* server, size_t max_connections);
 
 void http_server_dispatch(http_server_t* server, http_request_t* request, http_response_t* response);

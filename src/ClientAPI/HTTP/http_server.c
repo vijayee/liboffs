@@ -368,6 +368,10 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   (void)watcher;
   http_server_t* server = (http_server_t*)user_data;
 
+  if (atomic_load(&server->draining)) {
+    return;
+  }
+
   if (events & PD_EVENT_READ) {
     platform_socket_t* client_sock = platform_socket_accept(server->listen_sock, NULL);
     if (client_sock == NULL) {
@@ -431,6 +435,11 @@ void http_server_stop(http_server_t* server) {
   atomic_store(&server->running, 0);
   pd_loop_async_send(server->loop, server);
   platform_thread_join(server->thread);
+}
+
+void http_server_drain(http_server_t* server) {
+  if (server == NULL) return;
+  atomic_store(&server->draining, 1);
 }
 
 void http_server_set_max_connections(http_server_t* server, size_t max_connections) {

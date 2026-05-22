@@ -14,6 +14,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#define OFFS_ERROR_DRAINING -2
+
 typedef struct block_cache_t block_cache_t;
 typedef struct http_server_t http_server_t;
 
