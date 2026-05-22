@@ -23,6 +23,19 @@ typedef struct {
   size_t max_wals;
   size_t max_capacity_bytes;
   uint32_t shutdown_timeout_ms;
+  size_t scheduler_thread_count;
+  uint32_t gossip_init_interval_s;
+  size_t gossip_init_count;
+  uint32_t gossip_steady_interval_s;
+  uint32_t gossip_timeout_ms;
+  float hebbian_decay_factor;
+  uint32_t eabf_base_ttl_ms;
+  uint32_t eabf_maintenance_ms;
+  uint32_t respiration_tau_min_ms;
+  uint32_t respiration_tau_max_ms;
+  size_t relay_max_retries;
+  uint32_t relay_retry_delay_ms;
 } config_t;
 config_t config_default();
+int config_validate(const config_t* config);
 #endif //OFFS_CONFIG_H

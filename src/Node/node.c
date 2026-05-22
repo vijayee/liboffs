@@ -8,6 +8,7 @@
 #include "../Network/network.h"
 #include "../Platform/platform.h"
 #include "../Util/allocator.h"
+#include "../Util/log.h"
 #include <stdbool.h>
 #include <stdlib.h>
 
@@ -18,7 +19,7 @@ offs_node_t* offs_node_create(config_t* config, authority_t* authority) {
   node->running = ATOMIC_VAR_INIT(0);
   node->draining = ATOMIC_VAR_INIT(0);
 
-  node->scheduler = scheduler_pool_create(4);
+  node->scheduler = scheduler_pool_create(config->scheduler_thread_count);
   if (node->scheduler == NULL) {
     free(node);
     return NULL;
@@ -36,6 +37,11 @@ offs_node_t* offs_node_create(config_t* config, authority_t* authority) {
 
 int offs_node_start(offs_node_t* node) {
   if (node == NULL) return -1;
+
+  if (node->config == NULL || config_validate(node->config) != 0) {
+    log_error("offs_node_start: invalid configuration");
+    return -1;
+  }
 
   scheduler_pool_start(node->scheduler);
 
