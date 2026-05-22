@@ -41,7 +41,8 @@ if (BUILD_TESTING)
             test_unix_transport.cpp
             test_tcp_transport.cpp
             test_ws_transport.cpp
-            test_offs_client.cpp)
+            test_offs_client.cpp
+            test_platform.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
