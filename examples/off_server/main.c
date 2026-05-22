@@ -12,7 +12,7 @@
 #include "Scheduler/scheduler.h"
 #include "Timer/timer_actor.h"
 #include "Configuration/config.h"
-#include "Util/threadding.h"
+#include "Platform/platform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,7 +39,7 @@ static void _print_usage(const char* program) {
 }
 
 int main(int argc, char** argv) {
-  platform_setup_thread_stack();
+  platform_thread_setup_stack();
 
   const char* host = "0.0.0.0";
   uint16_t port = 23402;
