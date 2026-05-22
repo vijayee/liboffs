@@ -20,5 +20,6 @@ config_t config_default() {
   config.max_snapshots = 3;
   config.max_wals = 3;
   config.max_capacity_bytes = 5368709120;
+  config.shutdown_timeout_ms = 30000;
   return config;
 }

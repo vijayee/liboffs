@@ -5,6 +5,7 @@
 #ifndef OFFS_CONFIG_H
 #define OFFS_CONFIG_H
 #include <stddef.h>
+#include <stdint.h>
 typedef struct {
   size_t index_bucket_size;
   size_t index_wait;
@@ -21,6 +22,7 @@ typedef struct {
   size_t max_snapshots;
   size_t max_wals;
   size_t max_capacity_bytes;
+  uint32_t shutdown_timeout_ms;
 } config_t;
 config_t config_default();
 #endif //OFFS_CONFIG_H
