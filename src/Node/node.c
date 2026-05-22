@@ -16,6 +16,7 @@ offs_node_t* offs_node_create(config_t* config, authority_t* authority) {
   node->config = config;
   node->authority = authority;
   node->running = ATOMIC_VAR_INIT(0);
+  node->draining = ATOMIC_VAR_INIT(0);
 
   node->scheduler = scheduler_pool_create(4);
   if (node->scheduler == NULL) {
@@ -96,7 +97,7 @@ void offs_node_stop(offs_node_t* node) {
 
   /* Phase 3: Drain in-flight HTTP requests. */
   if (node->http_server != NULL && !_shutdown_deadline_exceeded(deadline)) {
-    while (atomic_load(&node->http_server->active_connections) > 0) {
+    while (ATOMIC_LOAD(&node->http_server->active_connections) > 0) {
       if (_shutdown_deadline_exceeded(deadline)) break;
       platform_sleep_ms(50);
     }
