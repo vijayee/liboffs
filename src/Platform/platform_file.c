@@ -73,5 +73,177 @@
     return mkdir_p((char*)path);
   }
 #else
-  /* Windows implementation deferred */
+  /* Windows implementation — Win32 File API */
+  #define WIN32_LEAN_AND_MEAN
+  #include <windows.h>
+  #include <stdlib.h>
+  #include <string.h>
+  #include <errno.h>
+
+  struct platform_file_t {
+    HANDLE handle;
+  };
+
+  platform_file_t* platform_file_open(const char* path, int flags, int mode) {
+    (void)mode;
+    DWORD dwDesiredAccess = 0;
+    DWORD dwCreationDisposition = OPEN_EXISTING;
+
+    if (flags & PLATFORM_O_RDWR) {
+      dwDesiredAccess = GENERIC_READ | GENERIC_WRITE;
+    } else if (flags & PLATFORM_O_WRONLY) {
+      dwDesiredAccess = GENERIC_WRITE;
+    } else {
+      dwDesiredAccess = GENERIC_READ;
+    }
+
+    if (flags & PLATFORM_O_CREAT) {
+      if (flags & PLATFORM_O_TRUNC) {
+        dwCreationDisposition = CREATE_ALWAYS;
+      } else {
+        dwCreationDisposition = OPEN_ALWAYS;
+      }
+    } else if (flags & PLATFORM_O_TRUNC) {
+      dwCreationDisposition = TRUNCATE_EXISTING;
+    }
+
+    /* Convert UTF-8 path to wide string */
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    if (wlen <= 0) return NULL;
+    WCHAR* wpath = (WCHAR*)malloc(wlen * sizeof(WCHAR));
+    if (wpath == NULL) return NULL;
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wlen);
+
+    HANDLE h = CreateFileW(wpath, dwDesiredAccess,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, dwCreationDisposition,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    free(wpath);
+    if (h == INVALID_HANDLE_VALUE) {
+      return NULL;
+    }
+    platform_file_t* file = (platform_file_t*)calloc(1, sizeof(platform_file_t));
+    if (file == NULL) {
+      CloseHandle(h);
+      return NULL;
+    }
+    file->handle = h;
+    return file;
+  }
+
+  void platform_file_close(platform_file_t* file) {
+    if (file == NULL) return;
+    CloseHandle(file->handle);
+    free(file);
+  }
+
+  ssize_t platform_file_read(platform_file_t* file, void* buf, size_t count) {
+    DWORD bytes_read = 0;
+    if (!ReadFile(file->handle, buf, (DWORD)count, &bytes_read, NULL)) {
+      return -1;
+    }
+    return (ssize_t)bytes_read;
+  }
+
+  ssize_t platform_file_write(platform_file_t* file, const void* buf, size_t count) {
+    DWORD bytes_written = 0;
+    if (!WriteFile(file->handle, buf, (DWORD)count, &bytes_written, NULL)) {
+      return -1;
+    }
+    return (ssize_t)bytes_written;
+  }
+
+  ssize_t platform_file_pread(platform_file_t* file, void* buf, size_t count, uint64_t offset) {
+    OVERLAPPED overlapped;
+    memset(&overlapped, 0, sizeof(overlapped));
+    overlapped.Offset = (DWORD)(offset & 0xFFFFFFFF);
+    overlapped.OffsetHigh = (DWORD)(offset >> 32);
+    DWORD bytes_read = 0;
+    if (!ReadFile(file->handle, buf, (DWORD)count, &bytes_read, &overlapped)) {
+      return -1;
+    }
+    return (ssize_t)bytes_read;
+  }
+
+  ssize_t platform_file_pwrite(platform_file_t* file, const void* buf, size_t count, uint64_t offset) {
+    OVERLAPPED overlapped;
+    memset(&overlapped, 0, sizeof(overlapped));
+    overlapped.Offset = (DWORD)(offset & 0xFFFFFFFF);
+    overlapped.OffsetHigh = (DWORD)(offset >> 32);
+    DWORD bytes_written = 0;
+    if (!WriteFile(file->handle, buf, (DWORD)count, &bytes_written, &overlapped)) {
+      return -1;
+    }
+    return (ssize_t)bytes_written;
+  }
+
+  int64_t platform_file_seek(platform_file_t* file, int64_t offset, int whence) {
+    DWORD move_method;
+    switch (whence) {
+      case PLATFORM_SEEK_SET: move_method = FILE_BEGIN; break;
+      case PLATFORM_SEEK_CUR: move_method = FILE_CURRENT; break;
+      case PLATFORM_SEEK_END: move_method = FILE_END; break;
+      default: return -1;
+    }
+    LARGE_INTEGER li_offset;
+    li_offset.QuadPart = offset;
+    LARGE_INTEGER li_new;
+    if (!SetFilePointerEx(file->handle, li_offset, &li_new, move_method)) {
+      return -1;
+    }
+    return (int64_t)li_new.QuadPart;
+  }
+
+  int platform_file_exists(const char* path) {
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    if (wlen <= 0) return 0;
+    WCHAR* wpath = (WCHAR*)malloc(wlen * sizeof(WCHAR));
+    if (wpath == NULL) return 0;
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wlen);
+    DWORD attrs = GetFileAttributesW(wpath);
+    free(wpath);
+    return (attrs != INVALID_FILE_ATTRIBUTES) ? 1 : 0;
+  }
+
+  int platform_file_unlink(const char* path) {
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    if (wlen <= 0) return -1;
+    WCHAR* wpath = (WCHAR*)malloc(wlen * sizeof(WCHAR));
+    if (wpath == NULL) return -1;
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wlen);
+    int result = DeleteFileW(wpath) ? 0 : -1;
+    free(wpath);
+    return result;
+  }
+
+  /* Recursive mkdir using CreateDirectoryW */
+  static int _mkdir_p_win(const char* path) {
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    if (wlen <= 0) return -1;
+    WCHAR* wpath = (WCHAR*)malloc(wlen * sizeof(WCHAR));
+    if (wpath == NULL) return -1;
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wlen);
+
+    /* Walk the path creating each component */
+    for (int i = 0; wpath[i] != L'\0'; i++) {
+      if (wpath[i] == L'\\' || wpath[i] == L'/') {
+        if (i == 0) continue; /* skip leading slash */
+        WCHAR saved = wpath[i];
+        wpath[i] = L'\0';
+        CreateDirectoryW(wpath, NULL); /* ignore error if already exists */
+        wpath[i] = saved;
+      }
+    }
+    /* Create the final component */
+    int result = CreateDirectoryW(wpath, NULL) ? 0 : -1;
+    if (result != 0 && GetLastError() == ERROR_ALREADY_EXISTS) {
+      result = 0;
+    }
+    free(wpath);
+    return result;
+  }
+
+  int platform_mkdir(const char* path) {
+    return _mkdir_p_win(path);
+  }
 #endif
