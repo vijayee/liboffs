@@ -46,7 +46,10 @@ if (BUILD_TESTING)
             test_platform_socket.cpp
             test_platform_file_sync.cpp
             test_timer_debounce.cpp
-            test_shutdown.cpp)
+            test_shutdown.cpp
+            test_config_validate.cpp
+            test_validation.cpp
+            test_wire_validation.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
