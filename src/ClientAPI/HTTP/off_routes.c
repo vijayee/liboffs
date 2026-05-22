@@ -23,6 +23,21 @@
 #include "../../OFFStreams/tuple.h"
 #include "../../OFFStreams/ofd.h"
 #include "../../BlockCache/block_cache.h"
+#include "../../Util/atomic_compat.h"
+
+static int _draining_middleware(http_request_t* request, http_response_t* response,
+                                void* user_data) {
+  (void)request;
+  http_server_t* server = (http_server_t*)user_data;
+  if (atomic_load(&server->draining)) {
+    http_response_set_status(response, HTTP_STATUS_SERVICE_UNAVAILABLE);
+    http_response_set_header(response, "Content-Type", "text/plain");
+    http_response_write(response, "Server is shutting down\n", 22);
+    http_response_end(response);
+    return -1;
+  }
+  return 0;
+}
 #include "../../BlockCache/block.h"
 #include "../../Buffer/buffer.h"
 #include "../../Util/allocator.h"
@@ -806,6 +821,8 @@ static void _off_post_handler(http_request_t* request, http_response_t* response
 void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
                          block_cache_t* bc, ofd_cache_t* ofd_cache, tuple_cache_t* tc) {
     off_routes_context_t* ctx = off_routes_context_create(pool, bc, ofd_cache, tc);
+
+    http_server_use(server, _draining_middleware, server, NULL);
 
     cors_config_t* cors_config = cors_config_offsystem();
     http_server_use(server, cors_middleware, cors_config,

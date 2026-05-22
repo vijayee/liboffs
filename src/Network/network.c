@@ -185,6 +185,30 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   return network;
 }
 
+void network_shutdown_connections(network_t* network) {
+  if (network == NULL) return;
+
+#ifdef HAS_MSQUIC
+  if (network->msquic != NULL) {
+    for (size_t i = 0; i < network->conn_mgr.peer_count; i++) {
+      peer_connection_t* peer = network->conn_mgr.peers[i];
+      if (peer != NULL && peer->quic_connection != NULL) {
+        network->msquic->ConnectionShutdown(
+            peer->quic_connection,
+            QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
+            0);
+        peer->quic_connection = NULL;
+        peer->quic_stream = NULL;
+      }
+    }
+  }
+#endif
+
+  if (network->relay != NULL) {
+    relay_client_disconnect(network->relay);
+  }
+}
+
 void network_destroy(network_t* network) {
   if (network == NULL) return;
   if (network->gossip_timer_id != 0) {

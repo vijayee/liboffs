@@ -95,5 +95,6 @@ void network_destroy(network_t* network);
 void network_dispatch(void* state, message_t* msg);
 int network_connect_relay(network_t* network, const char* host, uint16_t port);
 int network_connect_peer(network_t* network, const char* host, uint16_t port);
+void network_shutdown_connections(network_t* network);
 
 #endif // OFFS_NETWORK_H

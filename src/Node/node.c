@@ -109,8 +109,13 @@ void offs_node_stop(offs_node_t* node) {
   }
 
   /* Phase 5: Close P2P connections.
-     At this point actors are drained — no new messages can be generated.
-     Actual connection cleanup happens in network_destroy(). */
+     Actors are drained — no new messages can be generated.
+     Shutdown each peer's QUIC connection with a CONNECTION_CLOSE frame
+     (non-silent) so peers know this is an intentional departure, then
+     disconnect the relay client. */
+  if (node->network != NULL) {
+    network_shutdown_connections(node->network);
+  }
 
   /* Phase 6: Flush index/WAL and persist peer state. */
   if (!_shutdown_deadline_exceeded(deadline)) {
