@@ -10,7 +10,7 @@
 #include "../Network/node_id.h"
 #include "../Scheduler/scheduler.h"
 #include "../Util/atomic_compat.h"
-#include "../Util/threadding.h"
+#include "../Platform/platform.h"
 #include "../Util/allocator.h"
 #include <poll-dancer/poll-dancer.h>
 #include <stdint.h>
@@ -76,11 +76,11 @@ typedef struct quic_listener_t {
 
   // I/O thread for poll-dancer timers
   pd_loop_t* loop;
-  PLATFORMTHREADTYPE thread;
+  platform_thread_t* thread;
   ATOMIC(uint8_t) running;
 
   // Destroy stack for deferred watcher cleanup
-  PLATFORMLOCKTYPE(destroy_lock);
+  platform_mutex_t* destroy_lock;
   struct quic_destroy_node_t* destroy_head;
 
   // Active connection tracking for graceful shutdown
@@ -88,12 +88,12 @@ typedef struct quic_listener_t {
   HQUIC* connections;
   size_t connection_count;
   size_t connection_capacity;
-  PLATFORMLOCKTYPE(conn_lock);
+  platform_mutex_t* conn_lock;
 #else
   void** connections;
   size_t connection_count;
   size_t connection_capacity;
-  PLATFORMLOCKTYPE(conn_lock);
+  platform_mutex_t* conn_lock;
 #endif
 } quic_listener_t;
 

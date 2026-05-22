@@ -11,6 +11,7 @@
 #include "../../Actor/actor.h"
 #include "../../Util/atomic_compat.h"
 #include "../../Util/vec.h"
+#include "../../Platform/platform.h"
 #include <poll-dancer/poll-dancer.h>
 #include "../../Scheduler/scheduler.h"
 #include "http_route.h"
@@ -37,7 +38,7 @@ typedef struct server_destroy_node_t {
 typedef struct http_server_t {
   actor_t actor;
   pd_loop_t* loop;
-  PLATFORMTHREADTYPE thread;
+  platform_thread_t* thread;
   ATOMIC(uint8_t) running;
   int listen_fd;
   pd_watcher_t* listen_watcher;
@@ -48,7 +49,7 @@ typedef struct http_server_t {
   scheduler_pool_t* pool;
   size_t max_connections;
   ATOMIC(size_t) active_connections;
-  PLATFORMLOCKTYPE(destroy_lock);
+  platform_mutex_t* destroy_lock;
   server_destroy_node_t* destroy_head;
 } http_server_t;
 

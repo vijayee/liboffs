@@ -7,7 +7,7 @@
 
 #include "deque.h"
 #include "../Actor/actor.h"
-#include "../Util/threadding.h"
+#include "../Platform/platform.h"
 #include "../Util/atomic_compat.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -26,18 +26,18 @@ typedef struct inject_node_t {
 } inject_node_t;
 
 typedef struct inject_queue_t {
-  PLATFORMLOCKTYPE(lock);
-  PLATFORMCONDITIONTYPE(condition);
+  platform_mutex_t* lock;
+  platform_condvar_t* condition;
   inject_node_t* head;
   inject_node_t* tail;
 } inject_queue_t;
 
 typedef struct scheduler_t {
   size_t index;
-  PLATFORMTHREADTYPE thread;
+  platform_thread_t* thread;
   deque_t local_queue;
   ATOMIC(uint32_t) last_victim;
-  char _pad[CACHE_LINE_SIZE - sizeof(size_t) - sizeof(PLATFORMTHREADTYPE) - sizeof(deque_t) - sizeof(ATOMIC(uint32_t))];
+  char _pad[CACHE_LINE_SIZE - sizeof(size_t) - sizeof(platform_thread_t*) - sizeof(deque_t) - sizeof(ATOMIC(uint32_t))];
   actor_t* current;
 } scheduler_t;
 
@@ -45,13 +45,13 @@ typedef struct scheduler_pool_t {
   scheduler_t* workers;
   size_t worker_count;
   inject_queue_t inject;
-  PLATFORMBARRIERTYPE(barrier);
-  PLATFORMLOCKTYPE(idle_lock);
-  PLATFORMCONDITIONTYPE(idle);
+  platform_barrier_t* barrier;
+  platform_mutex_t* idle_lock;
+  platform_condvar_t* idle;
   ATOMIC(size_t) idle_count;
   ATOMIC(uint32_t) active_count;
   ATOMIC(uint8_t) terminate;
-  PLATFORMLOCKTYPE(deref_lock);
+  platform_mutex_t* deref_lock;
   pending_deref_node_t* pending_derefs;
 } scheduler_pool_t;
 

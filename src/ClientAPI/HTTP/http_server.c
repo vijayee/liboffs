@@ -7,7 +7,7 @@
 #include "http_connection.h"
 #include "http_route.h"
 #include "../../Util/allocator.h"
-#include "../../Util/threadding.h"
+#include "../../Platform/platform.h"
 #include "../../Actor/message.h"
 #include "../../Actor/message_queue.h"
 #include <poll-dancer/poll-dancer.h>
@@ -24,26 +24,26 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                               pd_event_t events, void* user_data);
 
 static void _destroy_stack_init(http_server_t* server) {
-  platform_lock_init(&server->destroy_lock);
+  server->destroy_lock = platform_mutex_create();
   server->destroy_head = NULL;
 }
 
 static void _destroy_stack_push(http_server_t* server, pd_watcher_t* watcher) {
   server_destroy_node_t* node = get_clear_memory(sizeof(server_destroy_node_t));
   node->watcher = watcher;
-  platform_lock(&server->destroy_lock);
+  platform_mutex_lock(server->destroy_lock);
   node->next = server->destroy_head;
   server->destroy_head = node;
-  platform_unlock(&server->destroy_lock);
+  platform_mutex_unlock(server->destroy_lock);
   pd_loop_async_send(server->loop, NULL);
 }
 
 static void _destroy_stack_drain(http_server_t* server) {
   server_destroy_node_t* node;
-  platform_lock(&server->destroy_lock);
+  platform_mutex_lock(server->destroy_lock);
   node = server->destroy_head;
   server->destroy_head = NULL;
-  platform_unlock(&server->destroy_lock);
+  platform_mutex_unlock(server->destroy_lock);
   while (node != NULL) {
     server_destroy_node_t* next = node->next;
     pd_watcher_destroy(node->watcher);
@@ -54,7 +54,7 @@ static void _destroy_stack_drain(http_server_t* server) {
 
 static void _destroy_stack_destroy(http_server_t* server) {
   _destroy_stack_drain(server);
-  platform_lock_destroy(&server->destroy_lock);
+  platform_mutex_destroy(server->destroy_lock);
 }
 
 /* Server actor dispatch — processes watcher lifecycle messages on scheduler threads. */
@@ -406,7 +406,7 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
 
 static void* _server_thread(void* arg) {
   http_server_t* server = (http_server_t*)arg;
-  platform_setup_thread_stack();
+  platform_thread_setup_stack();
 
   server->listen_watcher = pd_watcher_create(server->loop, server->listen_fd,
     PD_EVENT_READ, _accept_callback, server);
@@ -430,21 +430,13 @@ static void* _server_thread(void* arg) {
 
 void http_server_listen(http_server_t* server) {
   atomic_store(&server->running, 1);
-#ifdef _WIN32
-  server->thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)_server_thread, server, 0, NULL);
-#else
-  pthread_create(&server->thread, NULL, _server_thread, server);
-#endif
+  server->thread = platform_thread_create(_server_thread, server);
 }
 
 void http_server_stop(http_server_t* server) {
   atomic_store(&server->running, 0);
   pd_loop_async_send(server->loop, server);
-#ifdef _WIN32
-  WaitForSingleObject(server->thread, INFINITE);
-#else
-  pthread_join(server->thread, NULL);
-#endif
+  platform_thread_join(server->thread);
 }
 
 void http_server_set_max_connections(http_server_t* server, size_t max_connections) {

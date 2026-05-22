@@ -14,6 +14,7 @@
 #include "../../BlockCache/block_cache.h"
 #include "../../OFFStreams/ofd_cache.h"
 #include "../../OFFStreams/tuple_cache.h"
+#include "../../Platform/platform.h"
 #include <poll-dancer/poll-dancer.h>
 #include "ws_connection.h"
 
@@ -27,7 +28,7 @@ typedef struct ws_transport_destroy_node_t {
 typedef struct ws_transport_t {
   actor_t actor;
   pd_loop_t* loop;
-  PLATFORMTHREADTYPE thread;
+  platform_thread_t* thread;
   ATOMIC(uint8_t) running;
   int listen_fd;
   pd_watcher_t* listen_watcher;
@@ -38,7 +39,7 @@ typedef struct ws_transport_t {
   tuple_cache_t* tc;
   size_t max_connections;
   ATOMIC(size_t) active_connections;
-  PLATFORMLOCKTYPE(destroy_lock);
+  platform_mutex_t* destroy_lock;
   ws_transport_destroy_node_t* destroy_head;
   char* host;
   uint16_t port;

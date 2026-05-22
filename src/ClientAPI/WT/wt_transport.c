@@ -6,7 +6,7 @@
 #ifdef HAS_MSQUIC
 
 #include "../../Util/allocator.h"
-#include "../../Util/threadding.h"
+#include "../../Platform/platform.h"
 #include "../../Actor/message.h"
 #include "../../Actor/message_queue.h"
 #include <poll-dancer/poll-dancer.h>
@@ -25,26 +25,26 @@ static QUIC_STATUS QUIC_API _wt_listener_callback(
     HQUIC listener, void* context, QUIC_LISTENER_EVENT* event);
 
 static void _destroy_stack_init(wt_transport_t* transport) {
-  platform_lock_init(&transport->destroy_lock);
+  transport->destroy_lock = platform_mutex_create();
   transport->destroy_head = NULL;
 }
 
 static void _destroy_stack_push(wt_transport_t* transport, void* item) {
   wt_transport_destroy_node_t* node = get_clear_memory(sizeof(wt_transport_destroy_node_t));
   node->item = item;
-  platform_lock(&transport->destroy_lock);
+  platform_mutex_lock(transport->destroy_lock);
   node->next = transport->destroy_head;
   transport->destroy_head = node;
-  platform_unlock(&transport->destroy_lock);
+  platform_mutex_unlock(transport->destroy_lock);
   pd_loop_async_send(transport->loop, NULL);
 }
 
 static void _destroy_stack_drain(wt_transport_t* transport) {
   wt_transport_destroy_node_t* node;
-  platform_lock(&transport->destroy_lock);
+  platform_mutex_lock(transport->destroy_lock);
   node = transport->destroy_head;
   transport->destroy_head = NULL;
-  platform_unlock(&transport->destroy_lock);
+  platform_mutex_unlock(transport->destroy_lock);
   while (node != NULL) {
     wt_transport_destroy_node_t* next = node->next;
     /* Items in the destroy stack are either HQUIC streams or connections
@@ -61,7 +61,7 @@ static void _destroy_stack_drain(wt_transport_t* transport) {
 
 static void _destroy_stack_destroy(wt_transport_t* transport) {
   _destroy_stack_drain(transport);
-  platform_lock_destroy(&transport->destroy_lock);
+  platform_mutex_destroy(transport->destroy_lock);
 }
 
 void _wt_server_dispatch(void* state, message_t* msg) {
@@ -96,7 +96,7 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
   transport->max_connections = max_connections;
   atomic_store(&transport->active_connections, 0);
   _destroy_stack_init(transport);
-  platform_lock_init(&transport->conn_lock);
+  transport->conn_lock = platform_mutex_create();
 
   transport->host = get_memory(strlen(host) + 1);
   memcpy(transport->host, host, strlen(host) + 1);
@@ -120,7 +120,7 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
     free(transport->cert_path);
     free(transport->key_path);
     free(transport->host);
-    platform_lock_destroy(&transport->conn_lock);
+    platform_mutex_destroy(transport->conn_lock);
     _destroy_stack_destroy(transport);
     pd_loop_destroy(transport->loop);
     actor_destroy(&transport->actor);
@@ -139,13 +139,13 @@ void wt_transport_destroy(wt_transport_t* transport) {
     wt_transport_stop(transport);
   }
 
-  platform_lock(&transport->conn_lock);
+  platform_mutex_lock(transport->conn_lock);
   for (int i = 0; i < transport->connections.length; i++) {
     wt_connection_t* conn = transport->connections.data[i];
     conn->is_closing = 1;
     conn->transport = NULL;
   }
-  platform_unlock(&transport->conn_lock);
+  platform_mutex_unlock(transport->conn_lock);
 
   for (int i = 0; i < transport->connections.length; i++) {
     wt_connection_t* conn = transport->connections.data[i];
@@ -209,7 +209,7 @@ void wt_transport_destroy(wt_transport_t* transport) {
   if (transport->host != NULL) {
     free(transport->host);
   }
-  platform_lock_destroy(&transport->conn_lock);
+  platform_mutex_destroy(transport->conn_lock);
   actor_destroy(&transport->actor);
   _destroy_stack_destroy(transport);
   pd_loop_destroy(transport->loop);
@@ -263,9 +263,9 @@ static QUIC_STATUS QUIC_API _wt_connection_callback(
         transport->msquic->StreamClose(stream);
         return QUIC_STATUS_OUT_OF_MEMORY;
       }
-      platform_lock(&transport->conn_lock);
+      platform_mutex_lock(transport->conn_lock);
       vec_push(&transport->connections, wt_conn);
-      platform_unlock(&transport->conn_lock);
+      platform_mutex_unlock(transport->conn_lock);
       atomic_fetch_add(&transport->active_connections, 1);
 
       /* Set stream callback to receive data */
@@ -328,7 +328,7 @@ static QUIC_STATUS QUIC_API _wt_stream_callback(
 
 static void* _server_thread(void* arg) {
   wt_transport_t* transport = (wt_transport_t*)arg;
-  platform_setup_thread_stack();
+  platform_thread_setup_stack();
 
   /* Open MsQuic registration */
   QUIC_REGISTRATION_CONFIG reg_config = {0};
@@ -433,21 +433,13 @@ static void* _server_thread(void* arg) {
 
 void wt_transport_start(wt_transport_t* transport) {
   atomic_store(&transport->running, 1);
-#ifdef _WIN32
-  transport->thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)_server_thread, transport, 0, NULL);
-#else
-  pthread_create(&transport->thread, NULL, _server_thread, transport);
-#endif
+  transport->thread = platform_thread_create(_server_thread, transport);
 }
 
 void wt_transport_stop(wt_transport_t* transport) {
   atomic_store(&transport->running, 0);
   pd_loop_async_send(transport->loop, transport);
-#ifdef _WIN32
-  WaitForSingleObject(transport->thread, INFINITE);
-#else
-  pthread_join(transport->thread, NULL);
-#endif
+  platform_thread_join(transport->thread);
 }
 
 #else /* !HAS_MSQUIC */

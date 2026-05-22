@@ -23,7 +23,7 @@ static void _pool_global_init(void) {
     }
     _pool_global[index].head = NULL;
     _pool_global[index].count = threshold;
-    platform_lock_init(&_pool_global[index].lock);
+    _pool_global[index].lock = platform_mutex_create();
   }
 }
 
@@ -34,19 +34,19 @@ static void _pool_global_init_once(void) {
 }
 
 static void _pool_push_global(size_t index, pool_item_t* list_head) {
-  platform_lock(&_pool_global[index].lock);
+  platform_mutex_lock(_pool_global[index].lock);
   list_head->next = _pool_global[index].head;
   _pool_global[index].head = list_head;
-  platform_unlock(&_pool_global[index].lock);
+  platform_mutex_unlock(_pool_global[index].lock);
 }
 
 static pool_item_t* _pool_pull_global(size_t index) {
-  platform_lock(&_pool_global[index].lock);
+  platform_mutex_lock(_pool_global[index].lock);
   pool_item_t* head = _pool_global[index].head;
   if (head != NULL) {
     _pool_global[index].head = NULL;
   }
-  platform_unlock(&_pool_global[index].lock);
+  platform_mutex_unlock(_pool_global[index].lock);
   return head;
 }
 

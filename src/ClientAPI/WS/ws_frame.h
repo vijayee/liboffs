@@ -8,6 +8,8 @@
 #include <stddef.h>
 #include <unistd.h>
 
+#define WS_MAX_PAYLOAD_SIZE (16 * 1024 * 1024) /* 16 MB — reject frames larger than this */
+
 #define WS_OPCODE_TEXT   0x01
 #define WS_OPCODE_BINARY 0x02
 #define WS_OPCODE_CLOSE  0x08

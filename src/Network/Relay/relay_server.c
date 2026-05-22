@@ -26,7 +26,7 @@ typedef struct relay_stream_context_t {
 // --- Destroy stack for deferred pd_watcher cleanup ---
 
 static void _destroy_stack_init(relay_server_t* server) {
-  platform_lock_init(&server->destroy_lock);
+  server->destroy_lock = platform_mutex_create();
   server->destroy_head = NULL;
 }
 
@@ -38,19 +38,19 @@ static void __attribute__((unused)) _destroy_stack_push(relay_server_t* server, 
     return;
   }
   node->watcher = watcher;
-  platform_lock(&server->destroy_lock);
+  platform_mutex_lock(server->destroy_lock);
   node->next = server->destroy_head;
   server->destroy_head = node;
-  platform_unlock(&server->destroy_lock);
+  platform_mutex_unlock(server->destroy_lock);
   pd_loop_async_send(server->loop, NULL);
 }
 
 static void _destroy_stack_drain(relay_server_t* server) {
   relay_destroy_node_t* node;
-  platform_lock(&server->destroy_lock);
+  platform_mutex_lock(server->destroy_lock);
   node = server->destroy_head;
   server->destroy_head = NULL;
-  platform_unlock(&server->destroy_lock);
+  platform_mutex_unlock(server->destroy_lock);
   while (node != NULL) {
     relay_destroy_node_t* next = node->next;
     pd_watcher_destroy(node->watcher);
@@ -61,7 +61,7 @@ static void _destroy_stack_drain(relay_server_t* server) {
 
 static void _destroy_stack_destroy(relay_server_t* server) {
   _destroy_stack_drain(server);
-  platform_lock_destroy(&server->destroy_lock);
+  platform_mutex_destroy(server->destroy_lock);
 }
 
 // --- Client management ---
@@ -199,11 +199,11 @@ static void _relay_handle_relay_send(
     relay_server_t* server, relay_client_entry_t* src_client,
     wire_relay_send_t* relay_send) {
   (void)src_client;
-  platform_lock(&server->clients_lock);
+  platform_mutex_lock(server->clients_lock);
   relay_client_entry_t* dest_client = _relay_find_client_by_endpoint(
       server, relay_send->dest_endpoint_id);
   if (dest_client == NULL) {
-    platform_unlock(&server->clients_lock);
+    platform_mutex_unlock(server->clients_lock);
     log_error("relay: dest endpoint %u not found", relay_send->dest_endpoint_id);
     return;
   }
@@ -216,7 +216,7 @@ static void _relay_handle_relay_send(
 
   cbor_item_t* cbor = wire_relay_received_encode(&received);
   if (cbor == NULL) {
-    platform_unlock(&server->clients_lock);
+    platform_mutex_unlock(server->clients_lock);
     log_error("relay: failed to encode RELAY_RECEIVED CBOR");
     return;
   }
@@ -227,7 +227,7 @@ static void _relay_handle_relay_send(
   cbor_decref(&cbor);
 
   if (cbor_data == NULL) {
-    platform_unlock(&server->clients_lock);
+    platform_mutex_unlock(server->clients_lock);
     log_error("relay: failed to serialize RELAY_RECEIVED CBOR");
     return;
   }
@@ -238,7 +238,7 @@ static void _relay_handle_relay_send(
     log_error("relay: failed to send RELAY_RECEIVED to endpoint %u",
               dest_client->endpoint_id);
   }
-  platform_unlock(&server->clients_lock);
+  platform_mutex_unlock(server->clients_lock);
   free(cbor_data);
 }
 
@@ -338,9 +338,9 @@ static QUIC_STATUS QUIC_API _relay_connection_callback(
 
   switch (event->Type) {
     case QUIC_CONNECTION_EVENT_CONNECTED: {
-      platform_lock(&server->clients_lock);
+      platform_mutex_lock(server->clients_lock);
       if (server->num_clients >= RELAY_MAX_CLIENTS) {
-        platform_unlock(&server->clients_lock);
+        platform_mutex_unlock(server->clients_lock);
         log_error("relay: max clients reached, rejecting connection");
         server->msquic->ConnectionClose(connection);
         return QUIC_STATUS_SUCCESS;
@@ -364,7 +364,7 @@ static QUIC_STATUS QUIC_API _relay_connection_callback(
       client->stream = NULL;
       client->framer = stream_framer_create();
       if (client->framer == NULL) {
-        platform_unlock(&server->clients_lock);
+        platform_mutex_unlock(server->clients_lock);
         log_error("relay: failed to create stream framer");
         client->active = 0;
         client->connection = NULL;
@@ -374,12 +374,12 @@ static QUIC_STATUS QUIC_API _relay_connection_callback(
 
       server->num_clients++;
       log_info("relay: client connected with endpoint_id=%u, stream pending", endpoint_id);
-      platform_unlock(&server->clients_lock);
+      platform_mutex_unlock(server->clients_lock);
       break;
     }
     case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
       // The client opens a bidirectional stream — accept it and set our callback
-      platform_lock(&server->clients_lock);
+      platform_mutex_lock(server->clients_lock);
       relay_client_entry_t* client = NULL;
       for (size_t index = 0; index < RELAY_MAX_CLIENTS; index++) {
         if (server->clients[index].active &&
@@ -389,20 +389,20 @@ static QUIC_STATUS QUIC_API _relay_connection_callback(
         }
       }
       if (client == NULL) {
-        platform_unlock(&server->clients_lock);
+        platform_mutex_unlock(server->clients_lock);
         log_error("relay: PEER_STREAM_STARTED for unknown connection");
         return QUIC_STATUS_SUCCESS;
       }
 
       if (client->stream != NULL) {
-        platform_unlock(&server->clients_lock);
+        platform_mutex_unlock(server->clients_lock);
         log_error("relay: client already has a stream, rejecting extra stream");
         return QUIC_STATUS_ABORTED;
       }
 
       relay_stream_context_t* stream_ctx = get_clear_memory(sizeof(relay_stream_context_t));
       if (stream_ctx == NULL) {
-        platform_unlock(&server->clients_lock);
+        platform_mutex_unlock(server->clients_lock);
         log_error("relay: failed to allocate stream context");
         return QUIC_STATUS_ABORTED;
       }
@@ -416,7 +416,7 @@ static QUIC_STATUS QUIC_API _relay_connection_callback(
       client->stream = (void*)peer_stream;
 
       log_info("relay: client endpoint_id=%u stream started", client->endpoint_id);
-      platform_unlock(&server->clients_lock);
+      platform_mutex_unlock(server->clients_lock);
       break;
     }
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT: {
@@ -433,7 +433,7 @@ static QUIC_STATUS QUIC_API _relay_connection_callback(
       break;
     }
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
-      platform_lock(&server->clients_lock);
+      platform_mutex_lock(server->clients_lock);
       for (size_t index = 0; index < RELAY_MAX_CLIENTS; index++) {
         if (server->clients[index].active &&
             server->clients[index].connection == (void*)connection) {
@@ -449,7 +449,7 @@ static QUIC_STATUS QUIC_API _relay_connection_callback(
           break;
         }
       }
-      platform_unlock(&server->clients_lock);
+      platform_mutex_unlock(server->clients_lock);
       server->msquic->ConnectionClose(connection);
       break;
     }
@@ -488,7 +488,7 @@ static QUIC_STATUS QUIC_API _relay_listener_callback(
 
 static void* _relay_server_thread(void* arg) {
   relay_server_t* server = (relay_server_t*)arg;
-  platform_setup_thread_stack();
+  platform_thread_setup_stack();
   while (ATOMIC_LOAD(&server->running)) {
     _destroy_stack_drain(server);
     pd_loop_run_once(server->loop, 100);
@@ -508,12 +508,12 @@ relay_server_t* relay_server_create(scheduler_pool_t* pool) {
 
   actor_init(&server->actor, server, relay_server_dispatch, pool);
 
-  platform_lock_init(&server->clients_lock);
+  server->clients_lock = platform_mutex_create();
   _destroy_stack_init(server);
 
   server->loop = pd_loop_create(NULL);
   if (server->loop == NULL) {
-    platform_lock_destroy(&server->clients_lock);
+    platform_mutex_destroy(server->clients_lock);
     _destroy_stack_destroy(server);
     actor_destroy(&server->actor);
     free(server);
@@ -523,7 +523,7 @@ relay_server_t* relay_server_create(scheduler_pool_t* pool) {
   server->msquic = offs_msquic_open();
   if (server->msquic == NULL) {
     pd_loop_destroy(server->loop);
-    platform_lock_destroy(&server->clients_lock);
+    platform_mutex_destroy(server->clients_lock);
     _destroy_stack_destroy(server);
     actor_destroy(&server->actor);
     free(server);
@@ -565,7 +565,7 @@ void relay_server_destroy(relay_server_t* server) {
   if (server->cert_path != NULL) { free(server->cert_path); server->cert_path = NULL; }
   if (server->key_path != NULL) { free(server->key_path); server->key_path = NULL; }
   _destroy_stack_destroy(server);
-  platform_lock_destroy(&server->clients_lock);
+  platform_mutex_destroy(server->clients_lock);
   actor_destroy(&server->actor);
   free(server);
 }
@@ -667,9 +667,10 @@ int relay_server_start(relay_server_t* server, const char* host, uint16_t port) 
   server->listen_port = port;
 
   ATOMIC_STORE(&server->running, 1);
-  if (pthread_create(&server->thread, NULL, _relay_server_thread, server) != 0) {
+  server->thread = platform_thread_create(_relay_server_thread, server);
+  if (server->thread == NULL) {
     ATOMIC_STORE(&server->running, 0);
-    log_error("relay: pthread_create failed");
+    log_error("relay: platform_thread_create failed");
     return -1;
   }
 
@@ -681,7 +682,7 @@ void relay_server_stop(relay_server_t* server) {
   if (server == NULL) return;
   ATOMIC_STORE(&server->running, 0);
   pd_loop_async_send(server->loop, NULL);
-  pthread_join(server->thread, NULL);
+  platform_thread_join(server->thread);
   if (server->listener != NULL) {
     server->msquic->ListenerStop(server->listener);
   }

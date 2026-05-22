@@ -7,11 +7,11 @@
 
 void refcounter_init(refcounter_t* refcounter) {
 #ifndef OFFS_ATOMIC
-  platform_lock_init(&refcounter->lock);
-  platform_lock(&refcounter->lock);
+  refcounter->lock = platform_mutex_create();
+  platform_mutex_lock(refcounter->lock);
   refcounter->count++;
   refcounter->pending_deref = 0;
-  platform_unlock(&refcounter->lock);
+  platform_mutex_unlock(refcounter->lock);
 #else
   refcounter->count = 1;
   refcounter->yield = 0;
@@ -33,9 +33,9 @@ void refcounter_init_actor(refcounter_t* refcounter) {
 
 void refcounter_yield(refcounter_t* refcounter) {
 #ifndef OFFS_ATOMIC
-  platform_lock(&refcounter->lock);
+  platform_mutex_lock(refcounter->lock);
   refcounter->yield++;
-  platform_unlock(&refcounter->lock);
+  platform_mutex_unlock(refcounter->lock);
 #else
   if (refcounter->is_actor) {
     refcounter->yield++;
@@ -50,7 +50,7 @@ void* refcounter_reference(refcounter_t* refcounter) {
     return NULL;
   }
 #ifndef OFFS_ATOMIC
-  platform_lock(&refcounter->lock);
+  platform_mutex_lock(refcounter->lock);
   if (refcounter->yield > 0) {
     refcounter->yield--;
     if (refcounter->pending_deref > 0) {
@@ -60,7 +60,7 @@ void* refcounter_reference(refcounter_t* refcounter) {
   } else if (refcounter->count < USHRT_MAX) {
     refcounter->count++;
   }
-  platform_unlock(&refcounter->lock);
+  platform_mutex_unlock(refcounter->lock);
 #else
   if (refcounter->is_actor) {
     if (refcounter->yield > 0) {
@@ -89,13 +89,13 @@ void* refcounter_reference(refcounter_t* refcounter) {
 
 void refcounter_dereference(refcounter_t* refcounter) {
 #ifndef OFFS_ATOMIC
-  platform_lock(&refcounter->lock);
+  platform_mutex_lock(refcounter->lock);
   if ((refcounter->yield == 0) && (refcounter->count > 0)) {
     refcounter->count--;
   } else if (refcounter->yield > 0) {
     refcounter->pending_deref++;
   }
-  platform_unlock(&refcounter->lock);
+  platform_mutex_unlock(refcounter->lock);
 #else
   if (refcounter->is_actor) {
     if (refcounter->yield == 0 && refcounter->count > 0) {
@@ -115,14 +115,14 @@ void refcounter_dereference(refcounter_t* refcounter) {
 
 bool refcounter_dereference_is_zero(refcounter_t* refcounter) {
 #ifndef OFFS_ATOMIC
-  platform_lock(&refcounter->lock);
+  platform_mutex_lock(refcounter->lock);
   if ((refcounter->yield == 0) && (refcounter->count > 0)) {
     refcounter->count--;
   } else if (refcounter->yield > 0) {
     refcounter->pending_deref++;
   }
   bool is_zero = (refcounter->count == 0 && refcounter->pending_deref == 0);
-  platform_unlock(&refcounter->lock);
+  platform_mutex_unlock(refcounter->lock);
   return is_zero;
 #else
   if (refcounter->is_actor) {
@@ -146,9 +146,9 @@ bool refcounter_dereference_is_zero(refcounter_t* refcounter) {
 
 uint16_t refcounter_count(refcounter_t* refcounter) {
 #ifndef OFFS_ATOMIC
-  platform_lock(&refcounter->lock);
+  platform_mutex_lock(refcounter->lock);
   uint16_t count = refcounter->count;
-  platform_unlock(&refcounter->lock);
+  platform_mutex_unlock(refcounter->lock);
   return count;
 #else
   if (refcounter->is_actor) {
@@ -161,9 +161,9 @@ uint16_t refcounter_count(refcounter_t* refcounter) {
 
 uint8_t refcounter_pending_derefs(refcounter_t* refcounter) {
 #ifndef OFFS_ATOMIC
-  platform_lock(&refcounter->lock);
+  platform_mutex_lock(refcounter->lock);
   uint8_t pending = refcounter->pending_deref;
-  platform_unlock(&refcounter->lock);
+  platform_mutex_unlock(refcounter->lock);
   return pending;
 #else
   if (refcounter->is_actor) {
@@ -183,7 +183,7 @@ refcounter_t* refcounter_consume(refcounter_t** refcounter) {
 
 void refcounter_destroy_lock(refcounter_t* refcounter) {
 #ifndef OFFS_ATOMIC
-  platform_lock_destroy(&refcounter->lock);
+  platform_mutex_destroy(refcounter->lock);
 #else
   (void)refcounter;
 #endif

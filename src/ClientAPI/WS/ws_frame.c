@@ -4,6 +4,8 @@
 #include "ws_frame.h"
 #include "../../Util/allocator.h"
 #include <string.h>
+#include <unistd.h>
+#include <time.h>
 
 void ws_frame_destroy(ws_frame_t* frame) {
   if (frame == NULL) return;
@@ -63,6 +65,15 @@ ssize_t ws_frame_parse(const uint8_t* data, size_t len, ws_frame_t* frame, size_
     header_len += 4;
   }
 
+  if (len < header_len) {
+    if (needed != NULL) *needed = header_len;
+    return 0;
+  }
+
+  if (payload_len > WS_MAX_PAYLOAD_SIZE) {
+    return -1;
+  }
+
   if (len < header_len + payload_len) {
     if (needed != NULL) *needed = header_len + payload_len;
     return 0;
@@ -74,6 +85,7 @@ ssize_t ws_frame_parse(const uint8_t* data, size_t len, ws_frame_t* frame, size_
   }
 
   frame->payload_len = payload_len;
+
   if (payload_len > 0) {
     frame->payload = get_memory(payload_len);
     if (frame->mask) {
@@ -157,13 +169,20 @@ uint8_t* ws_frame_build_masked(uint8_t opcode, const uint8_t* payload, size_t pa
     frame[pos++] = (uint8_t)(payload_len & 0xFF);
   } else {
     frame[pos++] = 0x80 | 127;
-    for (int i = 56; i >= 0; i -= 8) {
-      frame[pos++] = (uint8_t)((payload_len >> i) & 0xFF);
+    for (int i = 0; i < 8; i++) {
+      frame[pos++] = (uint8_t)((payload_len >> (56 - 8 * i)) & 0xFF);
     }
   }
 
-  /* Masking key: 4 random bytes. Using zero-mask for simplicity. */
-  uint8_t mask_key[4] = {0x00, 0x00, 0x00, 0x00};
+  /* Masking key: 4 random bytes per RFC 6455 Section 5.3 */
+  uint8_t mask_key[4];
+  if (getentropy(mask_key, sizeof(mask_key)) != 0) {
+    /* Fallback: use PID-based seed if getentropy fails */
+    mask_key[0] = (uint8_t)(getpid() & 0xFF);
+    mask_key[1] = (uint8_t)((getpid() >> 8) & 0xFF);
+    mask_key[2] = (uint8_t)(clock() & 0xFF);
+    mask_key[3] = (uint8_t)((uintptr_t)frame & 0xFF);
+  }
   memcpy(frame + pos, mask_key, 4);
   pos += 4;
 

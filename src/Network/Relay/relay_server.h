@@ -8,7 +8,7 @@
 #include "../../Actor/actor.h"
 #include "../../Scheduler/scheduler.h"
 #include "../../Util/atomic_compat.h"
-#include "../../Util/threadding.h"
+#include "../../Platform/platform.h"
 #include <poll-dancer/poll-dancer.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -53,10 +53,10 @@ typedef struct relay_server_t {
   uint32_t next_endpoint_id;
   scheduler_pool_t* pool;
   pd_loop_t* loop;
-  PLATFORMTHREADTYPE thread;
+  platform_thread_t* thread;
   ATOMIC(uint8_t) running;
-  PLATFORMLOCKTYPE(clients_lock);  /* Protects clients array */
-  PLATFORMLOCKTYPE(destroy_lock);  /* Destroy stack lock */
+  platform_mutex_t* clients_lock;  /* Protects clients array */
+  platform_mutex_t* destroy_lock;  /* Destroy stack lock */
   relay_destroy_node_t* destroy_head;
 } relay_server_t;
 

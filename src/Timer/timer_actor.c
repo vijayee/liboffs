@@ -5,7 +5,7 @@
 #include "timer_actor.h"
 #include "../Actor/message.h"
 #include "../Util/allocator.h"
-#include "../Util/threadding.h"
+#include "../Platform/platform.h"
 #include <poll-dancer/poll-dancer.h>
 #include <internal/timer.h>
 #include <stdatomic.h>
@@ -180,7 +180,7 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
 }
 
 static void* _timer_actor_thread(void* arg) {
-  platform_setup_thread_stack();
+  platform_thread_setup_stack();
   timer_actor_t* timer_actor = (timer_actor_t*)arg;
 
   while (atomic_load(&timer_actor->running)) {
@@ -207,12 +207,7 @@ timer_actor_t* timer_actor_create(void) {
     return NULL;
   }
   atomic_store(&timer_actor->running, 1);
-#ifdef _WIN32
-  timer_actor->thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)_timer_actor_thread,
-                                     timer_actor, 0, NULL);
-#else
-  pthread_create(&timer_actor->thread, NULL, _timer_actor_thread, timer_actor);
-#endif
+  timer_actor->thread = platform_thread_create(_timer_actor_thread, timer_actor);
   return timer_actor;
 }
 
@@ -224,11 +219,7 @@ void timer_actor_destroy(timer_actor_t* timer_actor) {
   /* Wake the loop so it notices the stop flag */
   pd_loop_async_send(timer_actor->loop, timer_actor);
   pd_loop_stop(timer_actor->loop);
-#ifdef _WIN32
-  WaitForSingleObject(timer_actor->thread, INFINITE);
-#else
-  pthread_join(timer_actor->thread, NULL);
-#endif
+  platform_thread_join(timer_actor->thread);
   /* Stop and destroy all active timers, freeing their completion payloads. */
   for (size_t i = 0; i < timer_actor->active_timer_count; i++) {
     pd_timer_t* timer = timer_actor->active_timers[i];

@@ -43,26 +43,26 @@ typedef struct quic_destroy_node_t {
 } quic_destroy_node_t;
 
 static void _destroy_stack_init(quic_listener_t* listener) {
-  platform_lock_init(&listener->destroy_lock);
+  listener->destroy_lock = platform_mutex_create();
   listener->destroy_head = NULL;
 }
 
 static void __attribute__((unused)) _destroy_stack_push(quic_listener_t* listener, pd_watcher_t* watcher) {
   quic_destroy_node_t* node = get_clear_memory(sizeof(quic_destroy_node_t));
   node->watcher = watcher;
-  platform_lock(&listener->destroy_lock);
+  platform_mutex_lock(listener->destroy_lock);
   node->next = listener->destroy_head;
   listener->destroy_head = node;
-  platform_unlock(&listener->destroy_lock);
+  platform_mutex_unlock(listener->destroy_lock);
   pd_loop_async_send(listener->loop, NULL);
 }
 
 static void _destroy_stack_drain(quic_listener_t* listener) {
   quic_destroy_node_t* node;
-  platform_lock(&listener->destroy_lock);
+  platform_mutex_lock(listener->destroy_lock);
   node = listener->destroy_head;
   listener->destroy_head = NULL;
-  platform_unlock(&listener->destroy_lock);
+  platform_mutex_unlock(listener->destroy_lock);
   while (node != NULL) {
     quic_destroy_node_t* next = node->next;
     pd_watcher_destroy(node->watcher);
@@ -73,7 +73,7 @@ static void _destroy_stack_drain(quic_listener_t* listener) {
 
 static void _destroy_stack_destroy(quic_listener_t* listener) {
   _destroy_stack_drain(listener);
-  platform_lock_destroy(&listener->destroy_lock);
+  platform_mutex_destroy(listener->destroy_lock);
 }
 
 // Connection tracking — maintains a list of active HQUIC connections so
@@ -81,19 +81,19 @@ static void _destroy_stack_destroy(quic_listener_t* listener) {
 // the registration.
 
 static void _conn_track_init(quic_listener_t* listener) {
-  platform_lock_init(&listener->conn_lock);
+  listener->conn_lock = platform_mutex_create();
   listener->connections = NULL;
   listener->connection_count = 0;
   listener->connection_capacity = 0;
 }
 
 static void _conn_track_add(quic_listener_t* listener, HQUIC connection) {
-  platform_lock(&listener->conn_lock);
+  platform_mutex_lock(listener->conn_lock);
   if (listener->connection_count >= listener->connection_capacity) {
     size_t new_cap = listener->connection_capacity == 0 ? 8 : listener->connection_capacity * 2;
     HQUIC* new_arr = get_clear_memory(new_cap * sizeof(HQUIC));
     if (new_arr == NULL) {
-      platform_unlock(&listener->conn_lock);
+      platform_mutex_unlock(listener->conn_lock);
       return;
     }
     if (listener->connections != NULL) {
@@ -104,11 +104,11 @@ static void _conn_track_add(quic_listener_t* listener, HQUIC connection) {
     listener->connection_capacity = new_cap;
   }
   listener->connections[listener->connection_count++] = connection;
-  platform_unlock(&listener->conn_lock);
+  platform_mutex_unlock(listener->conn_lock);
 }
 
 static void _conn_track_remove(quic_listener_t* listener, HQUIC connection) {
-  platform_lock(&listener->conn_lock);
+  platform_mutex_lock(listener->conn_lock);
   for (size_t index = 0; index < listener->connection_count; index++) {
     if (listener->connections[index] == connection) {
       listener->connections[index] = listener->connections[listener->connection_count - 1];
@@ -116,7 +116,7 @@ static void _conn_track_remove(quic_listener_t* listener, HQUIC connection) {
       break;
     }
   }
-  platform_unlock(&listener->conn_lock);
+  platform_mutex_unlock(listener->conn_lock);
 }
 
 static void _conn_track_shutdown_all(quic_listener_t* listener) {
@@ -124,7 +124,7 @@ static void _conn_track_shutdown_all(quic_listener_t* listener) {
   // calling ConnectionShutdown. This avoids holding conn_lock during msquic
   // API calls which could deadlock if SHUTDOWN_COMPLETE fires synchronously
   // and tries to acquire conn_lock in _conn_track_remove.
-  platform_lock(&listener->conn_lock);
+  platform_mutex_lock(listener->conn_lock);
   size_t count = listener->connection_count;
   HQUIC* snapshot = NULL;
   if (count > 0) {
@@ -133,7 +133,7 @@ static void _conn_track_shutdown_all(quic_listener_t* listener) {
       memcpy(snapshot, listener->connections, count * sizeof(HQUIC));
     }
   }
-  platform_unlock(&listener->conn_lock);
+  platform_mutex_unlock(listener->conn_lock);
 
   if (snapshot != NULL) {
     for (size_t index = 0; index < count; index++) {
@@ -150,7 +150,7 @@ static void _conn_track_destroy(quic_listener_t* listener) {
   // Connections are closed by their SHUTDOWN_COMPLETE callbacks,
   // which fire after _conn_track_shutdown_all initiates shutdown.
   // Just free the tracking array.
-  platform_lock_destroy(&listener->conn_lock);
+  platform_mutex_destroy(listener->conn_lock);
   free(listener->connections);
   listener->connections = NULL;
   listener->connection_count = 0;
@@ -463,7 +463,7 @@ static QUIC_STATUS QUIC_API quic_listener_callback(
 // I/O thread — runs poll-dancer event loop for timers
 static void* _quic_listener_thread(void* arg) {
   quic_listener_t* listener = (quic_listener_t*)arg;
-  platform_setup_thread_stack();
+  platform_thread_setup_stack();
   while (ATOMIC_LOAD(&listener->running)) {
     _destroy_stack_drain(listener);
     pd_loop_run_once(listener->loop, 100);
@@ -632,9 +632,10 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
 
   // Start I/O thread
   ATOMIC_STORE(&listener->running, 1);
-  if (pthread_create(&listener->thread, NULL, _quic_listener_thread, listener) != 0) {
+  listener->thread = platform_thread_create(_quic_listener_thread, listener);
+  if (listener->thread == NULL) {
     ATOMIC_STORE(&listener->running, 0);
-    log_error("quic_listener: pthread_create failed");
+    log_error("quic_listener: platform_thread_create failed");
     return -1;
   }
 
@@ -646,7 +647,7 @@ void quic_listener_stop(quic_listener_t* listener) {
   if (listener == NULL) return;
   ATOMIC_STORE(&listener->running, 0);
   pd_loop_async_send(listener->loop, NULL);
-  pthread_join(listener->thread, NULL);
+  platform_thread_join(listener->thread);
   if (listener->listener != NULL) {
     listener->msquic->ListenerStop(listener->listener);
   }

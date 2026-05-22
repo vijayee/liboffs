@@ -638,9 +638,9 @@ void wt_connection_destroy(wt_connection_t* connection) {
   if (refcounter_dereference_is_zero((refcounter_t*)connection)) {
     if (connection->transport != NULL) {
       atomic_fetch_sub(&connection->transport->active_connections, 1);
-      platform_lock(&connection->transport->conn_lock);
+      platform_mutex_lock(connection->transport->conn_lock);
       vec_remove(&connection->transport->connections, connection);
-      platform_unlock(&connection->transport->conn_lock);
+      platform_mutex_unlock(connection->transport->conn_lock);
     }
     actor_destroy(&connection->actor);
     if (connection->framer != NULL) {

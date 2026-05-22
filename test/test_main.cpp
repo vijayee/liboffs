@@ -13,7 +13,7 @@ extern "C" {
 #include "../src/Util/error.h"
 #include "../src/BlockCache/fibonacci.h"
 #include "../src/BlockCache/index.h"
-#include "../src/Util/threadding.h"
+#include "Platform/platform.h"
 #include <time.h>
 }
 

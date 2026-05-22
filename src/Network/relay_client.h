@@ -9,7 +9,7 @@
 #include "../Network/network.h"
 #include "../Scheduler/scheduler.h"
 #include "../Util/atomic_compat.h"
-#include "../Util/threadding.h"
+#include "../Platform/platform.h"
 #include "../Network/stream_framer.h"
 #include <stdint.h>
 #include <stddef.h>
@@ -53,10 +53,10 @@ typedef struct relay_client_t {
   ATOMIC(uint8_t) connected;
 
   pd_loop_t* loop;
-  PLATFORMTHREADTYPE thread;
+  platform_thread_t* thread;
   ATOMIC(uint8_t) running;
 
-  PLATFORMLOCKTYPE(destroy_lock);
+  platform_mutex_t* destroy_lock;
   relay_client_destroy_node_t* destroy_head;
 
   struct sockaddr_storage relay_addr;

@@ -6,7 +6,7 @@
 #define LIBOFFS_REFCOUNTER_H
 #include <stdint.h>
 #include <stdbool.h>
-#include "../Util/threadding.h"
+#include "../Platform/platform.h"
 #define REFERENCE(N,T) (T*) refcounter_reference((refcounter_t*) N)
 #define YIELD(N) refcounter_yield((refcounter_t*) N)
 #define DEREFERENCE(N) refcounter_dereference((refcounter_t*) N); N = NULL
@@ -23,7 +23,7 @@ typedef struct refcounter_t {
   uint16_t count;
   uint8_t yield;
   uint8_t pending_deref;
-  PLATFORMLOCKTYPE(lock);
+  platform_mutex_t* lock;
 #endif
 } refcounter_t;
 void refcounter_init(refcounter_t* refcounter);

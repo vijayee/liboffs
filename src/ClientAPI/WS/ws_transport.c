@@ -3,7 +3,7 @@
 //
 #include "ws_transport.h"
 #include "../../Util/allocator.h"
-#include "../../Util/threadding.h"
+#include "../../Platform/platform.h"
 #include "../../Actor/message.h"
 #include "../../Actor/message_queue.h"
 #include <poll-dancer/poll-dancer.h>
@@ -22,26 +22,26 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                               pd_event_t events, void* user_data);
 
 static void _destroy_stack_init(ws_transport_t* transport) {
-  platform_lock_init(&transport->destroy_lock);
+  transport->destroy_lock = platform_mutex_create();
   transport->destroy_head = NULL;
 }
 
 static void _destroy_stack_push(ws_transport_t* transport, pd_watcher_t* watcher) {
   ws_transport_destroy_node_t* node = get_clear_memory(sizeof(ws_transport_destroy_node_t));
   node->watcher = watcher;
-  platform_lock(&transport->destroy_lock);
+  platform_mutex_lock(transport->destroy_lock);
   node->next = transport->destroy_head;
   transport->destroy_head = node;
-  platform_unlock(&transport->destroy_lock);
+  platform_mutex_unlock(transport->destroy_lock);
   pd_loop_async_send(transport->loop, NULL);
 }
 
 static void _destroy_stack_drain(ws_transport_t* transport) {
   ws_transport_destroy_node_t* node;
-  platform_lock(&transport->destroy_lock);
+  platform_mutex_lock(transport->destroy_lock);
   node = transport->destroy_head;
   transport->destroy_head = NULL;
-  platform_unlock(&transport->destroy_lock);
+  platform_mutex_unlock(transport->destroy_lock);
   while (node != NULL) {
     ws_transport_destroy_node_t* next = node->next;
     pd_watcher_destroy(node->watcher);
@@ -52,7 +52,7 @@ static void _destroy_stack_drain(ws_transport_t* transport) {
 
 static void _destroy_stack_destroy(ws_transport_t* transport) {
   _destroy_stack_drain(transport);
-  platform_lock_destroy(&transport->destroy_lock);
+  platform_mutex_destroy(transport->destroy_lock);
 }
 
 void _ws_server_dispatch(void* state, message_t* msg) {
@@ -330,7 +330,7 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
 
 static void* _server_thread(void* arg) {
   ws_transport_t* transport = (ws_transport_t*)arg;
-  platform_setup_thread_stack();
+  platform_thread_setup_stack();
 
   transport->listen_watcher = pd_watcher_create(transport->loop, transport->listen_fd,
     PD_EVENT_READ, _accept_callback, transport);
@@ -354,19 +354,11 @@ static void* _server_thread(void* arg) {
 
 void ws_transport_start(ws_transport_t* transport) {
   atomic_store(&transport->running, 1);
-#ifdef _WIN32
-  transport->thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)_server_thread, transport, 0, NULL);
-#else
-  pthread_create(&transport->thread, NULL, _server_thread, transport);
-#endif
+  transport->thread = platform_thread_create(_server_thread, transport);
 }
 
 void ws_transport_stop(ws_transport_t* transport) {
   atomic_store(&transport->running, 0);
   pd_loop_async_send(transport->loop, transport);
-#ifdef _WIN32
-  WaitForSingleObject(transport->thread, INFINITE);
-#else
-  pthread_join(transport->thread, NULL);
-#endif
+  platform_thread_join(transport->thread);
 }

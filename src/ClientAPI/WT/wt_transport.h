@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "../../Platform/platform.h"
 
 #ifdef HAS_MSQUIC
 #include <msquic.h>
@@ -35,9 +36,9 @@ typedef struct wt_transport_t {
   tuple_cache_t* tc;
   ATOMIC(uint8_t) running;
   ATOMIC(uint8_t) listening;
-  PLATFORMTHREADTYPE thread;
+  platform_thread_t* thread;
   pd_loop_t* loop;
-  PLATFORMLOCKTYPE(destroy_lock);
+  platform_mutex_t* destroy_lock;
   wt_transport_destroy_node_t* destroy_head;
 
   const struct QUIC_API_TABLE* msquic;
@@ -51,7 +52,7 @@ typedef struct wt_transport_t {
   size_t max_connections;
   ATOMIC(size_t) active_connections;
 
-  PLATFORMLOCKTYPE(conn_lock);
+  platform_mutex_t* conn_lock;
   vec_wt_connection_t connections;
 } wt_transport_t;
 

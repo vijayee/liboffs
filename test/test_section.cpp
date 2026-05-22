@@ -10,7 +10,7 @@ extern "C" {
 #include "../src/Util/path_join.h"
 #include "../src/Util/mkdir_p.h"
 #include "../src/Util/rm_rf.h"
-#include "../src/Util/threadding.h"
+#include "Platform/platform.h"
 #include "../src/Util/atomic_compat.h"
 #include <time.h>
 #include "../src/Timer/timer_actor.h"

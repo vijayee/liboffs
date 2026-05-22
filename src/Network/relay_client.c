@@ -35,7 +35,7 @@ static void _relay_send_complete(void* context) {
 // --- Destroy stack for deferred pd_watcher cleanup ---
 
 static void _destroy_stack_init(relay_client_t* client) {
-  platform_lock_init(&client->destroy_lock);
+  client->destroy_lock = platform_mutex_create();
   client->destroy_head = NULL;
 }
 
@@ -47,19 +47,19 @@ static void __attribute__((unused)) _destroy_stack_push(relay_client_t* client, 
     return;
   }
   node->watcher = watcher;
-  platform_lock(&client->destroy_lock);
+  platform_mutex_lock(client->destroy_lock);
   node->next = client->destroy_head;
   client->destroy_head = node;
-  platform_unlock(&client->destroy_lock);
+  platform_mutex_unlock(client->destroy_lock);
   pd_loop_async_send(client->loop, NULL);
 }
 
 static void _destroy_stack_drain(relay_client_t* client) {
   relay_client_destroy_node_t* node;
-  platform_lock(&client->destroy_lock);
+  platform_mutex_lock(client->destroy_lock);
   node = client->destroy_head;
   client->destroy_head = NULL;
-  platform_unlock(&client->destroy_lock);
+  platform_mutex_unlock(client->destroy_lock);
   while (node != NULL) {
     relay_client_destroy_node_t* next = node->next;
     pd_watcher_destroy(node->watcher);
@@ -70,7 +70,7 @@ static void _destroy_stack_drain(relay_client_t* client) {
 
 static void _destroy_stack_destroy(relay_client_t* client) {
   _destroy_stack_drain(client);
-  platform_lock_destroy(&client->destroy_lock);
+  platform_mutex_destroy(client->destroy_lock);
 }
 
 // --- Send helper: frame CBOR data and StreamSend ---
@@ -341,7 +341,7 @@ static QUIC_STATUS QUIC_API _relay_client_connection_callback(
 
 static void* _relay_client_thread(void* arg) {
   relay_client_t* client = (relay_client_t*)arg;
-  platform_setup_thread_stack();
+  platform_thread_setup_stack();
   while (ATOMIC_LOAD(&client->running)) {
     _destroy_stack_drain(client);
     pd_loop_run_once(client->loop, 100);
@@ -596,9 +596,10 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
 
   // Start I/O thread
   ATOMIC_STORE(&client->running, 1);
-  if (pthread_create(&client->thread, NULL, _relay_client_thread, client) != 0) {
+  client->thread = platform_thread_create(_relay_client_thread, client);
+  if (client->thread == NULL) {
     ATOMIC_STORE(&client->running, 0);
-    log_error("relay_client: pthread_create failed");
+    log_error("relay_client: platform_thread_create failed");
     return -1;
   }
 
@@ -611,7 +612,7 @@ void relay_client_disconnect(relay_client_t* client) {
   client->shutdown_pending = 1;  // prevent retry during intentional disconnect
   ATOMIC_STORE(&client->running, 0);
   pd_loop_async_send(client->loop, NULL);
-  pthread_join(client->thread, NULL);
+  platform_thread_join(client->thread);
 
   if (client->stream != NULL && client->msquic != NULL) {
     client->msquic->StreamClose(client->stream);

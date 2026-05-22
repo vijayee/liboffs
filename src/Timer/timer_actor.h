@@ -6,7 +6,7 @@
 #define OFFS_TIMER_ACTOR_H
 
 #include "../Actor/actor.h"
-#include "../Util/threadding.h"
+#include "../Platform/platform.h"
 #include "../Util/atomic_compat.h"
 #include <poll-dancer/types.h>
 #include <stdint.h>
@@ -23,7 +23,7 @@ typedef struct debounce_entry_t {
 typedef struct timer_actor_t {
   actor_t actor;
   pd_loop_t* loop;
-  PLATFORMTHREADTYPE thread;
+  platform_thread_t* thread;
   ATOMIC(uint8_t) running;
   /* Active timers tracked for cleanup on destroy. */
   pd_timer_t** active_timers;

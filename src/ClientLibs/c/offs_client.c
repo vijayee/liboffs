@@ -16,6 +16,7 @@
 #include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include "../../Platform/platform.h"
 #include <pthread.h>
 #include <errno.h>
 #include <openssl/sha.h>
@@ -33,16 +34,14 @@
  * CONF_modules_load allocation is a one-time global cost that persists until
  * process exit. Calling OPENSSL_cleanup() would break other OpenSSL users in
  * the same process (e.g. the WS transport server). */
-static pthread_mutex_t _ssl_init_lock = PTHREAD_MUTEX_INITIALIZER;
-static int _ssl_initialized = 0;
+static pthread_once_t _ssl_init_once = PTHREAD_ONCE_INIT;
+
+static void _ssl_init_impl(void) {
+  OPENSSL_init_ssl(0, NULL);
+}
 
 static void _ssl_init(void) {
-  pthread_mutex_lock(&_ssl_init_lock);
-  if (!_ssl_initialized) {
-    OPENSSL_init_ssl(0, NULL);
-    _ssl_initialized = 1;
-  }
-  pthread_mutex_unlock(&_ssl_init_lock);
+  pthread_once(&_ssl_init_once, _ssl_init_impl);
 }
 
 typedef enum {
@@ -54,7 +53,7 @@ typedef enum {
 
 struct offs_client_t {
   offs_transport_type_e transport_type;
-  uint8_t connected;
+  volatile uint8_t connected;
   union {
     struct {
       int fd;
@@ -74,8 +73,8 @@ struct offs_client_t {
       void* stream;
       void* msquic;
       uint8_t stream_open;
-      pthread_mutex_t recv_lock;
-      pthread_cond_t recv_cond;
+      platform_mutex_t* recv_lock;
+      platform_condvar_t* recv_cond;
       uint8_t* recv_buf;
       size_t recv_buf_size;
       size_t recv_buf_used;
@@ -86,8 +85,8 @@ struct offs_client_t {
   } transport;
   stream_framer_t* framer;
   buffer_t* write_buffer;
-  pthread_mutex_t lock;
-  pthread_t recv_thread;
+  platform_mutex_t* lock;
+  platform_thread_t* recv_thread;
   volatile uint8_t running;
   uint8_t* read_buf;
   size_t read_buf_size;
@@ -127,7 +126,9 @@ static QUIC_STATUS QUIC_API _wt_stream_callback(
 
   switch (event->Type) {
     case QUIC_STREAM_EVENT_RECEIVE: {
-      pthread_mutex_lock(&client->lock);
+      /* MsQuic serializes stream callbacks, so framer access is safe without lock.
+         Lock must NOT be held during _handle_frame — user callbacks may call
+         offs_client_get/put which acquire client->lock in _send_frame. */
       const QUIC_BUFFER* buffers = event->RECEIVE.Buffers;
       uint32_t buffer_count = event->RECEIVE.BufferCount;
       for (uint32_t idx = 0; idx < buffer_count; idx++) {
@@ -147,7 +148,6 @@ static QUIC_STATUS QUIC_API _wt_stream_callback(
           }
         }
       }
-      pthread_mutex_unlock(&client->lock);
       break;
     }
     case QUIC_STREAM_EVENT_SEND_COMPLETE: {
@@ -225,7 +225,7 @@ static void _send_frame(offs_client_t* client, cbor_item_t* frame) {
     free(cbor_buf);
     if (framed == NULL) return;
 
-    pthread_mutex_lock(&client->lock);
+    platform_mutex_lock(client->lock);
     if (client->write_buffer != NULL && client->write_buffer->size > 0) {
       buffer_ensure_capacity(client->write_buffer, client->write_buffer->size + framed_len);
       memcpy(client->write_buffer->data + client->write_buffer->size, framed, framed_len);
@@ -235,7 +235,7 @@ static void _send_frame(offs_client_t* client, cbor_item_t* frame) {
         client->connected = 0;
       }
     }
-    pthread_mutex_unlock(&client->lock);
+    platform_mutex_unlock(client->lock);
     free(framed);
   } else if (client->transport_type == OFFS_TRANSPORT_WT) {
     /* WT: length-prefix frame + MsQuic StreamSend */
@@ -253,7 +253,7 @@ static void _send_frame(offs_client_t* client, cbor_item_t* frame) {
     send_ctx->buf.Buffer = framed;
     send_ctx->buf.Length = (uint32_t)framed_len;
 
-    pthread_mutex_lock(&client->lock);
+    platform_mutex_lock(client->lock);
     const struct QUIC_API_TABLE* msquic = (const struct QUIC_API_TABLE*)client->transport.wt.msquic;
     QUIC_STATUS status = msquic->StreamSend(
         (HQUIC)client->transport.wt.stream, &send_ctx->buf, 1, QUIC_SEND_FLAG_NONE, send_ctx);
@@ -262,7 +262,7 @@ static void _send_frame(offs_client_t* client, cbor_item_t* frame) {
       free(send_ctx);
       client->connected = 0;
     }
-    pthread_mutex_unlock(&client->lock);
+    platform_mutex_unlock(client->lock);
     /* send_ctx and framed are freed in SEND_COMPLETE callback */
 #else
     free(framed);
@@ -274,7 +274,7 @@ static void _send_frame(offs_client_t* client, cbor_item_t* frame) {
     free(cbor_buf);
     if (framed == NULL) return;
 
-    pthread_mutex_lock(&client->lock);
+    platform_mutex_lock(client->lock);
     if (client->write_buffer != NULL && client->write_buffer->size > 0) {
       buffer_ensure_capacity(client->write_buffer, client->write_buffer->size + framed_len);
       memcpy(client->write_buffer->data + client->write_buffer->size, framed, framed_len);
@@ -291,42 +291,53 @@ static void _send_frame(offs_client_t* client, cbor_item_t* frame) {
         client->write_buffer->size = remaining;
       }
     }
-    pthread_mutex_unlock(&client->lock);
+    platform_mutex_unlock(client->lock);
     free(framed);
   }
 }
 
 static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* frame) {
+  /* Snapshot callbacks under lock to avoid data race with public API setters */
+  platform_mutex_lock(client->lock);
+  offs_put_response_cb_t put_cb = client->put_cb;
+  void* put_cb_ctx = client->put_cb_ctx;
+  offs_get_data_cb_t get_data_cb = client->get_data_cb;
+  void* get_data_cb_ctx = client->get_data_cb_ctx;
+  offs_get_end_cb_t get_end_cb = client->get_end_cb;
+  void* get_end_cb_ctx = client->get_end_cb_ctx;
+  offs_error_cb_t error_cb = client->error_cb;
+  void* error_cb_ctx = client->error_cb_ctx;
+  platform_mutex_unlock(client->lock);
+
   switch (type) {
     case CLIENT_API_PUT_RESPONSE: {
       client_api_put_response_t msg;
       memset(&msg, 0, sizeof(msg));
       if (client_api_put_response_decode(frame, &msg) == 0) {
-        if (client->put_cb != NULL) {
-          client->put_cb(client->put_cb_ctx, msg.ori_string);
+        if (put_cb != NULL) {
+          put_cb(put_cb_ctx, msg.ori_string);
         }
         client_api_put_response_destroy(&msg);
       }
       break;
     }
     case CLIENT_API_GET_RESPONSE_START: {
-      /* We don't need to process the start response for the simple client */
       break;
     }
     case CLIENT_API_GET_DATA: {
       client_api_get_data_t msg;
       memset(&msg, 0, sizeof(msg));
       if (client_api_get_data_decode(frame, &msg) == 0) {
-        if (client->get_data_cb != NULL) {
-          client->get_data_cb(client->get_data_cb_ctx, msg.data, msg.data_size);
+        if (get_data_cb != NULL) {
+          get_data_cb(get_data_cb_ctx, msg.data, msg.data_size);
         }
         free(msg.data);
       }
       break;
     }
     case CLIENT_API_GET_END: {
-      if (client->get_end_cb != NULL) {
-        client->get_end_cb(client->get_end_cb_ctx);
+      if (get_end_cb != NULL) {
+        get_end_cb(get_end_cb_ctx);
       }
       break;
     }
@@ -334,8 +345,8 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       client_api_error_t msg;
       memset(&msg, 0, sizeof(msg));
       if (client_api_error_decode(frame, &msg) == 0) {
-        if (client->error_cb != NULL) {
-          client->error_cb(client->error_cb_ctx, msg.status_code, msg.message);
+        if (error_cb != NULL) {
+          error_cb(error_cb_ctx, msg.status_code, msg.message);
         }
         client_api_error_destroy(&msg);
       }
@@ -414,11 +425,15 @@ static void* _recv_thread(void* arg) {
           ws_frame_destroy(&parsed);
           goto cleanup;
         } else if (parsed.opcode == WS_OPCODE_PING) {
-          /* RFC 6455: respond to PING with PONG */
+          /* RFC 6455: respond to PING with PONG — must hold lock to serialize with _send_frame */
           size_t pong_len;
           uint8_t* pong = ws_frame_build(WS_OPCODE_PONG, parsed.payload, parsed.payload_len, &pong_len);
           if (pong != NULL) {
-            _ws_send(client, pong, pong_len);
+            platform_mutex_lock(client->lock);
+            if (_ws_send(client, pong, pong_len) < 0) {
+              client->connected = 0;
+            }
+            platform_mutex_unlock(client->lock);
             free(pong);
           }
         }
@@ -564,25 +579,39 @@ static int _ws_upgrade(offs_client_t* client, const char* ws_host) {
     return -1;
   }
 
-  /* Read response */
+  /* Read response — loop until we have the complete HTTP headers (\r\n\r\n) */
   char response[4096];
-  ssize_t received;
-  if (client->transport.ws.is_ssl && client->transport.ws.ssl != NULL) {
-    received = SSL_read(client->transport.ws.ssl, response, sizeof(response) - 1);
-  } else {
-    received = recv(client->transport.ws.fd, response, sizeof(response) - 1, 0);
+  size_t total = 0;
+  for (int attempts = 0; attempts < 100; attempts++) {
+    ssize_t received;
+    if (client->transport.ws.is_ssl && client->transport.ws.ssl != NULL) {
+      received = SSL_read(client->transport.ws.ssl, response + total, sizeof(response) - 1 - total);
+    } else {
+      received = recv(client->transport.ws.fd, response + total, sizeof(response) - 1 - total, 0);
+    }
+    if (received <= 0) {
+      free(expected_accept);
+      return -1;
+    }
+    total += (size_t)received;
+    response[total] = '\0';
+    if (strstr(response, "\r\n\r\n") != NULL) break;
   }
-
-  if (received <= 0) {
+  if (total == 0 || strstr(response, "\r\n\r\n") == NULL) {
     free(expected_accept);
     return -1;
   }
-  response[received] = '\0';
 
-  /* Check for 101 Switching Protocols */
-  if (strstr(response, "101") == NULL) {
-    free(expected_accept);
-    return -1;
+  /* Check for 101 Switching Protocols on the status line.
+   * Parse "HTTP/x.y NNN" — the status code follows the first space. */
+  {
+    const char* first_space = strchr(response, ' ');
+    if (first_space == NULL || first_space[1] != '1' ||
+        first_space[2] != '0' || first_space[3] != '1' ||
+        first_space[4] != ' ') {
+      free(expected_accept);
+      return -1;
+    }
   }
 
   /* Validate Sec-WebSocket-Accept header */
@@ -591,7 +620,11 @@ static int _ws_upgrade(offs_client_t* client, const char* ws_host) {
     accept_header = strstr(response, "sec-websocket-accept:");
   }
   if (accept_header != NULL && expected_accept != NULL) {
-    accept_header += strlen("Sec-WebSocket-Accept:");
+    /* Skip past the header name (case-insensitive match) */
+    const char* colon = strchr(accept_header, ':');
+    if (colon != NULL) {
+      accept_header = colon + 1;
+    }
     while (*accept_header == ' ') accept_header++;
     char* crlf = strstr(accept_header, "\r\n");
     if (crlf != NULL) {
@@ -617,7 +650,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
   client->running = 0;
   client->framer = stream_framer_create();
   client->write_buffer = NULL;
-  pthread_mutex_init(&client->lock, NULL);
+  client->lock = platform_mutex_create();
   client->put_cb = NULL;
   client->put_cb_ctx = NULL;
   client->get_data_cb = NULL;
@@ -640,7 +673,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
     if (colon == NULL) {
       free(host);
       stream_framer_destroy(client->framer);
-      pthread_mutex_destroy(&client->lock);
+      platform_mutex_destroy(client->lock);
       free(client);
       return NULL;
     }
@@ -681,7 +714,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
     if (client->transport.ws.fd < 0) {
       free(addr_copy);
       stream_framer_destroy(client->framer);
-      pthread_mutex_destroy(&client->lock);
+      platform_mutex_destroy(client->lock);
       free(client);
       return NULL;
     }
@@ -695,7 +728,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
         free(addr_copy);
         close(client->transport.ws.fd);
         stream_framer_destroy(client->framer);
-        pthread_mutex_destroy(&client->lock);
+        platform_mutex_destroy(client->lock);
         free(client);
         return NULL;
       }
@@ -709,7 +742,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
         free(addr_copy);
         close(client->transport.ws.fd);
         stream_framer_destroy(client->framer);
-        pthread_mutex_destroy(&client->lock);
+        platform_mutex_destroy(client->lock);
         free(client);
         return NULL;
       }
@@ -728,7 +761,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       free(addr_copy);
       close(client->transport.ws.fd);
       stream_framer_destroy(client->framer);
-      pthread_mutex_destroy(&client->lock);
+      platform_mutex_destroy(client->lock);
       free(client);
       return NULL;
     }
@@ -741,7 +774,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
     /* WS doesn't use stream_framer — it uses ws_frame_parse instead */
     stream_framer_destroy(client->framer);
     client->framer = NULL;
-    pthread_create(&client->recv_thread, NULL, _recv_thread, client);
+    client->recv_thread = platform_thread_create(_recv_thread, client);
     return client;
   } else if (strncmp(transport_url, "wt://", 5) == 0 || strncmp(transport_url, "wts://", 6) == 0) {
 #ifdef HAS_MSQUIC
@@ -767,7 +800,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
     if (msquic == NULL) {
       free(addr_copy);
       stream_framer_destroy(client->framer);
-      pthread_mutex_destroy(&client->lock);
+      platform_mutex_destroy(client->lock);
       free(client);
       return NULL;
     }
@@ -779,7 +812,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       offs_msquic_close();
       free(addr_copy);
       stream_framer_destroy(client->framer);
-      pthread_mutex_destroy(&client->lock);
+      platform_mutex_destroy(client->lock);
       free(client);
       return NULL;
     }
@@ -804,7 +837,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       offs_msquic_close();
       free(addr_copy);
       stream_framer_destroy(client->framer);
-      pthread_mutex_destroy(&client->lock);
+      platform_mutex_destroy(client->lock);
       free(client);
       return NULL;
     }
@@ -814,7 +847,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       offs_msquic_close();
       free(addr_copy);
       stream_framer_destroy(client->framer);
-      pthread_mutex_destroy(&client->lock);
+      platform_mutex_destroy(client->lock);
       free(client);
       return NULL;
     }
@@ -828,7 +861,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       offs_msquic_close();
       free(addr_copy);
       stream_framer_destroy(client->framer);
-      pthread_mutex_destroy(&client->lock);
+      platform_mutex_destroy(client->lock);
       free(client);
       return NULL;
     }
@@ -841,7 +874,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       offs_msquic_close();
       free(addr_copy);
       stream_framer_destroy(client->framer);
-      pthread_mutex_destroy(&client->lock);
+      platform_mutex_destroy(client->lock);
       free(client);
       return NULL;
     }
@@ -857,7 +890,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       offs_msquic_close();
       free(addr_copy);
       stream_framer_destroy(client->framer);
-      pthread_mutex_destroy(&client->lock);
+      platform_mutex_destroy(client->lock);
       free(client);
       return NULL;
     }
@@ -871,7 +904,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       offs_msquic_close();
       free(addr_copy);
       stream_framer_destroy(client->framer);
-      pthread_mutex_destroy(&client->lock);
+      platform_mutex_destroy(client->lock);
       free(client);
       return NULL;
     }
@@ -885,7 +918,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       offs_msquic_close();
       free(addr_copy);
       stream_framer_destroy(client->framer);
-      pthread_mutex_destroy(&client->lock);
+      platform_mutex_destroy(client->lock);
       free(client);
       return NULL;
     }
@@ -906,27 +939,27 @@ offs_client_t* offs_client_connect(const char* transport_url) {
 #else
     /* WT not supported — MsQuic not available */
     stream_framer_destroy(client->framer);
-    pthread_mutex_destroy(&client->lock);
+    platform_mutex_destroy(client->lock);
     free(client);
     return NULL;
 #endif
   } else {
     stream_framer_destroy(client->framer);
-    pthread_mutex_destroy(&client->lock);
+    platform_mutex_destroy(client->lock);
     free(client);
     return NULL;
   }
 
   if (client->transport.raw.fd < 0) {
     stream_framer_destroy(client->framer);
-    pthread_mutex_destroy(&client->lock);
+    platform_mutex_destroy(client->lock);
     free(client);
     return NULL;
   }
 
   client->connected = 1;
   client->running = 1;
-  pthread_create(&client->recv_thread, NULL, _recv_thread, client);
+  client->recv_thread = platform_thread_create(_recv_thread, client);
 
   return client;
 }
@@ -985,8 +1018,8 @@ void offs_client_disconnect(offs_client_t* client) {
       break;
   }
 
-  if (client->recv_thread != 0) {
-    pthread_join(client->recv_thread, NULL);
+  if (client->recv_thread != NULL) {
+    platform_thread_join(client->recv_thread);
   }
 
   if (client->framer != NULL) {
@@ -995,7 +1028,7 @@ void offs_client_disconnect(offs_client_t* client) {
   if (client->write_buffer != NULL) {
     DESTROY(client->write_buffer, buffer);
   }
-  pthread_mutex_destroy(&client->lock);
+  platform_mutex_destroy(client->lock);
   free(client);
 }
 
@@ -1009,8 +1042,10 @@ int offs_client_put(offs_client_t* client,
                     void* ctx) {
   if (client == NULL || !client->connected) return -1;
 
+  platform_mutex_lock(client->lock);
   client->put_cb = callback;
   client->put_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
 
   client_api_put_request_t msg;
   msg.content_type = (char*)content_type;
@@ -1066,8 +1101,10 @@ int offs_client_put_stream_end(offs_client_t* client,
                                 void* ctx) {
   if (client == NULL || !client->connected) return -1;
 
+  platform_mutex_lock(client->lock);
   client->put_cb = callback;
   client->put_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
 
   cbor_item_t* frame = client_api_put_end_encode();
   _send_frame(client, frame);
@@ -1083,12 +1120,14 @@ int offs_client_get(offs_client_t* client,
                      void* ctx) {
   if (client == NULL || !client->connected) return -1;
 
+  platform_mutex_lock(client->lock);
   client->get_data_cb = data_cb;
   client->get_data_cb_ctx = ctx;
   client->get_end_cb = end_cb;
   client->get_end_cb_ctx = ctx;
   client->error_cb = error_cb;
   client->error_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
 
   client_api_get_request_t msg;
   msg.ori_string = (char*)ori_string;

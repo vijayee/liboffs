@@ -5,7 +5,7 @@
 #ifndef OFFS_POOL_H
 #define OFFS_POOL_H
 
-#include "../Util/threadding.h"
+#include "../Platform/platform.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -30,7 +30,7 @@ typedef struct pool_local_t {
 typedef struct pool_global_t {
   pool_item_t* head;
   size_t count;
-  PLATFORMLOCKTYPE(lock);
+  platform_mutex_t* lock;
 } pool_global_t;
 
 void*  pool_alloc(size_t index);
