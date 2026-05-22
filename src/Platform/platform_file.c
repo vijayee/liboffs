@@ -61,6 +61,11 @@
     return (int64_t)result;
   }
 
+  int platform_file_sync(platform_file_t* file) {
+    if (file == NULL) return -1;
+    return fsync(file->fd);
+  }
+
   int platform_file_exists(const char* path) {
     return access(path, F_OK) == 0 ? 1 : 0;
   }
@@ -192,6 +197,11 @@
       return -1;
     }
     return (int64_t)li_new.QuadPart;
+  }
+
+  int platform_file_sync(platform_file_t* file) {
+    if (file == NULL) return -1;
+    return FlushFileBuffers(file->handle) ? 0 : -1;
   }
 
   int platform_file_exists(const char* path) {

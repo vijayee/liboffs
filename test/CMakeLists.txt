@@ -43,7 +43,8 @@ if (BUILD_TESTING)
             test_ws_transport.cpp
             test_offs_client.cpp
             test_platform.cpp
-            test_platform_socket.cpp)
+            test_platform_socket.cpp
+            test_platform_file_sync.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
