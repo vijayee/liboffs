@@ -181,7 +181,8 @@ int nat_detect_start(nat_detect_t* detect, const char* relay_a_host, uint16_t re
   detect->relay_b_port = relay_b_port;
 
   /* Create and connect relay client A */
-  detect->relay_a = relay_client_create(detect->network, detect->pool);
+  detect->relay_a = relay_client_create(detect->network, detect->pool,
+      detect->network->relay_max_retries, detect->network->relay_retry_delay_ms);
   if (detect->relay_a == NULL) {
     log_error("nat_detect: failed to create relay client A");
     free(detect->relay_a_host);
@@ -210,7 +211,8 @@ int nat_detect_start(nat_detect_t* detect, const char* relay_a_host, uint16_t re
   }
 
   /* Create and connect relay client B */
-  detect->relay_b = relay_client_create(detect->network, detect->pool);
+  detect->relay_b = relay_client_create(detect->network, detect->pool,
+      detect->network->relay_max_retries, detect->network->relay_retry_delay_ms);
   if (detect->relay_b == NULL) {
     log_error("nat_detect: failed to create relay client B");
     relay_client_destroy(detect->relay_a);

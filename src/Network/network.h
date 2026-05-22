@@ -21,6 +21,7 @@
 #include "wanted_list.h"
 #include "conn_state.h"
 #include "message_log.h"
+#include "../Configuration/config.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -72,6 +73,17 @@ typedef struct network_t {
   uint64_t metrics_push_timer_id;
   uint64_t ping_capacity_timer_id;
   ATOMIC(uint8_t) running;
+  uint32_t gossip_init_interval_s;
+  size_t gossip_init_count;
+  uint32_t gossip_steady_interval_s;
+  uint32_t gossip_timeout_ms;
+  float hebbian_decay_factor;
+  uint32_t eabf_base_ttl_ms;
+  uint32_t eabf_maintenance_ms;
+  uint32_t respiration_tau_min_ms;
+  uint32_t respiration_tau_max_ms;
+  size_t relay_max_retries;
+  uint32_t relay_retry_delay_ms;
 
   relay_client_t* relay;          /* Connected relay client (or NULL) */
   nat_detect_t* nat_detect;       /* NAT detection module */
@@ -90,7 +102,8 @@ typedef struct network_t {
 } network_t;
 
 network_t* network_create(authority_t* authority, block_cache_t* block_cache,
-                          timer_actor_t* timer, scheduler_pool_t* pool);
+                          timer_actor_t* timer, scheduler_pool_t* pool,
+                          const config_t* config);
 void network_destroy(network_t* network);
 void network_dispatch(void* state, message_t* msg);
 int network_connect_relay(network_t* network, const char* host, uint16_t port);

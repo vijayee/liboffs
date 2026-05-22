@@ -55,11 +55,14 @@ elastic_bloom_filter_t* eabf_get_level(eabf_t* eabf, uint32_t level) {
 
 // --- EABF table ---
 
-void eabf_table_init(eabf_table_t* table, size_t capacity) {
+void eabf_table_init(eabf_table_t* table, size_t capacity,
+                     uint64_t base_ttl_ms, uint64_t maintenance_ms) {
   if (capacity == 0) capacity = 16;
   table->entries = get_clear_memory(capacity * sizeof(eabf_entry_t));
   table->capacity = capacity;
   table->count = 0;
+  table->base_ttl_ms = base_ttl_ms;
+  table->maintenance_ms = maintenance_ms;
 }
 
 void eabf_table_deinit(eabf_table_t* table) {
@@ -191,9 +194,8 @@ int eabf_ttl_table_remove_by_timer(eabf_ttl_table_t* table, uint64_t timer_id,
 
 // Compute TTL for a given distance level
 // Level 0: 60 min, Level 1: 40 min, Level 2: 30 min, Level 3: 24 min
-uint64_t eabf_ttl_for_level(uint32_t level) {
-  if (level >= EABF_LEVELS) return EABF_BASE_TTL_MS / 4;
-  // TTL = BASE_TTL / (1 + level * 0.5)
+uint64_t eabf_ttl_for_level(uint32_t level, uint64_t base_ttl_ms) {
+  if (level >= EABF_LEVELS) return base_ttl_ms / 4;
   double divisor = 1.0 + (double)level * 0.5;
-  return (uint64_t)(EABF_BASE_TTL_MS / divisor);
+  return (uint64_t)((double)base_ttl_ms / divisor);
 }

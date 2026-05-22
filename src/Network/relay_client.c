@@ -261,10 +261,10 @@ static QUIC_STATUS QUIC_API _relay_client_connection_callback(
       // connections start concurrently.
       if (shutdown_status == QUIC_STATUS_UNREACHABLE &&
           !client->shutdown_pending &&
-          client->retry_count < RELAY_CLIENT_MAX_RETRIES) {
+          client->retry_count < client->max_retries) {
         client->retry_count++;
         log_info("relay_client: scheduling retry %u/%u",
-                 client->retry_count, RELAY_CLIENT_MAX_RETRIES);
+                 client->retry_count, client->max_retries);
       }
       break;
     }
@@ -287,7 +287,7 @@ static QUIC_STATUS QUIC_API _relay_client_connection_callback(
       // We defer the retry to the I/O thread via actor_send to avoid blocking
       // the MsQuic worker thread and to prevent thread leaks from spawning
       // a new I/O thread while the old one is still running.
-      if (client->retry_count > 0 && client->retry_count <= RELAY_CLIENT_MAX_RETRIES &&
+      if (client->retry_count > 0 && client->retry_count <= client->max_retries &&
           !client->shutdown_pending && ATOMIC_LOAD(&client->running)) {
 
         // Clean up the current QUIC connection resources before retrying.
@@ -312,9 +312,9 @@ static QUIC_STATUS QUIC_API _relay_client_connection_callback(
 
         // Defer reconnect to the I/O thread — it will apply exponential
         // backoff and call relay_client_connect from a safe context.
-        unsigned long delay_ms = RELAY_CLIENT_RETRY_DELAY_MS * (1 << (client->retry_count - 1));
+        unsigned long delay_ms = client->retry_delay_ms * (1 << (client->retry_count - 1));
         log_info("relay_client: scheduling retry (attempt %u/%u) to %s:%u in %lums",
-                 client->retry_count, RELAY_CLIENT_MAX_RETRIES,
+                 client->retry_count, client->max_retries,
                  client->relay_host ? client->relay_host : "127.0.0.1",
                  client->relay_port, delay_ms);
 
@@ -351,12 +351,15 @@ static void* _relay_client_thread(void* arg) {
 
 // --- Public API ---
 
-relay_client_t* relay_client_create(network_t* network, scheduler_pool_t* pool) {
+relay_client_t* relay_client_create(network_t* network, scheduler_pool_t* pool,
+                                    uint8_t max_retries, uint32_t retry_delay_ms) {
   relay_client_t* client = get_clear_memory(sizeof(relay_client_t));
   if (client == NULL) return NULL;
 
   client->network = network;
   client->pool = pool;
+  client->max_retries = max_retries;
+  client->retry_delay_ms = retry_delay_ms;
   client->running = ATOMIC_VAR_INIT(0);
 
   actor_init(&client->actor, client, relay_client_dispatch, pool);
@@ -708,9 +711,12 @@ void relay_client_dispatch(void* state, message_t* msg) {
 
 #include <stdlib.h>
 
-relay_client_t* relay_client_create(network_t* network, scheduler_pool_t* pool) {
+relay_client_t* relay_client_create(network_t* network, scheduler_pool_t* pool,
+                                    uint8_t max_retries, uint32_t retry_delay_ms) {
   (void)network;
   (void)pool;
+  (void)max_retries;
+  (void)retry_delay_ms;
   return NULL;
 }
 

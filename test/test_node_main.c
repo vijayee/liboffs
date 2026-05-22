@@ -1816,7 +1816,7 @@ int node_main(int argc, char* argv[]) {
     return 1;
   }
 
-  g_node.network = network_create(g_node.authority, g_node.block_cache, g_node.timer, g_node.pool);
+  g_node.network = network_create(g_node.authority, g_node.block_cache, g_node.timer, g_node.pool, &g_node.config);
   if (!g_node.network) {
     fprintf(stderr, "node: network_create failed\n");
     tuple_cache_destroy(g_node.tuple_cache);

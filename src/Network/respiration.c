@@ -8,16 +8,17 @@
 // Seek throttle: compute interval in ms for a given capacity
 // tau(c) = tau_min + (tau_max - tau_min) * (c / 0.50)^alpha  for c in [0, 0.50)
 // tau(c) = infinity (UINT64_MAX) for c >= 0.50
-uint64_t respiration_seek_interval(float capacity) {
+uint64_t respiration_seek_interval(float capacity,
+                                   uint32_t tau_min_ms, uint32_t tau_max_ms) {
   if (capacity >= RESPIRATION_INHALE_THRESHOLD) {
-    return UINT64_MAX;  // Don't seek
+    return UINT64_MAX;
   }
 
   float ratio = capacity / RESPIRATION_INHALE_THRESHOLD;
   if (ratio < 0.0f) ratio = 0.0f;
   float scaled = powf(ratio, RESPIRATION_ALPHA);
-  float interval = (float)RESPIRATION_TAU_MIN_MS +
-                   ((float)RESPIRATION_TAU_MAX_MS - (float)RESPIRATION_TAU_MIN_MS) * scaled;
+  float interval = (float)tau_min_ms +
+                   ((float)tau_max_ms - (float)tau_min_ms) * scaled;
   return (uint64_t)interval;
 }
 

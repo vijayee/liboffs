@@ -616,7 +616,7 @@ TEST(QuicIntegration, NetworkCreateDestroy) {
   block_cache_t* cache = block_cache_create(config, (char*)"/tmp/test_quic_bc", standard, timer, pool, NULL, 0);
   ASSERT_NE(cache, nullptr);
 
-  network_t* network = network_create(authority, cache, timer, pool);
+  network_t* network = network_create(authority, cache, timer, pool, &config);
   // network_create may return nullptr if msquic initialization fails
   if (network == nullptr) {
     block_cache_destroy(cache);
@@ -660,7 +660,7 @@ TEST(QuicIntegration, QuicListenerStartStop) {
   block_cache_t* cache = block_cache_create(config, (char*)"/tmp/test_quic_bc2", standard, timer, pool, NULL, 0);
   ASSERT_NE(cache, nullptr);
 
-  network_t* network = network_create(authority, cache, timer, pool);
+  network_t* network = network_create(authority, cache, timer, pool, &config);
   if (network == nullptr) {
     timer_actor_destroy(timer);
     block_cache_destroy(cache);

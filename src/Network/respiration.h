@@ -12,15 +12,15 @@
 // Respiration constants from Network Design spec
 #define RESPIRATION_INHALE_THRESHOLD 0.50f
 #define RESPIRATION_EXHALE_THRESHOLD 0.80f
-#define RESPIRATION_TAU_MIN_MS 5000
-#define RESPIRATION_TAU_MAX_MS 300000
 #define RESPIRATION_ALPHA 2.0f
 #define RESPIRATION_SEEK_MAX_NEIGHBORS 3
 
 // Seek throttle: compute interval in ms for a given capacity
 // tau(c) = tau_min + (tau_max - tau_min) * (c / 0.50)^alpha  for c in [0, 0.50)
 // tau(c) = infinity for c >= 0.50
-uint64_t respiration_seek_interval(float capacity);
+uint64_t respiration_seek_interval(float capacity,
+                                   uint32_t tau_min_ms,
+                                   uint32_t tau_max_ms);
 
 // Check if node should inhale (capacity < 50%)
 bool respiration_should_inhale(float capacity);

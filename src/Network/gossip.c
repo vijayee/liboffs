@@ -37,11 +37,11 @@ void gossip_scheduler_init(gossip_scheduler_t* sched,
                            uint32_t num_init_intervals,
                            uint32_t steady_state_interval_s) {
   if (sched == NULL) return;
-  sched->init_interval_s = init_interval_s > 0 ? init_interval_s : GOSSIP_INIT_INTERVAL_S;
-  sched->num_init_intervals = num_init_intervals > 0 ? num_init_intervals : GOSSIP_INIT_COUNT;
+  sched->init_interval_s = init_interval_s > 0 ? init_interval_s : 2;
+  sched->num_init_intervals = num_init_intervals > 0 ? num_init_intervals : 5;
   sched->steady_state_interval_s = steady_state_interval_s > 0
                                        ? steady_state_interval_s
-                                       : GOSSIP_STEADY_INTERVAL_S;
+                                       : 30;
   sched->interval_idx = 0;
   sched->is_initial_phase = true;
   sched->last_gossip_ms = 0;
@@ -85,7 +85,7 @@ void gossip_handle_init(gossip_handle_t* handle,
   query_table_init(&handle->query_table, QUERY_TABLE_DEFAULT_CAPACITY);
   vec_init(&handle->active);
   handle->next_query_id = 1;
-  handle->timeout_ms = timeout_ms > 0 ? timeout_ms : GOSSIP_TIMEOUT_MS;
+  handle->timeout_ms = timeout_ms > 0 ? timeout_ms : 5000;
   handle->running = false;
 }
 

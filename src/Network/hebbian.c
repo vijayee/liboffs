@@ -10,11 +10,12 @@
 
 // --- Table lifecycle ---
 
-void hebbian_table_init(hebbian_table_t* table, size_t capacity) {
+void hebbian_table_init(hebbian_table_t* table, size_t capacity, float decay_factor) {
   if (capacity == 0) capacity = 16;
   table->entries = get_clear_memory(capacity * sizeof(hebbian_weight_t));
   table->capacity = capacity;
   table->count = 0;
+  table->decay_factor = decay_factor;
 }
 
 void hebbian_table_deinit(hebbian_table_t* table) {
@@ -135,11 +136,11 @@ void hebbian_symmetry(hebbian_table_t* table, const node_id_t* path, uint8_t pat
   }
 }
 
-// Decay: multiply all weights by HEBBIAN_DECAY_FACTOR
+// Decay: multiply all weights by table->decay_factor
 void hebbian_decay(hebbian_table_t* table) {
   if (table == NULL) return;
   for (size_t index = 0; index < table->count; index++) {
-    table->entries[index].weight *= HEBBIAN_DECAY_FACTOR;
+    table->entries[index].weight *= table->decay_factor;
     if (table->entries[index].weight < HEBBIAN_MIN_WEIGHT) {
       table->entries[index].weight = HEBBIAN_MIN_WEIGHT;
     }

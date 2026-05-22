@@ -114,7 +114,8 @@ void network_closest_nodes_result_payload_destroy(void* ptr) {
 }
 
 network_t* network_create(authority_t* authority, block_cache_t* block_cache,
-                          timer_actor_t* timer, scheduler_pool_t* pool) {
+                          timer_actor_t* timer, scheduler_pool_t* pool,
+                          const config_t* config) {
   network_t* network = get_clear_memory(sizeof(network_t));
   network->authority = authority;
   authority_init_local_id(authority);
@@ -124,10 +125,11 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   network->running = ATOMIC_VAR_INIT(0);
   network->rings = ring_set_create(0, 0, 0);
   network->latency_cache = latency_cache_create(0);
-  eabf_table_init(&network->eabf_table, 16);
+  eabf_table_init(&network->eabf_table, 16,
+                  config->eabf_base_ttl_ms, config->eabf_maintenance_ms);
   eabf_ttl_table_init(&network->eabf_ttl, 64);
   network->wanted_list = wanted_list_create();
-  hebbian_table_init(&network->hebbian, 32);
+  hebbian_table_init(&network->hebbian, 32, config->hebbian_decay_factor);
   rate_limit_table_init(&network->rate_limits, 32);
   network->log = NULL;
   network->topology_metrics = topology_metrics_create(pool);
@@ -139,15 +141,28 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   network->nat_detect = NULL;
   network->local_nat_type = NAT_TYPE_UNKNOWN;
 
+  // Store config values for downstream consumers
+  network->gossip_init_interval_s = config->gossip_init_interval_s;
+  network->gossip_init_count = config->gossip_init_count;
+  network->gossip_steady_interval_s = config->gossip_steady_interval_s;
+  network->gossip_timeout_ms = config->gossip_timeout_ms;
+  network->hebbian_decay_factor = config->hebbian_decay_factor;
+  network->eabf_base_ttl_ms = config->eabf_base_ttl_ms;
+  network->eabf_maintenance_ms = config->eabf_maintenance_ms;
+  network->respiration_tau_min_ms = config->respiration_tau_min_ms;
+  network->respiration_tau_max_ms = config->respiration_tau_max_ms;
+  network->relay_max_retries = config->relay_max_retries;
+  network->relay_retry_delay_ms = config->relay_retry_delay_ms;
+
 #ifdef HAS_MSQUIC
   network->msquic = offs_msquic_open();
 #endif
 
   gossip_handle_init(&network->gossip,
-                     GOSSIP_INIT_INTERVAL_S,
-                     GOSSIP_INIT_COUNT,
-                     GOSSIP_STEADY_INTERVAL_S,
-                     GOSSIP_TIMEOUT_MS);
+                     network->gossip_init_interval_s,
+                     network->gossip_init_count,
+                     network->gossip_steady_interval_s,
+                     network->gossip_timeout_ms);
 
   actor_init(&network->actor, network, network_dispatch, pool);
 
@@ -156,15 +171,15 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
 
   // Start gossip timer: first tick in init_interval_s, then recurring
   network->gossip_timer_id = timer_actor_set(timer,
-      (uint64_t)GOSSIP_INIT_INTERVAL_S * 1000,
-      (uint64_t)GOSSIP_INIT_INTERVAL_S * 1000,
+      (uint64_t)network->gossip_init_interval_s * 1000,
+      (uint64_t)network->gossip_init_interval_s * 1000,
       &network->actor,
       NETWORK_GOSSIP_TICK);
 
-  // Start EABF maintenance sweep: recurring 60-second timer
+  // Start EABF maintenance sweep
   network->eabf_maintenance_timer_id = timer_actor_set(timer,
-      EABF_MAINTENANCE_MS,
-      EABF_MAINTENANCE_MS,
+      network->eabf_maintenance_ms,
+      network->eabf_maintenance_ms,
       &network->actor,
       NETWORK_EABF_EXPIRE);
 
@@ -281,7 +296,8 @@ int network_connect_relay(network_t* network, const char* host, uint16_t port) {
   }
 
   // Create relay client
-  network->relay = relay_client_create(network, network->pool);
+  network->relay = relay_client_create(network, network->pool,
+      network->relay_max_retries, network->relay_retry_delay_ms);
   if (network->relay == NULL) {
     log_error("network_connect_relay: failed to create relay client");
     nat_detect_destroy(network->nat_detect);
@@ -581,7 +597,7 @@ static void network_handle_ping_block_response(network_t* network, message_t* ms
 
   // On successful block existence confirmation, strengthen Hebbian weight
   if (response->exists) {
-    float delta_w = hebbian_compute_delta(GOSSIP_TIMEOUT_MS, HEBBIAN_FIND_BLOCK_MULTIPLIER);
+    float delta_w = hebbian_compute_delta(network->gossip_timeout_ms, HEBBIAN_FIND_BLOCK_MULTIPLIER);
     hebbian_frequency(&network->hebbian, &response->sender_id, delta_w);
     network_sync_hebbian_to_rings(network);
   }
@@ -1296,7 +1312,7 @@ static void network_handle_ping_capacity_response(network_t* network, message_t*
 
   // Calculate delta_w from RTT. PingCapacity doesn't carry echo_time,
   // so we use a default latency estimate from the gossip timeout.
-  float delta_w = hebbian_compute_delta(GOSSIP_TIMEOUT_MS, HEBBIAN_FIND_BLOCK_MULTIPLIER);
+  float delta_w = hebbian_compute_delta(network->gossip_timeout_ms, HEBBIAN_FIND_BLOCK_MULTIPLIER);
 
   // Update Hebbian weights: the peer that responded is the one we sent PingCapacity to.
   // Apply frequency rule: w_{self→peer} += delta_w
@@ -1407,7 +1423,7 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         }
         // Hebbian: holder strengthens weight toward predecessor
         {
-          float delta_w = hebbian_compute_delta(GOSSIP_TIMEOUT_MS, HEBBIAN_FIND_BLOCK_MULTIPLIER);
+          float delta_w = hebbian_compute_delta(network->gossip_timeout_ms, HEBBIAN_FIND_BLOCK_MULTIPLIER);
           hebbian_frequency(&network->hebbian, reply_to, delta_w);
           network_sync_hebbian_to_rings(network);
         }

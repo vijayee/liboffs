@@ -57,7 +57,8 @@ int offs_node_start(offs_node_t* node) {
   if (node->block_cache == NULL) return -1;
 
   node->network = network_create(node->authority, node->block_cache,
-                                 node->timer, node->scheduler);
+                                 node->timer, node->scheduler,
+                                 node->config);
   if (node->network == NULL) {
     block_cache_destroy(node->block_cache);
     return -1;

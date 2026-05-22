@@ -24,9 +24,6 @@ typedef struct relay_client_destroy_node_t {
   struct relay_client_destroy_node_t* next;
 } relay_client_destroy_node_t;
 
-#define RELAY_CLIENT_MAX_RETRIES 5
-#define RELAY_CLIENT_RETRY_DELAY_MS 500
-
 typedef struct relay_client_t {
   actor_t actor;
   network_t* network;
@@ -64,11 +61,13 @@ typedef struct relay_client_t {
   char* key_path;
 
   // Retry state: when the QUIC connection fails with UNREACHABLE,
-  // we automatically retry up to RELAY_CLIENT_MAX_RETRIES times.
+  // we automatically retry up to max_retries times.
   char* relay_host;
   uint16_t relay_port;
   uint8_t retry_count;
   uint8_t shutdown_pending;  // 1 if we're intentionally shutting down
+  uint8_t max_retries;
+  uint32_t retry_delay_ms;
 #ifdef HAS_MSQUIC
   HQUIC shared_registration;  // shared registration from quic_listener (may be NULL)
 #else
@@ -76,7 +75,8 @@ typedef struct relay_client_t {
 #endif
 } relay_client_t;
 
-relay_client_t* relay_client_create(network_t* network, scheduler_pool_t* pool);
+relay_client_t* relay_client_create(network_t* network, scheduler_pool_t* pool,
+                                    uint8_t max_retries, uint32_t retry_delay_ms);
 void relay_client_destroy(relay_client_t* client);
 int relay_client_connect(relay_client_t* client, const char* host, uint16_t port,
 #ifdef HAS_MSQUIC

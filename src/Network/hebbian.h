@@ -15,7 +15,6 @@
 #define HEBBIAN_ETA_FEEDBACK 0.25f
 #define HEBBIAN_ETA_SYMMETRY 0.05f
 #define HEBBIAN_MAX_SEARCH_TIME_MS 60000
-#define HEBBIAN_DECAY_FACTOR 0.999f
 #define HEBBIAN_MIN_WEIGHT 0.01f
 #define HEBBIAN_INITIAL_WEIGHT 0.1f
 
@@ -36,10 +35,11 @@ typedef struct hebbian_table_t {
   hebbian_weight_t* entries;
   size_t capacity;
   size_t count;
+  float decay_factor;
 } hebbian_table_t;
 
 // Initialize/deinitialize weight table
-void hebbian_table_init(hebbian_table_t* table, size_t capacity);
+void hebbian_table_init(hebbian_table_t* table, size_t capacity, float decay_factor);
 void hebbian_table_deinit(hebbian_table_t* table);
 
 // Look up weight for a peer (returns HEBBIAN_MIN_WEIGHT if not found)
@@ -61,7 +61,7 @@ void hebbian_feedback(hebbian_table_t* table, const node_id_t* path, uint8_t pat
 void hebbian_symmetry(hebbian_table_t* table, const node_id_t* path, uint8_t path_len,
                       float delta_w);
 
-// Apply decay: multiply all weights by HEBBIAN_DECAY_FACTOR
+// Apply decay: multiply all weights by table->decay_factor
 void hebbian_decay(hebbian_table_t* table);
 
 // Remove a peer's weight entry

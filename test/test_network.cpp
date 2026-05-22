@@ -735,7 +735,7 @@ protected:
   node_id_t local_id;
 
   void SetUp() override {
-    eabf_table_init(&eabf_table, 4);
+    eabf_table_init(&eabf_table, 4, 3600000, 60000);
     eabf_ttl_table_init(&eabf_ttl, 16);
     rings = ring_set_create(RING_K, RING_M, RING_ALPHA);
     memset(local_id.hash, 0x01, NODE_ID_HASH_SIZE);
@@ -1026,7 +1026,7 @@ protected:
   node_id_t local_id;
 
   void SetUp() override {
-    eabf_table_init(&eabf_table, 4);
+    eabf_table_init(&eabf_table, 4, 3600000, 60000);
     rings = ring_set_create(RING_K, RING_M, RING_ALPHA);
     memset(local_id.hash, 0x01, NODE_ID_HASH_SIZE);
   }
@@ -1239,7 +1239,7 @@ protected:
   hebbian_table_t table;
 
   void SetUp() override {
-    hebbian_table_init(&table, 4);
+    hebbian_table_init(&table, 4, 0.999f);
   }
 
   void TearDown() override {
@@ -1348,7 +1348,7 @@ TEST_F(HebbianTest, DecayReducesWeights) {
 
   hebbian_decay(&table);
   float weight = hebbian_table_get(&table, &id);
-  EXPECT_NEAR(weight, 0.5f * HEBBIAN_DECAY_FACTOR, 0.001f);
+  EXPECT_NEAR(weight, 0.5f * 0.999f, 0.001f);
 }
 
 TEST_F(HebbianTest, DecayClampsToMin) {
@@ -1375,22 +1375,22 @@ TEST_F(HebbianTest, Remove) {
 // === Respiration tests ===
 
 TEST(RespirationTest, SeekIntervalAtZeroCapacity) {
-  uint64_t interval = respiration_seek_interval(0.0f);
-  EXPECT_EQ(interval, RESPIRATION_TAU_MIN_MS);
+  uint64_t interval = respiration_seek_interval(0.0f, 5000, 300000);
+  EXPECT_EQ(interval, 5000);
 }
 
 TEST(RespirationTest, SeekIntervalAtHighCapacity) {
-  uint64_t interval = respiration_seek_interval(0.50f);
+  uint64_t interval = respiration_seek_interval(0.50f, 5000, 300000);
   EXPECT_EQ(interval, UINT64_MAX);
 
-  interval = respiration_seek_interval(0.80f);
+  interval = respiration_seek_interval(0.80f, 5000, 300000);
   EXPECT_EQ(interval, UINT64_MAX);
 }
 
 TEST(RespirationTest, SeekIntervalAtMidCapacity) {
-  uint64_t interval = respiration_seek_interval(0.25f);
-  EXPECT_GT(interval, RESPIRATION_TAU_MIN_MS);
-  EXPECT_LT(interval, RESPIRATION_TAU_MAX_MS);
+  uint64_t interval = respiration_seek_interval(0.25f, 5000, 300000);
+  EXPECT_GT(interval, 5000);
+  EXPECT_LT(interval, 300000);
 }
 
 TEST(RespirationTest, ShouldInhale) {
@@ -1613,7 +1613,7 @@ protected:
     network->authority = authority;
     network->rings = ring_set_create(0, 0, 0);
     ASSERT_NE(network->rings, nullptr);
-    hebbian_table_init(&network->hebbian, 4);
+    hebbian_table_init(&network->hebbian, 4, 0.999f);
     rate_limit_table_init(&network->rate_limits, 4);
 
     // Set a known local_id
@@ -1649,7 +1649,7 @@ TEST_F(AuthorityPeerStoreTest, SaveAndLoadEmptyPeers) {
 
   // Clear hebbian table and reload
   hebbian_table_deinit(&network->hebbian);
-  hebbian_table_init(&network->hebbian, 4);
+  hebbian_table_init(&network->hebbian, 4, 0.999f);
   EXPECT_EQ(network->hebbian.count, 0u);
 
   result = authority_load_peers(authority, network);
@@ -1674,7 +1674,7 @@ TEST_F(AuthorityPeerStoreTest, SaveAndLoadHebbianWeights) {
 
   // Reset hebbian table
   hebbian_table_deinit(&network->hebbian);
-  hebbian_table_init(&network->hebbian, 4);
+  hebbian_table_init(&network->hebbian, 4, 0.999f);
   EXPECT_EQ(network->hebbian.count, 0u);
 
   // Load
@@ -1717,7 +1717,7 @@ TEST_F(AuthorityPeerStoreTest, SaveAndLoadPeersWithMetadata) {
   rate_limit_table_deinit(&network->rate_limits);
   network->rings = ring_set_create(0, 0, 0);
   ASSERT_NE(network->rings, nullptr);
-  hebbian_table_init(&network->hebbian, 4);
+  hebbian_table_init(&network->hebbian, 4, 0.999f);
   rate_limit_table_init(&network->rate_limits, 4);
 
   // Load
@@ -2942,7 +2942,7 @@ protected:
   node_id_t local_id;
 
   void SetUp() override {
-    eabf_table_init(&eabf_table, 4);
+    eabf_table_init(&eabf_table, 4, 3600000, 60000);
     eabf_ttl_table_init(&eabf_ttl, 16);
     rings = ring_set_create(RING_K, RING_M, RING_ALPHA);
     latency_cache = latency_cache_create(16);

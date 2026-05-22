@@ -19,8 +19,7 @@
 #define EABF_FP_BITS 8
 
 // TTL constants (in milliseconds)
-#define EABF_BASE_TTL_MS 3600000   // 60 minutes
-#define EABF_MAINTENANCE_MS 60000  // 60 second sweep
+// (tunable parameters now set via config_t at startup)
 
 // Per-connection EABF wrapper
 typedef struct eabf_t {
@@ -39,6 +38,8 @@ typedef struct eabf_table_t {
   eabf_entry_t* entries;
   size_t capacity;
   size_t count;
+  uint64_t base_ttl_ms;
+  uint64_t maintenance_ms;
 } eabf_table_t;
 
 // TTL tracking entry — pairs a timer ID with the EABF location
@@ -71,7 +72,8 @@ elastic_bloom_filter_t* eabf_get_level(eabf_t* eabf, uint32_t level);
 
 // --- EABF table ---
 
-void eabf_table_init(eabf_table_t* table, size_t capacity);
+void eabf_table_init(eabf_table_t* table, size_t capacity,
+                     uint64_t base_ttl_ms, uint64_t maintenance_ms);
 void eabf_table_deinit(eabf_table_t* table);
 
 eabf_t* eabf_table_lookup(const eabf_table_t* table, const node_id_t* peer_id);
@@ -90,6 +92,6 @@ int eabf_ttl_table_remove_by_timer(eabf_ttl_table_t* table, uint64_t timer_id,
                                     eabf_ttl_entry_t* out_entry);
 
 // Compute TTL for a given distance level
-uint64_t eabf_ttl_for_level(uint32_t level);
+uint64_t eabf_ttl_for_level(uint32_t level, uint64_t base_ttl_ms);
 
 #endif // OFFS_EABF_H

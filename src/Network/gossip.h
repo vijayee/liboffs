@@ -12,10 +12,7 @@
 #include <stdbool.h>
 
 // Two-phase gossip timing constants
-#define GOSSIP_INIT_INTERVAL_S 2
-#define GOSSIP_INIT_COUNT 5
-#define GOSSIP_STEADY_INTERVAL_S 30
-#define GOSSIP_TIMEOUT_MS 5000
+// (tunable parameters now set via config_t at startup)
 
 // Gossip states
 typedef enum gossip_state_e {
