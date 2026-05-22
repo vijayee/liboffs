@@ -10,16 +10,10 @@
 #include "../Util/get_dir.h"
 #include "../Actor/actor.h"
 #include "../Actor/message.h"
+#include "../Platform/platform.h"
 #include "../Scheduler/scheduler.h"
 #include "block.h"
 #include <stdatomic.h>
-#ifdef _WIN32
-#include <io.h>
-#define F_OK 0
-#define access _access
-#else
-#include <unistd.h>
-#endif
 
 void sections_lru_cache_move(sections_lru_cache_t* lru, sections_lru_node_t* node);
 void round_robin_save(void* ctx);
@@ -621,12 +615,12 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
   sections->max_tuple_size = max_tuple_size;
   sections->size = size;
   actor_init(&sections->actor, sections, sections_dispatch, pool);
-  if (access(robin_path, F_OK) == 0) {
+  if (platform_file_exists(robin_path)) {
     FILE* robin_file = fopen(robin_path, "rb");
     if (robin_file == NULL || fseek(robin_file, 0, SEEK_END)) {
       log_error("Failed to read round robin file size; recreating");
       if (robin_file != NULL) fclose(robin_file);
-      unlink(robin_path);
+      platform_file_unlink(robin_path);
       sections->robin = round_robin_create(robin_path, timer_actor, &sections->actor, wait, max_wait);
     } else {
       long file_size = ftell(robin_file);
@@ -653,7 +647,7 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
         cbor_decref(&cbor);
       } else {
         if (cbor != NULL) cbor_decref(&cbor);
-        unlink(robin_path);
+        platform_file_unlink(robin_path);
         sections->robin = round_robin_create(robin_path, timer_actor, &sections->actor, wait, max_wait);
       }
     }

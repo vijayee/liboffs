@@ -7,18 +7,9 @@
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
 #include "../Util/log.h"
-#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdatomic.h>
-
-#ifdef _WIN32
-#include <io.h>
-#define F_OK 0
-#define access _access
-#else
-#include <unistd.h>
-#endif
 
 /* ---- free_map helpers ---- */
 
@@ -45,7 +36,7 @@ static void free_map_destroy(free_map_t* fm) {
 static int free_map_alloc(free_map_t* fm, size_t* index) {
   for (size_t word = 0; word < fm->map_capacity; word++) {
     if (fm->map[word] != 0) {
-      int bit = __builtin_ffs(fm->map[word]) - 1;
+      int bit = PLATFORM_FFS(fm->map[word]) - 1;
       *index = word * 32 + (size_t)bit;
       fm->map[word] &= ~((uint32_t)1 << bit);
       return 0;
@@ -150,13 +141,9 @@ void section_dispatch(void* state, message_t* msg) {
         p->full = 1;
         break;
       }
-      if (section->fd == -1) {
-#ifdef _WIN32
-        section->fd = _open(section->path, _O_RDWR | _O_BINARY | _O_CREAT, 0644);
-#else
-        section->fd = open(section->path, O_RDWR | O_CREAT, 0644);
-#endif
-        if (section->fd < 0) {
+      if (section->file == NULL) {
+        section->file = platform_file_open(section->path, PLATFORM_O_RDWR | PLATFORM_O_CREAT, 0644);
+        if (section->file == NULL) {
           free_map_dealloc(&section->free_map, alloc_index);
           p->result = 3;
           p->full = free_map_is_full(&section->free_map);
@@ -164,18 +151,7 @@ void section_dispatch(void* state, message_t* msg) {
         }
       }
       size_t byte_offset = p->data->size * alloc_index;
-      ssize_t written;
-#ifdef _WIN32
-      if (_lseeki64(section->fd, (__int64)byte_offset, SEEK_SET) != (__int64)byte_offset) {
-        free_map_dealloc(&section->free_map, alloc_index);
-        p->result = 4;
-        p->full = free_map_is_full(&section->free_map);
-        break;
-      }
-      written = _write(section->fd, p->data->data, p->data->size);
-#else
-      written = pwrite(section->fd, p->data->data, p->data->size, (off_t)byte_offset);
-#endif
+      ssize_t written = platform_file_pwrite(section->file, p->data->data, p->data->size, (uint64_t)byte_offset);
       if (written < (ssize_t)section->block_size) {
         free_map_dealloc(&section->free_map, alloc_index);
         p->result = 5;
@@ -207,31 +183,17 @@ void section_dispatch(void* state, message_t* msg) {
     case SECTION_READ: {
       section_read_payload_t* p = (section_read_payload_t*)msg->payload;
       p->result = NULL;
-      int read_fd = section->fd;
-      if (read_fd == -1) {
-#ifdef _WIN32
-        read_fd = _open(section->path, _O_RDONLY | _O_BINARY, 0644);
-#else
-        read_fd = open(section->path, O_RDONLY, 0644);
-#endif
+      platform_file_t* read_file = section->file;
+      if (read_file == NULL) {
+        read_file = platform_file_open(section->path, PLATFORM_O_RDONLY, 0644);
       }
-      if (read_fd < 0) {
+      if (read_file == NULL) {
         break;
       }
       size_t byte_offset = p->index * section->block_size;
       uint8_t* data = get_memory(section->block_size);
-      ssize_t read_size;
-#ifdef _WIN32
-      if (_lseeki64(read_fd, (__int64)byte_offset, SEEK_SET) != (__int64)byte_offset) {
-        if (read_fd != section->fd) close(read_fd);
-        free(data);
-        break;
-      }
-      read_size = _read(read_fd, data, section->block_size);
-#else
-      read_size = pread(read_fd, data, section->block_size, (off_t)byte_offset);
-#endif
-      if (read_fd != section->fd) close(read_fd);
+      ssize_t read_size = platform_file_pread(read_file, data, section->block_size, (uint64_t)byte_offset);
+      if (read_file != section->file) platform_file_close(read_file);
       if (read_size < (ssize_t)section->block_size) {
         free(data);
         break;
@@ -280,9 +242,9 @@ void section_dispatch(void* state, message_t* msg) {
       break;
     }
     case SECTION_CLOSE: {
-      if (section->fd != -1) {
-        close(section->fd);
-        section->fd = -1;
+      if (section->file != NULL) {
+        platform_file_close(section->file);
+        section->file = NULL;
       }
       break;
     }
@@ -299,21 +261,17 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id, b
   actor_init(&section->actor, section, section_dispatch, NULL);
   char section_id[20];
   sprintf(section_id, "%lu", id);
-  section->fd = -1;
+  section->file = NULL;
   section->path = path_join(path, section_id);
   section->meta_path = path_join(meta_path, section_id);
   section->size = size;
   section->id = id;
   section->block_size = (size_t)type;
 
-  if (access(section->meta_path, F_OK) == 0) {
+  if (platform_file_exists(section->meta_path)) {
     /* Existing section -- load metadata */
-#ifdef _WIN32
-    int meta_fd = _open(section->meta_path, _O_RDONLY | _O_BINARY, 0644);
-#else
-    int meta_fd = open(section->meta_path, O_RDONLY, 0644);
-#endif
-    if (meta_fd < 0) {
+    platform_file_t* meta_file = platform_file_open(section->meta_path, PLATFORM_O_RDONLY, 0644);
+    if (meta_file == NULL) {
       log_error("Failed to open section meta file");
       actor_destroy(&section->actor);
       free(section->path);
@@ -322,10 +280,10 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id, b
       return NULL;
     }
 
-    off_t file_size = lseek(meta_fd, 0, SEEK_END);
+    int64_t file_size = platform_file_seek(meta_file, 0, PLATFORM_SEEK_END);
     if (file_size < 0) {
       log_error("Failed to read section meta file size");
-      close(meta_fd);
+      platform_file_close(meta_file);
       actor_destroy(&section->actor);
       free(section->path);
       free(section->meta_path);
@@ -333,9 +291,9 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id, b
       return NULL;
     }
 
-    if (lseek(meta_fd, 0, SEEK_SET) < 0) {
+    if (platform_file_seek(meta_file, 0, PLATFORM_SEEK_SET) < 0) {
       log_error("Failed to seek section meta file");
-      close(meta_fd);
+      platform_file_close(meta_file);
       actor_destroy(&section->actor);
       free(section->path);
       free(section->meta_path);
@@ -344,8 +302,8 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id, b
     }
 
     uint8_t* buffer = get_memory((size_t)file_size);
-    ssize_t read_size = read(meta_fd, buffer, (size_t)file_size);
-    close(meta_fd);
+    ssize_t read_size = platform_file_read(meta_file, buffer, (size_t)file_size);
+    platform_file_close(meta_file);
 
     if (read_size != file_size) {
       log_error("Failed to read section meta file");
@@ -382,9 +340,9 @@ void section_destroy(section_t* section) {
     }
     refcounter_destroy_lock((refcounter_t*) section);
     actor_destroy(&section->actor);
-    if (section->fd != -1) {
-      close(section->fd);
-      section->fd = -1;
+    if (section->file != NULL) {
+      platform_file_close(section->file);
+      section->file = NULL;
     }
     free_map_destroy(&section->free_map);
     free(section->path);
@@ -400,7 +358,7 @@ uint8_t section_full(section_t* section) {
   return free_map_is_full(&section->free_map);
 }
 
-/* Async API — send message to section actor.
+/* Async API -- send message to section actor.
    The caller must also inject the section's actor into the scheduler
    after calling these functions. Results arrive as
    SECTION_READ_RESULT / SECTION_WRITE_RESULT / SECTION_DEALLOCATE_RESULT
@@ -453,20 +411,17 @@ void section_deallocate(section_t* section, size_t index, actor_t* reply_to) {
 void section_save_meta(section_t* section) {
   size_t size;
   uint8_t* data = free_map_serialize(&section->free_map, &size);
-#ifdef _WIN32
-  int meta_fd = _open(section->meta_path, _O_WRONLY | _O_TRUNC | _O_BINARY | _O_CREAT, 0644);
-#else
-  int meta_fd = open(section->meta_path, O_WRONLY | O_TRUNC | O_CREAT, 0644);
-#endif
-  if (meta_fd < 0) {
+  platform_file_t* meta_file = platform_file_open(section->meta_path,
+      PLATFORM_O_WRONLY | PLATFORM_O_TRUNC | PLATFORM_O_CREAT, 0644);
+  if (meta_file == NULL) {
     log_error("Failed to save section meta data");
     free(data);
     return;
   }
-  ssize_t written = write(meta_fd, data, size);
+  ssize_t written = platform_file_write(meta_file, data, size);
   if (written < (ssize_t)size) {
     log_error("Failed to write section meta data");
   }
-  close(meta_fd);
+  platform_file_close(meta_file);
   free(data);
 }

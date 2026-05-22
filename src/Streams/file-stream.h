@@ -7,13 +7,14 @@
 #include "stream.h"
 #include <stdio.h>
 #include "../Buffer/buffer.h"
+#include "../Platform/platform.h"
 
 #define DEFAULT_CHUNK_SIZE 128000
 
 typedef struct {
   stream_t stream;
   size_t chunk_size;
-  int32_t fd;
+  platform_file_t* file;
   char* filename;
   int32_t file_size;
   int32_t cursor;
@@ -25,7 +26,7 @@ void readable_push_file_stream_close(readable_push_file_stream_t* stream);
 
 typedef struct {
   stream_t stream;
-  int32_t fd;
+  platform_file_t* file;
   char* filename;
   int32_t cursor;
 } writeable_push_file_stream_t;
@@ -39,7 +40,7 @@ void writeable_push_file_stream_close(writeable_push_file_stream_t* stream);
 typedef struct {
   stream_t stream;
   size_t chunk_size;
-  int32_t fd;
+  platform_file_t* file;
   char* filename;
   int32_t file_size;
   int32_t cursor;
@@ -52,7 +53,7 @@ void readable_pull_file_stream_close(readable_pull_file_stream_t* stream);
 
 typedef struct {
   stream_t stream;
-  int32_t fd;
+  platform_file_t* file;
   char* filename;
   int32_t cursor;
 } writeable_pull_file_stream_t;

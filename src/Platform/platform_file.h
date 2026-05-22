@@ -13,8 +13,10 @@ typedef struct platform_file_t platform_file_t;
 
 /* Open flags — values match POSIX. Windows implementation maps them internally. */
 #define PLATFORM_O_RDONLY  0
+#define PLATFORM_O_WRONLY  1
 #define PLATFORM_O_RDWR    2
 #define PLATFORM_O_CREAT   0100
+#define PLATFORM_O_TRUNC   01000
 #define PLATFORM_O_BINARY  0  /* no-op on POSIX */
 
 platform_file_t* platform_file_open(const char* path, int flags, int mode);

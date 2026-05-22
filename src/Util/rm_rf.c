@@ -6,6 +6,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "../Platform/platform.h"
 #include "allocator.h"
 #include "log.h"
 #include "rm_rf.h"
@@ -48,7 +49,7 @@ int rm_rf(const char *path) {
 
     if (S_ISLNK(statbuf.st_mode)) {
       // Remove symlink — do not follow it
-      if (unlink(buf) == -1) {
+      if (platform_file_unlink(buf) == -1) {
         log_error("failed to unlink symlink");
         free(buf);
         r = -1;
@@ -63,7 +64,7 @@ int rm_rf(const char *path) {
       }
     } else {
       // Remove file
-      if (unlink(buf) == -1) {
+      if (platform_file_unlink(buf) == -1) {
         log_error("failed to unlink");
         r = -1;
         free(buf);

@@ -8,8 +8,6 @@
 #include "../Util/get_dir.h"
 #include "../Util/vec.h"
 #include <stdlib.h>
-#include <fcntl.h>
-#include <unistd.h>
 
 
 wal_t* wal_create(char* location, uint64_t id) {
@@ -66,44 +64,37 @@ wal_t* wal_create_next(char* location, uint64_t next_id, char* last_file) {
 }
 
 void wal_write(wal_t* wal,wal_type_e type, buffer_t* data) {
-  if (wal->log == 0) {
-#ifdef _WIN32
-    wal->log = open(wal->current_file, _O_RDWR | _O_BINARY | _O_CREAT, 0644);
-#else
-    wal->log = open(wal->current_file, O_RDWR | O_CREAT, 0644);
-#endif
+  if (wal->log == NULL) {
+    wal->log = platform_file_open(wal->current_file, PLATFORM_O_RDWR | PLATFORM_O_CREAT, 0644);
   }
   uint32_t crc =  htonl(XXH32(data->data,data->size, 0));
-  write(wal->log, &type, 1);
-  write(wal->log, &crc, 4);
-  write(wal->log, data->data, data->size);
+  platform_file_write(wal->log, &type, 1);
+  platform_file_write(wal->log, &crc, 4);
+  platform_file_write(wal->log, data->data, data->size);
 }
 
 int wal_read(wal_t* wal, wal_type_e* type, buffer_t** data, uint64_t* cursor, int32_t* wal_size) {
-  if (wal->log == 0) {
+  if (wal->log == NULL) {
     *cursor = 0;
-#ifdef _WIN32
-    wal->log = open(wal->current_file, _O_RDWR | _O_BINARY | _O_CREAT, 0644);
-#else
-    wal->log = open(wal->current_file, O_RDWR | O_CREAT, 0644);
-#endif
-    *wal_size = lseek(wal->log, 0,SEEK_END);
-    if(*wal_size < 0) {
+    wal->log = platform_file_open(wal->current_file, PLATFORM_O_RDWR | PLATFORM_O_CREAT, 0644);
+    int64_t file_size = platform_file_seek(wal->log, 0, PLATFORM_SEEK_END);
+    if (file_size < 0) {
       return -1;
     }
-    if (lseek(wal->log, 0, SEEK_SET) < 0) {
+    *wal_size = (int32_t)file_size;
+    if (platform_file_seek(wal->log, 0, PLATFORM_SEEK_SET) < 0) {
       return -2;
     }
   } else if (*cursor >= (uint64_t)*wal_size) {
       return -3;
   }
-  lseek(wal->log, *cursor, SEEK_SET);
-  size_t bytes = read(wal->log, type, 1);
+  platform_file_seek(wal->log, (int64_t)*cursor, PLATFORM_SEEK_SET);
+  size_t bytes = platform_file_read(wal->log, type, 1);
   if (bytes != 1) {
     return 1;
   }
   uint32_t crc;
-  bytes = read(wal->log, &crc, 4);
+  bytes = platform_file_read(wal->log, &crc, 4);
   if (bytes != 4) {
     return 2;
   }
@@ -122,7 +113,7 @@ int wal_read(wal_t* wal, wal_type_e* type, buffer_t** data, uint64_t* cursor, in
       break;
   }
   uint8_t* buf = get_memory(size);
-  bytes = read(wal->log, buf, size);
+  bytes = platform_file_read(wal->log, buf, size);
   if (bytes != size) {
     free(buf);
     return 3;
@@ -140,8 +131,8 @@ int wal_read(wal_t* wal, wal_type_e* type, buffer_t** data, uint64_t* cursor, in
   }
 }
 void wal_destroy(wal_t* wal) {
-  if (wal->log > 0) {
-    close(wal->log);
+  if (wal->log != NULL) {
+    platform_file_close(wal->log);
   }
   free(wal->current_file);
   if (wal->last_file != NULL) {

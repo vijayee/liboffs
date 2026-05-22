@@ -2,8 +2,6 @@
 #include "../Util/allocator.h"
 #include "../Util/error.h"
 #include "../Buffer/buffer.h"
-#include <fcntl.h>
-#include <unistd.h>
 #include <string.h>
 
 void _readable_pull_file_stream_on_pull(readable_pull_file_stream_t* stream);
@@ -14,14 +12,10 @@ readable_push_file_stream_t* readable_push_file_stream_create(scheduler_pool_t* 
 
   rs->filename = strdup(filename);
   rs->chunk_size = chunk_size;
-#ifdef _WIN32
-  rs->fd = open(rs->filename, _O_RDONLY | _O_BINARY, 0644);
-#else
-  rs->fd = open(rs->filename, O_RDONLY, 0644);
-#endif
-  int file_size = lseek(rs->fd, 0, SEEK_END);
-  rs->file_size = file_size;
-  if (lseek(rs->fd, 0, SEEK_SET) < 0) {
+  rs->file = platform_file_open(rs->filename, PLATFORM_O_RDONLY, 0644);
+  int64_t file_size = platform_file_seek(rs->file, 0, PLATFORM_SEEK_END);
+  rs->file_size = (int32_t)file_size;
+  if (platform_file_seek(rs->file, 0, PLATFORM_SEEK_SET) < 0) {
     *error_code = -1;
   }
   stream_init((stream_t*) rs, push, readable_stream, 1, pool,
@@ -32,11 +26,7 @@ readable_push_file_stream_t* readable_push_file_stream_create(scheduler_pool_t* 
 }
 void readable_push_file_stream_destroy(readable_push_file_stream_t* stream) {
   if (refcounter_dereference_is_zero((refcounter_t*) stream)) {
-#ifdef _WIN32
-    _close(stream->fd);
-#else
-    close(stream->fd);
-#endif
+    platform_file_close(stream->file);
     stream_deinit((stream_t*) stream);
     free(stream->filename);
     free(stream);
@@ -58,7 +48,7 @@ void readable_push_file_stream_push(readable_push_file_stream_t* stream) {
     size = stream->chunk_size;
   }
   uint8_t* buf = get_memory(size);
-  size_t bytes = read(stream->fd, buf, size);
+  size_t bytes = platform_file_read(stream->file, buf, size);
   if (bytes != size) {
     free(buf);
     stream_notify((stream_t*)stream, error_event, ERROR("Invalid Read Size"), (void (*)(void*))error_destroy);
@@ -86,7 +76,7 @@ void readable_push_file_stream_read(readable_push_file_stream_t* stream, size_t 
       size = (size_t)diff;
     }
     uint8_t* buf = get_memory(size);
-    size_t bytes = read(stream->fd, buf, size);
+    size_t bytes = platform_file_read(stream->file, buf, size);
     if (bytes != size) {
       free(buf);
       stream_notify((stream_t*)stream, error_event, ERROR("Invalid Read Size"), (void (*)(void*))error_destroy);
@@ -116,25 +106,17 @@ writeable_push_file_stream_t* writeable_push_file_stream_create(scheduler_pool_t
   writeable_stream_write_handler((stream_t*) ws, (void (*)(stream_t*, void*)) writeable_push_file_stream_write);
   stream_close_handler((stream_t*) ws, (void(*)(stream_t*))writeable_push_file_stream_close);
   ws->filename = strdup(filename);
-#ifdef _WIN32
-  ws->fd = open(ws->filename, _O_WRONLY | _O_BINARY | _O_CREAT | _O_TRUNC, 0644);
-#else
-  ws->fd = open(ws->filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-#endif
+  ws->file = platform_file_open(ws->filename, PLATFORM_O_WRONLY | PLATFORM_O_CREAT | PLATFORM_O_TRUNC, 0644);
   return ws;
 }
 
 void writeable_push_file_stream_write(writeable_push_file_stream_t* stream, buffer_t* data) {
-  write(stream->fd, data->data, data->size);
+  platform_file_write(stream->file, data->data, data->size);
   DESTROY(data, buffer);
 }
 void writeable_push_file_stream_destroy(writeable_push_file_stream_t* stream) {
   if (refcounter_dereference_is_zero((refcounter_t*) stream)) {
-#ifdef _WIN32
-    _close(stream->fd);
-#else
-    close(stream->fd);
-#endif
+    platform_file_close(stream->file);
     stream_deinit((stream_t*) stream);
     free(stream->filename);
     free(stream);
@@ -156,14 +138,10 @@ readable_pull_file_stream_t* readable_pull_file_stream_create(scheduler_pool_t* 
 
   rs->filename = strdup(filename);
   rs->chunk_size = chunk_size;
-#ifdef _WIN32
-  rs->fd = open(rs->filename, _O_RDONLY | _O_BINARY, 0644);
-#else
-  rs->fd = open(rs->filename, O_RDONLY, 0644);
-#endif
-  int file_size = lseek(rs->fd, 0, SEEK_END);
-  rs->file_size = file_size;
-  if (lseek(rs->fd, 0, SEEK_SET) < 0) {
+  rs->file = platform_file_open(rs->filename, PLATFORM_O_RDONLY, 0644);
+  int64_t file_size = platform_file_seek(rs->file, 0, PLATFORM_SEEK_END);
+  rs->file_size = (int32_t)file_size;
+  if (platform_file_seek(rs->file, 0, PLATFORM_SEEK_SET) < 0) {
     *error_code = -1;
   }
   stream_init((stream_t*) rs, pull, readable_stream, 0, pool,
@@ -175,11 +153,7 @@ readable_pull_file_stream_t* readable_pull_file_stream_create(scheduler_pool_t* 
 
 void readable_pull_file_stream_destroy(readable_pull_file_stream_t* stream) {
   if (refcounter_dereference_is_zero((refcounter_t*) stream)) {
-#ifdef _WIN32
-    _close(stream->fd);
-#else
-    close(stream->fd);
-#endif
+    platform_file_close(stream->file);
     stream_deinit((stream_t*) stream);
     free(stream->filename);
     free(stream);
@@ -201,7 +175,7 @@ void _readable_pull_file_stream_on_pull(readable_pull_file_stream_t* stream) {
       size = stream->chunk_size;
     }
     uint8_t* buf = get_memory(size);
-    size_t bytes = read(stream->fd, buf, size);
+    size_t bytes = platform_file_read(stream->file, buf, size);
     if (bytes != size) {
       free(buf);
       stream_notify((stream_t*)stream, error_event, ERROR("Invalid Read Size"), (void (*)(void*))error_destroy);
@@ -234,25 +208,17 @@ writeable_pull_file_stream_t* writeable_pull_file_stream_create(scheduler_pool_t
   writeable_stream_write_handler((stream_t*) ws, (void (*)(stream_t*, void*)) writeable_pull_file_stream_write);
   stream_close_handler((stream_t*) ws, (void(*)(stream_t*))writeable_pull_file_stream_close);
   ws->filename = strdup(filename);
-#ifdef _WIN32
-  ws->fd = open(ws->filename, _O_WRONLY | _O_BINARY | _O_CREAT | _O_TRUNC, 0644);
-#else
-  ws->fd = open(ws->filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-#endif
+  ws->file = platform_file_open(ws->filename, PLATFORM_O_WRONLY | PLATFORM_O_CREAT | PLATFORM_O_TRUNC, 0644);
   return ws;
 }
 
 void writeable_pull_file_stream_write(writeable_pull_file_stream_t* stream, buffer_t* data) {
-  write(stream->fd, data->data, data->size);
+  platform_file_write(stream->file, data->data, data->size);
   DESTROY(data, buffer);
 }
 void writeable_pull_file_stream_destroy(writeable_pull_file_stream_t* stream) {
   if (refcounter_dereference_is_zero((refcounter_t*) stream)) {
-#ifdef _WIN32
-    _close(stream->fd);
-#else
-    close(stream->fd);
-#endif
+    platform_file_close(stream->file);
     stream_deinit((stream_t*) stream);
     free(stream->filename);
     free(stream);

@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include "../RefCounter/refcounter.h"
 #include "../Buffer/buffer.h"
+#include "../Platform/platform.h"
 #include <stdint.h>
 
 typedef enum wal_type_e {
@@ -17,7 +18,7 @@ typedef enum wal_type_e {
 } wal_type_e;
 
 typedef struct {
-  int log;
+  platform_file_t* log;
   char* location;
   char* current_file;
   char* last_file;

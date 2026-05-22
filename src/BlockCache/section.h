@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include "../Actor/actor.h"
 #include "../RefCounter/refcounter.h"
+#include "../Platform/platform.h"
 #include "../Util/atomic_compat.h"
 #include "block.h"
 
@@ -91,7 +92,7 @@ typedef struct {
 typedef struct section_t {
   refcounter_t refcounter;
   actor_t actor;
-  int fd;
+  platform_file_t* file;
   size_t id;
   char* meta_path;
   char* path;

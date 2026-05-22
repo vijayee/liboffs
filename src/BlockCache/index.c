@@ -12,8 +12,6 @@
 #include "../Actor/message.h"
 #include <stdio.h>
 #include <stdint.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <errno.h>
 #include <xxh3.h>
 #include <string.h>
@@ -217,46 +215,47 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
       }
       char* index_file_location = path_join(index_location, last);
 
-#ifdef _WIN32
-      int32_t index_fd = open(index_file_location, O_RDWR | O_CREAT, 0644);
-#else
-      int32_t index_fd = open(index_file_location, O_RDWR | O_CREAT, 0644);
-#endif
+      platform_file_t* index_file = platform_file_open(index_file_location, PLATFORM_O_RDONLY, 0644);
       free(index_file_location);
-      off_t size = lseek(index_fd, 0,SEEK_END);
-      if(size < 0) {
-        log_error("index file %d empty", i);
-        *error_code= -1;
-        close(index_fd);
+      if (index_file == NULL) {
+        log_error("index_create: index file %d (%s) failed to open", i, last);
+        *error_code = -1;
         continue;
       }
-      if (lseek(index_fd, 0, SEEK_SET) < 0) {
+      int64_t size = platform_file_seek(index_file, 0, PLATFORM_SEEK_END);
+      if (size < 0) {
+        log_error("index file %d empty", i);
+        *error_code= -1;
+        platform_file_close(index_file);
+        continue;
+      }
+      if (platform_file_seek(index_file, 0, PLATFORM_SEEK_SET) < 0) {
         log_error("index file %d failed to seek start", i);
         *error_code= -2;
-        close(index_fd);
+        platform_file_close(index_file);
         continue;
       }
       uint8_t* buffer = get_clear_memory((size_t)size);
       if (buffer == NULL) {
         log_error("index file %d failed to allocate read buffer", i);
         *error_code = -3;
-        close(index_fd);
+        platform_file_close(index_file);
         continue;
       }
-      size_t bytes = read(index_fd, buffer, (size_t)size);
+      ssize_t bytes = platform_file_read(index_file, buffer, (size_t)size);
 
-      if ((size_t)size != bytes) {
+      if ((size_t)size != (size_t)bytes) {
         log_error("index file %lu failed to read file", i);
         *error_code= -3;
         free(buffer);
-        close(index_fd);
+        platform_file_close(index_file);
         continue;
       }
       struct cbor_load_result result;
 
       cbor_item_t* cbor = cbor_load(buffer, (size_t)size, &result);
       free(buffer);
-      close(index_fd);
+      platform_file_close(index_file);
 
       if (result.error.code != CBOR_ERR_NONE) {
         *error_code= -4;
@@ -1069,7 +1068,7 @@ static uint64_t _index_prune_old_snapshots(index_t* index) {
   uint64_t first_kept_id = 0;
   for (size_t i = 0; i < delete_count; i++) {
     char* filepath = path_join(index->location, files->data[i]);
-    if (unlink(filepath) != 0) {
+    if (platform_file_unlink(filepath) != 0) {
       log_warn("Failed to delete old index snapshot %s: %s", filepath, strerror(errno));
     }
     free(filepath);
@@ -1100,7 +1099,7 @@ static void _index_prune_old_wals(index_t* index, uint64_t first_kept_id) {
     uint64_t wal_id = strtoull(files->data[i], NULL, 10);
     if (wal_id < first_kept_id) {
       char* filepath = path_join(wal_dir, files->data[i]);
-      if (unlink(filepath) != 0) {
+      if (platform_file_unlink(filepath) != 0) {
         log_warn("Failed to delete old WAL %s: %s", filepath, strerror(errno));
       }
       free(filepath);
@@ -1139,14 +1138,9 @@ void index_debounce(void* ctx) {
   uint8_t *cbor_data;
   size_t cbor_size;
   cbor_serialize_alloc(cbor, &cbor_data, &cbor_size);
-#ifdef _WIN32
-  int index_file = open(file, _O_WRONLY | _O_BINARY | _O_CREAT, 0644);
-#else
-  int index_file = open(file, O_WRONLY | O_CREAT, 0644);
-#endif
-
-  write(index_file, cbor_data, cbor_size);
-  close(index_file);
+  platform_file_t* index_file = platform_file_open(file, PLATFORM_O_WRONLY | PLATFORM_O_CREAT, 0644);
+  platform_file_write(index_file, cbor_data, cbor_size);
+  platform_file_close(index_file);
   free(cbor_data);
   wal_destroy(wal);
   cbor_intermediate_decref(cbor);
