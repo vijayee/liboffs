@@ -54,6 +54,10 @@ void offs_msquic_close(void) {
   if (g_msquic_refcount == 0) {
     MsQuicClose(g_msquic);
     g_msquic = NULL;
+    platform_mutex_unlock(g_msquic_lock);
+    platform_mutex_destroy(g_msquic_lock);
+    g_msquic_lock = NULL;
+    return;
   }
   platform_mutex_unlock(g_msquic_lock);
 }
