@@ -9,10 +9,6 @@
 #include <poll-dancer/poll-dancer.h>
 #include <string.h>
 #include <stdio.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
-#include <fcntl.h>
 
 static void* _server_thread(void* arg);
 static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
@@ -89,7 +85,7 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
   transport->loop = pd_loop_create(NULL);
   vec_init(&transport->connections);
   transport->running = 0;
-  transport->listen_fd = -1;
+  transport->listen_sock = NULL;
   transport->listen_watcher = NULL;
   transport->max_connections = 0;
   atomic_store(&transport->active_connections, 0);
@@ -98,9 +94,9 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
   transport->socket_path = get_memory(strlen(socket_path) + 1);
   memcpy(transport->socket_path, socket_path, strlen(socket_path) + 1);
 
-  transport->listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (transport->listen_fd < 0) {
-    perror("socket");
+  transport->listen_sock = platform_local_listen(socket_path);
+  if (transport->listen_sock == NULL) {
+    perror("platform_local_listen");
     pd_loop_destroy(transport->loop);
     _destroy_stack_destroy(transport);
     actor_destroy(&transport->actor);
@@ -109,37 +105,7 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
     return NULL;
   }
 
-  int flags = fcntl(transport->listen_fd, F_GETFL, 0);
-  fcntl(transport->listen_fd, F_SETFL, flags | O_NONBLOCK);
-
-  struct sockaddr_un addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sun_family = AF_UNIX;
-  strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
-
-  unlink(socket_path);
-
-  if (bind(transport->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-    perror("bind");
-    close(transport->listen_fd);
-    pd_loop_destroy(transport->loop);
-    _destroy_stack_destroy(transport);
-    actor_destroy(&transport->actor);
-    free(transport->socket_path);
-    free(transport);
-    return NULL;
-  }
-
-  if (listen(transport->listen_fd, 128) < 0) {
-    perror("listen");
-    close(transport->listen_fd);
-    pd_loop_destroy(transport->loop);
-    _destroy_stack_destroy(transport);
-    actor_destroy(&transport->actor);
-    free(transport->socket_path);
-    free(transport);
-    return NULL;
-  }
+  platform_socket_set_nonblocking(transport->listen_sock);
 
   return transport;
 }
@@ -151,15 +117,16 @@ void unix_transport_destroy(unix_transport_t* transport) {
   if (atomic_load(&transport->running)) {
     unix_transport_stop(transport);
   }
-  if (transport->listen_fd >= 0) {
-    close(transport->listen_fd);
+  if (transport->listen_sock != NULL) {
+    platform_socket_destroy(transport->listen_sock);
+    transport->listen_sock = NULL;
   }
   for (int i = 0; i < transport->connections.length; i++) {
     unix_connection_t* conn = transport->connections.data[i];
     conn->is_closing = 1;
-    if (conn->fd >= 0) {
-      close(conn->fd);
-      conn->fd = -1;
+    if (conn->sock != NULL) {
+      platform_socket_destroy(conn->sock);
+      conn->sock = NULL;
     }
     conn->transport = NULL;
   }
@@ -206,7 +173,7 @@ void unix_transport_destroy(unix_transport_t* transport) {
   }
   vec_deinit(&transport->connections);
   if (transport->socket_path != NULL) {
-    unlink(transport->socket_path);
+    platform_local_cleanup(transport->socket_path);
     free(transport->socket_path);
   }
   actor_destroy(&transport->actor);
@@ -222,23 +189,21 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   unix_transport_t* transport = (unix_transport_t*)user_data;
 
   if (events & PD_EVENT_READ) {
-    struct sockaddr_un client_addr;
-    socklen_t client_len = sizeof(client_addr);
-    int client_fd = accept(transport->listen_fd, (struct sockaddr*)&client_addr, &client_len);
-    if (client_fd < 0) {
+    platform_socket_t* client_sock = platform_local_accept(transport->listen_sock);
+    if (client_sock == NULL) {
       perror("accept");
       return;
     }
 
     if (transport->max_connections > 0 &&
         atomic_load(&transport->active_connections) >= transport->max_connections) {
-      close(client_fd);
+      platform_socket_destroy(client_sock);
       return;
     }
 
-    unix_connection_t* connection = unix_connection_create(transport, client_fd);
+    unix_connection_t* connection = unix_connection_create(transport, client_sock);
     if (connection == NULL) {
-      close(client_fd);
+      platform_socket_destroy(client_sock);
       return;
     }
     vec_push(&transport->connections, connection);
@@ -250,7 +215,7 @@ static void* _server_thread(void* arg) {
   unix_transport_t* transport = (unix_transport_t*)arg;
   platform_thread_setup_stack();
 
-  transport->listen_watcher = pd_watcher_create(transport->loop, transport->listen_fd,
+  transport->listen_watcher = pd_watcher_create(transport->loop, platform_socket_fd(transport->listen_sock),
     PD_EVENT_READ, _accept_callback, transport);
   if (transport->listen_watcher != NULL) {
     pd_watcher_start(transport->listen_watcher);

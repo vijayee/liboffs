@@ -13,6 +13,7 @@
 #include "../../Buffer/buffer.h"
 #include "../../Util/vec.h"
 #include "../../Actor/actor.h"
+#include "../../Platform/platform.h"
 #include "http_route.h"
 #include "../../Util/atomic_compat.h"
 #include <poll-dancer/poll-dancer.h>
@@ -30,7 +31,7 @@ typedef struct http_connection_t {
   refcounter_t refcounter;
   actor_t actor;
   http_server_t* server;
-  int fd;
+  platform_socket_t* sock;
   ATOMIC(pd_watcher_t*) watcher;
   SSL* ssl;
   http_parser parser;
@@ -51,7 +52,7 @@ typedef struct http_connection_t {
   http_route_t* streaming_route;
 } http_connection_t;
 
-http_connection_t* http_connection_create(http_server_t* server, int fd);
+http_connection_t* http_connection_create(http_server_t* server, platform_socket_t* sock);
 void http_connection_destroy(http_connection_t* connection);
 
 void http_connection_dispatch(void* state, message_t* msg);

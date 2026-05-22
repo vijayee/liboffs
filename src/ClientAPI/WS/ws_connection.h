@@ -23,6 +23,7 @@
 #include "../../OFFStreams/tuple_cache.h"
 #include "../../BlockCache/block_cache.h"
 #include "../../Scheduler/scheduler.h"
+#include "../../Platform/platform.h"
 #include <poll-dancer/poll-dancer.h>
 #include "ws_frame.h"
 
@@ -47,7 +48,7 @@ typedef enum {
 typedef struct ws_connection_t {
   refcounter_t refcounter;
   actor_t actor;
-  int fd;
+  platform_socket_t* sock;
   ATOMIC(pd_watcher_t*) watcher;
   SSL* ssl;
   uint8_t is_ssl;
@@ -81,7 +82,7 @@ typedef struct ws_connection_t {
   ws_get_phase_e get_phase;
 } ws_connection_t;
 
-ws_connection_t* ws_connection_create(ws_transport_t* transport, int fd);
+ws_connection_t* ws_connection_create(ws_transport_t* transport, platform_socket_t* sock);
 void ws_connection_destroy(ws_connection_t* connection);
 
 void ws_connection_dispatch(void* state, message_t* msg);

@@ -9,11 +9,6 @@
 #include <poll-dancer/poll-dancer.h>
 #include <string.h>
 #include <stdio.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <fcntl.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
@@ -95,7 +90,7 @@ tcp_transport_t* tcp_transport_create(scheduler_pool_t* pool,
   transport->loop = pd_loop_create(NULL);
   vec_init(&transport->connections);
   transport->running = 0;
-  transport->listen_fd = -1;
+  transport->listen_sock = NULL;
   transport->listen_watcher = NULL;
   transport->max_connections = 0;
   atomic_store(&transport->active_connections, 0);
@@ -151,8 +146,8 @@ tcp_transport_t* tcp_transport_create(scheduler_pool_t* pool,
     }
   }
 
-  transport->listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (transport->listen_fd < 0) {
+  transport->listen_sock = platform_socket_create(PLATFORM_AF_INET, 1);
+  if (transport->listen_sock == NULL) {
     perror("socket");
     if (transport->ssl_ctx != NULL) {
       SSL_CTX_free(transport->ssl_ctx);
@@ -165,23 +160,20 @@ tcp_transport_t* tcp_transport_create(scheduler_pool_t* pool,
     return NULL;
   }
 
-  int flags = fcntl(transport->listen_fd, F_GETFL, 0);
-  fcntl(transport->listen_fd, F_SETFL, flags | O_NONBLOCK);
+  platform_socket_set_nonblocking(transport->listen_sock);
+  platform_socket_set_reuseaddr(transport->listen_sock);
 
-  int opt = 1;
-  setsockopt(transport->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-  struct sockaddr_in addr;
+  platform_address_t addr;
   memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(port);
-  if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {
-    addr.sin_addr.s_addr = INADDR_ANY;
+  addr.family = PLATFORM_AF_INET;
+  addr.inet.port = port;
+  if (platform_address_parse(&addr, host, port) != 0) {
+    addr.inet.addr = 0; /* INADDR_ANY */
   }
 
-  if (bind(transport->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+  if (platform_socket_bind(transport->listen_sock, &addr) < 0) {
     perror("bind");
-    close(transport->listen_fd);
+    platform_socket_destroy(transport->listen_sock);
     if (transport->ssl_ctx != NULL) {
       SSL_CTX_free(transport->ssl_ctx);
     }
@@ -193,9 +185,9 @@ tcp_transport_t* tcp_transport_create(scheduler_pool_t* pool,
     return NULL;
   }
 
-  if (listen(transport->listen_fd, 128) < 0) {
+  if (platform_socket_listen(transport->listen_sock, 128) < 0) {
     perror("listen");
-    close(transport->listen_fd);
+    platform_socket_destroy(transport->listen_sock);
     if (transport->ssl_ctx != NULL) {
       SSL_CTX_free(transport->ssl_ctx);
     }
@@ -217,15 +209,16 @@ void tcp_transport_destroy(tcp_transport_t* transport) {
   if (atomic_load(&transport->running)) {
     tcp_transport_stop(transport);
   }
-  if (transport->listen_fd >= 0) {
-    close(transport->listen_fd);
+  if (transport->listen_sock != NULL) {
+    platform_socket_destroy(transport->listen_sock);
+    transport->listen_sock = NULL;
   }
   for (int i = 0; i < transport->connections.length; i++) {
     tcp_connection_t* conn = transport->connections.data[i];
     conn->is_closing = 1;
-    if (conn->fd >= 0) {
-      close(conn->fd);
-      conn->fd = -1;
+    if (conn->sock != NULL) {
+      platform_socket_destroy(conn->sock);
+      conn->sock = NULL;
     }
     conn->transport = NULL;
   }
@@ -294,23 +287,21 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   tcp_transport_t* transport = (tcp_transport_t*)user_data;
 
   if (events & PD_EVENT_READ) {
-    struct sockaddr_in client_addr;
-    socklen_t client_len = sizeof(client_addr);
-    int client_fd = accept(transport->listen_fd, (struct sockaddr*)&client_addr, &client_len);
-    if (client_fd < 0) {
+    platform_socket_t* client_sock = platform_socket_accept(transport->listen_sock, NULL);
+    if (client_sock == NULL) {
       perror("accept");
       return;
     }
 
     if (transport->max_connections > 0 &&
         atomic_load(&transport->active_connections) >= transport->max_connections) {
-      close(client_fd);
+      platform_socket_destroy(client_sock);
       return;
     }
 
-    tcp_connection_t* connection = tcp_connection_create(transport, client_fd);
+    tcp_connection_t* connection = tcp_connection_create(transport, client_sock);
     if (connection == NULL) {
-      close(client_fd);
+      platform_socket_destroy(client_sock);
       return;
     }
     vec_push(&transport->connections, connection);
@@ -322,7 +313,7 @@ static void* _server_thread(void* arg) {
   tcp_transport_t* transport = (tcp_transport_t*)arg;
   platform_thread_setup_stack();
 
-  transport->listen_watcher = pd_watcher_create(transport->loop, transport->listen_fd,
+  transport->listen_watcher = pd_watcher_create(transport->loop, platform_socket_fd(transport->listen_sock),
     PD_EVENT_READ, _accept_callback, transport);
   if (transport->listen_watcher != NULL) {
     pd_watcher_start(transport->listen_watcher);

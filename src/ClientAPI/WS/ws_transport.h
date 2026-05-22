@@ -30,7 +30,7 @@ typedef struct ws_transport_t {
   pd_loop_t* loop;
   platform_thread_t* thread;
   ATOMIC(uint8_t) running;
-  int listen_fd;
+  platform_socket_t* listen_sock;
   pd_watcher_t* listen_watcher;
   vec_ws_connection_t connections;
   scheduler_pool_t* pool;

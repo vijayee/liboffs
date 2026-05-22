@@ -13,11 +13,6 @@
 #include <poll-dancer/poll-dancer.h>
 #include <string.h>
 #include <stdio.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <fcntl.h>
 
 static void* _server_thread(void* arg);
 static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
@@ -91,40 +86,40 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
   vec_init(&server->middlewares);
   vec_init(&server->connections);
   server->running = 0;
-  server->listen_fd = -1;
+  server->listen_sock = NULL;
   server->listen_watcher = NULL;
   server->max_connections = 0;
   atomic_store(&server->active_connections, 0);
   _destroy_stack_init(server);
 
-  server->listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (server->listen_fd < 0) {
+  server->listen_sock = platform_socket_create(PLATFORM_AF_INET, 1);
+  if (server->listen_sock == NULL) {
     perror("socket");
     free(server);
     return NULL;
   }
 
-  int opt = 1;
-  setsockopt(server->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+  platform_socket_set_nonblocking(server->listen_sock);
+  platform_socket_set_reuseaddr(server->listen_sock);
 
-  struct sockaddr_in addr;
+  platform_address_t addr;
   memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(port);
-  if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {
-    addr.sin_addr.s_addr = INADDR_ANY;
+  addr.family = PLATFORM_AF_INET;
+  addr.inet.port = port;
+  if (platform_address_parse(&addr, host, port) != 0) {
+    addr.inet.addr = 0; /* INADDR_ANY */
   }
 
-  if (bind(server->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+  if (platform_socket_bind(server->listen_sock, &addr) < 0) {
     perror("bind");
-    close(server->listen_fd);
+    platform_socket_destroy(server->listen_sock);
     free(server);
     return NULL;
   }
 
-  if (listen(server->listen_fd, 128) < 0) {
+  if (platform_socket_listen(server->listen_sock, 128) < 0) {
     perror("listen");
-    close(server->listen_fd);
+    platform_socket_destroy(server->listen_sock);
     free(server);
     return NULL;
   }
@@ -144,7 +139,7 @@ http_server_t* http_server_create_ssl(scheduler_pool_t* pool, const char* host, 
   server->ssl_ctx = SSL_CTX_new(TLS_server_method());
   if (server->ssl_ctx == NULL) {
     fprintf(stderr, "http_server_create_ssl: failed to create SSL_CTX\n");
-    close(server->listen_fd);
+    platform_socket_destroy(server->listen_sock);
     free(server);
     return NULL;
   }
@@ -152,7 +147,7 @@ http_server_t* http_server_create_ssl(scheduler_pool_t* pool, const char* host, 
   if (SSL_CTX_use_certificate_file(server->ssl_ctx, cert_path, SSL_FILETYPE_PEM) <= 0) {
     fprintf(stderr, "http_server_create_ssl: failed to load certificate from %s\n", cert_path);
     SSL_CTX_free(server->ssl_ctx);
-    close(server->listen_fd);
+    platform_socket_destroy(server->listen_sock);
     free(server);
     return NULL;
   }
@@ -160,7 +155,7 @@ http_server_t* http_server_create_ssl(scheduler_pool_t* pool, const char* host, 
   if (SSL_CTX_use_PrivateKey_file(server->ssl_ctx, key_path, SSL_FILETYPE_PEM) <= 0) {
     fprintf(stderr, "http_server_create_ssl: failed to load private key from %s\n", key_path);
     SSL_CTX_free(server->ssl_ctx);
-    close(server->listen_fd);
+    platform_socket_destroy(server->listen_sock);
     free(server);
     return NULL;
   }
@@ -168,7 +163,7 @@ http_server_t* http_server_create_ssl(scheduler_pool_t* pool, const char* host, 
   if (!SSL_CTX_check_private_key(server->ssl_ctx)) {
     fprintf(stderr, "http_server_create_ssl: private key does not match certificate\n");
     SSL_CTX_free(server->ssl_ctx);
-    close(server->listen_fd);
+    platform_socket_destroy(server->listen_sock);
     free(server);
     return NULL;
   }
@@ -183,8 +178,9 @@ void http_server_destroy(http_server_t* server) {
   if (atomic_load(&server->running)) {
     http_server_stop(server);
   }
-  if (server->listen_fd >= 0) {
-    close(server->listen_fd);
+  if (server->listen_sock != NULL) {
+    platform_socket_destroy(server->listen_sock);
+    server->listen_sock = NULL;
   }
   /* Mark all connections as closing, close their fds so actors drain quickly,
    * and null out the server pointer so connection callbacks won't send
@@ -192,9 +188,9 @@ void http_server_destroy(http_server_t* server) {
   for (int i = 0; i < server->connections.length; i++) {
     http_connection_t* conn = server->connections.data[i];
     conn->is_closing = 1;
-    if (conn->fd >= 0) {
-      close(conn->fd);
-      conn->fd = -1;
+    if (conn->sock != NULL) {
+      platform_socket_destroy(conn->sock);
+      conn->sock = NULL;
     }
     conn->server = NULL;
   }
@@ -373,23 +369,21 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   http_server_t* server = (http_server_t*)user_data;
 
   if (events & PD_EVENT_READ) {
-    struct sockaddr_in client_addr;
-    socklen_t client_len = sizeof(client_addr);
-    int client_fd = accept(server->listen_fd, (struct sockaddr*)&client_addr, &client_len);
-    if (client_fd < 0) {
+    platform_socket_t* client_sock = platform_socket_accept(server->listen_sock, NULL);
+    if (client_sock == NULL) {
       perror("accept");
       return;
     }
 
     if (server->max_connections > 0 &&
         atomic_load(&server->active_connections) >= server->max_connections) {
-      close(client_fd);
+      platform_socket_destroy(client_sock);
       return;
     }
 
-    http_connection_t* connection = http_connection_create(server, client_fd);
+    http_connection_t* connection = http_connection_create(server, client_sock);
     if (connection == NULL) {
-      close(client_fd);
+      platform_socket_destroy(client_sock);
       return;
     }
     vec_push(&server->connections, connection);
@@ -397,7 +391,7 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
 
     if (server->ssl_ctx != NULL) {
       connection->ssl = SSL_new(server->ssl_ctx);
-      SSL_set_fd(connection->ssl, client_fd);
+      SSL_set_fd(connection->ssl, platform_socket_fd(client_sock));
       SSL_set_accept_state(connection->ssl);
       connection->is_ssl = 1;
     }
@@ -408,7 +402,7 @@ static void* _server_thread(void* arg) {
   http_server_t* server = (http_server_t*)arg;
   platform_thread_setup_stack();
 
-  server->listen_watcher = pd_watcher_create(server->loop, server->listen_fd,
+  server->listen_watcher = pd_watcher_create(server->loop, platform_socket_fd(server->listen_sock),
     PD_EVENT_READ, _accept_callback, server);
   if (server->listen_watcher != NULL) {
     pd_watcher_start(server->listen_watcher);

@@ -23,6 +23,7 @@
 #include "../../OFFStreams/tuple_cache.h"
 #include "../../BlockCache/block_cache.h"
 #include "../../Scheduler/scheduler.h"
+#include "../../Platform/platform.h"
 #include <poll-dancer/poll-dancer.h>
 
 typedef struct unix_transport_t unix_transport_t;
@@ -41,7 +42,7 @@ typedef enum {
 typedef struct unix_connection_t {
   refcounter_t refcounter;
   actor_t actor;
-  int fd;
+  platform_socket_t* sock;
   ATOMIC(pd_watcher_t*) watcher;
   stream_framer_t* framer;
   buffer_t* write_buffer;
@@ -69,7 +70,7 @@ typedef struct unix_connection_t {
   uint8_t get_phase;
 } unix_connection_t;
 
-unix_connection_t* unix_connection_create(unix_transport_t* transport, int fd);
+unix_connection_t* unix_connection_create(unix_transport_t* transport, platform_socket_t* sock);
 void unix_connection_destroy(unix_connection_t* connection);
 
 void unix_connection_dispatch(void* state, message_t* msg);

@@ -11,14 +11,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include "../../Platform/platform.h"
+#include "../../Platform/platform_local.h"
 #include <pthread.h>
-#include <errno.h>
 #include <openssl/sha.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -56,11 +51,11 @@ struct offs_client_t {
   volatile uint8_t connected;
   union {
     struct {
-      int fd;
+      platform_socket_t* sock;
       uint8_t is_unix;
     } raw;
     struct {
-      int fd;
+      platform_socket_t* sock;
       SSL* ssl;
       SSL_CTX* ssl_ctx;
       uint8_t is_ssl;
@@ -185,11 +180,11 @@ static QUIC_STATUS QUIC_API _wt_connection_callback(
 #endif /* HAS_MSQUIC */
 
 static int _raw_send(offs_client_t* client, const uint8_t* data, size_t len) {
-  ssize_t sent = send(client->transport.raw.fd, data, len, MSG_NOSIGNAL);
+  ssize_t sent = platform_socket_send(client->transport.raw.sock, data, len);
   if (sent < 0) return -1;
   size_t total_sent = (size_t)sent;
   while (total_sent < len) {
-    sent = send(client->transport.raw.fd, data + total_sent, len - total_sent, MSG_NOSIGNAL);
+    sent = platform_socket_send(client->transport.raw.sock, data + total_sent, len - total_sent);
     if (sent <= 0) return -1;
     total_sent += (size_t)sent;
   }
@@ -280,8 +275,7 @@ static void _send_frame(offs_client_t* client, cbor_item_t* frame) {
       memcpy(client->write_buffer->data + client->write_buffer->size, framed, framed_len);
       client->write_buffer->size += framed_len;
     } else {
-      int fd = client->transport.raw.fd;
-      ssize_t sent = send(fd, framed, framed_len, MSG_NOSIGNAL);
+      ssize_t sent = platform_socket_send(client->transport.raw.sock, framed, framed_len);
       if (sent < 0) {
         client->connected = 0;
       } else if ((size_t)sent < framed_len) {
@@ -361,7 +355,7 @@ static ssize_t _ws_recv(offs_client_t* client, uint8_t* buf, size_t buf_size) {
   if (client->transport.ws.is_ssl && client->transport.ws.ssl != NULL) {
     return SSL_read(client->transport.ws.ssl, buf, (int)buf_size);
   }
-  return recv(client->transport.ws.fd, buf, buf_size, 0);
+  return platform_socket_recv(client->transport.ws.sock, buf, buf_size);
 }
 
 static void* _recv_thread(void* arg) {
@@ -441,7 +435,7 @@ static void* _recv_thread(void* arg) {
       }
     } else {
       /* unix/tcp: raw socket + stream_framer */
-      ssize_t bytes_read = recv(client->transport.raw.fd, buf, sizeof(buf), 0);
+      ssize_t bytes_read = platform_socket_recv(client->transport.raw.sock, buf, sizeof(buf));
       if (bytes_read <= 0) {
         client->connected = 0;
         break;
@@ -468,40 +462,28 @@ cleanup:
   return NULL;
 }
 
-static int _connect_unix(const char* path) {
-  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (fd < 0) return -1;
-
-  struct sockaddr_un addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sun_family = AF_UNIX;
-  strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
-
-  if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-    close(fd);
-    return -1;
-  }
-  return fd;
+static platform_socket_t* _connect_unix(const char* path) {
+  return platform_local_connect(path);
 }
 
-static int _connect_tcp(const char* host, uint16_t port) {
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) return -1;
+static platform_socket_t* _connect_tcp(const char* host, uint16_t port) {
+  platform_socket_t* sock = platform_socket_create(PLATFORM_AF_INET, 1);
+  if (sock == NULL) return NULL;
 
-  struct sockaddr_in addr;
+  platform_address_t addr;
   memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(port);
-  if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {
-    close(fd);
-    return -1;
+  addr.family = PLATFORM_AF_INET;
+  addr.inet.port = port;
+  if (platform_address_parse(&addr, host, port) != 0) {
+    platform_socket_destroy(sock);
+    return NULL;
   }
 
-  if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-    close(fd);
-    return -1;
+  if (platform_socket_connect(sock, &addr) < 0) {
+    platform_socket_destroy(sock);
+    return NULL;
   }
-  return fd;
+  return sock;
 }
 
 static char* _ws_compute_accept_key(const char* client_key) {
@@ -587,7 +569,7 @@ static int _ws_upgrade(offs_client_t* client, const char* ws_host) {
     if (client->transport.ws.is_ssl && client->transport.ws.ssl != NULL) {
       received = SSL_read(client->transport.ws.ssl, response + total, sizeof(response) - 1 - total);
     } else {
-      received = recv(client->transport.ws.fd, response + total, sizeof(response) - 1 - total, 0);
+      received = platform_socket_recv(client->transport.ws.sock, response + total, sizeof(response) - 1 - total);
     }
     if (received <= 0) {
       free(expected_accept);
@@ -662,7 +644,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
 
   if (strncmp(transport_url, "unix://", 7) == 0) {
     const char* path = transport_url + 7;
-    client->transport.raw.fd = _connect_unix(path);
+    client->transport.raw.sock = _connect_unix(path);
     client->transport.raw.is_unix = 1;
     client->transport_type = OFFS_TRANSPORT_UNIX;
   } else if (strncmp(transport_url, "tcp://", 6) == 0) {
@@ -679,7 +661,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
     }
     *colon = '\0';
     uint16_t port = (uint16_t)atoi(colon + 1);
-    client->transport.raw.fd = _connect_tcp(host, port);
+    client->transport.raw.sock = _connect_tcp(host, port);
     client->transport.raw.is_unix = 0;
     client->transport_type = OFFS_TRANSPORT_TCP;
     free(host);
@@ -706,12 +688,12 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       ws_host = addr_copy;
     }
 
-    client->transport.ws.fd = _connect_tcp(ws_host, port);
+    client->transport.ws.sock = _connect_tcp(ws_host, port);
     client->transport.ws.ssl = NULL;
     client->transport.ws.is_ssl = is_ssl;
     client->transport.ws.recv_buf = NULL;
 
-    if (client->transport.ws.fd < 0) {
+    if (client->transport.ws.sock == NULL) {
       free(addr_copy);
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
@@ -726,21 +708,21 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       if (ssl_ctx == NULL) {
 
         free(addr_copy);
-        close(client->transport.ws.fd);
+        platform_socket_destroy(client->transport.ws.sock);
         stream_framer_destroy(client->framer);
         platform_mutex_destroy(client->lock);
         free(client);
         return NULL;
       }
       SSL* ssl = SSL_new(ssl_ctx);
-      SSL_set_fd(ssl, client->transport.ws.fd);
+      SSL_set_fd(ssl, platform_socket_fd(client->transport.ws.sock));
       SSL_set_tlsext_host_name(ssl, ws_host);
       if (SSL_connect(ssl) <= 0) {
         SSL_free(ssl);
         SSL_CTX_free(ssl_ctx);
 
         free(addr_copy);
-        close(client->transport.ws.fd);
+        platform_socket_destroy(client->transport.ws.sock);
         stream_framer_destroy(client->framer);
         platform_mutex_destroy(client->lock);
         free(client);
@@ -759,7 +741,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
         SSL_CTX_free(client->transport.ws.ssl_ctx);
       }
       free(addr_copy);
-      close(client->transport.ws.fd);
+      platform_socket_destroy(client->transport.ws.sock);
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
       free(client);
@@ -950,7 +932,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
     return NULL;
   }
 
-  if (client->transport.raw.fd < 0) {
+  if (client->transport.raw.sock == NULL) {
     stream_framer_destroy(client->framer);
     platform_mutex_destroy(client->lock);
     free(client);
@@ -973,9 +955,10 @@ void offs_client_disconnect(offs_client_t* client) {
   switch (client->transport_type) {
     case OFFS_TRANSPORT_UNIX:
     case OFFS_TRANSPORT_TCP:
-      if (client->transport.raw.fd >= 0) {
-        shutdown(client->transport.raw.fd, SHUT_RDWR);
-        close(client->transport.raw.fd);
+      if (client->transport.raw.sock != NULL) {
+        platform_socket_shutdown(client->transport.raw.sock, PLATFORM_SHUT_RDWR);
+        platform_socket_destroy(client->transport.raw.sock);
+        client->transport.raw.sock = NULL;
       }
       break;
     case OFFS_TRANSPORT_WS:
@@ -986,9 +969,10 @@ void offs_client_disconnect(offs_client_t* client) {
       if (client->transport.ws.ssl_ctx != NULL) {
         SSL_CTX_free(client->transport.ws.ssl_ctx);
       }
-      if (client->transport.ws.fd >= 0) {
-        shutdown(client->transport.ws.fd, SHUT_RDWR);
-        close(client->transport.ws.fd);
+      if (client->transport.ws.sock != NULL) {
+        platform_socket_shutdown(client->transport.ws.sock, PLATFORM_SHUT_RDWR);
+        platform_socket_destroy(client->transport.ws.sock);
+        client->transport.ws.sock = NULL;
       }
       if (client->transport.ws.recv_buf != NULL) {
         DESTROY(client->transport.ws.recv_buf, buffer);

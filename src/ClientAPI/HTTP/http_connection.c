@@ -14,8 +14,6 @@
 #include "../../Scheduler/scheduler.h"
 #include <string.h>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <fcntl.h>
 #include <errno.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -249,7 +247,7 @@ static int _on_message_complete(http_parser* parser) {
     DESTROY(response, http_response);
 
     if (!connection->request->keep_alive) {
-      shutdown(connection->fd, SHUT_WR);
+      platform_socket_shutdown(connection->sock, PLATFORM_SHUT_WR);
     }
   }
 
@@ -305,9 +303,9 @@ static void _connection_stop_watcher(http_connection_t* connection) {
 
 /* Close the fd and mark connection as closing. Used from dispatch (worker thread). */
 static void _connection_close_fd(http_connection_t* connection) {
-  if (connection->fd >= 0) {
-    close(connection->fd);
-    connection->fd = -1;
+  if (connection->sock != NULL) {
+    platform_socket_destroy(connection->sock);
+    connection->sock = NULL;
   }
   connection->is_closing = 1;
 }
@@ -325,7 +323,7 @@ void http_connection_dispatch(void* state, message_t* msg) {
     case HTTP_CONNECTION_DATA: {
       buffer_t* data = (buffer_t*)msg->payload;
       msg->payload = NULL; /* Take ownership — actor_run won't destroy it */
-      if (connection->fd < 0) {
+      if (connection->sock == NULL) {
         DESTROY(data, buffer);
         break;
       }
@@ -365,7 +363,7 @@ void http_connection_dispatch(void* state, message_t* msg) {
     case HTTP_CONNECTION_WRITE: {
       buffer_t* buf = (buffer_t*)msg->payload;
       msg->payload = NULL; /* Take ownership — actor_run won't destroy it */
-      if (connection->fd < 0) {
+      if (connection->sock == NULL) {
         DESTROY(buf, buffer);
         break;
       }
@@ -379,7 +377,7 @@ void http_connection_dispatch(void* state, message_t* msg) {
         break;
       }
       /* Try direct send */
-      ssize_t sent = send(connection->fd, buf->data, buf->size, MSG_NOSIGNAL);
+      ssize_t sent = platform_socket_send(connection->sock, buf->data, buf->size);
       if (sent < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
           connection->write_buffer = buf;
@@ -410,7 +408,7 @@ void http_connection_dispatch(void* state, message_t* msg) {
     }
 
     case HTTP_CONNECTION_WRITABLE: {
-      if (connection->fd < 0) {
+      if (connection->sock == NULL) {
         break;
       }
       if (connection->write_buffer == NULL || connection->write_buffer->size == 0) {
@@ -418,8 +416,8 @@ void http_connection_dispatch(void* state, message_t* msg) {
         _connection_update_watcher(connection, PD_EVENT_READ);
         break;
       }
-      ssize_t sent = send(connection->fd, connection->write_buffer->data,
-                           connection->write_buffer->size, MSG_NOSIGNAL);
+      ssize_t sent = platform_socket_send(connection->sock, connection->write_buffer->data,
+                           connection->write_buffer->size);
       if (sent > 0) {
         if ((size_t)sent >= connection->write_buffer->size) {
           DESTROY(connection->write_buffer, buffer);
@@ -427,8 +425,8 @@ void http_connection_dispatch(void* state, message_t* msg) {
           connection->write_pending = 0;
           if (connection->is_closing) {
             /* All data flushed — finish the deferred close */
-            if (connection->fd >= 0) {
-              shutdown(connection->fd, SHUT_WR);
+            if (connection->sock != NULL) {
+              platform_socket_shutdown(connection->sock, PLATFORM_SHUT_WR);
             }
             _connection_stop_watcher(connection);
             _connection_close_fd(connection);
@@ -467,8 +465,8 @@ void http_connection_dispatch(void* state, message_t* msg) {
         _connection_update_watcher(connection, PD_EVENT_READ | PD_EVENT_WRITE);
         break;
       }
-      if (connection->fd >= 0) {
-        shutdown(connection->fd, SHUT_WR);
+      if (connection->sock != NULL) {
+        platform_socket_shutdown(connection->sock, PLATFORM_SHUT_WR);
       }
       _connection_stop_watcher(connection);
       _connection_close_fd(connection);
@@ -530,7 +528,7 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
         return;
       }
     } else {
-      bytes_read = recv(connection->fd, buffer, sizeof(buffer), 0);
+      bytes_read = platform_socket_recv(connection->sock, buffer, sizeof(buffer));
       if (bytes_read <= 0) {
         if (bytes_read == 0) {
           message_t msg;
@@ -561,11 +559,11 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   }
 }
 
-http_connection_t* http_connection_create(http_server_t* server, int fd) {
+http_connection_t* http_connection_create(http_server_t* server, platform_socket_t* sock) {
   http_connection_t* connection = get_clear_memory(sizeof(http_connection_t));
   refcounter_init((refcounter_t*)connection);
   connection->server = server;
-  connection->fd = fd;
+  connection->sock = sock;
   connection->ssl = NULL;
   connection->is_ssl = 0;
   connection->headers_complete = 0;
@@ -583,13 +581,12 @@ http_connection_t* http_connection_create(http_server_t* server, int fd) {
 
   actor_init(&connection->actor, connection, http_connection_dispatch, server->pool);
 
-  int flags = fcntl(fd, F_GETFL, 0);
-  fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  platform_socket_set_nonblocking(sock);
 
   http_parser_init(&connection->parser, HTTP_REQUEST);
   connection->parser.data = connection;
 
-  ATOMIC_STORE(&connection->watcher, pd_watcher_create(server->loop, fd,
+  ATOMIC_STORE(&connection->watcher, pd_watcher_create(server->loop, platform_socket_fd(sock),
     PD_EVENT_READ, _connection_read_callback, connection));
   if (ATOMIC_LOAD(&connection->watcher) != NULL) {
     pd_watcher_start(ATOMIC_LOAD(&connection->watcher));
@@ -630,8 +627,9 @@ void http_connection_destroy(http_connection_t* connection) {
         }
       }
     }
-    if (connection->fd >= 0) {
-      close(connection->fd);
+    if (connection->sock != NULL) {
+      platform_socket_destroy(connection->sock);
+      connection->sock = NULL;
     }
     if (connection->request != NULL) {
       DESTROY(connection->request, http_request);
@@ -653,7 +651,7 @@ void http_connection_destroy(http_connection_t* connection) {
 }
 
 void http_connection_write(http_connection_t* connection, const char* data, size_t length) {
-  if (connection == NULL || connection->fd < 0) {
+  if (connection == NULL || connection->sock == NULL) {
     return;
   }
   buffer_t* buf = buffer_create_from_pointer_copy((uint8_t*)data, length);

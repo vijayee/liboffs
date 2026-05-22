@@ -29,9 +29,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <fcntl.h>
 #include <errno.h>
 #include <stdio.h>
 
@@ -130,9 +127,9 @@ static void _connection_stop_watcher(unix_connection_t* connection) {
 }
 
 static void _connection_close_fd(unix_connection_t* connection) {
-  if (connection->fd >= 0) {
-    close(connection->fd);
-    connection->fd = -1;
+  if (connection->sock != NULL) {
+    platform_socket_destroy(connection->sock);
+    connection->sock = NULL;
   }
   connection->is_closing = 1;
 }
@@ -638,7 +635,7 @@ void unix_connection_dispatch(void* state, message_t* msg) {
     case UNIX_CONNECTION_DATA: {
       buffer_t* data = (buffer_t*)msg->payload;
       msg->payload = NULL;
-      if (connection->fd < 0) {
+      if (connection->sock == NULL) {
         DESTROY(data, buffer);
         break;
       }
@@ -674,7 +671,7 @@ void unix_connection_dispatch(void* state, message_t* msg) {
     case UNIX_CONNECTION_WRITE: {
       buffer_t* buf = (buffer_t*)msg->payload;
       msg->payload = NULL;
-      if (connection->fd < 0) {
+      if (connection->sock == NULL) {
         DESTROY(buf, buffer);
         break;
       }
@@ -686,7 +683,7 @@ void unix_connection_dispatch(void* state, message_t* msg) {
         DESTROY(buf, buffer);
         break;
       }
-      ssize_t sent = send(connection->fd, buf->data, buf->size, MSG_NOSIGNAL);
+      ssize_t sent = platform_socket_send(connection->sock, buf->data, buf->size);
       if (sent < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
           connection->write_buffer = buf;
@@ -716,7 +713,7 @@ void unix_connection_dispatch(void* state, message_t* msg) {
     }
 
     case UNIX_CONNECTION_WRITABLE: {
-      if (connection->fd < 0) {
+      if (connection->sock == NULL) {
         break;
       }
       if (connection->write_buffer == NULL || connection->write_buffer->size == 0) {
@@ -724,16 +721,16 @@ void unix_connection_dispatch(void* state, message_t* msg) {
         _connection_update_watcher(connection, PD_EVENT_READ);
         break;
       }
-      ssize_t sent = send(connection->fd, connection->write_buffer->data,
-                           connection->write_buffer->size, MSG_NOSIGNAL);
+      ssize_t sent = platform_socket_send(connection->sock, connection->write_buffer->data,
+                           connection->write_buffer->size);
       if (sent > 0) {
         if ((size_t)sent >= connection->write_buffer->size) {
           DESTROY(connection->write_buffer, buffer);
           connection->write_buffer = NULL;
           connection->write_pending = 0;
           if (connection->is_closing) {
-            if (connection->fd >= 0) {
-              shutdown(connection->fd, SHUT_WR);
+            if (connection->sock != NULL) {
+              platform_socket_shutdown(connection->sock, PLATFORM_SHUT_WR);
             }
             _connection_stop_watcher(connection);
             _connection_close_fd(connection);
@@ -768,8 +765,8 @@ void unix_connection_dispatch(void* state, message_t* msg) {
         _connection_update_watcher(connection, PD_EVENT_READ | PD_EVENT_WRITE);
         break;
       }
-      if (connection->fd >= 0) {
-        shutdown(connection->fd, SHUT_WR);
+      if (connection->sock != NULL) {
+        platform_socket_shutdown(connection->sock, PLATFORM_SHUT_WR);
       }
       _connection_stop_watcher(connection);
       _connection_close_fd(connection);
@@ -830,7 +827,7 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
 
   if (events & PD_EVENT_READ) {
     uint8_t buffer[READ_BUFFER_SIZE];
-    ssize_t bytes_read = recv(connection->fd, buffer, sizeof(buffer), 0);
+    ssize_t bytes_read = platform_socket_recv(connection->sock, buffer, sizeof(buffer));
     if (bytes_read <= 0) {
       if (bytes_read == 0) {
         message_t msg;
@@ -862,11 +859,11 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
 
 /* --- Create / Destroy --- */
 
-unix_connection_t* unix_connection_create(unix_transport_t* transport, int fd) {
+unix_connection_t* unix_connection_create(unix_transport_t* transport, platform_socket_t* sock) {
   unix_connection_t* connection = get_clear_memory(sizeof(unix_connection_t));
   refcounter_init((refcounter_t*)connection);
   connection->transport = transport;
-  connection->fd = fd;
+  connection->sock = sock;
   connection->pool = transport->pool;
   connection->bc = transport->bc;
   connection->ofd_cache = transport->ofd_cache;
@@ -891,10 +888,9 @@ unix_connection_t* unix_connection_create(unix_transport_t* transport, int fd) {
 
   actor_init(&connection->actor, connection, unix_connection_dispatch, transport->pool);
 
-  int flags = fcntl(fd, F_GETFL, 0);
-  fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  platform_socket_set_nonblocking(sock);
 
-  ATOMIC_STORE(&connection->watcher, pd_watcher_create(transport->loop, fd,
+  ATOMIC_STORE(&connection->watcher, pd_watcher_create(transport->loop, platform_socket_fd(sock),
     PD_EVENT_READ, _connection_read_callback, connection));
   if (ATOMIC_LOAD(&connection->watcher) != NULL) {
     pd_watcher_start(ATOMIC_LOAD(&connection->watcher));
@@ -931,8 +927,9 @@ void unix_connection_destroy(unix_connection_t* connection) {
         }
       }
     }
-    if (connection->fd >= 0) {
-      close(connection->fd);
+    if (connection->sock != NULL) {
+      platform_socket_destroy(connection->sock);
+      connection->sock = NULL;
     }
     if (connection->framer != NULL) {
       stream_framer_destroy(connection->framer);
@@ -966,7 +963,7 @@ void unix_connection_destroy(unix_connection_t* connection) {
 }
 
 void unix_connection_write(unix_connection_t* connection, const uint8_t* data, size_t length) {
-  if (connection == NULL || connection->fd < 0) {
+  if (connection == NULL || connection->sock == NULL) {
     return;
   }
   buffer_t* buf = buffer_create_from_pointer_copy((uint8_t*)data, length);

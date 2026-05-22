@@ -29,9 +29,6 @@
 #include <strings.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <fcntl.h>
 #include <errno.h>
 #include <stdio.h>
 #include <openssl/ssl.h>
@@ -197,7 +194,7 @@ static char* _compute_ws_accept_key(const char* client_key) {
 /* --- Helper: send raw bytes to connection (handles SSL and buffering) --- */
 
 static void _ws_connection_send_raw(ws_connection_t* conn, const uint8_t* data, size_t length) {
-  if (conn == NULL || conn->fd < 0) {
+  if (conn == NULL || conn->sock == NULL) {
     return;
   }
   ws_connection_write(conn, data, length);
@@ -273,9 +270,9 @@ static void _connection_close_fd(ws_connection_t* connection) {
     SSL_free(connection->ssl);
     connection->ssl = NULL;
   }
-  if (connection->fd >= 0) {
-    close(connection->fd);
-    connection->fd = -1;
+  if (connection->sock != NULL) {
+    platform_socket_destroy(connection->sock);
+    connection->sock = NULL;
   }
   connection->is_closing = 1;
 }
@@ -926,7 +923,7 @@ void ws_connection_dispatch(void* state, message_t* msg) {
     case WS_CONNECTION_DATA: {
       buffer_t* data = (buffer_t*)msg->payload;
       msg->payload = NULL;
-      if (connection->fd < 0) {
+      if (connection->sock == NULL) {
         DESTROY(data, buffer);
         break;
       }
@@ -1078,7 +1075,7 @@ void ws_connection_dispatch(void* state, message_t* msg) {
     case WS_CONNECTION_WRITE: {
       buffer_t* buf = (buffer_t*)msg->payload;
       msg->payload = NULL;
-      if (connection->fd < 0) {
+      if (connection->sock == NULL) {
         DESTROY(buf, buffer);
         break;
       }
@@ -1094,7 +1091,7 @@ void ws_connection_dispatch(void* state, message_t* msg) {
       if (connection->is_ssl && connection->ssl != NULL) {
         sent = SSL_write(connection->ssl, buf->data, (int)buf->size);
       } else {
-        sent = send(connection->fd, buf->data, buf->size, MSG_NOSIGNAL);
+        sent = platform_socket_send(connection->sock, buf->data, buf->size);
       }
       if (sent < 0) {
         if (connection->is_ssl && connection->ssl != NULL) {
@@ -1138,7 +1135,7 @@ void ws_connection_dispatch(void* state, message_t* msg) {
     }
 
     case WS_CONNECTION_WRITABLE: {
-      if (connection->fd < 0) {
+      if (connection->sock == NULL) {
         break;
       }
       if (connection->write_buffer == NULL || connection->write_buffer->size == 0) {
@@ -1151,8 +1148,8 @@ void ws_connection_dispatch(void* state, message_t* msg) {
         sent = SSL_write(connection->ssl, connection->write_buffer->data,
                          (int)connection->write_buffer->size);
       } else {
-        sent = send(connection->fd, connection->write_buffer->data,
-                     connection->write_buffer->size, MSG_NOSIGNAL);
+        sent = platform_socket_send(connection->sock, connection->write_buffer->data,
+                     connection->write_buffer->size);
       }
       if (sent > 0) {
         if ((size_t)sent >= connection->write_buffer->size) {
@@ -1165,8 +1162,8 @@ void ws_connection_dispatch(void* state, message_t* msg) {
               SSL_free(connection->ssl);
               connection->ssl = NULL;
             }
-            if (connection->fd >= 0) {
-              shutdown(connection->fd, SHUT_WR);
+            if (connection->sock != NULL) {
+              platform_socket_shutdown(connection->sock, PLATFORM_SHUT_WR);
             }
             _connection_stop_watcher(connection);
             _connection_close_fd(connection);
@@ -1219,8 +1216,8 @@ void ws_connection_dispatch(void* state, message_t* msg) {
         SSL_free(connection->ssl);
         connection->ssl = NULL;
       }
-      if (connection->fd >= 0) {
-        shutdown(connection->fd, SHUT_WR);
+      if (connection->sock != NULL) {
+        platform_socket_shutdown(connection->sock, PLATFORM_SHUT_WR);
       }
       _connection_stop_watcher(connection);
       _connection_close_fd(connection);
@@ -1306,7 +1303,7 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
         return;
       }
     } else {
-      bytes_read = recv(connection->fd, read_buffer, sizeof(read_buffer), 0);
+      bytes_read = platform_socket_recv(connection->sock, read_buffer, sizeof(read_buffer));
       if (bytes_read <= 0) {
         if (bytes_read == 0) {
           message_t msg;
@@ -1340,11 +1337,11 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
 
 /* --- Create / Destroy --- */
 
-ws_connection_t* ws_connection_create(ws_transport_t* transport, int fd) {
+ws_connection_t* ws_connection_create(ws_transport_t* transport, platform_socket_t* sock) {
   ws_connection_t* connection = get_clear_memory(sizeof(ws_connection_t));
   refcounter_init((refcounter_t*)connection);
   connection->transport = transport;
-  connection->fd = fd;
+  connection->sock = sock;
   connection->pool = transport->pool;
   connection->bc = transport->bc;
   connection->ofd_cache = transport->ofd_cache;
@@ -1375,7 +1372,7 @@ ws_connection_t* ws_connection_create(ws_transport_t* transport, int fd) {
   if (transport->ssl_ctx != NULL) {
     connection->ssl = SSL_new(transport->ssl_ctx);
     if (connection->ssl != NULL) {
-      SSL_set_fd(connection->ssl, fd);
+      SSL_set_fd(connection->ssl, platform_socket_fd(sock));
       SSL_set_accept_state(connection->ssl);
       connection->is_ssl = 1;
     }
@@ -1383,10 +1380,9 @@ ws_connection_t* ws_connection_create(ws_transport_t* transport, int fd) {
 
   actor_init(&connection->actor, connection, ws_connection_dispatch, transport->pool);
 
-  int flags = fcntl(fd, F_GETFL, 0);
-  fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  platform_socket_set_nonblocking(sock);
 
-  ATOMIC_STORE(&connection->watcher, pd_watcher_create(transport->loop, fd,
+  ATOMIC_STORE(&connection->watcher, pd_watcher_create(transport->loop, platform_socket_fd(sock),
     PD_EVENT_READ, _connection_read_callback, connection));
   if (ATOMIC_LOAD(&connection->watcher) != NULL) {
     pd_watcher_start(ATOMIC_LOAD(&connection->watcher));
@@ -1426,8 +1422,9 @@ void ws_connection_destroy(ws_connection_t* connection) {
     if (connection->ssl != NULL) {
       SSL_free(connection->ssl);
     }
-    if (connection->fd >= 0) {
-      close(connection->fd);
+    if (connection->sock != NULL) {
+      platform_socket_destroy(connection->sock);
+      connection->sock = NULL;
     }
     if (connection->upgrade_buf != NULL) {
       DESTROY(connection->upgrade_buf, buffer);
@@ -1464,7 +1461,7 @@ void ws_connection_destroy(ws_connection_t* connection) {
 }
 
 void ws_connection_write(ws_connection_t* connection, const uint8_t* data, size_t length) {
-  if (connection == NULL || connection->fd < 0) {
+  if (connection == NULL || connection->sock == NULL) {
     return;
   }
   buffer_t* buf = buffer_create_from_pointer_copy((uint8_t*)data, length);
