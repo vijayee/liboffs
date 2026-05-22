@@ -51,21 +51,24 @@ int authority_load_ca_cert(authority_t* authority, const char* pem_path);
 - Stores result in `authority->ca_cert_data` / `authority->ca_cert_len`
 - The data persists via CBOR: `authority_save` writes it, `authority_load` reads it back
 
-`authority_save` CBOR structure updated (v2):
+`authority_save` CBOR structure updated (v2). Positional arrays replace named-key maps
+to prevent casual inspection and manipulation:
+
 ```
-{
-  "v": uint8 (2),
-  "local_id": bytes[32],
-  "ca_cert": bytes (DER-encoded CA certificate, optional),
-  "hebbian": [...],
-  "peers": [...]
-}
+[
+  uint8 (2),                        // version (index 0)
+  bytes[32] (local_id),             // index 1
+  bytes (DER-encoded CA cert),      // index 2 — empty byte string if none
+  [ [bytes[32], float], ... ],      // hebbian (index 3)
+  [ [bytes[32], uint32, uint16, float, float, float, uint8, float], ... ]  // peers (index 4)
+]
 ```
 
-Bump `PEER_STORE_VERSION` from 1 to 2. Version 1 files without `ca_cert` still load
-correctly — `authority_load` treats missing `ca_cert` key as no CA cert.
+Bump `PEER_STORE_VERSION` from 1 to 2. The v1 map format `{"local_id": ..., "hebbian": [...], ...}`
+is still readable — `authority_load` detects map vs array to choose the decode path. When loading
+a v2 array, a zero-length bytestring at index 2 means no CA cert.
 
-`authority_load` reads `ca_cert` key and populates `ca_cert_data`/`ca_cert_len`.
+`authority_load` reads index 2 and populates `ca_cert_data`/`ca_cert_len`.
 
 `authority_destroy` frees `ca_cert_data`.
 
@@ -151,7 +154,7 @@ int peer_verify_validate(peer_verify_ctx_t* ctx, void* certificate);
 | ca_cert_data is NULL | peer_verify_ctx_create returns NULL, credential config uses NO_CERTIFICATE_VALIDATION flag (existing behavior) |
 | ca_cert_data is corrupt/invalid DER | peer_verify_ctx_create logs error and returns NULL, falls back to unchecked |
 | Peer cert fails validation | peer_verify_validate returns -1, connection is rejected with error log |
-| CBOR store has no ca_cert key | authority_load leaves ca_cert_data NULL, unchecked behavior |
+| CBOR store has empty ca_cert bytestring | authority_load leaves ca_cert_data NULL, unchecked behavior |
 
 ## Testing
 
