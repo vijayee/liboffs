@@ -78,10 +78,13 @@ generated.
 
 ### Phase 6: Flush & Persist
 
-- **Index/WAL flush:** Call `index_debounce()` to write a final snapshot and rotate
-  the WAL, then call a new `wal_sync()` to `fsync`/`FlushFileBuffers` the WAL file.
-  Currently neither `wal_write` nor `index_debounce` calls fsync — writes go to the
-  OS page cache only. `wal_sync()` ensures crash durability.
+- **Index/WAL flush:** Call `timer_actor_debounce_flush()` for the index's
+  `INDEX_SAVE` timer. This cancels the pending debounce and immediately dispatches
+  the `INDEX_SAVE` message to the index actor, which runs `index_debounce()` through
+  its normal dispatch path. After the actor drains (Phase 4), call a new `wal_sync()`
+  to `fsync`/`FlushFileBuffers` the WAL file. Currently neither `wal_write` nor
+  `index_debounce` calls fsync — writes go to the OS page cache only. `wal_sync()`
+  ensures crash durability.
 - **Platform sync API:** Add `platform_file_sync(platform_file_t*)` to the platform
   layer (`fsync`/`fdatasync` on POSIX, `FlushFileBuffers` on Windows).
 - Flush section bitmaps to disk.
@@ -125,6 +128,8 @@ After deadline exceeded in any phase, skip directly to Phase 7 (force stop).
 | `src/Platform/platform_file.c` | Add `platform_file_sync()` (POSIX `fsync` + Win32 `FlushFileBuffers`) |
 | `src/BlockCache/wal.h` | Add `wal_sync()` declaration |
 | `src/BlockCache/wal.c` | Add `wal_sync()` — calls `platform_file_sync()` on the WAL file |
+| `src/Timer/timer_actor.h` | Add `timer_actor_debounce_flush()` declaration |
+| `src/Timer/timer_actor.c` | Add `timer_actor_debounce_flush()` — cancels pending debounce, dispatches completion immediately |
 
 ## Testing
 
@@ -136,5 +141,5 @@ After deadline exceeded in any phase, skip directly to Phase 7 (force stop).
 - Integration: zero timeout blocks until idle (backward compatible)
 - Unit: `platform_file_sync()` calls fsync and returns success code
 - Unit: `wal_sync()` calls platform_file_sync on the WAL file handle
-- Unit: `wal_sync()` returns 0 on success, error code on failure
+- Unit: `timer_actor_debounce_flush()` cancels pending timer and dispatches completion message
 - Pre-existing: all existing tests continue to pass
