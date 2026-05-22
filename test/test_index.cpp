@@ -14,6 +14,7 @@ extern "C" {
 #include <cbor.h>
 #include "../src/Timer/timer_actor.h"
 #include "../src/BlockCache/frand.h"
+#include "../src/BlockCache/wal.h"
 #include "../src/Util/get_dir.h"
 }
 
@@ -281,5 +282,45 @@ namespace indexTest {
     EXPECT_EQ(index_to_crc(from_cbor, &cbor_crc), 0);
     DESTROY(from_cbor, index);
     EXPECT_EQ(cbor_crc, index_crc);
+  }
+
+  TEST(TestWal, WalSyncOpenWalReturnsZero) {
+    char* location = path_join("/tmp", "wal_sync_test");
+    mkdir_p(location);
+
+    wal_t* wal = wal_create(location, 1);
+    ASSERT_NE(wal, nullptr);
+
+    buffer_t* data = buffer_create(78);
+    memset(data->data, 0xAB, 78);
+    wal_write(wal, addition, data);
+
+    int result = wal_sync(wal);
+    EXPECT_EQ(result, 0);
+
+    DESTROY(data, buffer);
+    wal_destroy(wal);
+    rm_rf(location);
+    free(location);
+  }
+
+  TEST(TestWal, WalSyncNullWalReturnsNegative) {
+    int result = wal_sync(NULL);
+    EXPECT_EQ(result, -1);
+  }
+
+  TEST(TestWal, WalSyncNullLogReturnsNegative) {
+    char* location = path_join("/tmp", "wal_sync_null_log");
+    mkdir_p(location);
+
+    wal_t* wal = wal_create(location, 1);
+    ASSERT_NE(wal, nullptr);
+    /* Don't write -- log is still NULL */
+    int result = wal_sync(wal);
+    EXPECT_EQ(result, -1);
+
+    wal_destroy(wal);
+    rm_rf(location);
+    free(location);
   }
 }

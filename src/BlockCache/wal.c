@@ -73,6 +73,11 @@ void wal_write(wal_t* wal,wal_type_e type, buffer_t* data) {
   platform_file_write(wal->log, data->data, data->size);
 }
 
+int wal_sync(wal_t* wal) {
+  if (wal == NULL || wal->log == NULL) return -1;
+  return platform_file_sync(wal->log);
+}
+
 int wal_read(wal_t* wal, wal_type_e* type, buffer_t** data, uint64_t* cursor, int32_t* wal_size) {
   if (wal->log == NULL) {
     *cursor = 0;
