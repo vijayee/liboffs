@@ -17,6 +17,7 @@
 #include <openssl/sha.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <poll-dancer/poll-dancer.h>
 
 #ifdef HAS_MSQUIC
 #include <msquic.h>
@@ -83,6 +84,8 @@ struct offs_client_t {
   platform_mutex_t* lock;
   platform_thread_t* recv_thread;
   volatile uint8_t running;
+  pd_loop_t* loop;
+  pd_watcher_t* watcher;
   uint8_t* read_buf;
   size_t read_buf_size;
 
@@ -358,107 +361,168 @@ static ssize_t _ws_recv(offs_client_t* client, uint8_t* buf, size_t buf_size) {
   return platform_socket_recv(client->transport.ws.sock, buf, buf_size);
 }
 
-static void* _recv_thread(void* arg) {
-  offs_client_t* client = (offs_client_t*)arg;
-  uint8_t buf[READ_BUFFER_SIZE];
+static void _client_raw_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
+                                       pd_event_t events, void* user_data) {
+  offs_client_t* client = (offs_client_t*)user_data;
+  (void)loop;
+  (void)watcher;
 
-  while (client->running) {
-    if (client->transport_type == OFFS_TRANSPORT_WS) {
-      /* WS: read raw bytes, parse WebSocket frames */
-      ssize_t bytes_read = _ws_recv(client, buf, sizeof(buf));
-      if (bytes_read <= 0) {
-        client->connected = 0;
-        break;
-      }
-
-      /* Append to recv buffer */
-      if (client->transport.ws.recv_buf == NULL) {
-        client->transport.ws.recv_buf = buffer_create(bytes_read);
-        memcpy(client->transport.ws.recv_buf->data, buf, bytes_read);
-        client->transport.ws.recv_buf->size = bytes_read;
-      } else {
-        buffer_ensure_capacity(client->transport.ws.recv_buf, client->transport.ws.recv_buf->size + bytes_read);
-        memcpy(client->transport.ws.recv_buf->data + client->transport.ws.recv_buf->size, buf, bytes_read);
-        client->transport.ws.recv_buf->size += bytes_read;
-      }
-
-      /* Parse all complete WebSocket frames */
-      while (1) {
-        ws_frame_t parsed;
-        size_t needed;
-        ssize_t consumed = ws_frame_parse(
-          client->transport.ws.recv_buf->data,
-          client->transport.ws.recv_buf->size,
-          &parsed, &needed);
-        if (consumed == 0) break; /* incomplete frame */
-        if (consumed < 0) {
-          client->connected = 0;
-          goto cleanup;
-        }
-        /* Consume parsed bytes from recv buffer */
-        size_t remaining = client->transport.ws.recv_buf->size - (size_t)consumed;
-        if (remaining > 0) {
-          memmove(client->transport.ws.recv_buf->data,
-                  client->transport.ws.recv_buf->data + consumed,
-                  remaining);
-        }
-        client->transport.ws.recv_buf->size = remaining;
-
-        if (parsed.opcode == WS_OPCODE_BINARY && parsed.payload != NULL && parsed.payload_len > 0) {
-          struct cbor_load_result load_result;
-          cbor_item_t* item = cbor_load(parsed.payload, parsed.payload_len, &load_result);
-          if (item != NULL && load_result.error.code == CBOR_ERR_NONE) {
-            uint8_t type = client_api_wire_get_type(item);
-            _handle_frame(client, type, item);
-            cbor_decref(&item);
-          } else if (item != NULL) {
-            cbor_decref(&item);
-          }
-        } else if (parsed.opcode == WS_OPCODE_CLOSE) {
-          client->connected = 0;
-          ws_frame_destroy(&parsed);
-          goto cleanup;
-        } else if (parsed.opcode == WS_OPCODE_PING) {
-          /* RFC 6455: respond to PING with PONG — must hold lock to serialize with _send_frame */
-          size_t pong_len;
-          uint8_t* pong = ws_frame_build(WS_OPCODE_PONG, parsed.payload, parsed.payload_len, &pong_len);
-          if (pong != NULL) {
-            platform_mutex_lock(client->lock);
-            if (_ws_send(client, pong, pong_len) < 0) {
-              client->connected = 0;
-            }
-            platform_mutex_unlock(client->lock);
-            free(pong);
-          }
-        }
-        ws_frame_destroy(&parsed);
-      }
-    } else {
-      /* unix/tcp: raw socket + stream_framer */
-      ssize_t bytes_read = platform_socket_recv(client->transport.raw.sock, buf, sizeof(buf));
-      if (bytes_read <= 0) {
-        client->connected = 0;
-        break;
-      }
-      stream_framer_feed(client->framer, buf, (size_t)bytes_read);
-      uint8_t* frame_data;
-      size_t frame_len;
-      while ((frame_data = stream_framer_next(client->framer, &frame_len)) != NULL) {
-        struct cbor_load_result load_result;
-        cbor_item_t* cbor_item = cbor_load(frame_data, frame_len, &load_result);
-        free(frame_data);
-        if (cbor_item == NULL || load_result.error.code != CBOR_ERR_NONE) {
-          if (cbor_item != NULL) cbor_decref(&cbor_item);
-          continue;
-        }
-        uint8_t type = client_api_wire_get_type(cbor_item);
-        _handle_frame(client, type, cbor_item);
-        cbor_decref(&cbor_item);
-      }
-    }
+  if (events & (PD_EVENT_ERROR | PD_EVENT_HANGUP)) {
+    client->connected = 0;
+    client->running = 0;
+    return;
   }
 
-cleanup:
+  if (events & PD_EVENT_READ) {
+    uint8_t buf[READ_BUFFER_SIZE];
+    ssize_t bytes_read = platform_socket_recv(client->transport.raw.sock, buf, sizeof(buf));
+    if (bytes_read <= 0) {
+      client->connected = 0;
+      client->running = 0;
+      return;
+    }
+    stream_framer_feed(client->framer, buf, (size_t)bytes_read);
+    uint8_t* frame_data;
+    size_t frame_len;
+    while ((frame_data = stream_framer_next(client->framer, &frame_len)) != NULL) {
+      struct cbor_load_result load_result;
+      cbor_item_t* cbor_item = cbor_load(frame_data, frame_len, &load_result);
+      free(frame_data);
+      if (cbor_item == NULL || load_result.error.code != CBOR_ERR_NONE) {
+        if (cbor_item != NULL) cbor_decref(&cbor_item);
+        continue;
+      }
+      uint8_t type = client_api_wire_get_type(cbor_item);
+      _handle_frame(client, type, cbor_item);
+      cbor_decref(&cbor_item);
+    }
+  }
+}
+
+static void _client_ws_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
+                                      pd_event_t events, void* user_data) {
+  offs_client_t* client = (offs_client_t*)user_data;
+  (void)loop;
+  (void)watcher;
+
+  if (events & (PD_EVENT_ERROR | PD_EVENT_HANGUP)) {
+    client->connected = 0;
+    client->running = 0;
+    return;
+  }
+
+  if (events & PD_EVENT_READ) {
+    uint8_t buf[READ_BUFFER_SIZE];
+    ssize_t bytes_read = _ws_recv(client, buf, sizeof(buf));
+    if (bytes_read <= 0) {
+      client->connected = 0;
+      client->running = 0;
+      return;
+    }
+
+    /* Append to recv buffer */
+    if (client->transport.ws.recv_buf == NULL) {
+      client->transport.ws.recv_buf = buffer_create(bytes_read);
+      memcpy(client->transport.ws.recv_buf->data, buf, bytes_read);
+      client->transport.ws.recv_buf->size = bytes_read;
+    } else {
+      buffer_ensure_capacity(client->transport.ws.recv_buf, client->transport.ws.recv_buf->size + (size_t)bytes_read);
+      memcpy(client->transport.ws.recv_buf->data + client->transport.ws.recv_buf->size, buf, (size_t)bytes_read);
+      client->transport.ws.recv_buf->size += (size_t)bytes_read;
+    }
+
+    /* Parse all complete WebSocket frames */
+    while (1) {
+      ws_frame_t parsed;
+      size_t needed;
+      ssize_t consumed = ws_frame_parse(
+        client->transport.ws.recv_buf->data,
+        client->transport.ws.recv_buf->size,
+        &parsed, &needed);
+      if (consumed == 0) break; /* incomplete frame */
+      if (consumed < 0) {
+        client->connected = 0;
+        client->running = 0;
+        return;
+      }
+      /* Consume parsed bytes from recv buffer */
+      size_t remaining = client->transport.ws.recv_buf->size - (size_t)consumed;
+      if (remaining > 0) {
+        memmove(client->transport.ws.recv_buf->data,
+                client->transport.ws.recv_buf->data + consumed,
+                remaining);
+      }
+      client->transport.ws.recv_buf->size = remaining;
+
+      if (parsed.opcode == WS_OPCODE_BINARY && parsed.payload != NULL && parsed.payload_len > 0) {
+        struct cbor_load_result load_result;
+        cbor_item_t* item = cbor_load(parsed.payload, parsed.payload_len, &load_result);
+        if (item != NULL && load_result.error.code == CBOR_ERR_NONE) {
+          uint8_t type = client_api_wire_get_type(item);
+          _handle_frame(client, type, item);
+          cbor_decref(&item);
+        } else if (item != NULL) {
+          cbor_decref(&item);
+        }
+      } else if (parsed.opcode == WS_OPCODE_CLOSE) {
+        client->connected = 0;
+        client->running = 0;
+        ws_frame_destroy(&parsed);
+        return;
+      } else if (parsed.opcode == WS_OPCODE_PING) {
+        /* RFC 6455: respond to PING with PONG — must hold lock to serialize with _send_frame */
+        size_t pong_len;
+        uint8_t* pong = ws_frame_build(WS_OPCODE_PONG, parsed.payload, parsed.payload_len, &pong_len);
+        if (pong != NULL) {
+          platform_mutex_lock(client->lock);
+          if (_ws_send(client, pong, pong_len) < 0) {
+            client->connected = 0;
+          }
+          platform_mutex_unlock(client->lock);
+          free(pong);
+        }
+      }
+      ws_frame_destroy(&parsed);
+    }
+  }
+}
+
+static void* _recv_thread(void* arg) {
+  offs_client_t* client = (offs_client_t*)arg;
+  platform_socket_t* sock;
+  pd_callback_t callback;
+
+  if (client->transport_type == OFFS_TRANSPORT_WS) {
+    sock = client->transport.ws.sock;
+    callback = _client_ws_read_callback;
+  } else {
+    sock = client->transport.raw.sock;
+    callback = _client_raw_read_callback;
+  }
+
+  client->loop = pd_loop_create(NULL);
+  if (client->loop == NULL) return NULL;
+
+  client->watcher = pd_watcher_create(client->loop, platform_socket_fd(sock),
+      PD_EVENT_READ | PD_EVENT_ERROR | PD_EVENT_HANGUP,
+      callback, client);
+  if (client->watcher == NULL) {
+    pd_loop_destroy(client->loop);
+    client->loop = NULL;
+    return NULL;
+  }
+
+  pd_watcher_start(client->watcher);
+
+  while (client->running) {
+    pd_loop_run_once(client->loop, 100);
+  }
+
+  pd_watcher_destroy(client->watcher);
+  client->watcher = NULL;
+  pd_loop_destroy(client->loop);
+  client->loop = NULL;
+
   return NULL;
 }
 
@@ -945,6 +1009,11 @@ void offs_client_disconnect(offs_client_t* client) {
 
   client->running = 0;
   client->connected = 0;
+
+  /* Stop the poll-dancer loop to unblock the recv thread */
+  if (client->loop != NULL) {
+    pd_loop_stop(client->loop);
+  }
 
   switch (client->transport_type) {
     case OFFS_TRANSPORT_UNIX:
