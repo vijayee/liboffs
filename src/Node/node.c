@@ -106,7 +106,6 @@ void offs_node_stop(offs_node_t* node) {
   /* Phase 4: Drain actor work queue. */
   if (!_shutdown_deadline_exceeded(deadline)) {
     scheduler_pool_wait_for_idle(node->scheduler);
-    scheduler_pool_drain_pending_derefs(node->scheduler);
   }
 
   /* Phase 5: Close P2P connections.

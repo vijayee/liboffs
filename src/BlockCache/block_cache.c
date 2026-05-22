@@ -736,9 +736,10 @@ void block_cache_sync(block_cache_t* block_cache) {
   timer_actor_debounce_flush(block_cache->index->timer_actor,
                              &block_cache->index->actor, INDEX_SAVE);
 
-  /* Wait briefly for the actor to process the INDEX_SAVE message,
-     then wait for all workers to go idle. */
-  platform_sleep_ms(100);
+  /* Wait for the timer thread to process the flush and deliver INDEX_SAVE
+     to the index actor, then wait for the scheduler to process it.
+     The timer thread polls at 100ms intervals, so 10ms is a safe minimum. */
+  platform_sleep_ms(10);
   scheduler_pool_wait_for_idle(block_cache->pool);
 
   /* Sync the WAL to disk for crash durability. */
