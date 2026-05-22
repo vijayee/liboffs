@@ -90,6 +90,7 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
   server->listen_watcher = NULL;
   server->max_connections = 0;
   atomic_store(&server->active_connections, 0);
+  atomic_store(&server->draining, 0);
   _destroy_stack_init(server);
 
   server->listen_sock = platform_socket_create(PLATFORM_AF_INET, 1);
