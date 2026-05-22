@@ -4,6 +4,7 @@
 
 #include "client_api_wire.h"
 #include "../Util/allocator.h"
+#include "../Util/validation.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -16,15 +17,22 @@ static cbor_item_t* _encode_string(const char* str) {
 }
 
 // --- Helper: decode a CBOR text string, caller must free() the result ---
-// Returns NULL for empty strings (treat as absent)
-static char* _decode_string(cbor_item_t* item) {
+// Returns NULL for empty strings (treat as absent) or strings exceeding max_len
+static char* _decode_string(cbor_item_t* item, size_t max_len) {
   if (!cbor_isa_string(item)) return NULL;
   size_t len = cbor_string_length(item);
-  if (len == 0) return NULL;
+  if (len == 0 || len > max_len) return NULL;
   char* str = get_memory(len + 1);
   memcpy(str, cbor_string_handle(item), len);
   str[len] = '\0';
   return str;
+}
+
+// --- Helper: safe cbor_get_uint64 → size_t with overflow guard ---
+static size_t _decode_size(cbor_item_t* item) {
+  uint64_t val = cbor_get_uint64(item);
+  if (val > SIZE_MAX) return 0;
+  return (size_t)val;
 }
 
 // --- Helper: decode a CBOR bytestring into allocated buffer ---
@@ -92,20 +100,25 @@ int client_api_put_request_decode(cbor_item_t* item, client_api_put_request_t* m
   memset(msg, 0, sizeof(*msg));
 
   cbor_item_t* content_type = cbor_array_get(item, 1);
-  msg->content_type = _decode_string(content_type);
+  msg->content_type = _decode_string(content_type, OFFS_MAX_CONTENT_TYPE_LEN);
   cbor_decref(&content_type);
 
   cbor_item_t* file_name = cbor_array_get(item, 2);
-  msg->file_name = _decode_string(file_name);
+  msg->file_name = _decode_string(file_name, OFFS_MAX_FILE_NAME_LEN);
   cbor_decref(&file_name);
 
   cbor_item_t* stream_length = cbor_array_get(item, 3);
-  msg->stream_length = (size_t)cbor_get_uint64(stream_length);
+  msg->stream_length = _decode_size(stream_length);
   cbor_decref(&stream_length);
+
+  // Validate decoded fields
+  if (validate_content_type(msg->content_type) != 0) return -1;
+  if (validate_file_name(msg->file_name) != 0) return -1;
+  if (msg->stream_length == 0 || msg->stream_length > OFFS_MAX_CBOR_MESSAGE_SIZE) return -1;
 
   if (cbor_array_size(item) >= 5) {
     cbor_item_t* server_address = cbor_array_get(item, 4);
-    msg->server_address = _decode_string(server_address);
+    msg->server_address = _decode_string(server_address, OFFS_MAX_ORI_STRING_LEN);
     cbor_decref(&server_address);
   }
 
@@ -113,6 +126,10 @@ int client_api_put_request_decode(cbor_item_t* item, client_api_put_request_t* m
     cbor_item_t* data_item = cbor_array_get(item, 5);
     if (!cbor_is_null(data_item) && cbor_isa_bytestring(data_item)) {
       msg->data_size = cbor_bytestring_length(data_item);
+      if (msg->data_size > OFFS_MAX_CBOR_MESSAGE_SIZE) {
+        cbor_decref(&data_item);
+        return -1;
+      }
       if (msg->data_size > 0) {
         msg->data = get_memory(msg->data_size);
         memcpy(msg->data, cbor_bytestring_handle(data_item), msg->data_size);
@@ -215,7 +232,7 @@ int client_api_put_response_decode(cbor_item_t* item, client_api_put_response_t*
   memset(msg, 0, sizeof(*msg));
 
   cbor_item_t* ori = cbor_array_get(item, 1);
-  msg->ori_string = _decode_string(ori);
+  msg->ori_string = _decode_string(ori, OFFS_MAX_ORI_STRING_LEN);
   cbor_decref(&ori);
   return 0;
 }
@@ -268,8 +285,10 @@ int client_api_get_request_decode(cbor_item_t* item, client_api_get_request_t* m
   memset(msg, 0, sizeof(*msg));
 
   cbor_item_t* ori = cbor_array_get(item, 1);
-  msg->ori_string = _decode_string(ori);
+  msg->ori_string = _decode_string(ori, OFFS_MAX_ORI_STRING_LEN);
   cbor_decref(&ori);
+
+  if (validate_ori_string(msg->ori_string) != 0) return -1;
 
   if (cbor_array_size(item) >= 5) {
     cbor_item_t* has_range = cbor_array_get(item, 2);
@@ -277,11 +296,11 @@ int client_api_get_request_decode(cbor_item_t* item, client_api_get_request_t* m
     cbor_decref(&has_range);
 
     cbor_item_t* range_start = cbor_array_get(item, 3);
-    msg->range_start = (size_t)cbor_get_uint64(range_start);
+    msg->range_start = _decode_size(range_start);
     cbor_decref(&range_start);
 
     cbor_item_t* range_end = cbor_array_get(item, 4);
-    msg->range_end = (size_t)cbor_get_uint64(range_end);
+    msg->range_end = _decode_size(range_end);
     cbor_decref(&range_end);
   }
 
@@ -340,11 +359,13 @@ int client_api_get_response_start_decode(cbor_item_t* item, client_api_get_respo
   memset(msg, 0, sizeof(*msg));
 
   cbor_item_t* content_type = cbor_array_get(item, 1);
-  msg->content_type = _decode_string(content_type);
+  msg->content_type = _decode_string(content_type, OFFS_MAX_CONTENT_TYPE_LEN);
   cbor_decref(&content_type);
 
+  if (validate_content_type(msg->content_type) != 0) return -1;
+
   cbor_item_t* content_length = cbor_array_get(item, 2);
-  msg->content_length = (size_t)cbor_get_uint64(content_length);
+  msg->content_length = _decode_size(content_length);
   cbor_decref(&content_length);
 
   cbor_item_t* has_range = cbor_array_get(item, 3);
@@ -353,11 +374,11 @@ int client_api_get_response_start_decode(cbor_item_t* item, client_api_get_respo
 
   if (cbor_array_size(item) >= 6 && msg->has_range) {
     cbor_item_t* range_start = cbor_array_get(item, 4);
-    msg->range_start = (size_t)cbor_get_uint64(range_start);
+    msg->range_start = _decode_size(range_start);
     cbor_decref(&range_start);
 
     cbor_item_t* range_end = cbor_array_get(item, 5);
-    msg->range_end = (size_t)cbor_get_uint64(range_end);
+    msg->range_end = _decode_size(range_end);
     cbor_decref(&range_end);
   }
 
@@ -455,7 +476,7 @@ int client_api_error_decode(cbor_item_t* item, client_api_error_t* msg) {
   cbor_decref(&status_code);
 
   cbor_item_t* message = cbor_array_get(item, 2);
-  msg->message = _decode_string(message);
+  msg->message = _decode_string(message, 1024);
   cbor_decref(&message);
   return 0;
 }

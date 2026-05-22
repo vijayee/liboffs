@@ -5,6 +5,7 @@
 #include "off_url.h"
 #include "../Util/base58.h"
 #include "../Util/allocator.h"
+#include "../Util/validation.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -89,6 +90,10 @@ off_url_t* off_url_parse(const char* url_string) {
     decoded_type[decoded_type_len] = '\0';
     free(content_type_raw);
 
+    if (decoded_type_len > OFFS_MAX_CONTENT_TYPE_LEN) {
+        free(decoded_type); free(server_address); return NULL;
+    }
+
     cursor = type_end + 1;
     char* endp;
     long stream_length = strtol(cursor, &endp, 10);
@@ -131,6 +136,11 @@ off_url_t* off_url_parse(const char* url_string) {
     }
     file_name[decoded_name_len] = '\0';
     free(name_raw);
+
+    if (decoded_name_len > OFFS_MAX_FILE_NAME_LEN) {
+        free(file_name); free(file_hash_b58); free(descriptor_hash_b58); free(decoded_type); free(server_address);
+        return NULL;
+    }
 
     size_t decoded_len = base58_decoded_length(hash1_len);
     uint8_t* file_hash_raw = get_clear_memory(decoded_len);

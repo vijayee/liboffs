@@ -24,6 +24,7 @@
 #include "../../OFFStreams/ofd.h"
 #include "../../BlockCache/block_cache.h"
 #include "../../Util/atomic_compat.h"
+#include "../../Util/validation.h"
 
 static int _draining_middleware(http_request_t* request, http_response_t* response,
                                 void* user_data) {
@@ -652,10 +653,17 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
         return;
     }
 
-    size_t stream_length = (size_t)atol(stream_length_str);
-    if (stream_length == 0) {
+    if (validate_content_type(type) != 0 || validate_file_name(file_name) != 0) {
         http_response_set_status(response, 400);
-        http_response_write(response, "Empty stream", 12);
+        http_response_write(response, "Invalid content type or file name", 35);
+        http_response_end(response);
+        return;
+    }
+
+    size_t stream_length = (size_t)atol(stream_length_str);
+    if (stream_length == 0 || stream_length > OFFS_MAX_CBOR_MESSAGE_SIZE) {
+        http_response_set_status(response, 400);
+        http_response_write(response, "Invalid stream length", 20);
         http_response_end(response);
         return;
     }
@@ -747,8 +755,12 @@ static int _off_put_headers_complete(http_connection_t* connection,
         return 0;
     }
 
+    if (validate_content_type(type) != 0 || validate_file_name(file_name) != 0) {
+        return 0;
+    }
+
     size_t stream_length = (size_t)atol(stream_length_str);
-    if (stream_length == 0) {
+    if (stream_length == 0 || stream_length > OFFS_MAX_CBOR_MESSAGE_SIZE) {
         return 0;
     }
 
