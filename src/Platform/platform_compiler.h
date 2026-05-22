@@ -8,7 +8,13 @@
   #define PLATFORM_STRUCT_PACKED  __declspec(align(1))
   #define PLATFORM_ALIGNED(n)     __declspec(align(n))
   #define PLATFORM_PRINTF(f, a)   /* no MSVC equivalent */
-  #define PLATFORM_FFS(x)         (_BitScanForward((unsigned long*)&(x), (x)) ? 0 : 0) /* placeholder */
+  #include <intrin.h>
+  #pragma intrinsic(_BitScanForward)
+  static inline int _platform_ffs_msvc(unsigned long x) {
+    unsigned long index;
+    return _BitScanForward(&index, x) ? (int)(index + 1) : 0;
+  }
+  #define PLATFORM_FFS(x) _platform_ffs_msvc((unsigned long)(x))
 
   #define PLATFORM_DIAGNOSTIC_PUSH         __pragma(warning(push))
   #define PLATFORM_DIAGNOSTIC_POP          __pragma(warning(pop))
@@ -24,8 +30,11 @@
 
   #define PLATFORM_DIAGNOSTIC_PUSH         _Pragma("GCC diagnostic push")
   #define PLATFORM_DIAGNOSTIC_POP          _Pragma("GCC diagnostic pop")
-  #define PLATFORM_DIAGNOSTIC_IGNORE_STR(w) #w
-  #define PLATFORM_DIAGNOSTIC_IGNORE(w)    _Pragma(PLATFORM_DIAGNOSTIC_IGNORE_STR(GCC diagnostic ignored w))
+  #define PLATFORM_DIAGNOSTIC_STRINGIFY(x) #x
+  #define PLATFORM_DIAGNOSTIC_IGNORE_MSG(msg) \
+    _Pragma(PLATFORM_DIAGNOSTIC_STRINGIFY(GCC diagnostic ignored msg))
+  #define PLATFORM_DIAGNOSTIC_IGNORE(w) \
+    PLATFORM_DIAGNOSTIC_IGNORE_MSG(PLATFORM_DIAGNOSTIC_STRINGIFY(w))
 #endif
 
 #endif /* OFFS_PLATFORM_COMPILER_H */
