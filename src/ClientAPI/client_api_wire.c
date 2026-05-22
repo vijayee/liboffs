@@ -112,9 +112,18 @@ int client_api_put_request_decode(cbor_item_t* item, client_api_put_request_t* m
   cbor_decref(&stream_length);
 
   // Validate decoded fields
-  if (validate_content_type(msg->content_type) != 0) return -1;
-  if (validate_file_name(msg->file_name) != 0) return -1;
-  if (msg->stream_length == 0 || msg->stream_length > OFFS_MAX_CBOR_MESSAGE_SIZE) return -1;
+  if (validate_content_type(msg->content_type) != 0) {
+    client_api_put_request_destroy(msg);
+    return -1;
+  }
+  if (validate_file_name(msg->file_name) != 0) {
+    client_api_put_request_destroy(msg);
+    return -1;
+  }
+  if (msg->stream_length == 0 || msg->stream_length > OFFS_MAX_CBOR_MESSAGE_SIZE) {
+    client_api_put_request_destroy(msg);
+    return -1;
+  }
 
   if (cbor_array_size(item) >= 5) {
     cbor_item_t* server_address = cbor_array_get(item, 4);
@@ -128,6 +137,7 @@ int client_api_put_request_decode(cbor_item_t* item, client_api_put_request_t* m
       msg->data_size = cbor_bytestring_length(data_item);
       if (msg->data_size > OFFS_MAX_CBOR_MESSAGE_SIZE) {
         cbor_decref(&data_item);
+        client_api_put_request_destroy(msg);
         return -1;
       }
       if (msg->data_size > 0) {
