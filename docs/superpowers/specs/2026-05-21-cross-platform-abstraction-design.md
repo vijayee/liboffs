@@ -8,6 +8,28 @@ Each header uses `#ifdef _WIN32` internally to dispatch to Win32/MSVC APIs or PO
 
 poll-dancer already provides cross-platform event loops, watchers, timers, and async wake-up. This design covers everything else: sockets, threading, file I/O, time, RNG, process info, compiler attributes, and local transport.
 
+### Using poll-dancer in the Client
+
+The client library (`src/ClientLibs/c/offs_client.c`) currently uses a raw blocking `recv()`/`SSL_read()` loop in a dedicated `pthread`. This has several problems:
+
+- **Blocked shutdown**: `client->running = 0` doesn't unblock a stuck `recv()` — the thread waits until data arrives or the socket closes.
+- **No timeouts**: connect and read operations have no timeout mechanism.
+- **Inconsistent pattern**: every other I/O component uses poll-dancer's event-driven model.
+
+The client will be migrated to use `pd_loop_t` + `pd_watcher_t` for socket readability:
+
+```
+Client I/O thread:
+  pd_loop_t* loop
+  pd_watcher_t* watcher  (on socket fd, PD_EVENT_READ)
+  pd_timer_t* timer      (optional connect/read timeout)
+
+On data: watcher callback → read → parse frames → dispatch
+On shutdown: pd_loop_stop() → immediate, clean exit
+```
+
+This unifies the I/O pattern across the entire codebase — every component that reads from a socket uses poll-dancer. The client still runs in its own thread (the `pd_loop_t` needs a thread to run in), but the I/O is non-blocking and event-driven.
+
 ## Design Rules
 
 1. **Each header is self-contained** — includes only `<stdint.h>`/`<stddef.h>` plus the platform internals it needs.
@@ -278,7 +300,7 @@ The returned `platform_socket_t*` supports the full `platform_socket_*` API. Bac
 - `src/ClientAPI/TCP/tcp_transport.c`, `tcp_connection.c`
 - `src/ClientAPI/Unix/unix_transport.c`, `unix_connection.c`
 - `src/ClientAPI/WT/wt_transport.c`
-- `src/ClientLibs/c/offs_client.c`
+- `src/ClientLibs/c/offs_client.c` — also migrated to poll-dancer event loop (see overview)
 - `src/Network/quic_listener.c`, `relay_client.c`
 - `src/Network/Relay/relay_server.c`, `relay_server_main.c`
 - `src/Timer/timer_actor.c`
