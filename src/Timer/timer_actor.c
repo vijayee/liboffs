@@ -174,6 +174,40 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
       msg->payload = NULL;
       break;
     }
+    case TIMER_DEBOUNCE_FLUSH: {
+      timer_debounce_payload_t* payload = (timer_debounce_payload_t*)msg->payload;
+      debounce_entry_t* entry = _timer_actor_find_debounce(
+          timer_actor, payload->target, payload->completion_type);
+      if (entry != NULL && entry->timer != NULL) {
+        /* Cancel the pending debounce timer. */
+        pd_timer_stop(entry->timer);
+        void* old_user_data = entry->timer->user_data;
+        _timer_actor_untrack(timer_actor, entry->timer);
+        pd_timer_destroy(entry->timer);
+        free(old_user_data);
+        /* Immediately dispatch the completion message to the target actor. */
+        timer_completion_payload_t* copy = get_clear_memory(sizeof(timer_completion_payload_t));
+        copy->target = payload->target;
+        copy->completion_type = payload->completion_type;
+        copy->timer_id = 0;
+        message_t dispatch_msg;
+        dispatch_msg.type = copy->completion_type;
+        dispatch_msg.payload = copy;
+        dispatch_msg.payload_destroy = free;
+        actor_send(copy->target, &dispatch_msg);
+        /* Clear the debounce entry. */
+        entry->target = NULL;
+        entry->completion_type = 0;
+        entry->timer = NULL;
+        entry->completion_payload = NULL;
+      }
+      if (msg->payload_destroy != NULL) {
+        msg->payload_destroy(msg->payload);
+      }
+      msg->payload_destroy = NULL;
+      msg->payload = NULL;
+      break;
+    }
     default:
       break;
   }
@@ -291,4 +325,21 @@ uint64_t timer_actor_debounce(timer_actor_t* timer_actor,
   pd_loop_async_send(timer_actor->loop, timer_actor);
 
   return 0;
+}
+
+void timer_actor_debounce_flush(timer_actor_t* timer_actor,
+                                actor_t* target, uint32_t completion_type) {
+  timer_debounce_payload_t* payload = get_clear_memory(sizeof(timer_debounce_payload_t));
+  payload->target = target;
+  payload->completion_type = completion_type;
+  payload->timeout_ms = 0;
+  payload->interval_ms = 0;
+
+  message_t msg;
+  msg.type = TIMER_DEBOUNCE_FLUSH;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+
+  actor_send(&timer_actor->actor, &msg);
+  pd_loop_async_send(timer_actor->loop, timer_actor);
 }

@@ -68,5 +68,7 @@ void timer_actor_cancel(timer_actor_t* timer_actor, uint64_t timer_id);
 uint64_t timer_actor_debounce(timer_actor_t* timer_actor,
                               uint64_t timeout_ms, uint64_t interval_ms,
                               actor_t* target, uint32_t completion_type);
+void timer_actor_debounce_flush(timer_actor_t* timer_actor,
+                                actor_t* target, uint32_t completion_type);
 
 #endif // OFFS_TIMER_ACTOR_H
