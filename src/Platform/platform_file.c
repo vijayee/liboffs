@@ -10,6 +10,8 @@
   #include <string.h>
   #include <errno.h>
 
+  extern int mkdir_p(char* path);
+
   struct platform_file_t {
     int fd;
   };
@@ -68,7 +70,6 @@
   }
 
   int platform_mkdir(const char* path) {
-    extern int mkdir_p(char* path);
     return mkdir_p((char*)path);
   }
 #else
