@@ -193,6 +193,7 @@ TEST(TupleCacheActor, TestCreateDestroy) {
   tuple_cache_t* tc = tuple_cache_create(10, pool);
   ASSERT_NE(tc, nullptr);
   tuple_cache_destroy(tc);
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }
@@ -241,6 +242,7 @@ TEST(TupleCacheActor, TestApplyAndUpdate) {
   tuple_destroy(key);
   DESTROY(h1, buffer);
   DESTROY(val, buffer);
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }
@@ -273,6 +275,7 @@ TEST(TupleCacheActor, TestRemove) {
   tuple_destroy(key);
   DESTROY(h1, buffer);
   DESTROY(val, buffer);
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }

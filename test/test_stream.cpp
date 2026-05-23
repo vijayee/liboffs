@@ -18,6 +18,8 @@ public:
     scheduler_pool_start(pool);
   }
   void TearDown() override {
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
     scheduler_pool_destroy(pool);
   }
 };
@@ -62,7 +64,6 @@ TEST_F(TestStreamActor, TestPushFileStreamActorDispatch) {
   close_future.wait();
 
   scheduler_pool_wait_for_idle(pool);
-  scheduler_pool_stop(pool);
 
   EXPECT_GT(data_count.load(), 0);
 
@@ -96,7 +97,6 @@ TEST_F(TestStreamActor, TestPullFileStreamActorDispatch) {
   w_close_future.wait();
 
   scheduler_pool_wait_for_idle(pool);
-  scheduler_pool_stop(pool);
 
   EXPECT_GT(data_count.load(), 0);
 
@@ -131,7 +131,6 @@ TEST_F(TestStreamActor, TestStreamNotifyManyHandlers) {
   close_future.wait();
 
   scheduler_pool_wait_for_idle(pool);
-  scheduler_pool_stop(pool);
 
   EXPECT_GT(handler_count.load(), 0);
 
@@ -158,7 +157,6 @@ TEST_F(TestStreamActor, TestIdleSignalWaitsForCompletion) {
   close_future.wait();
 
   scheduler_pool_wait_for_idle(pool);
-  scheduler_pool_stop(pool);
 
   EXPECT_GT(data_count.load(), 0);
   DESTROY(rs, readable_push_file_stream);
@@ -187,7 +185,6 @@ TEST_F(TestStreamActor, TestPushPipeEndToEnd) {
   w_close_future.wait();
 
   scheduler_pool_wait_for_idle(pool);
-  scheduler_pool_stop(pool);
 
   DESTROY(rs, readable_push_file_stream);
   DESTROY(ws, writeable_push_file_stream);

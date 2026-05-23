@@ -141,6 +141,7 @@ TEST(NatDetect, CreateDestroyNoLeak) {
   // But the function shouldn't crash
   nat_detect_destroy(detect);
 
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }

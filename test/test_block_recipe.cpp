@@ -55,6 +55,7 @@ TEST(NewBlocksRecipe, CreateDestroy) {
 
   new_blocks_recipe_destroy(recipe);
 
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }
@@ -103,6 +104,7 @@ TEST(NewBlocksRecipe, PullCreatesBlock) {
     block_destroy(b);
   }
 
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   new_blocks_recipe_destroy(recipe);
   block_cache_destroy(bc);
@@ -151,6 +153,7 @@ TEST(NewBlocksRecipe, PullMultipleBlocks) {
     block_destroy(b);
   }
 
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   new_blocks_recipe_destroy(recipe);
   block_cache_destroy(bc);
@@ -174,6 +177,7 @@ TEST(RecyclerRecipe, CreateDestroy) {
 
   recycler_recipe_destroy(recipe);
 
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }
@@ -278,7 +282,7 @@ TEST(RecyclerRecipe, PullFromDescriptor) {
   EXPECT_EQ(close_future.wait_for(std::chrono::seconds(5)),
             std::future_status::ready);
 
-  // Stop scheduler before destroying anything to prevent race conditions
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
 
   for (auto* b : blocks) {
@@ -372,6 +376,7 @@ TEST(BlockRecipeIntegration, WriteableOffStreamWithNewBlocksRecipe) {
     DESTROY(collector.file_hash, buffer);
   }
 
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   writeable_off_stream_destroy(stream);
   new_blocks_recipe_destroy(recipe);

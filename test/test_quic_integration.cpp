@@ -305,6 +305,7 @@ protected:
   }
   void TearDown() override {
     if (g_pool != nullptr) {
+      scheduler_pool_wait_for_idle(g_pool);
       scheduler_pool_stop(g_pool);
       scheduler_pool_destroy(g_pool);
       g_pool = nullptr;
@@ -622,6 +623,7 @@ TEST(QuicIntegration, NetworkCreateDestroy) {
     block_cache_destroy(cache);
     timer_actor_destroy(timer);
     authority_destroy(authority);
+    scheduler_pool_wait_for_idle(pool);
     scheduler_pool_stop(pool);
     scheduler_pool_destroy(pool);
     GTEST_SKIP() << "msquic initialization failed";
@@ -633,6 +635,7 @@ TEST(QuicIntegration, NetworkCreateDestroy) {
   block_cache_destroy(cache);
   timer_actor_destroy(timer);
   authority_destroy(authority);
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 #endif
@@ -665,6 +668,7 @@ TEST(QuicIntegration, QuicListenerStartStop) {
     timer_actor_destroy(timer);
     block_cache_destroy(cache);
     authority_destroy(authority);
+    scheduler_pool_wait_for_idle(pool);
     scheduler_pool_stop(pool);
     scheduler_pool_destroy(pool);
     cleanup_msquic(msquic);
@@ -678,6 +682,7 @@ TEST(QuicIntegration, QuicListenerStartStop) {
     timer_actor_destroy(timer);
     block_cache_destroy(cache);
     authority_destroy(authority);
+    scheduler_pool_wait_for_idle(pool);
     scheduler_pool_stop(pool);
     scheduler_pool_destroy(pool);
     cleanup_msquic(msquic);
@@ -695,6 +700,7 @@ TEST(QuicIntegration, QuicListenerStartStop) {
   timer_actor_destroy(timer);
   block_cache_destroy(cache);
   authority_destroy(authority);
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
   cleanup_msquic(msquic);

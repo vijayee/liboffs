@@ -32,6 +32,7 @@ TEST(WriteableOffStream, TestCreateDestroy) {
   tuple_cache_destroy(tc);
   block_cache_destroy(bc);
 
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   new_blocks_recipe_destroy(recipe);
   scheduler_pool_destroy(pool);

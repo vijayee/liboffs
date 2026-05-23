@@ -40,6 +40,7 @@ TEST(TestScheduler, TestPoolStartStop) {
 
   scheduler_pool_start(pool);
   usleep(50000); // 50ms — let workers settle
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
 
   scheduler_pool_destroy(pool);
@@ -65,6 +66,7 @@ TEST(TestScheduler, TestActorScheduling) {
   }
   EXPECT_GE(counter.load(), 1);
 
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   actor_destroy(&actor);
   scheduler_pool_destroy(pool);
@@ -93,6 +95,7 @@ TEST(TestScheduler, TestActorBatchProcessing) {
   }
   EXPECT_GE(counter.load(), 5);
 
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   actor_destroy(&actor);
   scheduler_pool_destroy(pool);
@@ -150,6 +153,7 @@ TEST(TestScheduler, TestActorReschedulingViaPool) {
   EXPECT_GE(counter.load(), total_messages) << "Expected at least " << total_messages
                                             << " dispatches, got " << counter.load();
 
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   actor_destroy(&actor);
   scheduler_pool_destroy(pool);
@@ -193,6 +197,7 @@ TEST(TestScheduler, TestMultipleActors) {
     EXPECT_GE(counters[i].load(), 1);
   }
 
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   for (int i = 0; i < NUM_ACTORS; i++) {
     actor_destroy(&actors[i]);
@@ -225,6 +230,7 @@ TEST(TestScheduler, TestWorkStealing) {
   }
   EXPECT_GE(counter.load(), total_messages);
 
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   actor_destroy(&actor);
   scheduler_pool_destroy(pool);
@@ -255,6 +261,7 @@ TEST(TestScheduler, TestInjectFromExternalThread) {
   }
   EXPECT_GE(counter.load(), 1);
 
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   actor_destroy(&actor);
   scheduler_pool_destroy(pool);

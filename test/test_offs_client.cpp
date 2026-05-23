@@ -117,12 +117,12 @@ protected:
         if (transport != nullptr) {
             unix_transport_stop(transport);
         }
+        scheduler_pool_wait_for_idle(pool);
+        scheduler_pool_stop(pool);
         ofd_cache_destroy(ofd_cache);
         tuple_cache_destroy(tc);
         block_cache_destroy(bc);
         timer_actor_destroy(timer);
-        scheduler_pool_wait_for_idle(pool);
-        scheduler_pool_stop(pool);
         if (transport != nullptr) {
             unix_transport_destroy(transport);
         }
@@ -360,12 +360,12 @@ protected:
         if (transport != nullptr) {
             ws_transport_stop(transport);
         }
+        scheduler_pool_wait_for_idle(pool);
+        scheduler_pool_stop(pool);
         ofd_cache_destroy(ofd_cache);
         tuple_cache_destroy(tc);
         block_cache_destroy(bc);
         timer_actor_destroy(timer);
-        scheduler_pool_wait_for_idle(pool);
-        scheduler_pool_stop(pool);
         if (transport != nullptr) {
             ws_transport_destroy(transport);
         }
@@ -554,12 +554,12 @@ protected:
         if (transport != nullptr) {
             wt_transport_stop(transport);
         }
+        scheduler_pool_wait_for_idle(pool);
+        scheduler_pool_stop(pool);
         ofd_cache_destroy(ofd_cache);
         tuple_cache_destroy(tc);
         block_cache_destroy(bc);
         timer_actor_destroy(timer);
-        scheduler_pool_wait_for_idle(pool);
-        scheduler_pool_stop(pool);
         /*
          * wt_transport_destroy calls MsQuic RegistrationClose which blocks
          * indefinitely if server-side connections haven't fully shut down.

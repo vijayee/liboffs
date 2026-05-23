@@ -235,6 +235,7 @@ TEST(TestActor, TestBackpressureMutesSenderWhenTargetPressured) {
   EXPECT_EQ(atomic_load(&target.queue.size), 1u);
 
   actor_destroy(&target);
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }
@@ -359,6 +360,7 @@ TEST(TestActor, TestBackpressureReleaseUnmutesSenders) {
 
   actor_destroy(&sender);
   actor_destroy(&target);
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }

@@ -144,12 +144,12 @@ protected:
         if (transport != nullptr) {
             tcp_transport_stop(transport);
         }
+        scheduler_pool_wait_for_idle(pool);
+        scheduler_pool_stop(pool);
         ofd_cache_destroy(ofd_cache);
         tuple_cache_destroy(tc);
         block_cache_destroy(bc);
         timer_actor_destroy(timer);
-        scheduler_pool_wait_for_idle(pool);
-        scheduler_pool_stop(pool);
         if (transport != nullptr) {
             tcp_transport_destroy(transport);
         }

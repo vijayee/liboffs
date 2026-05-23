@@ -394,12 +394,7 @@ protected:
 
   void TearDown() override {
     writeable_off_stream_destroy(stream);
-    // writeable_off_stream_destroy releases the references it added (one per
-    // vec entry + one for current_recipe), but the creation reference from
-    // new_blocks_recipe_create is still held. Release it now.
     new_blocks_recipe_destroy(recipe);
-    // Do NOT call vec_deinit(&recipes) — writeable_off_stream_destroy already
-    // freed the underlying array via vec_deinit(&stream->recipes).
     wanted_list_destroy(network->wanted_list);
     actor_destroy(&network->actor);
     free(network);

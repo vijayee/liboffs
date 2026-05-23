@@ -119,11 +119,11 @@ TEST(OffStreamIntegration, WriteableOffStreamEncodesData) {
 
   new_blocks_recipe_destroy(recipe);
   writeable_off_stream_destroy(stream);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
   tuple_cache_destroy(tc);
   block_cache_destroy(bc);
   timer_actor_destroy(timer);
-  scheduler_pool_wait_for_idle(pool);
-  scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }
 
@@ -219,10 +219,11 @@ TEST(OffStreamIntegration, ReadableOffStreamDecodesBlock) {
   block_destroy(origin_block);
   readable_off_stream_destroy(stream);
   ori_destroy(ori);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
   tuple_cache_destroy(tc);
   block_cache_destroy(bc);
   timer_actor_destroy(timer);
 
-  scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }

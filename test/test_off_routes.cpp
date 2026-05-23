@@ -129,15 +129,15 @@ protected:
         if (server != NULL) {
             http_server_stop(server);
         }
-        ofd_cache_destroy(ofd_cache);
-        tuple_cache_destroy(tc);
-        block_cache_destroy(bc);
-        timer_actor_destroy(timer);
         scheduler_pool_wait_for_idle(pool);
         scheduler_pool_stop(pool);
         if (server != NULL) {
             http_server_destroy(server);
         }
+        ofd_cache_destroy(ofd_cache);
+        tuple_cache_destroy(tc);
+        block_cache_destroy(bc);
+        timer_actor_destroy(timer);
         scheduler_pool_destroy(pool);
         rm_rf(cache_dir);
         free(cache_dir);
