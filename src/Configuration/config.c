@@ -5,6 +5,7 @@
 #include "config.h"
 #include "../Util/log.h"
 #include <stdbool.h>
+#include <string.h>
 
 config_t config_default() {
   config_t config;
@@ -36,6 +37,20 @@ config_t config_default() {
   config.respiration_tau_max_ms = 300000;
   config.relay_max_retries = 5;
   config.relay_retry_delay_ms = 500;
+  config.http_enabled = false;
+  config.http_port = 80;
+  config.https_enabled = false;
+  config.https_port = 443;
+  config.https_cert_path = NULL;
+  config.https_key_path = NULL;
+  config.unix_enabled = false;
+  config.tcp_enabled = false;
+  config.tcp_port = 9000;
+  config.ws_enabled = false;
+  config.ws_port = 9001;
+  config.wt_enabled = false;
+  config.wt_port = 9002;
+  config.api_key_hash = NULL;
   return config;
 }
 
@@ -167,6 +182,32 @@ int config_validate(const config_t* config) {
   if (config->relay_retry_delay_ms == 0) {
     log_error("config_validate: relay_retry_delay_ms must be > 0");
     valid = false;
+  }
+
+  /* HTTPS requires cert and key paths */
+  if (config->https_enabled) {
+    if (config->https_cert_path == NULL || config->https_key_path == NULL) {
+      log_error("https_enabled requires https_cert_path and https_key_path");
+      valid = false;
+    }
+  }
+
+  /* API key hash format validation */
+  if (config->api_key_hash != NULL) {
+    size_t hash_len = strlen(config->api_key_hash);
+    if (hash_len != 60 || strncmp(config->api_key_hash, "$2b$", 4) != 0) {
+      log_error("api_key_hash must be a bcrypt $2b$ hash (60 characters)");
+      valid = false;
+    }
+    /* API keys over plaintext remote transports are forbidden */
+    if (config->tcp_enabled) {
+      log_error("tcp_enabled cannot be used with api_key_hash (plaintext remote transport)");
+      valid = false;
+    }
+    if (config->ws_enabled) {
+      log_error("ws_enabled cannot be used with api_key_hash (plaintext remote transport)");
+      valid = false;
+    }
   }
 
   return valid ? 0 : -1;
