@@ -90,7 +90,12 @@
       unlink(tmpl);
       return NULL;
     }
-    return strdup(tmpl);
+    char* path = strdup(tmpl);
+    if (path == NULL) {
+      unlink(tmpl);
+      return NULL;
+    }
+    return path;
   }
 #else
   /* Windows implementation — Win32 File API */
@@ -291,6 +296,11 @@
       return NULL;
     }
 
-    return strdup(tmp_file);
+    char* path = strdup(tmp_file);
+    if (path == NULL) {
+      DeleteFileA(tmp_file);
+      return NULL;
+    }
+    return path;
   }
 #endif
