@@ -435,7 +435,7 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
         if (peer_verify_validate((peer_verify_ctx_t*)listener->peer_verify,
                                   event->PEER_CERTIFICATE_RECEIVED.Certificate) != 0) {
           log_error("quic_listener: peer certificate validation failed, rejecting connection");
-          listener->msquic->ConnectionClose(event->PEER_CERTIFICATE_RECEIVED.Connection);
+          listener->msquic->ConnectionClose(connection);
         }
       }
       break;

@@ -459,7 +459,7 @@ static QUIC_STATUS QUIC_API _relay_connection_callback(
         if (peer_verify_validate((peer_verify_ctx_t*)server->peer_verify,
                                   event->PEER_CERTIFICATE_RECEIVED.Certificate) != 0) {
           log_error("relay_server: peer certificate validation failed, rejecting connection");
-          server->msquic->ConnectionClose(event->PEER_CERTIFICATE_RECEIVED.Connection);
+          server->msquic->ConnectionClose(connection);
         }
       }
       break;
