@@ -36,6 +36,10 @@ int platform_file_exists(const char* path);
 int platform_file_unlink(const char* path);
 int platform_mkdir(const char* path);  /* recursive */
 
+// Write data to a uniquely-named temporary file. Returns a strdup'd path
+// the caller must free (and unlink when done), or NULL on failure.
+char* platform_temp_file_write(const uint8_t* data, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

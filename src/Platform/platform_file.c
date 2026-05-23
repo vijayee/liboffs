@@ -4,6 +4,7 @@
 
 #ifndef _WIN32
   #include <stdlib.h>
+  #include <stdio.h>
   #include <unistd.h>
   #include <fcntl.h>
   #include <sys/stat.h>
@@ -76,6 +77,20 @@
 
   int platform_mkdir(const char* path) {
     return mkdir_p((char*)path);
+  }
+
+  char* platform_temp_file_write(const uint8_t* data, size_t len) {
+    char tmpl[256];
+    snprintf(tmpl, sizeof(tmpl), "/tmp/liboffs_XXXXXX");
+    int fd = mkstemp(tmpl);
+    if (fd < 0) return NULL;
+    ssize_t written = write(fd, data, len);
+    close(fd);
+    if (written != (ssize_t)len) {
+      unlink(tmpl);
+      return NULL;
+    }
+    return strdup(tmpl);
   }
 #else
   /* Windows implementation — Win32 File API */
@@ -255,5 +270,27 @@
 
   int platform_mkdir(const char* path) {
     return _mkdir_p_win(path);
+  }
+
+  char* platform_temp_file_write(const uint8_t* data, size_t len) {
+    char tmp_path[MAX_PATH];
+    char tmp_file[MAX_PATH];
+    if (GetTempPathA(sizeof(tmp_path), tmp_path) == 0) return NULL;
+    if (GetTempFileNameA(tmp_path, "lof", 0, tmp_file) == 0) return NULL;
+
+    HANDLE h = CreateFileA(tmp_file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_TEMPORARY, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+
+    DWORD bytes_written = 0;
+    BOOL ok = WriteFile(h, data, (DWORD)len, &bytes_written, NULL);
+    CloseHandle(h);
+
+    if (!ok || bytes_written != (DWORD)len) {
+      DeleteFileA(tmp_file);
+      return NULL;
+    }
+
+    return strdup(tmp_file);
   }
 #endif

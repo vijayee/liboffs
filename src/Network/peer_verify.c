@@ -5,13 +5,11 @@
 #include "peer_verify.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
+#include "../Platform/platform_file.h"
 #include <openssl/x509.h>
 #include <openssl/pem.h>
 #include <openssl/bio.h>
 #include <string.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
 
 struct peer_verify_ctx_t {
   char* temp_path;  // path to temporary PEM file, NULL if creation failed
@@ -50,45 +48,27 @@ peer_verify_ctx_t* peer_verify_ctx_create(const uint8_t* ca_cert_data, size_t ca
     return NULL;
   }
 
-  char temp_path[256];
-  snprintf(temp_path, sizeof(temp_path), "/tmp/liboffs_ca_XXXXXX");
-  int fd = mkstemp(temp_path);
-  if (fd < 0) {
-    log_error("peer_verify: failed to create temp file for CA cert");
-    BIO_free(mem_bio);
-    return NULL;
-  }
-
-  ssize_t written = write(fd, pem_data, (size_t)pem_len);
-  close(fd);
+  char* temp_path = platform_temp_file_write((const uint8_t*)pem_data, (size_t)pem_len);
   BIO_free(mem_bio);
-
-  if (written != pem_len) {
-    log_error("peer_verify: failed to write PEM to temp file");
-    unlink(temp_path);
+  if (temp_path == NULL) {
+    log_error("peer_verify: failed to write CA cert to temp file");
     return NULL;
   }
 
   peer_verify_ctx_t* ctx = get_clear_memory(sizeof(peer_verify_ctx_t));
   if (ctx == NULL) {
-    unlink(temp_path);
+    platform_file_unlink(temp_path);
+    free(temp_path);
     return NULL;
   }
-
-  ctx->temp_path = strdup(temp_path);
-  if (ctx->temp_path == NULL) {
-    unlink(temp_path);
-    free(ctx);
-    return NULL;
-  }
-
+  ctx->temp_path = temp_path;
   return ctx;
 }
 
 void peer_verify_ctx_destroy(peer_verify_ctx_t* ctx) {
   if (ctx == NULL) return;
   if (ctx->temp_path != NULL) {
-    unlink(ctx->temp_path);
+    platform_file_unlink(ctx->temp_path);
     free(ctx->temp_path);
   }
   free(ctx);
