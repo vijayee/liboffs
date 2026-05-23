@@ -7,23 +7,23 @@ extern "C" {
 static const char* test_hash = "$2b$04$MTIzNDU2Nzg5MDEyMzQ1NePheb5yq4/5.giE2KzFrDwx2yMnwVtpW";
 static const char* test_key = "test-key";
 
-TEST(Bcrypt, MatchReturnsZero) {
+TEST(TestBcrypt, MatchReturnsZero) {
   EXPECT_EQ(0, bcrypt_check(test_key, test_hash));
 }
 
-TEST(Bcrypt, MismatchReturnsNegative) {
+TEST(TestBcrypt, MismatchReturnsNegative) {
   EXPECT_EQ(-1, bcrypt_check("wrong-key", test_hash));
 }
 
-TEST(Bcrypt, NullKeyReturnsNegative) {
+TEST(TestBcrypt, NullKeyReturnsNegative) {
   EXPECT_EQ(-1, bcrypt_check(NULL, test_hash));
 }
 
-TEST(Bcrypt, NullHashReturnsNegative) {
+TEST(TestBcrypt, NullHashReturnsNegative) {
   EXPECT_EQ(-1, bcrypt_check(test_key, NULL));
 }
 
-TEST(Bcrypt, InvalidPrefixReturnsNegative) {
+TEST(TestBcrypt, WrongKeyWith2xPrefixReturnsNegative) {
   EXPECT_EQ(-1, bcrypt_check("key", "not-a-hash"));
   EXPECT_EQ(-1, bcrypt_check("key", "$2x$10$GjIW4.eOZECm4QY1KQjI4.6FfN8CqT5uJdLzMxX3bG1yRaVnPw0Su"));
 }

@@ -1,3 +1,7 @@
+//
+// Created by victor on 5/23/25.
+//
+
 #define _DEFAULT_SOURCE
 #include "bcrypt.h"
 
@@ -15,7 +19,6 @@ int bcrypt_check(const char* key, const char* hash) {
   return (strcmp(result, hash) == 0) ? 0 : -1;
 }
 #else
-#include <string.h>
 
 int bcrypt_check(const char* key, const char* hash) {
   (void)key;

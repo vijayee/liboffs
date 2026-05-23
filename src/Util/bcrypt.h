@@ -1,5 +1,9 @@
-#ifndef OFFS_UTIL_BCRYPT_H
-#define OFFS_UTIL_BCRYPT_H
+//
+// Created by victor on 5/23/25.
+//
+
+#ifndef OFFS_BCRYPT_H
+#define OFFS_BCRYPT_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -13,4 +17,4 @@ int bcrypt_check(const char* key, const char* hash);
 }
 #endif
 
-#endif /* OFFS_UTIL_BCRYPT_H */
+#endif /* OFFS_BCRYPT_H */
