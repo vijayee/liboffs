@@ -801,7 +801,26 @@ cd build && valgrind --leak-check=full --show-leak-kinds=all \
 
 Expected: Only pre-existing leaks, no new ones.
 
-- [ ] **Step 3: Final commit if any fixups needed**
+- [ ] **Step 3: De-wonk audit**
+
+Invoke the de-wonk skill to check for unimplemented, stubbed, disabled, broken, or weird code in all files touched by this plan:
+
+```bash
+# Files to audit:
+# src/Util/bcrypt.c (non-Linux stub is intentional)
+# src/ClientAPI/HTTP/auth_middleware.c
+# src/ClientAPI/HTTP/auth_middleware.h
+# src/ClientAPI/client_api_wire.h (new message types)
+# src/ClientAPI/client_api_wire.c (auth encode/decode)
+# src/Configuration/config.h (new fields)
+# src/Configuration/config.c (validation)
+# src/ClientAPI/HTTP/http_request.h (is_authenticated)
+# src/ClientAPI/HTTP/off_routes.c (integration)
+```
+
+Fix any issues found before proceeding.
+
+- [ ] **Step 4: Final commit if any fixups needed**
 
 ```bash
 git status
