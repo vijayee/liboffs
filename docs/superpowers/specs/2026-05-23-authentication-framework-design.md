@@ -10,14 +10,37 @@ compatible, and designed for future per-block permission extensions.
 
 ## Configuration
 
-`config_t` gains one field:
+`config_t` gains fields for enabling each client API, their ports, and auth:
 
 ```c
-char* api_key_hash;  // bcrypt hash ($2b$ prefix), NULL if auth disabled
+/* REST API */
+bool     http_enabled;
+uint16_t http_port;           // default 80
+bool     https_enabled;
+uint16_t https_port;          // default 443
+char*    https_cert_path;
+char*    https_key_path;
+
+/* Wire protocol transports */
+bool     unix_enabled;        // Unix domain socket (local-only)
+bool     tcp_enabled;
+uint16_t tcp_port;
+bool     ws_enabled;          // WebSocket
+uint16_t ws_port;
+bool     wt_enabled;          // WebTransport (QUIC, always encrypted)
+uint16_t wt_port;
+
+/* Auth (applies to all enabled APIs) */
+char*    api_key_hash;        // bcrypt hash, NULL = auth disabled
 ```
 
-`config_validate()` checks: if `api_key_hash` is non-NULL, it must start with `$2b$`
-and be exactly 60 characters.
+`config_validate()` checks:
+
+- `https_enabled` → `https_cert_path` and `https_key_path` must be non-NULL
+- `api_key_hash` non-NULL → must start with `$2b$` and be exactly 60 characters
+- `api_key_hash` non-NULL with `tcp_enabled` or `ws_enabled` → reject (API keys
+  over plaintext remote transports)
+- At least one API enabled → otherwise it's a headless P2P-only node (also valid)
 
 `authority_t` is unchanged — API auth is unrelated to P2P identity.
 
@@ -36,8 +59,14 @@ creates two server instances on different ports:
 - **Plaintext server** (e.g. port 80): no auth middleware → open access, should be
   bound to loopback (`127.0.0.1`)
 
-The port and bind address are passed to `http_server_create()` / `http_server_create_ssl()`
-by the embedding application — they are not owned by config_t.
+Ports and enabled flags are in `config_t`. The embedding application reads config
+to decide which servers to create, e.g.:
+```c
+if (config->https_enabled) {
+    server = http_server_create_ssl(pool, "0.0.0.0", config->https_port,
+                                    config->https_cert_path, config->https_key_path);
+}
+```
 
 ## HTTP Auth Middleware
 
