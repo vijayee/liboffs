@@ -21,6 +21,7 @@ http_request_t* http_request_create(scheduler_pool_t* pool) {
   request->keep_alive = 0;
   request->headers_complete = 0;
   request->message_complete = 0;
+  request->is_authenticated = 0;
   request->method = HTTP_GET;
   request->url = NULL;
   request->path = NULL;

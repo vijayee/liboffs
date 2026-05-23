@@ -26,6 +26,7 @@ typedef struct http_request_t {
   vec_capture_t params;
   uint8_t headers_complete;
   uint8_t message_complete;
+  uint8_t is_authenticated;
 } http_request_t;
 
 http_request_t* http_request_create(scheduler_pool_t* pool);
