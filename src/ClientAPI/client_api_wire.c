@@ -539,4 +539,5 @@ void client_api_auth_request_destroy(client_api_auth_request_t* auth) {
     memset(auth->api_key, 0, auth->api_key_len);
     free(auth->api_key);
   }
+  memset(auth, 0, sizeof(*auth));
 }

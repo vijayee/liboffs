@@ -1,8 +1,12 @@
 #include <gtest/gtest.h>
+extern "C" {
 #include <cbor.h>
+}
 #include <string.h>
 #include <stdlib.h>
-#include "ClientAPI/client_api_wire.h"
+extern "C" {
+#include "../src/ClientAPI/client_api_wire.h"
+}
 
 TEST(TestAuthWire, EncodeDecodeRoundtrip) {
   client_api_auth_request_t auth;
