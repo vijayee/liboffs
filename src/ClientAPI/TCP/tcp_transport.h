@@ -41,6 +41,7 @@ typedef struct tcp_transport_t {
   char* host;
   uint16_t port;
   SSL_CTX* ssl_ctx;
+  char* api_key_hash;
 } tcp_transport_t;
 
 tcp_transport_t* tcp_transport_create(scheduler_pool_t* pool,
@@ -50,7 +51,8 @@ tcp_transport_t* tcp_transport_create(scheduler_pool_t* pool,
                                        const char* host,
                                        uint16_t port,
                                        const char* cert_path,
-                                       const char* key_path);
+                                       const char* key_path,
+                                       const char* api_key_hash);
 void tcp_transport_destroy(tcp_transport_t* transport);
 void tcp_transport_start(tcp_transport_t* transport);
 void tcp_transport_stop(tcp_transport_t* transport);

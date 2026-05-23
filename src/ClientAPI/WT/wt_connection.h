@@ -48,6 +48,7 @@ typedef struct wt_connection_t {
   stream_framer_t* framer;
   buffer_t* write_buffer;
   uint8_t is_closing;
+  uint8_t is_authenticated;
   wt_transport_t* transport;
   scheduler_pool_t* pool;
   block_cache_t* bc;

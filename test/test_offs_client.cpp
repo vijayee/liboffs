@@ -106,7 +106,7 @@ protected:
         snprintf(socket_path, sizeof(socket_path), "/tmp/test_client_sock_%d", getpid());
         unlink(socket_path);
 
-        transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path);
+        transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path, NULL);
         ASSERT_NE(transport, nullptr);
         unix_transport_start(transport);
 
@@ -132,14 +132,44 @@ protected:
     }
 };
 
-TEST_F(TestOffsClient, ConnectAndDisconnect) {
-    offs_client_t* client = offs_client_connect(url);
+TEST_F(TestOffsClient, ConnectWithApiKey) {
+    offs_client_t* client = offs_client_connect(url, "test-api-key");
     ASSERT_NE(client, nullptr);
     offs_client_disconnect(client);
 }
 
+TEST_F(TestOffsClient, ConnectAndDisconnect) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+    offs_client_disconnect(client);
+}
+
+TEST_F(TestOffsClient, PutBufferedWithApiKey) {
+    offs_client_t* client = offs_client_connect(url, "my-api-key");
+    ASSERT_NE(client, nullptr);
+
+    PutCallbackContext ctx;
+    ctx.ori_string = nullptr;
+    ctx.called = 0;
+
+    const uint8_t data[] = "hello with api key";
+    int result = offs_client_put(client, "application/octet-stream", "test.bin",
+                                  sizeof(data) - 1, data, sizeof(data) - 1,
+                                  _put_callback, &ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 200 && !ctx.called; attempts++) {
+        usleep(10000);
+    }
+    EXPECT_EQ(ctx.called, 1);
+    EXPECT_NE(ctx.ori_string, nullptr);
+    free(ctx.ori_string);
+
+    offs_client_disconnect(client);
+}
+
 TEST_F(TestOffsClient, PutBuffered) {
-    offs_client_t* client = offs_client_connect(url);
+    offs_client_t* client = offs_client_connect(url, NULL);
     ASSERT_NE(client, nullptr);
 
     PutCallbackContext ctx;
@@ -164,7 +194,7 @@ TEST_F(TestOffsClient, PutBuffered) {
 }
 
 TEST_F(TestOffsClient, PutStreaming) {
-    offs_client_t* client = offs_client_connect(url);
+    offs_client_t* client = offs_client_connect(url, NULL);
     ASSERT_NE(client, nullptr);
 
     PutCallbackContext ctx;
@@ -194,7 +224,7 @@ TEST_F(TestOffsClient, PutStreaming) {
 }
 
 TEST_F(TestOffsClient, GetAfterPut) {
-    offs_client_t* client = offs_client_connect(url);
+    offs_client_t* client = offs_client_connect(url, NULL);
     ASSERT_NE(client, nullptr);
 
     PutCallbackContext put_ctx;
@@ -248,7 +278,7 @@ TEST_F(TestOffsClient, GetAfterPut) {
 }
 
 TEST_F(TestOffsClient, GetInvalidOri) {
-    offs_client_t* client = offs_client_connect(url);
+    offs_client_t* client = offs_client_connect(url, NULL);
     ASSERT_NE(client, nullptr);
 
     GetDataCallbackContext ctx;
@@ -318,7 +348,7 @@ protected:
         port = _next_port++;
         snprintf(url, sizeof(url), "ws://127.0.0.1:%d/offs", port);
 
-        transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0);
+        transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL);
         ASSERT_NE(transport, nullptr);
         ws_transport_start(transport);
 
@@ -347,14 +377,20 @@ protected:
 
 uint16_t TestOffsWsClient::_next_port = 40080;
 
+TEST_F(TestOffsWsClient, ConnectWithApiKey) {
+    offs_client_t* client = offs_client_connect(url, "ws-api-key");
+    ASSERT_NE(client, nullptr);
+    offs_client_disconnect(client);
+}
+
 TEST_F(TestOffsWsClient, ConnectAndDisconnect) {
-    offs_client_t* client = offs_client_connect(url);
+    offs_client_t* client = offs_client_connect(url, NULL);
     ASSERT_NE(client, nullptr);
     offs_client_disconnect(client);
 }
 
 TEST_F(TestOffsWsClient, PutBuffered) {
-    offs_client_t* client = offs_client_connect(url);
+    offs_client_t* client = offs_client_connect(url, NULL);
     ASSERT_NE(client, nullptr);
 
     PutCallbackContext ctx;
@@ -378,7 +414,7 @@ TEST_F(TestOffsWsClient, PutBuffered) {
 }
 
 TEST_F(TestOffsWsClient, GetAfterPut) {
-    offs_client_t* client = offs_client_connect(url);
+    offs_client_t* client = offs_client_connect(url, NULL);
     ASSERT_NE(client, nullptr);
 
     PutCallbackContext put_ctx;
@@ -498,7 +534,7 @@ protected:
 
         const char* cp = (cert_path[0] != '\0') ? cert_path : NULL;
         const char* kp = (key_path[0] != '\0') ? key_path : NULL;
-        transport = wt_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, cp, kp, 0);
+        transport = wt_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, cp, kp, 0, NULL);
         if (transport != nullptr) {
             wt_transport_start(transport);
             /* Wait for QUIC server listener to be ready */
@@ -543,7 +579,7 @@ TEST_F(TestOffsWtClient, ConnectAndDisconnect) {
     if (transport == nullptr) {
         GTEST_SKIP() << "WT transport creation failed (MsQuic not available)";
     }
-    offs_client_t* client = offs_client_connect(url);
+    offs_client_t* client = offs_client_connect(url, NULL);
     ASSERT_NE(client, nullptr);
     offs_client_disconnect(client);
 }
@@ -552,7 +588,7 @@ TEST_F(TestOffsWtClient, PutBuffered) {
     if (transport == nullptr) {
         GTEST_SKIP() << "WT transport creation failed (MsQuic not available)";
     }
-    offs_client_t* client = offs_client_connect(url);
+    offs_client_t* client = offs_client_connect(url, NULL);
     ASSERT_NE(client, nullptr);
 
     PutCallbackContext ctx;
@@ -579,7 +615,7 @@ TEST_F(TestOffsWtClient, GetAfterPut) {
     if (transport == nullptr) {
         GTEST_SKIP() << "WT transport creation failed (MsQuic not available)";
     }
-    offs_client_t* client = offs_client_connect(url);
+    offs_client_t* client = offs_client_connect(url, NULL);
     ASSERT_NE(client, nullptr);
 
     PutCallbackContext put_ctx;

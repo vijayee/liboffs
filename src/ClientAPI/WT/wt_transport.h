@@ -54,6 +54,7 @@ typedef struct wt_transport_t {
 
   platform_mutex_t* conn_lock;
   vec_wt_connection_t connections;
+  char* api_key_hash;
 } wt_transport_t;
 
 wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
@@ -64,7 +65,8 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
                                       uint16_t port,
                                       const char* cert_path,
                                       const char* key_path,
-                                      size_t max_connections);
+                                      size_t max_connections,
+                                      const char* api_key_hash);
 void wt_transport_destroy(wt_transport_t* transport);
 void wt_transport_start(wt_transport_t* transport);
 void wt_transport_stop(wt_transport_t* transport);

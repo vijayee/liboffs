@@ -75,7 +75,8 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
                                          block_cache_t* bc,
                                          ofd_cache_t* ofd_cache,
                                          tuple_cache_t* tc,
-                                         const char* socket_path) {
+                                         const char* socket_path,
+                                         const char* api_key_hash) {
   unix_transport_t* transport = get_clear_memory(sizeof(unix_transport_t));
   transport->pool = pool;
   transport->bc = bc;
@@ -94,6 +95,13 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
   transport->socket_path = get_memory(strlen(socket_path) + 1);
   memcpy(transport->socket_path, socket_path, strlen(socket_path) + 1);
 
+  if (api_key_hash != NULL) {
+    transport->api_key_hash = get_memory(strlen(api_key_hash) + 1);
+    memcpy(transport->api_key_hash, api_key_hash, strlen(api_key_hash) + 1);
+  } else {
+    transport->api_key_hash = NULL;
+  }
+
   transport->listen_sock = platform_local_listen(socket_path);
   if (transport->listen_sock == NULL) {
     perror("platform_local_listen");
@@ -101,6 +109,7 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
     _destroy_stack_destroy(transport);
     actor_destroy(&transport->actor);
     free(transport->socket_path);
+    free(transport->api_key_hash);
     free(transport);
     return NULL;
   }
@@ -176,6 +185,7 @@ void unix_transport_destroy(unix_transport_t* transport) {
     platform_local_cleanup(transport->socket_path);
     free(transport->socket_path);
   }
+  free(transport->api_key_hash);
   actor_destroy(&transport->actor);
   _destroy_stack_destroy(transport);
   pd_loop_destroy(transport->loop);

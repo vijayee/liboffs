@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include "../../Util/bcrypt.h"
 
 #define READ_BUFFER_SIZE 65536
 
@@ -324,6 +325,10 @@ static void _tcp_put_on_descriptor_error(void* ctx, void* error) {
 /* --- Frame handlers --- */
 
 static void _tcp_handle_get(tcp_connection_t* conn, cbor_item_t* frame) {
+  if (!conn->is_authenticated) {
+    _tcp_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
   client_api_get_request_t msg;
   memset(&msg, 0, sizeof(msg));
   if (client_api_get_request_decode(frame, &msg) != 0) {
@@ -410,6 +415,10 @@ static void _tcp_handle_get(tcp_connection_t* conn, cbor_item_t* frame) {
 }
 
 static void _tcp_handle_put(tcp_connection_t* conn, cbor_item_t* frame) {
+  if (!conn->is_authenticated) {
+    _tcp_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
   client_api_put_request_t msg;
   memset(&msg, 0, sizeof(msg));
   if (client_api_put_request_decode(frame, &msg) != 0) {
@@ -495,6 +504,10 @@ static void _tcp_handle_put(tcp_connection_t* conn, cbor_item_t* frame) {
 }
 
 static void _tcp_handle_put_data(tcp_connection_t* conn, cbor_item_t* frame) {
+  if (!conn->is_authenticated) {
+    _tcp_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
   if (!conn->put_streaming || conn->put_ws == NULL) {
     _tcp_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "No streaming PUT in progress");
     return;
@@ -518,6 +531,10 @@ static void _tcp_handle_put_data(tcp_connection_t* conn, cbor_item_t* frame) {
 }
 
 static void _tcp_handle_put_end(tcp_connection_t* conn) {
+  if (!conn->is_authenticated) {
+    _tcp_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
   if (!conn->put_streaming || conn->put_ws == NULL) {
     _tcp_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "No streaming PUT in progress");
     return;
@@ -527,6 +544,32 @@ static void _tcp_handle_put_end(tcp_connection_t* conn) {
   conn->put_streaming = 0;
   conn->put_ws = NULL;
   conn->put_desc = NULL;
+}
+
+static void _tcp_handle_auth(tcp_connection_t* conn, cbor_item_t* frame) {
+  if (conn->transport == NULL || conn->transport->api_key_hash == NULL) {
+    conn->is_authenticated = 1;
+    return;
+  }
+
+  client_api_auth_request_t auth;
+  if (client_api_auth_request_decode(frame, &auth) != 0) {
+    _tcp_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Invalid auth request");
+    return;
+  }
+
+  char* key = get_memory(auth.api_key_len + 1);
+  memcpy(key, auth.api_key, auth.api_key_len);
+  key[auth.api_key_len] = '\0';
+
+  if (bcrypt_check(key, conn->transport->api_key_hash) == 0) {
+    conn->is_authenticated = 1;
+  } else {
+    _tcp_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication failed");
+  }
+
+  free(key);
+  client_api_auth_request_destroy(&auth);
 }
 
 static void _tcp_dispatch_frame(tcp_connection_t* conn, uint8_t type, cbor_item_t* frame) {
@@ -542,6 +585,9 @@ static void _tcp_dispatch_frame(tcp_connection_t* conn, uint8_t type, cbor_item_
       break;
     case CLIENT_API_PUT_END:
       _tcp_handle_put_end(conn);
+      break;
+    case CLIENT_API_AUTH_REQUEST:
+      _tcp_handle_auth(conn, frame);
       break;
     default:
       _tcp_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Unknown message type");
@@ -953,6 +999,7 @@ tcp_connection_t* tcp_connection_create(tcp_transport_t* transport, platform_soc
   connection->write_pending = 0;
   connection->is_closing = 0;
   connection->is_ssl = 0;
+  connection->is_authenticated = (transport->api_key_hash == NULL) ? 1 : 0;
   connection->ssl = NULL;
   connection->framer = stream_framer_create();
   connection->put_streaming = 0;

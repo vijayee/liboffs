@@ -21,7 +21,7 @@ typedef void (*offs_get_end_cb_t)(void* ctx);
 typedef void (*offs_error_cb_t)(void* ctx, uint8_t status_code, const char* message);
 
 /* Connection lifecycle */
-offs_client_t* offs_client_connect(const char* transport_url);
+offs_client_t* offs_client_connect(const char* transport_url, const char* api_key);
 void offs_client_disconnect(offs_client_t* client);
 
 /* Buffered PUT — sends data in a single request */

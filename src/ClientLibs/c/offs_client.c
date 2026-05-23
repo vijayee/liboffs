@@ -89,6 +89,9 @@ struct offs_client_t {
   uint8_t* read_buf;
   size_t read_buf_size;
 
+  /* Auth */
+  char* api_key;
+
   /* Callbacks */
   offs_put_response_cb_t put_cb;
   void* put_cb_ctx;
@@ -291,6 +294,17 @@ static void _send_frame(offs_client_t* client, cbor_item_t* frame) {
     platform_mutex_unlock(client->lock);
     free(framed);
   }
+}
+
+static void _send_auth_request(offs_client_t* client) {
+  if (client->api_key == NULL) return;
+
+  client_api_auth_request_t auth;
+  auth.api_key = (uint8_t*)client->api_key;
+  auth.api_key_len = strlen(client->api_key);
+
+  cbor_item_t* frame = client_api_auth_request_encode(&auth);
+  _send_frame(client, frame);
 }
 
 static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* frame) {
@@ -681,7 +695,7 @@ static int _ws_upgrade(offs_client_t* client, const char* ws_host) {
   return 0;
 }
 
-offs_client_t* offs_client_connect(const char* transport_url) {
+offs_client_t* offs_client_connect(const char* transport_url, const char* api_key) {
   if (transport_url == NULL) return NULL;
 
   offs_client_t* client = get_clear_memory(sizeof(offs_client_t));
@@ -700,6 +714,12 @@ offs_client_t* offs_client_connect(const char* transport_url) {
   client->error_cb = NULL;
   client->error_cb_ctx = NULL;
 
+  if (api_key != NULL) {
+    size_t key_len = strlen(api_key);
+    client->api_key = get_memory(key_len + 1);
+    memcpy(client->api_key, api_key, key_len + 1);
+  }
+
   if (strncmp(transport_url, "unix://", 7) == 0) {
     const char* path = transport_url + 7;
     client->transport.raw.sock = _connect_unix(path);
@@ -714,6 +734,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       free(host);
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
+      free(client->api_key);
       free(client);
       return NULL;
     }
@@ -755,6 +776,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       free(addr_copy);
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
+      free(client->api_key);
       free(client);
       return NULL;
     }
@@ -769,6 +791,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
         platform_socket_destroy(client->transport.ws.sock);
         stream_framer_destroy(client->framer);
         platform_mutex_destroy(client->lock);
+        free(client->api_key);
         free(client);
         return NULL;
       }
@@ -783,6 +806,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
         platform_socket_destroy(client->transport.ws.sock);
         stream_framer_destroy(client->framer);
         platform_mutex_destroy(client->lock);
+        free(client->api_key);
         free(client);
         return NULL;
       }
@@ -802,6 +826,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       platform_socket_destroy(client->transport.ws.sock);
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
+      free(client->api_key);
       free(client);
       return NULL;
     }
@@ -811,6 +836,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
     client->transport_type = OFFS_TRANSPORT_WS;
     client->connected = 1;
     client->running = 1;
+    _send_auth_request(client);
     /* WS doesn't use stream_framer — it uses ws_frame_parse instead */
     stream_framer_destroy(client->framer);
     client->framer = NULL;
@@ -841,6 +867,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       free(addr_copy);
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
+      free(client->api_key);
       free(client);
       return NULL;
     }
@@ -853,6 +880,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       free(addr_copy);
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
+      free(client->api_key);
       free(client);
       return NULL;
     }
@@ -878,6 +906,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       free(addr_copy);
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
+      free(client->api_key);
       free(client);
       return NULL;
     }
@@ -888,6 +917,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       free(addr_copy);
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
+      free(client->api_key);
       free(client);
       return NULL;
     }
@@ -902,6 +932,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       free(addr_copy);
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
+      free(client->api_key);
       free(client);
       return NULL;
     }
@@ -915,6 +946,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       free(addr_copy);
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
+      free(client->api_key);
       free(client);
       return NULL;
     }
@@ -931,6 +963,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       free(addr_copy);
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
+      free(client->api_key);
       free(client);
       return NULL;
     }
@@ -945,6 +978,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       free(addr_copy);
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
+      free(client->api_key);
       free(client);
       return NULL;
     }
@@ -959,6 +993,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
       free(addr_copy);
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
+      free(client->api_key);
       free(client);
       return NULL;
     }
@@ -973,6 +1008,7 @@ offs_client_t* offs_client_connect(const char* transport_url) {
     /* recv_lock, recv_cond, recv_buf, etc. are zeroed by get_clear_memory */
     client->connected = 1;
     client->running = 1;
+    _send_auth_request(client);
     free(addr_copy);
     /* WT doesn't use a recv thread — data arrives via MsQuic stream callback */
     return client;
@@ -980,12 +1016,14 @@ offs_client_t* offs_client_connect(const char* transport_url) {
     /* WT not supported — MsQuic not available */
     stream_framer_destroy(client->framer);
     platform_mutex_destroy(client->lock);
+    free(client->api_key);
     free(client);
     return NULL;
 #endif
   } else {
     stream_framer_destroy(client->framer);
     platform_mutex_destroy(client->lock);
+    free(client->api_key);
     free(client);
     return NULL;
   }
@@ -993,12 +1031,14 @@ offs_client_t* offs_client_connect(const char* transport_url) {
   if (client->transport.raw.sock == NULL) {
     stream_framer_destroy(client->framer);
     platform_mutex_destroy(client->lock);
+    free(client->api_key);
     free(client);
     return NULL;
   }
 
   client->connected = 1;
   client->running = 1;
+  _send_auth_request(client);
   client->recv_thread = platform_thread_create(_recv_thread, client);
 
   return client;
@@ -1076,6 +1116,7 @@ void offs_client_disconnect(offs_client_t* client) {
     DESTROY(client->write_buffer, buffer);
   }
   platform_mutex_destroy(client->lock);
+  free(client->api_key);
   free(client);
 }
 

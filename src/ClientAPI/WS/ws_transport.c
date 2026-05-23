@@ -81,7 +81,8 @@ ws_transport_t* ws_transport_create(scheduler_pool_t* pool,
                                      uint16_t port,
                                      const char* cert_path,
                                      const char* key_path,
-                                     size_t max_connections) {
+                                     size_t max_connections,
+                                     const char* api_key_hash) {
   ws_transport_t* transport = get_clear_memory(sizeof(ws_transport_t));
   transport->pool = pool;
   transport->bc = bc;
@@ -101,6 +102,13 @@ ws_transport_t* ws_transport_create(scheduler_pool_t* pool,
   memcpy(transport->host, host, strlen(host) + 1);
   transport->port = port;
   transport->ssl_ctx = NULL;
+
+  if (api_key_hash != NULL) {
+    transport->api_key_hash = get_memory(strlen(api_key_hash) + 1);
+    memcpy(transport->api_key_hash, api_key_hash, strlen(api_key_hash) + 1);
+  } else {
+    transport->api_key_hash = NULL;
+  }
 
   /* Set up SSL_CTX if cert_path and key_path are provided */
   if (cert_path != NULL && key_path != NULL) {
@@ -156,6 +164,7 @@ ws_transport_t* ws_transport_create(scheduler_pool_t* pool,
     pd_loop_destroy(transport->loop);
     _destroy_stack_destroy(transport);
     actor_destroy(&transport->actor);
+    free(transport->api_key_hash);
     free(transport->host);
     free(transport);
     return NULL;
@@ -181,6 +190,7 @@ ws_transport_t* ws_transport_create(scheduler_pool_t* pool,
     pd_loop_destroy(transport->loop);
     _destroy_stack_destroy(transport);
     actor_destroy(&transport->actor);
+    free(transport->api_key_hash);
     free(transport->host);
     free(transport);
     return NULL;
@@ -195,6 +205,7 @@ ws_transport_t* ws_transport_create(scheduler_pool_t* pool,
     pd_loop_destroy(transport->loop);
     _destroy_stack_destroy(transport);
     actor_destroy(&transport->actor);
+    free(transport->api_key_hash);
     free(transport->host);
     free(transport);
     return NULL;
@@ -284,6 +295,7 @@ void ws_transport_destroy(ws_transport_t* transport) {
   if (transport->host != NULL) {
     free(transport->host);
   }
+  free(transport->api_key_hash);
   actor_destroy(&transport->actor);
   _destroy_stack_destroy(transport);
   pd_loop_destroy(transport->loop);

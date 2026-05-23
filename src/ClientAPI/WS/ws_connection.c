@@ -36,6 +36,7 @@
 #include <openssl/sha.h>
 #include <openssl/bio.h>
 #include <openssl/evp.h>
+#include "../../Util/bcrypt.h"
 
 #define READ_BUFFER_SIZE 65536
 #define WS_UPGRADE_BUFFER_INITIAL 4096
@@ -605,6 +606,10 @@ static void _ws_put_on_descriptor_error(void* ctx, void* error) {
 /* --- Frame handlers --- */
 
 static void _ws_handle_get(ws_connection_t* conn, cbor_item_t* frame) {
+  if (!conn->is_authenticated) {
+    _ws_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
   client_api_get_request_t msg;
   memset(&msg, 0, sizeof(msg));
   if (client_api_get_request_decode(frame, &msg) != 0) {
@@ -691,6 +696,10 @@ static void _ws_handle_get(ws_connection_t* conn, cbor_item_t* frame) {
 }
 
 static void _ws_handle_put(ws_connection_t* conn, cbor_item_t* frame) {
+  if (!conn->is_authenticated) {
+    _ws_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
   client_api_put_request_t msg;
   memset(&msg, 0, sizeof(msg));
   if (client_api_put_request_decode(frame, &msg) != 0) {
@@ -776,6 +785,10 @@ static void _ws_handle_put(ws_connection_t* conn, cbor_item_t* frame) {
 }
 
 static void _ws_handle_put_data(ws_connection_t* conn, cbor_item_t* frame) {
+  if (!conn->is_authenticated) {
+    _ws_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
   if (!conn->put_streaming || conn->put_ws == NULL) {
     _ws_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "No streaming PUT in progress");
     return;
@@ -799,6 +812,10 @@ static void _ws_handle_put_data(ws_connection_t* conn, cbor_item_t* frame) {
 }
 
 static void _ws_handle_put_end(ws_connection_t* conn) {
+  if (!conn->is_authenticated) {
+    _ws_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
   if (!conn->put_streaming || conn->put_ws == NULL) {
     _ws_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "No streaming PUT in progress");
     return;
@@ -808,6 +825,32 @@ static void _ws_handle_put_end(ws_connection_t* conn) {
   conn->put_streaming = 0;
   conn->put_ws = NULL;
   conn->put_desc = NULL;
+}
+
+static void _ws_handle_auth(ws_connection_t* conn, cbor_item_t* frame) {
+  if (conn->transport == NULL || conn->transport->api_key_hash == NULL) {
+    conn->is_authenticated = 1;
+    return;
+  }
+
+  client_api_auth_request_t auth;
+  if (client_api_auth_request_decode(frame, &auth) != 0) {
+    _ws_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Invalid auth request");
+    return;
+  }
+
+  char* key = get_memory(auth.api_key_len + 1);
+  memcpy(key, auth.api_key, auth.api_key_len);
+  key[auth.api_key_len] = '\0';
+
+  if (bcrypt_check(key, conn->transport->api_key_hash) == 0) {
+    conn->is_authenticated = 1;
+  } else {
+    _ws_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication failed");
+  }
+
+  free(key);
+  client_api_auth_request_destroy(&auth);
 }
 
 static void _ws_dispatch_frame(ws_connection_t* conn, uint8_t type, cbor_item_t* frame) {
@@ -823,6 +866,9 @@ static void _ws_dispatch_frame(ws_connection_t* conn, uint8_t type, cbor_item_t*
       break;
     case CLIENT_API_PUT_END:
       _ws_handle_put_end(conn);
+      break;
+    case CLIENT_API_AUTH_REQUEST:
+      _ws_handle_auth(conn, frame);
       break;
     default:
       _ws_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Unknown message type");
@@ -1350,6 +1396,7 @@ ws_connection_t* ws_connection_create(ws_transport_t* transport, platform_socket
   connection->write_pending = 0;
   connection->is_closing = 0;
   connection->is_ssl = 0;
+  connection->is_authenticated = (transport->api_key_hash == NULL) ? 1 : 0;
   connection->ssl = NULL;
   connection->state = WS_STATE_UPGRADING;
   connection->upgrade_buf = NULL;

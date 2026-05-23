@@ -48,6 +48,7 @@ typedef struct unix_connection_t {
   buffer_t* write_buffer;
   uint8_t write_pending;
   uint8_t is_closing;
+  uint8_t is_authenticated;
   unix_transport_t* transport;
   scheduler_pool_t* pool;
   block_cache_t* bc;

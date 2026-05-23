@@ -30,6 +30,7 @@
 #include <cbor.h>
 #include <string.h>
 #include <stdlib.h>
+#include "../../Util/bcrypt.h"
 
 /* Pipeline context for GET requests */
 typedef struct {
@@ -274,6 +275,10 @@ static void _wt_put_on_descriptor_error(void* ctx, void* error) {
 /* --- Frame handlers --- */
 
 static void _wt_handle_get(wt_connection_t* conn, cbor_item_t* frame) {
+  if (!conn->is_authenticated) {
+    wt_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
   client_api_get_request_t msg;
   memset(&msg, 0, sizeof(msg));
   if (client_api_get_request_decode(frame, &msg) != 0) {
@@ -350,6 +355,10 @@ static void _wt_handle_get(wt_connection_t* conn, cbor_item_t* frame) {
 }
 
 static void _wt_handle_put(wt_connection_t* conn, cbor_item_t* frame) {
+  if (!conn->is_authenticated) {
+    wt_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
   client_api_put_request_t msg;
   memset(&msg, 0, sizeof(msg));
   if (client_api_put_request_decode(frame, &msg) != 0) {
@@ -425,6 +434,10 @@ static void _wt_handle_put(wt_connection_t* conn, cbor_item_t* frame) {
 }
 
 static void _wt_handle_put_data(wt_connection_t* conn, cbor_item_t* frame) {
+  if (!conn->is_authenticated) {
+    wt_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
   if (!conn->put_streaming || conn->put_ws == NULL) {
     wt_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "No streaming PUT in progress");
     return;
@@ -448,6 +461,10 @@ static void _wt_handle_put_data(wt_connection_t* conn, cbor_item_t* frame) {
 }
 
 static void _wt_handle_put_end(wt_connection_t* conn) {
+  if (!conn->is_authenticated) {
+    wt_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
   if (!conn->put_streaming || conn->put_ws == NULL) {
     wt_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "No streaming PUT in progress");
     return;
@@ -457,6 +474,32 @@ static void _wt_handle_put_end(wt_connection_t* conn) {
   conn->put_streaming = 0;
   conn->put_ws = NULL;
   conn->put_desc = NULL;
+}
+
+static void _wt_handle_auth(wt_connection_t* conn, cbor_item_t* frame) {
+  if (conn->transport == NULL || conn->transport->api_key_hash == NULL) {
+    conn->is_authenticated = 1;
+    return;
+  }
+
+  client_api_auth_request_t auth;
+  if (client_api_auth_request_decode(frame, &auth) != 0) {
+    wt_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Invalid auth request");
+    return;
+  }
+
+  char* key = get_memory(auth.api_key_len + 1);
+  memcpy(key, auth.api_key, auth.api_key_len);
+  key[auth.api_key_len] = '\0';
+
+  if (bcrypt_check(key, conn->transport->api_key_hash) == 0) {
+    conn->is_authenticated = 1;
+  } else {
+    wt_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication failed");
+  }
+
+  free(key);
+  client_api_auth_request_destroy(&auth);
 }
 
 static void _wt_dispatch_frame(wt_connection_t* conn, uint8_t type, cbor_item_t* frame) {
@@ -472,6 +515,9 @@ static void _wt_dispatch_frame(wt_connection_t* conn, uint8_t type, cbor_item_t*
       break;
     case CLIENT_API_PUT_END:
       _wt_handle_put_end(conn);
+      break;
+    case CLIENT_API_AUTH_REQUEST:
+      _wt_handle_auth(conn, frame);
       break;
     default:
       wt_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Unknown message type");
@@ -609,6 +655,7 @@ wt_connection_t* wt_connection_create(wt_transport_t* transport, HQUIC connectio
   conn->ofd_cache = transport->ofd_cache;
   conn->tc = transport->tc;
   conn->is_closing = 0;
+  conn->is_authenticated = (transport->api_key_hash == NULL) ? 1 : 0;
   conn->put_streaming = 0;
   conn->put_ws = NULL;
   conn->put_desc = NULL;

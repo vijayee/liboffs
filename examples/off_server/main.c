@@ -105,7 +105,7 @@ int main(int argc, char** argv) {
 
   unix_transport_t* unix_transport = NULL;
   if (unix_path != NULL) {
-    unix_transport = unix_transport_create(pool, bc, ofd_cache, tc, unix_path);
+    unix_transport = unix_transport_create(pool, bc, ofd_cache, tc, unix_path, NULL);
     if (unix_transport == NULL) {
       fprintf(stderr, "Failed to create Unix transport on %s\n", unix_path);
       http_server_destroy(server);

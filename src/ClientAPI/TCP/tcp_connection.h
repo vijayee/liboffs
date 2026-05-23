@@ -50,6 +50,7 @@ typedef struct tcp_connection_t {
   uint8_t write_pending;
   uint8_t is_closing;
   uint8_t is_ssl;
+  uint8_t is_authenticated;
   SSL* ssl;
   tcp_transport_t* transport;
   scheduler_pool_t* pool;

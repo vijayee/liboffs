@@ -44,6 +44,7 @@ typedef struct ws_transport_t {
   char* host;
   uint16_t port;
   SSL_CTX* ssl_ctx;
+  char* api_key_hash;
 } ws_transport_t;
 
 ws_transport_t* ws_transport_create(scheduler_pool_t* pool,
@@ -54,7 +55,8 @@ ws_transport_t* ws_transport_create(scheduler_pool_t* pool,
                                      uint16_t port,
                                      const char* cert_path,
                                      const char* key_path,
-                                     size_t max_connections);
+                                     size_t max_connections,
+                                     const char* api_key_hash);
 void ws_transport_destroy(ws_transport_t* transport);
 void ws_transport_start(ws_transport_t* transport);
 void ws_transport_stop(ws_transport_t* transport);

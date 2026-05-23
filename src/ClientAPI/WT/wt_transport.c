@@ -79,7 +79,8 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
                                       uint16_t port,
                                       const char* cert_path,
                                       const char* key_path,
-                                      size_t max_connections) {
+                                      size_t max_connections,
+                                      const char* api_key_hash) {
   wt_transport_t* transport = get_clear_memory(sizeof(wt_transport_t));
   transport->pool = pool;
   transport->bc = bc;
@@ -101,6 +102,13 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
   transport->host = get_memory(strlen(host) + 1);
   memcpy(transport->host, host, strlen(host) + 1);
   transport->port = port;
+
+  if (api_key_hash != NULL) {
+    transport->api_key_hash = get_memory(strlen(api_key_hash) + 1);
+    memcpy(transport->api_key_hash, api_key_hash, strlen(api_key_hash) + 1);
+  } else {
+    transport->api_key_hash = NULL;
+  }
   if (cert_path != NULL) {
     transport->cert_path = get_memory(strlen(cert_path) + 1);
     memcpy(transport->cert_path, cert_path, strlen(cert_path) + 1);
@@ -120,6 +128,7 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
     free(transport->cert_path);
     free(transport->key_path);
     free(transport->host);
+    free(transport->api_key_hash);
     platform_mutex_destroy(transport->conn_lock);
     _destroy_stack_destroy(transport);
     pd_loop_destroy(transport->loop);
@@ -209,6 +218,7 @@ void wt_transport_destroy(wt_transport_t* transport) {
   if (transport->host != NULL) {
     free(transport->host);
   }
+  free(transport->api_key_hash);
   platform_mutex_destroy(transport->conn_lock);
   actor_destroy(&transport->actor);
   _destroy_stack_destroy(transport);
@@ -456,9 +466,10 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
                                       uint16_t port,
                                       const char* cert_path,
                                       const char* key_path,
-                                      size_t max_connections) {
+                                      size_t max_connections,
+                                      const char* api_key_hash) {
   (void)pool; (void)bc; (void)ofd_cache; (void)tc;
-  (void)host; (void)port; (void)cert_path; (void)key_path; (void)max_connections;
+  (void)host; (void)port; (void)cert_path; (void)key_path; (void)max_connections; (void)api_key_hash;
   return NULL;
 }
 

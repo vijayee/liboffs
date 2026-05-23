@@ -37,6 +37,7 @@ typedef struct unix_transport_t {
   ATOMIC(size_t) active_connections;
   platform_mutex_t* destroy_lock;
   unix_transport_destroy_node_t* destroy_head;
+  char* api_key_hash;
   char* socket_path;
 } unix_transport_t;
 
@@ -44,7 +45,8 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
                                          block_cache_t* bc,
                                          ofd_cache_t* ofd_cache,
                                          tuple_cache_t* tc,
-                                         const char* socket_path);
+                                         const char* socket_path,
+                                         const char* api_key_hash);
 void unix_transport_destroy(unix_transport_t* transport);
 void unix_transport_start(unix_transport_t* transport);
 void unix_transport_stop(unix_transport_t* transport);
