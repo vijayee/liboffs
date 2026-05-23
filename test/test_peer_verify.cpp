@@ -25,16 +25,17 @@ static std::vector<uint8_t> pem_to_der(const char* pem_path) {
   return der;
 }
 
+static bool file_exists(const char* path) {
+  std::ifstream file(path);
+  return file.good();
+}
+
 class PeerVerifyTest : public ::testing::Test {
 protected:
   std::vector<uint8_t> ca_der;
-  std::vector<uint8_t> leaf_der;
-  std::vector<uint8_t> other_ca_der;
 
   void SetUp() override {
-    ca_der = pem_to_der("test/certs/ca_cert.pem");
-    leaf_der = pem_to_der("test/certs/leaf_cert.pem");
-    other_ca_der = pem_to_der("test/certs/other_ca_cert.pem");
+    ca_der = pem_to_der("../test/certs/ca_cert.pem");
   }
 };
 
@@ -50,8 +51,20 @@ TEST_F(PeerVerifyTest, ZeroLengthReturnsNull) {
 
 TEST_F(PeerVerifyTest, ValidCACreatesContext) {
   peer_verify_ctx_t* ctx = peer_verify_ctx_create(ca_der.data(), ca_der.size());
-  EXPECT_NE(ctx, nullptr);
+  ASSERT_NE(ctx, nullptr);
+  const char* path = peer_verify_ctx_path(ctx);
+  ASSERT_NE(path, nullptr);
+  EXPECT_TRUE(file_exists(path));
   peer_verify_ctx_destroy(ctx);
+}
+
+TEST_F(PeerVerifyTest, DestroyRemovesTempFile) {
+  peer_verify_ctx_t* ctx = peer_verify_ctx_create(ca_der.data(), ca_der.size());
+  ASSERT_NE(ctx, nullptr);
+  std::string path(peer_verify_ctx_path(ctx));
+  ASSERT_TRUE(file_exists(path.c_str()));
+  peer_verify_ctx_destroy(ctx);
+  EXPECT_FALSE(file_exists(path.c_str()));
 }
 
 TEST_F(PeerVerifyTest, CorruptDERReturnsNull) {
@@ -65,39 +78,22 @@ TEST_F(PeerVerifyTest, DestroyNullIsSafe) {
   SUCCEED();
 }
 
-#ifdef HAS_MSQUIC
-#include <msquic.h>
+TEST_F(PeerVerifyTest, PathReturnsNullForNull) {
+  EXPECT_EQ(peer_verify_ctx_path(NULL), nullptr);
+}
 
-TEST_F(PeerVerifyTest, ValidLeafPasses) {
+TEST_F(PeerVerifyTest, PemFileIsReadable) {
   peer_verify_ctx_t* ctx = peer_verify_ctx_create(ca_der.data(), ca_der.size());
   ASSERT_NE(ctx, nullptr);
+  const char* path = peer_verify_ctx_path(ctx);
 
-  QUIC_CERTIFICATE cert;
-  memset(&cert, 0, sizeof(cert));
-  cert.Certificate = leaf_der.data();
-  cert.CertificateLength = (uint32_t)leaf_der.size();
+  // Verify the PEM file can be parsed back by OpenSSL
+  BIO* bio = BIO_new_file(path, "r");
+  ASSERT_NE(bio, nullptr);
+  X509* cert = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+  BIO_free(bio);
+  EXPECT_NE(cert, nullptr);
+  X509_free(cert);
 
-  EXPECT_EQ(peer_verify_validate(ctx, &cert), 0);
   peer_verify_ctx_destroy(ctx);
 }
-
-TEST_F(PeerVerifyTest, WrongCAFails) {
-  peer_verify_ctx_t* ctx = peer_verify_ctx_create(other_ca_der.data(), other_ca_der.size());
-  ASSERT_NE(ctx, nullptr);
-
-  QUIC_CERTIFICATE cert;
-  memset(&cert, 0, sizeof(cert));
-  cert.Certificate = leaf_der.data();
-  cert.CertificateLength = (uint32_t)leaf_der.size();
-
-  EXPECT_NE(peer_verify_validate(ctx, &cert), 0);
-  peer_verify_ctx_destroy(ctx);
-}
-
-TEST_F(PeerVerifyTest, NullCertificateFails) {
-  peer_verify_ctx_t* ctx = peer_verify_ctx_create(ca_der.data(), ca_der.size());
-  ASSERT_NE(ctx, nullptr);
-  EXPECT_NE(peer_verify_validate(ctx, NULL), 0);
-  peer_verify_ctx_destroy(ctx);
-}
-#endif // HAS_MSQUIC

@@ -332,16 +332,6 @@ static QUIC_STATUS QUIC_API _relay_client_connection_callback(
       }
       break;
     }
-    case QUIC_CONNECTION_EVENT_PEER_CERTIFICATE_RECEIVED: {
-      if (client->peer_verify != NULL) {
-        if (peer_verify_validate((peer_verify_ctx_t*)client->peer_verify,
-                                  event->PEER_CERTIFICATE_RECEIVED.Certificate) != 0) {
-          log_error("relay_client: peer certificate validation failed, closing connection");
-          client->msquic->ConnectionClose(connection);
-        }
-      }
-      break;
-    }
     default:
       break;
   }
@@ -531,13 +521,21 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
     cert_file.PrivateKeyFile = client->key_path;
     cred_config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
     cred_config.CertificateFile = &cert_file;
-    cred_config.Flags = (client->peer_verify != NULL)
-        ? QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED
-        : QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    if (client->peer_verify != NULL) {
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
+      cred_config.CaCertificateFile = peer_verify_ctx_path(
+          (peer_verify_ctx_t*)client->peer_verify);
+    } else {
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    }
   } else {
-    cred_config.Flags = (client->peer_verify != NULL)
-        ? QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED
-        : QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    if (client->peer_verify != NULL) {
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
+      cred_config.CaCertificateFile = peer_verify_ctx_path(
+          (peer_verify_ctx_t*)client->peer_verify);
+    } else {
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    }
   }
 
   if (QUIC_FAILED(status = client->msquic->ConfigurationLoadCredential(

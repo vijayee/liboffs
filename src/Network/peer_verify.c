@@ -6,14 +6,15 @@
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include <openssl/x509.h>
-#include <openssl/x509_vfy.h>
+#include <openssl/pem.h>
 #include <openssl/bio.h>
-#ifdef HAS_MSQUIC
-#include <msquic.h>
-#endif
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 struct peer_verify_ctx_t {
-  X509_STORE* store;
+  char* temp_path;  // path to temporary PEM file, NULL if creation failed
 };
 
 peer_verify_ctx_t* peer_verify_ctx_create(const uint8_t* ca_cert_data, size_t ca_cert_len) {
@@ -28,72 +29,72 @@ peer_verify_ctx_t* peer_verify_ctx_create(const uint8_t* ca_cert_data, size_t ca
     return NULL;
   }
 
-  X509_STORE* store = X509_STORE_new();
-  if (store == NULL) {
+  BIO* mem_bio = BIO_new(BIO_s_mem());
+  if (mem_bio == NULL) {
     X509_free(ca_cert);
     return NULL;
   }
 
-  if (X509_STORE_add_cert(store, ca_cert) != 1) {
-    log_error("peer_verify: failed to add CA cert to store");
+  if (PEM_write_bio_X509(mem_bio, ca_cert) != 1) {
+    log_error("peer_verify: failed to convert DER to PEM");
+    BIO_free(mem_bio);
     X509_free(ca_cert);
-    X509_STORE_free(store);
     return NULL;
   }
   X509_free(ca_cert);
 
-  peer_verify_ctx_t* ctx = get_clear_memory(sizeof(peer_verify_ctx_t));
-  if (ctx == NULL) {
-    X509_STORE_free(store);
+  char* pem_data = NULL;
+  long pem_len = BIO_get_mem_data(mem_bio, &pem_data);
+  if (pem_data == NULL || pem_len <= 0) {
+    BIO_free(mem_bio);
     return NULL;
   }
-  ctx->store = store;
+
+  char temp_path[256];
+  snprintf(temp_path, sizeof(temp_path), "/tmp/liboffs_ca_XXXXXX");
+  int fd = mkstemp(temp_path);
+  if (fd < 0) {
+    log_error("peer_verify: failed to create temp file for CA cert");
+    BIO_free(mem_bio);
+    return NULL;
+  }
+
+  ssize_t written = write(fd, pem_data, (size_t)pem_len);
+  close(fd);
+  BIO_free(mem_bio);
+
+  if (written != pem_len) {
+    log_error("peer_verify: failed to write PEM to temp file");
+    unlink(temp_path);
+    return NULL;
+  }
+
+  peer_verify_ctx_t* ctx = get_clear_memory(sizeof(peer_verify_ctx_t));
+  if (ctx == NULL) {
+    unlink(temp_path);
+    return NULL;
+  }
+
+  ctx->temp_path = strdup(temp_path);
+  if (ctx->temp_path == NULL) {
+    unlink(temp_path);
+    free(ctx);
+    return NULL;
+  }
+
   return ctx;
 }
 
 void peer_verify_ctx_destroy(peer_verify_ctx_t* ctx) {
   if (ctx == NULL) return;
-  if (ctx->store != NULL) {
-    X509_STORE_free(ctx->store);
+  if (ctx->temp_path != NULL) {
+    unlink(ctx->temp_path);
+    free(ctx->temp_path);
   }
   free(ctx);
 }
 
-int peer_verify_validate(peer_verify_ctx_t* ctx, void* certificate) {
-#ifdef HAS_MSQUIC
-  if (ctx == NULL || certificate == NULL) {
-    return -1;
-  }
-
-  QUIC_CERTIFICATE* cert = (QUIC_CERTIFICATE*)certificate;
-  const unsigned char* cursor = cert->Certificate;
-  X509* peer_cert = d2i_X509(NULL, &cursor, (long)cert->CertificateLength);
-  if (peer_cert == NULL) {
-    log_error("peer_verify: failed to parse peer certificate DER");
-    return -1;
-  }
-
-  X509_STORE_CTX* verify_ctx = X509_STORE_CTX_new();
-  if (verify_ctx == NULL) {
-    X509_free(peer_cert);
-    return -1;
-  }
-
-  X509_STORE_CTX_init(verify_ctx, ctx->store, peer_cert, NULL);
-  int result = X509_verify_cert(verify_ctx);
-
-  if (result != 1) {
-    int err = X509_STORE_CTX_get_error(verify_ctx);
-    log_error("peer_verify: certificate verification failed: %s",
-              X509_verify_cert_error_string(err));
-  }
-
-  X509_STORE_CTX_free(verify_ctx);
-  X509_free(peer_cert);
-  return (result == 1) ? 0 : -1;
-#else
-  (void)ctx;
-  (void)certificate;
-  return -1;
-#endif
+const char* peer_verify_ctx_path(const peer_verify_ctx_t* ctx) {
+  if (ctx == NULL) return NULL;
+  return ctx->temp_path;
 }
