@@ -8,6 +8,7 @@
 #include "../wire.h"
 #include "../../Util/allocator.h"
 #include "../../Util/log.h"
+#include "../peer_verify.h"
 
 #ifdef HAS_MSQUIC
 
@@ -478,6 +479,16 @@ static QUIC_STATUS QUIC_API _relay_listener_callback(
           server->configuration);
       break;
     }
+    case QUIC_LISTENER_EVENT_PEER_CERTIFICATE_RECEIVED: {
+      if (server->peer_verify != NULL) {
+        if (peer_verify_validate((peer_verify_ctx_t*)server->peer_verify,
+                                  event->PEER_CERTIFICATE_RECEIVED.Certificate) != 0) {
+          log_error("relay_server: peer certificate validation failed, rejecting connection");
+          server->msquic->ConnectionClose(event->PEER_CERTIFICATE_RECEIVED.Connection);
+        }
+      }
+      break;
+    }
     default:
       break;
   }
@@ -564,6 +575,10 @@ void relay_server_destroy(relay_server_t* server) {
   }
   if (server->cert_path != NULL) { free(server->cert_path); server->cert_path = NULL; }
   if (server->key_path != NULL) { free(server->key_path); server->key_path = NULL; }
+  if (server->peer_verify != NULL) {
+    peer_verify_ctx_destroy((peer_verify_ctx_t*)server->peer_verify);
+    server->peer_verify = NULL;
+  }
   _destroy_stack_destroy(server);
   platform_mutex_destroy(server->clients_lock);
   actor_destroy(&server->actor);
@@ -612,9 +627,13 @@ int relay_server_start(relay_server_t* server, const char* host, uint16_t port) 
     cert_file.PrivateKeyFile = server->key_path;
     cred_config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
     cred_config.CertificateFile = &cert_file;
-    cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    cred_config.Flags = (server->peer_verify != NULL)
+        ? QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED
+        : QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
   } else {
-    cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    cred_config.Flags = (server->peer_verify != NULL)
+        ? QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED
+        : QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
   }
 
   if (QUIC_FAILED(status = server->msquic->ConfigurationLoadCredential(

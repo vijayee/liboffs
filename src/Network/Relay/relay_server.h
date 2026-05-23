@@ -48,6 +48,7 @@ typedef struct relay_server_t {
   uint16_t listen_port;
   char* cert_path;
   char* key_path;
+  void* peer_verify;  // peer_verify_ctx_t* — NULL if no CA cert loaded
   relay_client_entry_t clients[RELAY_MAX_CLIENTS];
   size_t num_clients;
   uint32_t next_endpoint_id;
