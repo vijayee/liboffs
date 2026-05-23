@@ -495,3 +495,48 @@ void client_api_error_destroy(client_api_error_t* msg) {
   if (msg == NULL) return;
   free(msg->message);
 }
+
+// --- Auth Request ---
+// [type, bytestring(api_key)]
+
+cbor_item_t* client_api_auth_request_encode(const client_api_auth_request_t* auth) {
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_AUTH_REQUEST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_bytestring(auth->api_key, auth->api_key_len);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_auth_request_decode(cbor_item_t* item, client_api_auth_request_t* auth) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  memset(auth, 0, sizeof(*auth));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_AUTH_REQUEST) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* key_item = cbor_array_get(item, 1);
+  auth->api_key = _decode_bytestring(key_item, &auth->api_key_len);
+  cbor_decref(&key_item);
+
+  if (auth->api_key == NULL || auth->api_key_len == 0) return -1;
+  return 0;
+}
+
+void client_api_auth_request_destroy(client_api_auth_request_t* auth) {
+  if (auth == NULL) return;
+  if (auth->api_key != NULL) {
+    memset(auth->api_key, 0, auth->api_key_len);
+    free(auth->api_key);
+  }
+}

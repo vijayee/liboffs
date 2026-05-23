@@ -19,6 +19,7 @@
 #define CLIENT_API_GET_DATA             7
 #define CLIENT_API_GET_END              8
 #define CLIENT_API_ERROR                11
+#define CLIENT_API_AUTH_REQUEST        12
 
 // Status codes for responses
 #define CLIENT_API_STATUS_OK                0
@@ -26,6 +27,7 @@
 #define CLIENT_API_STATUS_NOT_FOUND         2
 #define CLIENT_API_STATUS_INTERNAL_ERROR    3
 #define CLIENT_API_STATUS_RANGE_NOT_SATISFIABLE 4
+#define CLIENT_API_STATUS_UNAUTHORIZED      5
 
 // --- PUT Request ---
 // [type, content_type, file_name, stream_length, server_address, data?]
@@ -93,6 +95,13 @@ typedef struct {
   char* message;           // caller must free()
 } client_api_error_t;
 
+// --- Auth Request ---
+// [type, bytestring(api_key)]
+typedef struct {
+  uint8_t* api_key;
+  size_t   api_key_len;
+} client_api_auth_request_t;
+
 // Encode functions — return CBOR item (caller must cbor_decref)
 cbor_item_t* client_api_put_request_encode(const client_api_put_request_t* msg);
 cbor_item_t* client_api_put_data_encode(const client_api_put_data_t* msg);
@@ -114,6 +123,10 @@ int client_api_get_response_start_decode(cbor_item_t* item, client_api_get_respo
 int client_api_get_data_decode(cbor_item_t* item, client_api_get_data_t* msg);
 int client_api_get_end_decode(cbor_item_t* item);
 int client_api_error_decode(cbor_item_t* item, client_api_error_t* msg);
+
+cbor_item_t* client_api_auth_request_encode(const client_api_auth_request_t* auth);
+int client_api_auth_request_decode(cbor_item_t* item, client_api_auth_request_t* auth);
+void client_api_auth_request_destroy(client_api_auth_request_t* auth);
 
 // Helper: extract type byte from CBOR item
 uint8_t client_api_wire_get_type(cbor_item_t* item);
