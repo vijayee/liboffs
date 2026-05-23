@@ -430,6 +430,16 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
           stream_ctx);
       break;
     }
+    case QUIC_CONNECTION_EVENT_PEER_CERTIFICATE_RECEIVED: {
+      if (listener->peer_verify != NULL) {
+        if (peer_verify_validate((peer_verify_ctx_t*)listener->peer_verify,
+                                  event->PEER_CERTIFICATE_RECEIVED.Certificate) != 0) {
+          log_error("quic_listener: peer certificate validation failed, rejecting connection");
+          listener->msquic->ConnectionClose(event->PEER_CERTIFICATE_RECEIVED.Connection);
+        }
+      }
+      break;
+    }
     default:
       break;
   }
@@ -453,16 +463,6 @@ static QUIC_STATUS QUIC_API quic_listener_callback(
       listener->msquic->ConnectionSetConfiguration(
           connection,
           listener->configuration);
-      break;
-    }
-    case QUIC_LISTENER_EVENT_PEER_CERTIFICATE_RECEIVED: {
-      if (listener->peer_verify != NULL) {
-        if (peer_verify_validate((peer_verify_ctx_t*)listener->peer_verify,
-                                  event->PEER_CERTIFICATE_RECEIVED.Certificate) != 0) {
-          log_error("quic_listener: peer certificate validation failed, rejecting connection");
-          listener->msquic->ConnectionClose(event->PEER_CERTIFICATE_RECEIVED.Connection);
-        }
-      }
       break;
     }
     default:

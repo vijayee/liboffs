@@ -454,6 +454,16 @@ static QUIC_STATUS QUIC_API _relay_connection_callback(
       server->msquic->ConnectionClose(connection);
       break;
     }
+    case QUIC_CONNECTION_EVENT_PEER_CERTIFICATE_RECEIVED: {
+      if (server->peer_verify != NULL) {
+        if (peer_verify_validate((peer_verify_ctx_t*)server->peer_verify,
+                                  event->PEER_CERTIFICATE_RECEIVED.Certificate) != 0) {
+          log_error("relay_server: peer certificate validation failed, rejecting connection");
+          server->msquic->ConnectionClose(event->PEER_CERTIFICATE_RECEIVED.Connection);
+        }
+      }
+      break;
+    }
     default:
       break;
   }
@@ -477,16 +487,6 @@ static QUIC_STATUS QUIC_API _relay_listener_callback(
       server->msquic->ConnectionSetConfiguration(
           connection,
           server->configuration);
-      break;
-    }
-    case QUIC_LISTENER_EVENT_PEER_CERTIFICATE_RECEIVED: {
-      if (server->peer_verify != NULL) {
-        if (peer_verify_validate((peer_verify_ctx_t*)server->peer_verify,
-                                  event->PEER_CERTIFICATE_RECEIVED.Certificate) != 0) {
-          log_error("relay_server: peer certificate validation failed, rejecting connection");
-          server->msquic->ConnectionClose(event->PEER_CERTIFICATE_RECEIVED.Connection);
-        }
-      }
       break;
     }
     default:
