@@ -21,6 +21,24 @@ and be exactly 60 characters.
 
 `authority_t` is unchanged — API auth is unrelated to P2P identity.
 
+The embedding application sources the plaintext API key from its own mechanism (CLI
+argument, secure store, etc.) and passes it to the auth middleware. The library never
+reads environment variables.
+
+## Deployment Model
+
+The HTTP server is single-socket, all-or-nothing TLS (`SSL_CTX*` applies to every
+accepted connection). An application that wants both encrypted and unencrypted access
+creates two server instances on different ports:
+
+- **TLS server** (e.g. port 443): auth middleware registered → all requests require
+  `Authorization: Bearer <key>`
+- **Plaintext server** (e.g. port 80): no auth middleware → open access, should be
+  bound to loopback (`127.0.0.1`)
+
+The port and bind address are passed to `http_server_create()` / `http_server_create_ssl()`
+by the embedding application — they are not owned by config_t.
+
 ## HTTP Auth Middleware
 
 **File:** `src/ClientAPI/HTTP/auth.h`
@@ -32,15 +50,15 @@ auth_middleware_t* auth_middleware_create(const char* api_key, const char* bcryp
 void auth_middleware_destroy(auth_middleware_t* auth);
 ```
 
-The middleware checks `Authorization: Bearer <key>` on every request.
+The middleware extracts the `Authorization` header, validates it is `Bearer <key>`,
+and checks the key against the bcrypt hash via `bcrypt_check()`.
 
-### Three-tier enforcement
+- Missing / malformed header → `401 Unauthorized` with `WWW-Authenticate: Bearer`
+- Invalid key → `403 Forbidden`
+- Valid key → sets `request->is_authenticated = true`, continues chain
 
-| Connection | Behavior |
-|------------|----------|
-| Remote + TLS | Validate Bearer token against bcrypt hash |
-| Localhost (127.0.0.1, ::1) | Pass through, mark unauthenticated |
-| Remote + plaintext | Reject `403 TLS required` |
+The middleware does **not** check whether the connection is TLS or localhost — those
+are deployment decisions (which server instance gets the middleware registered).
 
 ### Request metadata
 
@@ -48,25 +66,18 @@ The middleware checks `Authorization: Bearer <key>` on every request.
 
 ```c
 bool is_authenticated;  // set true by auth middleware on successful validation
-bool is_tls;            // set by connection layer based on SSL context
 ```
 
-`is_authenticated` is the hook for future per-block permission middleware.
+This is the hook for future per-block permission middleware.
 
-### Registration
-
-In `off_routes.c`, the auth middleware is registered only when
-`config->api_key_hash != NULL`:
+### Registration (in the embedding application)
 
 ```c
 if (config->api_key_hash) {
     auth_middleware_t* auth = auth_middleware_create(api_key, config->api_key_hash);
-    http_server_use(server, auth_middleware_handler(), auth, auth_middleware_destroy);
+    http_server_use(tls_server, auth_middleware_handler(), auth, auth_middleware_destroy);
 }
 ```
-
-The embedding application sources `api_key` from its own mechanism (CLI argument,
-secure store, etc.) — the library does not read environment variables.
 
 ## Client API Wire Protocol
 
@@ -94,8 +105,8 @@ CBOR array: `[12, bytestring(api_key)]`
 - Any other message before AUTH receives `CLIENT_API_ERROR` with status
   `CLIENT_API_STATUS_UNAUTHORIZED` and the connection is closed
 - On success, the connection is marked authenticated
-- Same localhost exemption: loopback transports skip AUTH requirement
-- Same TLS requirement: remote plaintext transports reject AUTH attempts
+- Same deployment pattern as HTTP: TLS transports register the AUTH requirement;
+  plaintext transports bound to loopback skip it
 
 ### Encoder/decoder
 
@@ -108,8 +119,8 @@ int client_api_auth_decode(cbor_decoder_t* decoder, uint8_t** key_out, size_t* k
 
 ## Dependencies
 
-- `bcrypt` / `crypt_blowfish` for `bcrypt_check()` — POSIX `crypt()` with `$2b$` prefix,
-  or a lightweight embedded implementation (e.g., OpenBSD-style bcrypt)
+- `bcrypt` — a portable implementation of the OpenBSD bcrypt algorithm for
+  `bcrypt_check()`. The `$2b$` prefix variant is required.
 - No new dependencies for the wire protocol (CBOR encoder/decoder already exists)
 
 ## Future: Per-Block Permissions
