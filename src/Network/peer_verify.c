@@ -57,6 +57,7 @@ void peer_verify_ctx_destroy(peer_verify_ctx_t* ctx) {
 }
 
 int peer_verify_validate(peer_verify_ctx_t* ctx, void* certificate) {
+#ifdef HAS_MSQUIC
   if (ctx == NULL || certificate == NULL) {
     return -1;
   }
@@ -87,4 +88,9 @@ int peer_verify_validate(peer_verify_ctx_t* ctx, void* certificate) {
   X509_STORE_CTX_free(verify_ctx);
   X509_free(peer_cert);
   return (result == 1) ? 0 : -1;
+#else
+  (void)ctx;
+  (void)certificate;
+  return -1;
+#endif
 }
