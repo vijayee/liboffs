@@ -70,8 +70,10 @@ typedef struct relay_client_t {
   uint32_t retry_delay_ms;
 #ifdef HAS_MSQUIC
   HQUIC shared_registration;  // shared registration from quic_listener (may be NULL)
+  void* peer_verify;  // peer_verify_ctx_t* — NULL if no CA cert loaded
 #else
   void* shared_registration;
+  void* peer_verify;
 #endif
 } relay_client_t;
 

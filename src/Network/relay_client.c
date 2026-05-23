@@ -8,6 +8,7 @@
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include <cbor.h>
+#include "peer_verify.h"
 
 #ifdef HAS_MSQUIC
 
@@ -331,6 +332,16 @@ static QUIC_STATUS QUIC_API _relay_client_connection_callback(
       }
       break;
     }
+    case QUIC_CONNECTION_EVENT_PEER_CERTIFICATE_RECEIVED: {
+      if (client->peer_verify != NULL) {
+        if (peer_verify_validate((peer_verify_ctx_t*)client->peer_verify,
+                                  event->PEER_CERTIFICATE_RECEIVED.Certificate) != 0) {
+          log_error("relay_client: peer certificate validation failed, closing connection");
+          client->msquic->ConnectionClose(connection);
+        }
+      }
+      break;
+    }
     default:
       break;
   }
@@ -360,6 +371,13 @@ relay_client_t* relay_client_create(network_t* network, scheduler_pool_t* pool,
   client->pool = pool;
   client->max_retries = max_retries;
   client->retry_delay_ms = retry_delay_ms;
+
+  // Create peer verifier if CA cert is loaded in authority
+  if (network != NULL && network->authority != NULL &&
+      network->authority->ca_cert_data != NULL && network->authority->ca_cert_len > 0) {
+    client->peer_verify = peer_verify_ctx_create(
+        network->authority->ca_cert_data, network->authority->ca_cert_len);
+  }
   client->running = ATOMIC_VAR_INIT(0);
 
   actor_init(&client->actor, client, relay_client_dispatch, pool);
@@ -391,6 +409,11 @@ void relay_client_destroy(relay_client_t* client) {
 
   // Mark as shutting down so retry logic doesn't fire during cleanup
   client->shutdown_pending = 1;
+
+  if (client->peer_verify != NULL) {
+    peer_verify_ctx_destroy((peer_verify_ctx_t*)client->peer_verify);
+    client->peer_verify = NULL;
+  }
 
   if (ATOMIC_LOAD(&client->running)) {
     relay_client_disconnect(client);
@@ -508,9 +531,13 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
     cert_file.PrivateKeyFile = client->key_path;
     cred_config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
     cred_config.CertificateFile = &cert_file;
-    cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    cred_config.Flags = (client->peer_verify != NULL)
+        ? QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED
+        : QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
   } else {
-    cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    cred_config.Flags = (client->peer_verify != NULL)
+        ? QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED
+        : QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
   }
 
   if (QUIC_FAILED(status = client->msquic->ConfigurationLoadCredential(
