@@ -28,8 +28,12 @@ TEST(TestAuthWire, EncodeDecodeRoundtrip) {
 
 TEST(TestAuthWire, DecodeRejectsWrongType) {
   cbor_item_t* array = cbor_new_definite_array(2);
-  (void)cbor_array_push(array, cbor_build_uint8(1));
-  (void)cbor_array_push(array, cbor_build_bytestring((const unsigned char*)"key", 3));
+  cbor_item_t* type_item = cbor_build_uint8(1);
+  (void)cbor_array_push(array, type_item);
+  cbor_decref(&type_item);
+  cbor_item_t* key_item = cbor_build_bytestring((const unsigned char*)"key", 3);
+  (void)cbor_array_push(array, key_item);
+  cbor_decref(&key_item);
 
   client_api_auth_request_t decoded;
   EXPECT_EQ(-1, client_api_auth_request_decode(array, &decoded));
@@ -45,8 +49,12 @@ TEST(TestAuthWire, DecodeRejectsNonArray) {
 
 TEST(TestAuthWire, DecodeRejectsEmptyKey) {
   cbor_item_t* array = cbor_new_definite_array(2);
-  (void)cbor_array_push(array, cbor_build_uint8(CLIENT_API_AUTH_REQUEST));
-  (void)cbor_array_push(array, cbor_build_bytestring(NULL, 0));
+  cbor_item_t* type_item = cbor_build_uint8(CLIENT_API_AUTH_REQUEST);
+  (void)cbor_array_push(array, type_item);
+  cbor_decref(&type_item);
+  cbor_item_t* key_item = cbor_build_bytestring(NULL, 0);
+  (void)cbor_array_push(array, key_item);
+  cbor_decref(&key_item);
 
   client_api_auth_request_t decoded;
   EXPECT_EQ(-1, client_api_auth_request_decode(array, &decoded));

@@ -529,7 +529,11 @@ int client_api_auth_request_decode(cbor_item_t* item, client_api_auth_request_t*
   auth->api_key = _decode_bytestring(key_item, &auth->api_key_len);
   cbor_decref(&key_item);
 
-  if (auth->api_key == NULL || auth->api_key_len == 0) return -1;
+  if (auth->api_key == NULL || auth->api_key_len == 0) {
+    free(auth->api_key);
+    auth->api_key = NULL;
+    return -1;
+  }
   return 0;
 }
 
