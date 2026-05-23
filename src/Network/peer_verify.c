@@ -8,6 +8,9 @@
 #include <openssl/x509.h>
 #include <openssl/x509_vfy.h>
 #include <openssl/bio.h>
+#ifdef HAS_MSQUIC
+#include <msquic.h>
+#endif
 
 struct peer_verify_ctx_t {
   X509_STORE* store;
