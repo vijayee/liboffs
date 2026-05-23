@@ -50,7 +50,8 @@ if (BUILD_TESTING)
             test_shutdown.cpp
             test_config_validate.cpp
             test_validation.cpp
-            test_wire_validation.cpp)
+            test_wire_validation.cpp
+            test_bcrypt.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)

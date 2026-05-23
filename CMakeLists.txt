@@ -57,6 +57,7 @@ target_include_directories(offs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../poll-danc
 target_include_directories(offs PUBLIC ${LIBCBOR_BUILD_PATH}/include)
 target_link_libraries(offs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../poll-dancer/build/libpoll_dancer.a)
 target_link_libraries(offs PRIVATE http-parser)
+target_link_libraries(offs PRIVATE crypt)
 
 # msquic QUIC library (conditional — built if submodule is present)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/CMakeLists.txt)
