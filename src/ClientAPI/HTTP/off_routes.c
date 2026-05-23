@@ -11,6 +11,7 @@
 #include "http_connection.h"
 #include "http_server.h"
 #include "cors.h"
+#include "auth_middleware.h"
 #include "../../OFFStreams/off_url.h"
 #include "../../OFFStreams/readable_off_stream.h"
 #include "../../OFFStreams/readable_descriptor.h"
@@ -831,7 +832,8 @@ static void _off_post_handler(http_request_t* request, http_response_t* response
 }
 
 void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
-                         block_cache_t* bc, ofd_cache_t* ofd_cache, tuple_cache_t* tc) {
+                         block_cache_t* bc, ofd_cache_t* ofd_cache, tuple_cache_t* tc,
+                         const config_t* config, const char* api_key) {
     off_routes_context_t* ctx = off_routes_context_create(pool, bc, ofd_cache, tc);
 
     http_server_use(server, _draining_middleware, server, NULL);
@@ -839,6 +841,15 @@ void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
     cors_config_t* cors_config = cors_config_offsystem();
     http_server_use(server, cors_middleware, cors_config,
                     (void (*)(void*))cors_config_destroy);
+
+    /* Register auth middleware if an API key hash is configured */
+    if (config != NULL && config->api_key_hash != NULL && api_key != NULL) {
+        auth_middleware_t* auth = auth_middleware_create(api_key, config->api_key_hash);
+        if (auth != NULL) {
+            http_server_use(server, auth_middleware_handler(), auth,
+                            (void (*)(void*))auth_middleware_destroy);
+        }
+    }
 
     http_server_get_with_data(server, OFF_GET_PATTERN,
                                _off_get_handler, ctx,

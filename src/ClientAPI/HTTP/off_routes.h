@@ -6,6 +6,7 @@
 #define OFFS_OFF_ROUTES_H
 
 #include "http_server.h"
+#include "../../Configuration/config.h"
 #include "../../OFFStreams/ofd_cache.h"
 #include "../../OFFStreams/tuple_cache.h"
 #include "../../BlockCache/block_cache.h"
@@ -18,7 +19,8 @@ typedef struct {
 } off_routes_context_t;
 
 void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
-                         block_cache_t* bc, ofd_cache_t* ofd_cache, tuple_cache_t* tc);
+                         block_cache_t* bc, ofd_cache_t* ofd_cache, tuple_cache_t* tc,
+                         const config_t* config, const char* api_key);
 
 off_routes_context_t* off_routes_context_create(scheduler_pool_t* pool,
                                                   block_cache_t* bc,

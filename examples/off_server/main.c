@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  off_routes_register(server, pool, bc, ofd_cache, tc);
+  off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL);
 
   unix_transport_t* unix_transport = NULL;
   if (unix_path != NULL) {
