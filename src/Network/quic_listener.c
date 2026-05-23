@@ -35,6 +35,7 @@ void quic_send_payload_destroy(quic_send_payload_t* payload) {
 #include <msquic.h>
 #include <string.h>
 #include <cbor.h>
+#include "peer_verify.h"
 
 // Destroy stack for deferred watcher cleanup (mirrors HTTP server pattern)
 typedef struct quic_destroy_node_t {
@@ -454,6 +455,16 @@ static QUIC_STATUS QUIC_API quic_listener_callback(
           listener->configuration);
       break;
     }
+    case QUIC_LISTENER_EVENT_PEER_CERTIFICATE_RECEIVED: {
+      if (listener->peer_verify != NULL) {
+        if (peer_verify_validate((peer_verify_ctx_t*)listener->peer_verify,
+                                  event->PEER_CERTIFICATE_RECEIVED.Certificate) != 0) {
+          log_error("quic_listener: peer certificate validation failed, rejecting connection");
+          listener->msquic->ConnectionClose(event->PEER_CERTIFICATE_RECEIVED.Connection);
+        }
+      }
+      break;
+    }
     default:
       break;
   }
@@ -506,6 +517,10 @@ void quic_listener_destroy(quic_listener_t* listener) {
   // Shut down all active connections gracefully so their SHUTDOWN_COMPLETE
   // callbacks fire and clean up. This must happen before RegistrationClose
   // or msquic worker threads could access freed memory.
+  if (listener->peer_verify != NULL) {
+    peer_verify_ctx_destroy((peer_verify_ctx_t*)listener->peer_verify);
+    listener->peer_verify = NULL;
+  }
   _conn_track_shutdown_all(listener);
   if (listener->listener != NULL) {
     listener->msquic->ListenerClose(listener->listener);
@@ -568,6 +583,10 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
 
   // Load credentials
   authority_t* authority = listener->network->authority;
+  // Create peer verifier if CA cert is loaded
+  if (authority != NULL && authority->ca_cert_data != NULL && authority->ca_cert_len > 0) {
+    listener->peer_verify = peer_verify_ctx_create(authority->ca_cert_data, authority->ca_cert_len);
+  }
   QUIC_CREDENTIAL_CONFIG cred_config = {0};
   QUIC_CERTIFICATE_FILE cert_file = {0};
   if (authority != NULL && authority->node_cert_path != NULL && authority->node_key_path != NULL) {
@@ -575,10 +594,14 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
     cert_file.PrivateKeyFile = authority->node_key_path;
     cred_config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
     cred_config.CertificateFile = &cert_file;
-    cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    cred_config.Flags = (listener->peer_verify != NULL)
+        ? QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED
+        : QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
   } else {
     cred_config.CertificateFile = &cert_file;
-    cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    cred_config.Flags = (listener->peer_verify != NULL)
+        ? QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED
+        : QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
   }
 
   if (QUIC_FAILED(status = listener->msquic->ConfigurationLoadCredential(

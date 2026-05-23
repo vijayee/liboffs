@@ -89,11 +89,13 @@ typedef struct quic_listener_t {
   size_t connection_count;
   size_t connection_capacity;
   platform_mutex_t* conn_lock;
+  void* peer_verify;  // peer_verify_ctx_t* — NULL if no CA cert loaded
 #else
   void** connections;
   size_t connection_count;
   size_t connection_capacity;
   platform_mutex_t* conn_lock;
+  void* peer_verify;
 #endif
 } quic_listener_t;
 
