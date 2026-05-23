@@ -29,7 +29,8 @@ typedef struct authority_t {
   char** persisted_peers;
   size_t persisted_peer_count;
 
-  char* ca_cert_path;
+  uint8_t* ca_cert_data;   // DER-encoded CA certificate (NULL if none)
+  size_t   ca_cert_len;    // Length of ca_cert_data
   char* node_cert_path;
   char* node_key_path;
 
@@ -53,6 +54,10 @@ void authority_destroy(authority_t* authority);
 
 // Generate local_id from certificate public key (or random if no cert)
 int authority_init_local_id(authority_t* authority);
+
+// Load a PEM-encoded CA certificate, convert to DER, store in authority.
+// Returns 0 on success, -1 on failure.
+int authority_load_ca_cert(authority_t* authority, const char* pem_path);
 
 // Save/load config-only state (bootstrap peers, paths, local_id)
 int authority_save(const authority_t* authority);
