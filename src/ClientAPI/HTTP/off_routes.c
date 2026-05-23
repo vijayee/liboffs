@@ -140,9 +140,6 @@ off_routes_context_t* off_routes_context_create(scheduler_pool_t* pool,
 }
 
 void off_routes_context_destroy(off_routes_context_t* ctx) {
-    if (ctx->tc != NULL) {
-        tuple_cache_destroy(ctx->tc);
-    }
     free(ctx);
 }
 

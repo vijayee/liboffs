@@ -298,7 +298,11 @@ int client_api_get_request_decode(cbor_item_t* item, client_api_get_request_t* m
   msg->ori_string = _decode_string(ori, OFFS_MAX_ORI_STRING_LEN);
   cbor_decref(&ori);
 
-  if (validate_ori_string(msg->ori_string) != 0) return -1;
+  if (validate_ori_string(msg->ori_string) != 0) {
+    free(msg->ori_string);
+    msg->ori_string = NULL;
+    return -1;
+  }
 
   if (cbor_array_size(item) >= 5) {
     cbor_item_t* has_range = cbor_array_get(item, 2);
@@ -372,7 +376,11 @@ int client_api_get_response_start_decode(cbor_item_t* item, client_api_get_respo
   msg->content_type = _decode_string(content_type, OFFS_MAX_CONTENT_TYPE_LEN);
   cbor_decref(&content_type);
 
-  if (validate_content_type(msg->content_type) != 0) return -1;
+  if (validate_content_type(msg->content_type) != 0) {
+    free(msg->content_type);
+    msg->content_type = NULL;
+    return -1;
+  }
 
   cbor_item_t* content_length = cbor_array_get(item, 2);
   msg->content_length = _decode_size(content_length);
