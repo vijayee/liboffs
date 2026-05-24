@@ -58,12 +58,10 @@ uint8_t client_api_wire_get_type(cbor_item_t* item) {
 }
 
 // --- PUT Request ---
-// [type, content_type, file_name, stream_length, server_address, data?, recycler_urls?, temporary?]
+// [type, content_type, file_name, stream_length, server_address, data, recycler_urls, temporary]
 
 cbor_item_t* client_api_put_request_encode(const client_api_put_request_t* msg) {
-  uint8_t has_recycler = (msg->recycler_urls != NULL && msg->recycler_count > 0);
-  size_t array_size = 6 + (has_recycler ? 1 : 0) + (msg->temporary ? 1 : 0);
-  cbor_item_t* array = cbor_new_definite_array(array_size);
+  cbor_item_t* array = cbor_new_definite_array(8);
   cbor_item_t* item;
 
   item = cbor_build_uint8(CLIENT_API_PUT_REQUEST);
@@ -94,10 +92,12 @@ cbor_item_t* client_api_put_request_encode(const client_api_put_request_t* msg) 
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
-  if (has_recycler) {
-    cbor_item_t* urls_array = cbor_new_definite_array(msg->recycler_count);
-    for (size_t i = 0; i < msg->recycler_count; i++) {
-      item = cbor_build_string(msg->recycler_urls[i]);
+  /* Index 6: recycler_urls CBOR array (always present, empty if none) */
+  {
+    size_t url_count = (msg->recycler_urls != NULL) ? msg->recycler_count : 0;
+    cbor_item_t* urls_array = cbor_new_definite_array(url_count);
+    for (size_t i = 0; i < url_count; i++) {
+      item = cbor_build_string(msg->recycler_urls[i] ? msg->recycler_urls[i] : "");
       (void)cbor_array_push(urls_array, item);
       cbor_decref(&item);
     }
@@ -105,11 +105,10 @@ cbor_item_t* client_api_put_request_encode(const client_api_put_request_t* msg) 
     cbor_decref(&urls_array);
   }
 
-  if (msg->temporary) {
-    item = cbor_build_uint8(1);
-    (void)cbor_array_push(array, item);
-    cbor_decref(&item);
-  }
+  /* Index 7: temporary (always present, 0 or 1) */
+  item = cbor_build_uint8(msg->temporary ? 1 : 0);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
 
   return array;
 }
@@ -172,14 +171,20 @@ int client_api_put_request_decode(cbor_item_t* item, client_api_put_request_t* m
     cbor_item_t* urls_item = cbor_array_get(item, 6);
     if (cbor_isa_array(urls_item)) {
       size_t url_count = cbor_array_size(urls_item);
-      if (url_count > 0 && url_count <= 256) {
+      if (url_count > 256) {
+        cbor_decref(&urls_item);
+        client_api_put_request_destroy(msg);
+        return -1;
+      }
+      if (url_count > 0) {
         msg->recycler_urls = get_clear_memory(sizeof(char*) * url_count);
         msg->recycler_count = url_count;
         for (size_t i = 0; i < url_count; i++) {
           cbor_item_t* url_str = cbor_array_get(urls_item, i);
           msg->recycler_urls[i] = _decode_string(url_str, OFFS_MAX_ORI_STRING_LEN);
           cbor_decref(&url_str);
-          if (msg->recycler_urls[i] == NULL) {
+          if (msg->recycler_urls[i] == NULL
+              || validate_ori_string(msg->recycler_urls[i]) != 0) {
             client_api_put_request_destroy(msg);
             cbor_decref(&urls_item);
             return -1;
