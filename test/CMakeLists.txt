@@ -53,7 +53,8 @@ if (BUILD_TESTING)
             test_wire_validation.cpp
             test_bcrypt.cpp
             test_auth_middleware.cpp
-            test_auth_wire.cpp)
+            test_auth_wire.cpp
+            test_recycler_wire.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
