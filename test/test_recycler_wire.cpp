@@ -63,6 +63,7 @@ TEST(TestRecyclerWire, TestPutRequestEncodeDecode_NoRecycler) {
   EXPECT_STREQ(decoded.content_type, "text/plain");
   EXPECT_STREQ(decoded.file_name, "test.txt");
   EXPECT_EQ(decoded.stream_length, (size_t)1024);
+  EXPECT_EQ(decoded.server_address, nullptr);
   EXPECT_EQ(decoded.recycler_count, (size_t)0);
   EXPECT_EQ(decoded.recycler_urls, nullptr);
   EXPECT_EQ(decoded.temporary, 0);
@@ -97,6 +98,7 @@ TEST(TestRecyclerWire, TestPutRequestEncodeDecode_RecyclerOnly) {
   EXPECT_STREQ(decoded.content_type, "application/octet-stream");
   EXPECT_STREQ(decoded.file_name, "data.bin");
   EXPECT_EQ(decoded.stream_length, (size_t)4096);
+  EXPECT_EQ(decoded.server_address, nullptr);
   EXPECT_EQ(decoded.recycler_count, (size_t)1);
   ASSERT_NE(decoded.recycler_urls, nullptr);
   EXPECT_STREQ(decoded.recycler_urls[0], urls[0]);
