@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
@@ -19,6 +20,8 @@ class _ImportScreenState extends State<ImportScreen> {
   String? _resultUrl;
   String? _error;
   double _progress = 0;
+  List<String>? _recyclerUrls;
+  final TextEditingController _recyclerController = TextEditingController();
 
   Future<void> _pickFile() async {
     final result = await FilePicker.platform.pickFiles();
@@ -66,6 +69,69 @@ class _ImportScreenState extends State<ImportScreen> {
     }
   }
 
+  Future<void> _importFolder() async {
+    final dirResult = await FilePicker.platform.getDirectoryPath();
+    if (dirResult == null) return;
+
+    setState(() {
+      _isUploading = true;
+      _progress = 0;
+      _error = null;
+      _resultUrl = null;
+    });
+
+    try {
+      final folder = Directory(dirResult);
+      final folderName = folder.path.split(Platform.pathSeparator).last;
+      final ofd = <String, String>{};
+
+      final entries = folder.listSync(recursive: true);
+      final files = entries.whereType<File>().toList();
+
+      for (int i = 0; i < files.length; i++) {
+        final file = files[i];
+        final relativePath = file.path.substring(folder.path.length + 1);
+        final filePath = relativePath.replaceAll(Platform.pathSeparator, '/');
+
+        final length = await file.length();
+        final url = await _api.uploadFile(
+          fileName: filePath.split('/').last,
+          streamLength: length,
+          filePath: file.path,
+          recyclerUrls: _recyclerUrls,
+        );
+
+        ofd[filePath] = url;
+        setState(() => _progress = (i + 1) / (files.length + 1));
+      }
+
+      final ofdJson = jsonEncode(ofd);
+      final ofdBytes = utf8.encode(ofdJson);
+      final finalUrl = await _api.uploadFileBuffered(
+        fileName: '$folderName.ofd',
+        streamLength: ofdBytes.length,
+        contentType: 'offsystem/directory',
+        bodyBytes: ofdBytes,
+        recyclerUrls: _recyclerUrls,
+      );
+
+      setState(() {
+        _progress = 1.0;
+        _resultUrl = finalUrl;
+      });
+    } catch (e) {
+      setState(() => _error = e.toString());
+    } finally {
+      setState(() => _isUploading = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _recyclerController.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Padding(
@@ -75,6 +141,11 @@ class _ImportScreenState extends State<ImportScreen> {
         children: [
           const Text('Import File', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
           const SizedBox(height: 24),
+          ElevatedButton.icon(
+            onPressed: _isUploading ? null : _importFolder,
+            icon: const Icon(Icons.create_new_folder),
+            label: const Text('Import Folder'),
+          ),
           ElevatedButton.icon(
             onPressed: _isUploading ? null : _pickFile,
             icon: const Icon(Icons.folder_open),
