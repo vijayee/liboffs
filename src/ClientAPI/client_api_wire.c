@@ -58,10 +58,12 @@ uint8_t client_api_wire_get_type(cbor_item_t* item) {
 }
 
 // --- PUT Request ---
-// [type, content_type, file_name, stream_length, server_address, data]
+// [type, content_type, file_name, stream_length, server_address, data?, recycler_urls?, temporary?]
 
 cbor_item_t* client_api_put_request_encode(const client_api_put_request_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(6);
+  uint8_t has_recycler = (msg->recycler_urls != NULL && msg->recycler_count > 0);
+  size_t array_size = 6 + (has_recycler ? 1 : 0) + (msg->temporary ? 1 : 0);
+  cbor_item_t* array = cbor_new_definite_array(array_size);
   cbor_item_t* item;
 
   item = cbor_build_uint8(CLIENT_API_PUT_REQUEST);
@@ -91,6 +93,23 @@ cbor_item_t* client_api_put_request_encode(const client_api_put_request_t* msg) 
   }
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
+
+  if (has_recycler) {
+    cbor_item_t* urls_array = cbor_new_definite_array(msg->recycler_count);
+    for (size_t i = 0; i < msg->recycler_count; i++) {
+      item = cbor_build_string(msg->recycler_urls[i]);
+      (void)cbor_array_push(urls_array, item);
+      cbor_decref(&item);
+    }
+    (void)cbor_array_push(array, urls_array);
+    cbor_decref(&urls_array);
+  }
+
+  if (msg->temporary) {
+    item = cbor_build_uint8(1);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+  }
 
   return array;
 }
@@ -148,6 +167,38 @@ int client_api_put_request_decode(cbor_item_t* item, client_api_put_request_t* m
     cbor_decref(&data_item);
   }
 
+  /* Index 6: recycler_urls (optional array of strings) */
+  if (cbor_array_size(item) >= 7) {
+    cbor_item_t* urls_item = cbor_array_get(item, 6);
+    if (cbor_isa_array(urls_item)) {
+      size_t url_count = cbor_array_size(urls_item);
+      if (url_count > 0 && url_count <= 256) {
+        msg->recycler_urls = get_clear_memory(sizeof(char*) * url_count);
+        msg->recycler_count = url_count;
+        for (size_t i = 0; i < url_count; i++) {
+          cbor_item_t* url_str = cbor_array_get(urls_item, i);
+          msg->recycler_urls[i] = _decode_string(url_str, OFFS_MAX_ORI_STRING_LEN);
+          cbor_decref(&url_str);
+          if (msg->recycler_urls[i] == NULL) {
+            client_api_put_request_destroy(msg);
+            cbor_decref(&urls_item);
+            return -1;
+          }
+        }
+      }
+    }
+    cbor_decref(&urls_item);
+  }
+
+  /* Index 7: temporary (optional uint8) */
+  if (cbor_array_size(item) >= 8) {
+    cbor_item_t* temp_item = cbor_array_get(item, 7);
+    if (cbor_isa_uint(temp_item)) {
+      msg->temporary = cbor_get_uint8(temp_item);
+    }
+    cbor_decref(&temp_item);
+  }
+
   return 0;
 }
 
@@ -157,6 +208,12 @@ void client_api_put_request_destroy(client_api_put_request_t* msg) {
   free(msg->file_name);
   free(msg->server_address);
   free(msg->data);
+  if (msg->recycler_urls != NULL) {
+    for (size_t i = 0; i < msg->recycler_count; i++) {
+      free(msg->recycler_urls[i]);
+    }
+    free(msg->recycler_urls);
+  }
 }
 
 // --- PUT Data ---

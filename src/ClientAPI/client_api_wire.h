@@ -30,7 +30,7 @@
 #define CLIENT_API_STATUS_UNAUTHORIZED      5
 
 // --- PUT Request ---
-// [type, content_type, file_name, stream_length, server_address, data?]
+// [type, content_type, file_name, stream_length, server_address, data?, recycler_urls?, temporary?]
 // data is NULL/empty for streaming uploads; subsequent PUT_DATA frames carry the body
 typedef struct {
   char* content_type;
@@ -39,6 +39,9 @@ typedef struct {
   char* server_address;   // may be NULL
   uint8_t* data;          // may be NULL for streaming uploads
   size_t data_size;
+  char** recycler_urls;   // NULL or array of URL strings
+  size_t recycler_count;  // 0 if no recycler
+  uint8_t temporary;      // 0 or 1
 } client_api_put_request_t;
 
 // --- PUT Data (streaming upload chunk) ---
