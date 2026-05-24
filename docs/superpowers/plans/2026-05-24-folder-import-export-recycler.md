@@ -628,7 +628,7 @@ git commit -m "feat: add recycler and temporary header parsing to server PUT han
 **Files:**
 - Modify: `src/ClientAPI/HTTP/off_routes.c`
 
-**Why:** When a directory OFD is uploaded (content-type `offsystem/directory`), the cache should be populated immediately so that subsequent GET requests for paths within the directory hit the cache. Currently the cache is only populated lazily on the first GET via `ofd_cache_resolve()`.
+**Why:** When a directory OFD is uploaded (content-type `offsystem/directory`), the cache should be populated immediately so that subsequent GET requests for paths within the directory hit the cache. Currently the cache is populated lazily via `ofd_cache_resolve()` but NOT from the `?ofd=raw` GET path or the PUT path.
 
 - [ ] **Step 1: Add OFD cache populator actor type**
 
@@ -728,11 +728,49 @@ In `_put_on_descriptor_close`, add after `buffer_t* file_hash = buffer_copy(put_
 Run: `cd build && cmake .. && make -j$(nproc)`
 Expected: Compiles without errors.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Populate OFD cache on `?ofd=raw` GET path**
+
+In `_off_get_dispatch`, in the `OFF_GET_FETCH_RAW_OFD` case, add cache population after block is retrieved but before sending the response:
+
+```c
+case CACHE_GET_RESULT: {
+    if (ctx->phase == OFF_GET_FETCH_RAW_OFD) {
+        cache_get_result_payload_t* result = (cache_get_result_payload_t*)msg->payload;
+        block_t* block = result->block;
+
+        if (!block) {
+            http_response_set_status(ctx->response, 404);
+            http_response_end(ctx->response);
+            DESTROY(result->hash, buffer);
+            _off_get_state_destroy(ctx);
+            return;
+        }
+
+        /* Populate OFD cache from raw GET */
+        ofd_t* ofd = ofd_decode(block->data);
+        if (ofd != NULL) {
+            ofd_cache_put(ctx->ctx->ofd_cache, ctx->url->file_hash, ofd);
+        }
+
+        http_response_set_header(ctx->response, "Content-Type", "application/cbor");
+        http_response_write(ctx->response, (const char*)block->data->data, block->data->size);
+        http_response_end(ctx->response);
+        block_destroy(block);
+        DESTROY(result->hash, buffer);
+        _off_get_state_destroy(ctx);
+        return;
+    }
+    break;
+}
+```
+
+This ensures both PUT and GET populate the OFD cache, and the cache is shared across all four transports (HTTP, WS, Unix, TCP) since they all reference the same `ofd_cache_t*`.
+
+- [ ] **Step 5: Commit**
 
 ```bash
 git add src/ClientAPI/HTTP/off_routes.c
-git commit -m "feat: populate OFD cache on directory PUT upload, shared across all transports"
+git commit -m "feat: populate OFD cache on directory PUT and GET, shared across all transports"
 ```
 
 ---
