@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
 
@@ -74,6 +75,8 @@ class OffApi {
     required int streamLength,
     String? contentType,
     String? serverAddress,
+    List<String>? recyclerUrls,
+    bool temporary = false,
     required String filePath,
     void Function(double progress)? onProgress,
   }) async {
@@ -89,6 +92,12 @@ class OffApi {
     request.headers['Content-Type'] = 'application/octet-stream';
     if (serverAddress != null) {
       request.headers['server-address'] = serverAddress;
+    }
+    if (recyclerUrls != null && recyclerUrls.isNotEmpty) {
+      request.headers['recycler'] = jsonEncode(recyclerUrls);
+    }
+    if (temporary) {
+      request.headers['temporary'] = 'true';
     }
 
     int sent = 0;
@@ -119,6 +128,8 @@ class OffApi {
     required int streamLength,
     String? contentType,
     String? serverAddress,
+    List<String>? recyclerUrls,
+    bool temporary = false,
     required List<int> bodyBytes,
   }) async {
     final type = contentType ?? mimeFromExtension(fileName);
@@ -130,6 +141,12 @@ class OffApi {
     request.headers['Content-Type'] = 'application/octet-stream';
     if (serverAddress != null) {
       request.headers['server-address'] = serverAddress;
+    }
+    if (recyclerUrls != null && recyclerUrls.isNotEmpty) {
+      request.headers['recycler'] = jsonEncode(recyclerUrls);
+    }
+    if (temporary) {
+      request.headers['temporary'] = 'true';
     }
     request.bodyBytes = bodyBytes;
 
