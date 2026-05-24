@@ -47,9 +47,30 @@ typedef enum {
   OFFS_TRANSPORT_WT,
 } offs_transport_type_e;
 
+offs_client_config_t offs_client_config_default(void) {
+  offs_client_config_t config;
+  config.connect_timeout_ms = 5000;
+  config.ws_upgrade_timeout_ms = 5000;
+  config.poll_timeout_ms = 100;
+  config.max_retries = 3;
+  config.retry_base_delay_ms = 1000;
+  return config;
+}
+
+static uint32_t _retry_delay_ms(const offs_client_config_t* config, uint32_t attempt) {
+  uint32_t delay = config->retry_base_delay_ms * (1u << (attempt - 1));
+  uint32_t jitter_range = delay / 4;
+  if (jitter_range == 0) return delay;
+  uint32_t rand_val;
+  platform_random_bytes((uint8_t*)&rand_val, sizeof(rand_val));
+  uint32_t offset = rand_val % (jitter_range * 2 + 1);
+  return delay + offset - jitter_range;
+}
+
 struct offs_client_t {
   offs_transport_type_e transport_type;
   volatile uint8_t connected;
+  offs_client_config_t config;
   union {
     struct {
       platform_socket_t* sock;
@@ -529,7 +550,7 @@ static void* _recv_thread(void* arg) {
   pd_watcher_start(client->watcher);
 
   while (client->running) {
-    pd_loop_run_once(client->loop, 100);
+    pd_loop_run_once(client->loop, (int)client->config.poll_timeout_ms);
   }
 
   pd_watcher_destroy(client->watcher);
@@ -633,10 +654,13 @@ static int _ws_upgrade(offs_client_t* client, const char* ws_host) {
     return -1;
   }
 
-  /* Read response — loop until we have the complete HTTP headers (\r\n\r\n) */
+  /* Read response — loop until we have the complete HTTP headers (\r\n\r\n)
+   * or the upgrade timeout expires. */
   char response[4096];
   size_t total = 0;
-  for (int attempts = 0; attempts < 100; attempts++) {
+  uint64_t deadline_ns = platform_monotonic_ns() +
+      (uint64_t)client->config.ws_upgrade_timeout_ms * 1000000ULL;
+  while (platform_monotonic_ns() < deadline_ns) {
     ssize_t received;
     if (client->transport.ws.is_ssl && client->transport.ws.ssl != NULL) {
       received = SSL_read(client->transport.ws.ssl, response + total, sizeof(response) - 1 - total);
@@ -695,10 +719,12 @@ static int _ws_upgrade(offs_client_t* client, const char* ws_host) {
   return 0;
 }
 
-offs_client_t* offs_client_connect(const char* transport_url, const char* api_key) {
+static offs_client_t* _connect_attempt(const char* transport_url, const char* api_key,
+                                         const offs_client_config_t* config) {
   if (transport_url == NULL) return NULL;
 
   offs_client_t* client = get_clear_memory(sizeof(offs_client_t));
+  client->config = (config != NULL) ? *config : offs_client_config_default();
   client->transport_type = OFFS_TRANSPORT_UNIX;
   client->connected = 0;
   client->running = 0;
@@ -951,9 +977,13 @@ offs_client_t* offs_client_connect(const char* transport_url, const char* api_ke
       return NULL;
     }
 
-    /* Wait for connection (poll with timeout) */
-    for (int attempts = 0; attempts < 200 && !connect_ctx.connected_event; attempts++) {
-      platform_sleep_ms(10);
+    /* Wait for connection (poll with configurable timeout) */
+    {
+      uint64_t connect_deadline_ns = platform_monotonic_ns() +
+          (uint64_t)client->config.connect_timeout_ms * 1000000ULL;
+      while (!connect_ctx.connected_event && platform_monotonic_ns() < connect_deadline_ns) {
+        platform_sleep_ms(10);
+      }
     }
     if (!connect_ctx.connected_event) {
       msquic->ConnectionClose(connection);
@@ -1044,6 +1074,28 @@ offs_client_t* offs_client_connect(const char* transport_url, const char* api_ke
   return client;
 }
 
+offs_client_t* offs_client_connect_ex(const char* transport_url, const char* api_key,
+                                       const offs_client_config_t* config) {
+  offs_client_config_t effective_config = (config != NULL) ? *config : offs_client_config_default();
+  uint32_t max_retries = effective_config.max_retries;
+
+  for (uint32_t attempt = 0; attempt <= max_retries; attempt++) {
+    offs_client_t* client = _connect_attempt(transport_url, api_key, &effective_config);
+    if (client != NULL) return client;
+
+    if (attempt < max_retries) {
+      uint32_t delay_ms = _retry_delay_ms(&effective_config, attempt + 1);
+      platform_sleep_ms(delay_ms);
+    }
+  }
+
+  return NULL;
+}
+
+offs_client_t* offs_client_connect(const char* transport_url, const char* api_key) {
+  return offs_client_connect_ex(transport_url, api_key, NULL);
+}
+
 void offs_client_disconnect(offs_client_t* client) {
   if (client == NULL) return;
 
@@ -1128,7 +1180,35 @@ int offs_client_put(offs_client_t* client,
                     size_t data_len,
                     offs_put_response_cb_t callback,
                     void* ctx) {
-  if (client == NULL || !client->connected) return -1;
+  offs_put_options_t options;
+  memset(&options, 0, sizeof(options));
+  options.content_type = content_type;
+  options.file_name = file_name;
+  options.stream_length = stream_length;
+  return offs_client_put_ex(client, &options, data, data_len, callback, ctx);
+}
+
+static void _fill_put_request(client_api_put_request_t* msg, const offs_put_options_t* options,
+                               const uint8_t* data, size_t data_len) {
+  memset(msg, 0, sizeof(*msg));
+  msg->content_type = (char*)options->content_type;
+  msg->file_name = (char*)options->file_name;
+  msg->stream_length = options->stream_length;
+  msg->server_address = (char*)options->server_address;
+  msg->data = (uint8_t*)data;
+  msg->data_size = data_len;
+  msg->recycler_urls = (char**)options->recycler_urls;
+  msg->recycler_count = options->recycler_count;
+  msg->temporary = options->temporary;
+}
+
+int offs_client_put_ex(offs_client_t* client,
+                       const offs_put_options_t* options,
+                       const uint8_t* data,
+                       size_t data_len,
+                       offs_put_response_cb_t callback,
+                       void* ctx) {
+  if (client == NULL || !client->connected || options == NULL) return -1;
 
   platform_mutex_lock(client->lock);
   client->put_cb = callback;
@@ -1136,12 +1216,20 @@ int offs_client_put(offs_client_t* client,
   platform_mutex_unlock(client->lock);
 
   client_api_put_request_t msg;
-  msg.content_type = (char*)content_type;
-  msg.file_name = (char*)file_name;
-  msg.stream_length = stream_length;
-  msg.server_address = NULL;
-  msg.data = (uint8_t*)data;
-  msg.data_size = data_len;
+  _fill_put_request(&msg, options, data, data_len);
+
+  cbor_item_t* frame = client_api_put_request_encode(&msg);
+  _send_frame(client, frame);
+
+  return 0;
+}
+
+int offs_client_put_stream_start_ex(offs_client_t* client,
+                                     const offs_put_options_t* options) {
+  if (client == NULL || !client->connected || options == NULL) return -1;
+
+  client_api_put_request_t msg;
+  _fill_put_request(&msg, options, NULL, 0);
 
   cbor_item_t* frame = client_api_put_request_encode(&msg);
   _send_frame(client, frame);
@@ -1153,20 +1241,12 @@ int offs_client_put_stream_start(offs_client_t* client,
                                   const char* content_type,
                                   const char* file_name,
                                   size_t stream_length) {
-  if (client == NULL || !client->connected) return -1;
-
-  client_api_put_request_t msg;
-  msg.content_type = (char*)content_type;
-  msg.file_name = (char*)file_name;
-  msg.stream_length = stream_length;
-  msg.server_address = NULL;
-  msg.data = NULL;
-  msg.data_size = 0;
-
-  cbor_item_t* frame = client_api_put_request_encode(&msg);
-  _send_frame(client, frame);
-
-  return 0;
+  offs_put_options_t options;
+  memset(&options, 0, sizeof(options));
+  options.content_type = content_type;
+  options.file_name = file_name;
+  options.stream_length = stream_length;
+  return offs_client_put_stream_start_ex(client, &options);
 }
 
 int offs_client_put_stream_data(offs_client_t* client,
