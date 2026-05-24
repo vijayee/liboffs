@@ -635,6 +635,41 @@ static buffer_t* _extract_multipart_file(buffer_t* body, const char* content_typ
     return result;
 }
 
+static void _parse_recycler_header(const char* recycler_header, vec_ori_t* oris) {
+    vec_init(oris);
+    if (recycler_header == NULL || recycler_header[0] == '\0') return;
+
+    const char* cursor = recycler_header;
+    while (*cursor) {
+        const char* start = strchr(cursor, '"');
+        if (start == NULL) break;
+        start++;
+        const char* end = strchr(start, '"');
+        if (end == NULL) break;
+
+        size_t url_len = (size_t)(end - start);
+        if (url_len > 0 && url_len < 4096) {
+            char* url_str = get_memory(url_len + 1);
+            memcpy(url_str, start, url_len);
+            url_str[url_len] = '\0';
+
+            off_url_t* parsed = off_url_parse(url_str);
+            if (parsed != NULL) {
+                ori_t* ori = ori_create(parsed->stream_length);
+                ori->descriptor_hash = buffer_copy(parsed->descriptor_hash);
+                ori->file_hash = buffer_copy(parsed->file_hash);
+                ori->file_name = strdup(parsed->file_name);
+                ori->block_type = standard;
+                ori->tuple_size = 3;
+                vec_push(oris, ori);
+                off_url_destroy(parsed);
+            }
+            free(url_str);
+        }
+        cursor = end + 1;
+    }
+}
+
 static void _off_put_handler(http_request_t* request, http_response_t* response, void* user_data) {
     off_routes_context_t* ctx = (off_routes_context_t*)user_data;
 
@@ -679,9 +714,23 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
         upload_data = (buffer_t*)refcounter_reference((refcounter_t*)request->body);
     }
 
-    new_blocks_recipe_t* recipe = new_blocks_recipe_create(ctx->pool, ctx->bc, standard);
+    const char* recycler_header = http_request_header(request, "recycler");
+    const char* temporary_header = http_request_header(request, "temporary");
+    uint8_t is_temporary = (temporary_header != NULL && strcmp(temporary_header, "true") == 0);
+    (void)is_temporary;
+
     vec_block_recipe_t recipes;
     vec_init(&recipes);
+
+    vec_ori_t recycler_oris;
+    _parse_recycler_header(recycler_header, &recycler_oris);
+    if (recycler_oris.length > 0) {
+        recycler_recipe_t* recycler = recycler_recipe_create(ctx->pool, ctx->bc, standard,
+                                                              recycler_oris, NULL);
+        vec_push(&recipes, (block_recipe_t*)recycler);
+    }
+
+    new_blocks_recipe_t* recipe = new_blocks_recipe_create(ctx->pool, ctx->bc, standard);
     vec_push(&recipes, (block_recipe_t*)recipe);
 
     writeable_off_stream_t* ws = writeable_off_stream_create(
@@ -765,9 +814,23 @@ static int _off_put_headers_complete(http_connection_t* connection,
     // Get the off_routes_context from the matched route
     off_routes_context_t* routes_ctx = (off_routes_context_t*)connection->streaming_route->user_data;
 
-    new_blocks_recipe_t* recipe = new_blocks_recipe_create(routes_ctx->pool, routes_ctx->bc, standard);
+    const char* recycler_header = http_request_header(request, "recycler");
+    const char* temporary_header = http_request_header(request, "temporary");
+    uint8_t is_temporary = (temporary_header != NULL && strcmp(temporary_header, "true") == 0);
+    (void)is_temporary;
+
     vec_block_recipe_t recipes;
     vec_init(&recipes);
+
+    vec_ori_t recycler_oris;
+    _parse_recycler_header(recycler_header, &recycler_oris);
+    if (recycler_oris.length > 0) {
+        recycler_recipe_t* recycler = recycler_recipe_create(routes_ctx->pool, routes_ctx->bc, standard,
+                                                              recycler_oris, NULL);
+        vec_push(&recipes, (block_recipe_t*)recycler);
+    }
+
+    new_blocks_recipe_t* recipe = new_blocks_recipe_create(routes_ctx->pool, routes_ctx->bc, standard);
     vec_push(&recipes, (block_recipe_t*)recipe);
 
     writeable_off_stream_t* ws = writeable_off_stream_create(
