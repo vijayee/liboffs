@@ -7,6 +7,7 @@ extern "C" {
 #include "../src/ClientAPI/HTTP/http_response.h"
 #include "../src/OFFStreams/off_url.h"
 #include "../src/OFFStreams/ofd_cache.h"
+#include "../src/OFFStreams/ofd.h"
 #include "../src/OFFStreams/tuple_cache.h"
 #include "../src/BlockCache/block_cache.h"
 #include "../src/BlockCache/block.h"
@@ -273,6 +274,94 @@ TEST_F(TestOffRoutes, PutAndGetRoundTrip) {
         put_body);
 
     char get_response[8192];
+    result = _send_and_recv(fd, get_request, (size_t)get_len,
+                            get_response, sizeof(get_response), 5000);
+    EXPECT_EQ(result, 0);
+
+    close(fd);
+}
+
+TEST_F(TestOffRoutes, DirectoryOfdRawRoundTrip) {
+    off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL);
+    http_server_listen(server);
+
+    int fd = -1;
+    for (int attempts = 0; attempts < 50; attempts++) {
+        usleep(10000);
+        fd = _connect_to_server(port);
+        if (fd >= 0) break;
+    }
+    ASSERT_GE(fd, 0);
+
+    /* Create a CBOR-encoded OFD */
+    ofd_t* ofd = ofd_create();
+    ASSERT_NE(ofd, nullptr);
+
+    /* Create a minimal ori_t for a dummy file entry */
+    ori_t* dummy_ori = ori_create(100);
+    uint8_t hash_bytes[32] = {0};
+    memset(hash_bytes, 0x42, 32);
+    dummy_ori->file_hash = buffer_create_from_pointer_copy(hash_bytes, 32);
+    dummy_ori->file_name = strdup("test.txt");
+    ofd_add_file(ofd, "test.txt", dummy_ori);
+    DESTROY(dummy_ori, ori);
+
+    buffer_t* encoded = ofd_encode(ofd);
+    ASSERT_NE(encoded, nullptr);
+    ofd_destroy(ofd);
+
+    /* PUT with offsystem/directory content type */
+    size_t body_len = encoded->size;
+    char put_request[16384];
+    int put_len = snprintf(put_request, sizeof(put_request),
+        "PUT /offsystem HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "type: offsystem/directory\r\n"
+        "file-name: test_dir.ofd\r\n"
+        "stream-length: %zu\r\n"
+        "Content-Length: %zu\r\n"
+        "\r\n",
+        body_len, body_len);
+    /* Append body after headers */
+    memcpy(put_request + put_len, encoded->data, body_len);
+    put_len += (int)body_len;
+
+    char put_response[8192];
+    memset(put_response, 0, sizeof(put_response));
+    int result = _send_and_recv(fd, put_request, (size_t)put_len,
+                                put_response, sizeof(put_response), 5000);
+    EXPECT_EQ(result, 0);
+    EXPECT_NE(strstr(put_response, "200"), nullptr);
+
+    /* Extract the OFF URL */
+    char* header_end = strstr(put_response, "\r\n\r\n");
+    ASSERT_NE(header_end, nullptr);
+    char* put_body = header_end + 4;
+    size_t url_len = strlen(put_body);
+    while (url_len > 0 && (put_body[url_len-1] == '\r' || put_body[url_len-1] == '\n'))
+        put_body[--url_len] = '\0';
+
+    close(fd);
+    buffer_destroy(encoded);
+
+    /* Now GET the URL — this triggers async directory resolution */
+    fd = -1;
+    for (int attempts = 0; attempts < 50; attempts++) {
+        usleep(10000);
+        fd = _connect_to_server(port);
+        if (fd >= 0) break;
+    }
+    ASSERT_GE(fd, 0);
+
+    char get_request[8192];
+    int get_len = snprintf(get_request, sizeof(get_request),
+        "GET %s HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "\r\n",
+        put_body);
+
+    char get_response[16384];
+    memset(get_response, 0, sizeof(get_response));
     result = _send_and_recv(fd, get_request, (size_t)get_len,
                             get_response, sizeof(get_response), 5000);
     EXPECT_EQ(result, 0);

@@ -67,6 +67,7 @@ int http_request_method(http_request_t* request) {
 }
 
 const char* http_request_header(http_request_t* request, const char* name) {
+  if (request == NULL) return NULL;
   return http_headers_get(&request->headers, name);
 }
 

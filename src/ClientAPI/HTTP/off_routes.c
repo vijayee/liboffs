@@ -266,7 +266,10 @@ static void _off_get_state_destroy(off_get_state_t* state) {
 static void _send_stream_response(http_response_t* response, off_routes_context_t* ctx,
                                    ori_t* file_ori, const char* content_type) {
     size_t file_size = file_ori->final_byte;
-    const char* range_header = http_request_header(response->connection->request, "Range");
+    const char* range_header = NULL;
+    if (response->connection != NULL) {
+      range_header = http_request_header(response->connection->request, "Range");
+    }
     range_request_t range = parse_range_header(range_header, file_size);
     http_response_set_header(response, "Content-Type", content_type);
     http_response_set_header(response, "Accept-Ranges", "bytes");

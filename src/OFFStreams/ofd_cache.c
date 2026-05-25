@@ -218,7 +218,7 @@ static void _resolver_dispatch(void* state, message_t* msg) {
 
             if (!block) {
                 /* Block not found — resolution failed */
-                DESTROY(hash, buffer);
+                DESTROY(result->hash, buffer);
                 _resolver_send_result(resolver, NULL);
                 _resolver_cleanup(resolver);
                 return;
@@ -228,7 +228,7 @@ static void _resolver_dispatch(void* state, message_t* msg) {
             block_destroy(block);
 
             if (!ofd) {
-                DESTROY(hash, buffer);
+                DESTROY(result->hash, buffer);
                 _resolver_send_result(resolver, NULL);
                 _resolver_cleanup(resolver);
                 return;
@@ -237,7 +237,7 @@ static void _resolver_dispatch(void* state, message_t* msg) {
             /* Cache the decoded OFD. For non-root OFDs, ofd_decode doesn't set
                ofd->hash, so we use the block hash as the cache key. */
             ofd_cache_put(resolver->cache, resolver->resolving_root ? resolver->root_hash : hash, ofd);
-            DESTROY(hash, buffer);
+            DESTROY(result->hash, buffer);
 
             if (resolver->resolving_root) {
                 /* We just fetched the root OFD */

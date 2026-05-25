@@ -81,15 +81,31 @@ bool actor_run(actor_t* actor, size_t batch_size) {
     if (node == NULL) {
       break;
     }
+    /* Save payload info before dispatch — actor_destroy may free the node.
+       A dispatch that CONSUMEs the payload will set msg->payload = NULL;
+       we must respect that in the normal (non-self-destruct) path. */
+    void (*payload_destroy)(void*) = node->msg.payload_destroy;
+    void* payload = node->msg.payload;
+
     actor->dispatch(actor->state, &node->msg);
-    if (node->msg.payload_destroy != NULL && node->msg.payload != NULL) {
-      node->msg.payload_destroy(node->msg.payload);
-    }
+
     /* If dispatch requested self-destruction, stop processing immediately.
+       The node may have been freed by actor_destroy — use saved payload info.
+       Dispatch functions that self-destruct do not CONSUME; they leave
+       normal payload cleanup to actor_run.
        The caller (typically the scheduler) must check ACTOR_FLAG_DESTROY
        and skip further operations on this actor. */
     if (atomic_load(&actor->flags) & ACTOR_FLAG_DESTROY) {
+      if (payload_destroy != NULL && payload != NULL) {
+        payload_destroy(payload);
+      }
       return false;
+    }
+
+    /* Node is still valid — use current msg values to respect CONSUME
+       (dispatch may have set msg->payload = NULL to take ownership). */
+    if (node->msg.payload_destroy != NULL && node->msg.payload != NULL) {
+      node->msg.payload_destroy(node->msg.payload);
     }
     /* If the actor became muted during dispatch, stop processing. */
     if (atomic_load(&actor->flags) & ACTOR_FLAG_MUTED) {
