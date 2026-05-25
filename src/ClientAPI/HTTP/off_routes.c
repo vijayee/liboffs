@@ -285,7 +285,9 @@ static void _send_stream_response(http_response_t* response, off_routes_context_
     }
 
     ori_t* stream_ori = ori_create(file_size);
-    stream_ori->descriptor_hash = buffer_copy(file_ori->descriptor_hash);
+    stream_ori->descriptor_hash = file_ori->descriptor_hash
+        ? buffer_copy(file_ori->descriptor_hash)
+        : buffer_copy(file_ori->file_hash);
     stream_ori->file_hash = buffer_copy(file_ori->file_hash);
     stream_ori->file_name = strdup(file_ori->file_name);
     stream_ori->block_type = file_ori->block_type;

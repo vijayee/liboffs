@@ -225,6 +225,7 @@ ofd_t* ofd_decode(buffer_t* data) {
             if (type == OFD_ENTRY_FILE) {
                 file_ori = ori_create(0);
                 file_ori->file_hash = hash;
+                file_ori->descriptor_hash = buffer_copy(hash);
                 file_ori->file_name = strdup(name);
                 ofd_add_file(ofd, name, file_ori);
                 DESTROY(file_ori, ori);

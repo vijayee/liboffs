@@ -175,6 +175,11 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
         break;
       }
       if (desc->current_descriptor == NULL) {
+        if (desc->ori->descriptor_hash == NULL && desc->next_descriptor_hash == NULL) {
+          stream_notify((stream_t*)desc, error_event, NULL, NULL);
+          desc->stream.is_deactivated = 1;
+          break;
+        }
         buffer_t* hash = desc->next_descriptor_hash != NULL
                              ? desc->next_descriptor_hash
                              : (buffer_t*)refcounter_reference((refcounter_t*)desc->ori->descriptor_hash);

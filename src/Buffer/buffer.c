@@ -60,6 +60,7 @@ buffer_t* buffer_create_from_existing_memory(uint8_t* data, size_t size) {
 }
 
 buffer_t* buffer_copy(buffer_t* buf) {
+  if (!buf) return NULL;
   return buffer_create_from_pointer_copy(buf->data, buf->size);
 }
 
