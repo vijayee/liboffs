@@ -513,6 +513,17 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
     char buffer[READ_BUFFER_SIZE];
     ssize_t bytes_read;
 
+    /* Connection is being destroyed — epoll fired after socket was freed
+       but before the deferred watcher stop was processed on this I/O thread. */
+    if (connection->sock == NULL) {
+      pd_watcher_t* claimed = ATOMIC_EXCHANGE(&connection->watcher, NULL);
+      if (claimed != NULL) {
+        pd_watcher_stop(claimed);
+        pd_watcher_destroy(claimed);
+      }
+      return;
+    }
+
     if (connection->is_ssl && connection->ssl != NULL) {
       bytes_read = SSL_read(connection->ssl, buffer, sizeof(buffer));
       if (bytes_read <= 0) {

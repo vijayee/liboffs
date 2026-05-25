@@ -502,6 +502,7 @@ typedef struct {
     tuple_cache_t* tc;
     ofd_cache_t* ofd_cache;
     block_cache_t* bc;
+    uint8_t temporary;
 } put_context_t;
 
 typedef struct {
@@ -776,7 +777,6 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
     const char* recycler_header = http_request_header(request, "recycler");
     const char* temporary_header = http_request_header(request, "temporary");
     uint8_t is_temporary = (temporary_header != NULL && strcmp(temporary_header, "true") == 0);
-    (void)is_temporary;
 
     vec_block_recipe_t recipes;
     vec_init(&recipes);
@@ -815,6 +815,7 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
     put_ctx->tc = ctx->tc;
     put_ctx->ofd_cache = ctx->ofd_cache;
     put_ctx->bc = ctx->bc;
+    put_ctx->temporary = is_temporary;
 
     stream_subscribe((stream_t*)ws, data_event, put_ctx,
                      (void (*)(void*, void*))_put_on_stream_data, NULL);
@@ -878,7 +879,6 @@ static int _off_put_headers_complete(http_connection_t* connection,
     const char* recycler_header = http_request_header(request, "recycler");
     const char* temporary_header = http_request_header(request, "temporary");
     uint8_t is_temporary = (temporary_header != NULL && strcmp(temporary_header, "true") == 0);
-    (void)is_temporary;
 
     vec_block_recipe_t recipes;
     vec_init(&recipes);
@@ -917,6 +917,7 @@ static int _off_put_headers_complete(http_connection_t* connection,
     put_ctx->tc = routes_ctx->tc;
     put_ctx->ofd_cache = routes_ctx->ofd_cache;
     put_ctx->bc = routes_ctx->bc;
+    put_ctx->temporary = is_temporary;
 
     stream_subscribe((stream_t*)ws, data_event, put_ctx,
                      (void (*)(void*, void*))_put_on_stream_data, NULL);
