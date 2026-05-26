@@ -22,6 +22,7 @@
 #include "../../OFFStreams/ofd_cache.h"
 #include "../../OFFStreams/tuple_cache.h"
 #include "../../BlockCache/block_cache.h"
+#include "../block_handlers.h"
 #include "../../Scheduler/scheduler.h"
 #include "../../Platform/platform.h"
 #include <poll-dancer/poll-dancer.h>
@@ -54,6 +55,7 @@ typedef struct unix_connection_t {
   block_cache_t* bc;
   ofd_cache_t* ofd_cache;
   tuple_cache_t* tc;
+  block_handler_ctx_t block_ctx;
   /* Streaming PUT state */
   writeable_off_stream_t* put_ws;
   writeable_descriptor_t* put_desc;
