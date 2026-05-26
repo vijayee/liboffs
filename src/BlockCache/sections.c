@@ -332,7 +332,7 @@ void sections_dispatch(void* state, message_t* msg) {
       break;
     }
     case SECTION_SAVE_META: {
-      round_robin_save(sections->robin);
+      if (sections->robin) round_robin_save(sections->robin);
       break;
     }
     case SECTION_WRITE_META: {
@@ -571,7 +571,7 @@ round_robin_t* cbor_to_round_robin(cbor_item_t* cbor, char* robin_path, timer_ac
   size_t size = cbor_array_size(cbor);
   for(size_t i = 0; i < size; i++) {
     cbor_item_t* cbor_id = cbor_array_get(cbor, i);
-    round_robin_add(robin, cbor_get_uint64(cbor_id));
+    round_robin_add(robin, cbor_get_int(cbor_id));
     cbor_decref(&cbor_id);
   }
   return robin;
@@ -709,8 +709,8 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
 
 void sections_destroy(sections_t* sections) {
   sections_lru_cache_destroy(sections->lru);
-  round_robin_destroy(sections->robin);
   actor_destroy(&sections->actor);
+  round_robin_destroy(sections->robin);
   free(sections->meta_path);
   free(sections->data_path);
   free(sections->robin_path);

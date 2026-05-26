@@ -28,9 +28,9 @@ static char* _decode_string(cbor_item_t* item, size_t max_len) {
   return str;
 }
 
-// --- Helper: safe cbor_get_uint64 → size_t with overflow guard ---
+// --- Helper: safe cbor_get_int → size_t with overflow guard ---
 static size_t _decode_size(cbor_item_t* item) {
-  uint64_t val = cbor_get_uint64(item);
+  uint64_t val = cbor_get_int(item);
   if (val > SIZE_MAX) return 0;
   return (size_t)val;
 }

@@ -324,7 +324,7 @@ int authority_load_peers(authority_t* authority, network_t* network) {
 
     // Index 0: version
     cbor_item_t* version_item = cbor_array_get(root, 0);
-    uint8_t version = cbor_isa_uint(version_item) ? (uint8_t)cbor_get_uint64(version_item) : 0;
+    uint8_t version = cbor_isa_uint(version_item) ? (uint8_t)cbor_get_int(version_item) : 0;
     cbor_decref(&version_item);
     if (version != PEER_STORE_VERSION) {
       cbor_decref(&root);
@@ -407,14 +407,14 @@ int authority_load_peers(authority_t* authority, network_t* network) {
               node_id_t peer_id;
               memset(&peer_id, 0, sizeof(peer_id));
               memcpy(peer_id.hash, cbor_bytestring_handle(id_item), NODE_ID_HASH_SIZE);
-              uint32_t addr = cbor_isa_uint(addr_item) ? (uint32_t)cbor_get_uint64(addr_item) : 0;
-              uint16_t port = cbor_isa_uint(port_item) ? (uint16_t)cbor_get_uint64(port_item) : 0;
+              uint32_t addr = cbor_isa_uint(addr_item) ? (uint32_t)cbor_get_int(addr_item) : 0;
+              uint16_t port = cbor_isa_uint(port_item) ? (uint16_t)cbor_get_int(port_item) : 0;
               net_node_t* node = net_node_create(&peer_id, addr, port);
               if (node != NULL) {
                 if (cbor_is_float(lat_item)) node->latency_ms = (float)cbor_float_get_float4(lat_item);
                 if (cbor_is_float(wt_item)) node->weight = (float)cbor_float_get_float4(wt_item);
                 if (cbor_is_float(cap_item)) node->capacity = (float)cbor_float_get_float4(cap_item);
-                if (cbor_isa_uint(phase_item)) node->phase = (node_phase_e)cbor_get_uint64(phase_item);
+                if (cbor_isa_uint(phase_item)) node->phase = (node_phase_e)cbor_get_int(phase_item);
                 if (cbor_is_float(avail_item)) node->availability = (float)cbor_float_get_float4(avail_item);
                 uint32_t latency_us = (uint32_t)(node->latency_ms * 1000.0f);
                 ring_set_insert(network->rings, node, latency_us);
@@ -444,7 +444,7 @@ int authority_load_peers(authority_t* authority, network_t* network) {
       struct cbor_pair pair = cbor_map_handle(root)[index];
       if (cbor_isa_string(pair.key) && cbor_string_length(pair.key) == 1 &&
           cbor_string_handle(pair.key)[0] == 'v') {
-        if (cbor_isa_uint(pair.value)) version = (uint8_t)cbor_get_uint64(pair.value);
+        if (cbor_isa_uint(pair.value)) version = (uint8_t)cbor_get_int(pair.value);
       }
     }
     if (version != 1) {
@@ -516,14 +516,14 @@ int authority_load_peers(authority_t* authority, network_t* network) {
                 node_id_t peer_id;
                 memset(&peer_id, 0, sizeof(peer_id));
                 memcpy(peer_id.hash, cbor_bytestring_handle(id_item), NODE_ID_HASH_SIZE);
-                uint32_t addr = cbor_isa_uint(addr_item) ? (uint32_t)cbor_get_uint64(addr_item) : 0;
-                uint16_t port = cbor_isa_uint(port_item) ? (uint16_t)cbor_get_uint64(port_item) : 0;
+                uint32_t addr = cbor_isa_uint(addr_item) ? (uint32_t)cbor_get_int(addr_item) : 0;
+                uint16_t port = cbor_isa_uint(port_item) ? (uint16_t)cbor_get_int(port_item) : 0;
                 net_node_t* node = net_node_create(&peer_id, addr, port);
                 if (node != NULL) {
                   if (cbor_is_float(lat_item)) node->latency_ms = (float)cbor_float_get_float4(lat_item);
                   if (cbor_is_float(wt_item)) node->weight = (float)cbor_float_get_float4(wt_item);
                   if (cbor_is_float(cap_item)) node->capacity = (float)cbor_float_get_float4(cap_item);
-                  if (cbor_isa_uint(phase_item)) node->phase = (node_phase_e)cbor_get_uint64(phase_item);
+                  if (cbor_isa_uint(phase_item)) node->phase = (node_phase_e)cbor_get_int(phase_item);
                   if (cbor_is_float(avail_item)) node->availability = (float)cbor_float_get_float4(avail_item);
                   uint32_t latency_us = (uint32_t)(node->latency_ms * 1000.0f);
                   ring_set_insert(network->rings, node, latency_us);

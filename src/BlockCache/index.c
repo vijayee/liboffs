@@ -118,9 +118,9 @@ index_entry_t* cbor_to_index_entry(cbor_item_t* cbor) {
  cbor_item_t* item4 = cbor_array_get(cbor, 4);
  fibonacci_hit_counter_t counter = cbor_to_fibonacci_hit_counter(item0);
  buffer_t* hash = cbor_to_buffer(item1);
- size_t section_index = (size_t) cbor_get_uint64(item2);
- size_t section_id = (size_t) cbor_get_uint64(item3);
- uint64_t ejection_date = (size_t) cbor_get_uint64(item4);
+ size_t section_index = (size_t) cbor_get_int(item2);
+ size_t section_id = (size_t) cbor_get_int(item3);
+ uint64_t ejection_date = (size_t) cbor_get_int(item4);
  cbor_decref(&item0);
  cbor_decref(&item1);
  cbor_decref(&item2);
@@ -349,7 +349,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
                       if (cbor_isa_bytestring(cbor_hash) && cbor_isa_uint(cbor_date)) {
                         buffer_t* hash = cbor_to_buffer(cbor_hash);
                         index_entry_t* entry = index_find(index, hash);
-                        index_entry_set_ejection_date(entry, cbor_get_uint64(cbor_date));
+                        index_entry_set_ejection_date(entry, cbor_get_int(cbor_date));
                         DESTROY(hash, buffer);
                         cbor_decref(&cbor_hash);
                         cbor_decref(&cbor_date);
@@ -1021,7 +1021,7 @@ cbor_item_t* _index_to_cbor(index_t* index) {
 index_t* cbor_to_index(cbor_item_t* cbor, char* location, timer_actor_t* timer_actor, uint64_t wait, uint64_t max_wait, size_t max_snapshots, size_t max_wals) {
   cbor_item_t* cbor_root = cbor_array_get(cbor, 0);
   cbor_item_t* cbor_bucket_size = cbor_array_get(cbor, 1);
-  size_t bucket_size = cbor_get_uint64(cbor_bucket_size);
+  size_t bucket_size = cbor_get_int(cbor_bucket_size);
   cbor_decref(&cbor_bucket_size);
   index_node_t* root = cbor_to_index_node(cbor_root, bucket_size);
   cbor_decref(&cbor_root);

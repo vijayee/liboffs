@@ -352,7 +352,7 @@ elastic_bloom_filter_t* elastic_bloom_filter_decode(cbor_item_t* item) {
   if (cbor_array_size(item) < 7) return NULL;
 
   cbor_item_t* size_item = cbor_array_get(item, 0);
-  size_t size = (size_t)cbor_get_uint64(size_item);
+  size_t size = (size_t)cbor_get_int(size_item);
   cbor_decref(&size_item);
 
   cbor_item_t* hash_count_item = cbor_array_get(item, 1);
@@ -364,11 +364,11 @@ elastic_bloom_filter_t* elastic_bloom_filter_decode(cbor_item_t* item) {
   cbor_decref(&fp_bits_item);
 
   cbor_item_t* seed_a_item = cbor_array_get(item, 3);
-  uint64_t seed_a = cbor_get_uint64(seed_a_item);
+  uint64_t seed_a = cbor_get_int(seed_a_item);
   cbor_decref(&seed_a_item);
 
   cbor_item_t* seed_b_item = cbor_array_get(item, 4);
-  uint64_t seed_b = cbor_get_uint64(seed_b_item);
+  uint64_t seed_b = cbor_get_int(seed_b_item);
   cbor_decref(&seed_b_item);
 
   cbor_item_t* bitset_item = cbor_array_get(item, 5);
@@ -405,7 +405,7 @@ elastic_bloom_filter_t* elastic_bloom_filter_decode(cbor_item_t* item) {
       continue;
     }
     cbor_item_t* idx_item = cbor_array_get(bucket_item, 0);
-    size_t bucket_idx = (size_t)cbor_get_uint64(idx_item);
+    size_t bucket_idx = (size_t)cbor_get_int(idx_item);
     cbor_decref(&idx_item);
 
     cbor_item_t* fp_count_item = cbor_array_get(bucket_item, 1);
