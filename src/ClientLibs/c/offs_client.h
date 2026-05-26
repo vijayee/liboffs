@@ -41,6 +41,12 @@ typedef void (*offs_put_response_cb_t)(void* ctx, const char* ori_string);
 typedef void (*offs_get_data_cb_t)(void* ctx, const uint8_t* data, size_t len);
 typedef void (*offs_get_end_cb_t)(void* ctx);
 typedef void (*offs_error_cb_t)(void* ctx, uint8_t status_code, const char* message);
+typedef void (*offs_block_put_cb_t)(void* ctx, uint8_t status,
+    const uint8_t* hash_data, size_t hash_len, uint8_t hash_is_text);
+typedef void (*offs_block_get_cb_t)(void* ctx, uint8_t status,
+    const uint8_t* data, size_t data_len);
+typedef void (*offs_block_delete_cb_t)(void* ctx, uint8_t status);
+typedef void (*offs_health_cb_t)(void* ctx, const char* json_response);
 
 /* Connection lifecycle */
 offs_client_t* offs_client_connect(const char* transport_url, const char* api_key);
@@ -88,6 +94,23 @@ int offs_client_get(offs_client_t* client,
                      offs_get_end_cb_t end_cb,
                      offs_error_cb_t error_cb,
                      void* ctx);
+
+/* Block cache operations */
+int offs_client_block_put(offs_client_t* client,
+    const uint8_t* data, size_t data_len, uint8_t encoding,
+    offs_block_put_cb_t callback, void* ctx);
+
+int offs_client_block_get(offs_client_t* client,
+    const uint8_t* hash_data, size_t hash_len,
+    offs_block_get_cb_t callback, void* ctx);
+
+int offs_client_block_delete(offs_client_t* client,
+    const uint8_t* hash_data, size_t hash_len,
+    offs_block_delete_cb_t callback, void* ctx);
+
+/* Health check */
+int offs_client_health(offs_client_t* client,
+    offs_health_cb_t callback, void* ctx);
 
 #ifdef __cplusplus
 }

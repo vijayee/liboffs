@@ -122,6 +122,14 @@ struct offs_client_t {
   void* get_end_cb_ctx;
   offs_error_cb_t error_cb;
   void* error_cb_ctx;
+  offs_block_put_cb_t block_put_cb;
+  void* block_put_cb_ctx;
+  offs_block_get_cb_t block_get_cb;
+  void* block_get_cb_ctx;
+  offs_block_delete_cb_t block_delete_cb;
+  void* block_delete_cb_ctx;
+  offs_health_cb_t health_cb;
+  void* health_cb_ctx;
 };
 
 /* Forward declaration — needed for MsQuic callbacks that call _handle_frame */
@@ -339,6 +347,14 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
   void* get_end_cb_ctx = client->get_end_cb_ctx;
   offs_error_cb_t error_cb = client->error_cb;
   void* error_cb_ctx = client->error_cb_ctx;
+  offs_block_put_cb_t block_put_cb = client->block_put_cb;
+  void* block_put_cb_ctx = client->block_put_cb_ctx;
+  offs_block_get_cb_t block_get_cb = client->block_get_cb;
+  void* block_get_cb_ctx = client->block_get_cb_ctx;
+  offs_block_delete_cb_t block_delete_cb = client->block_delete_cb;
+  void* block_delete_cb_ctx = client->block_delete_cb_ctx;
+  offs_health_cb_t health_cb = client->health_cb;
+  void* health_cb_ctx = client->health_cb_ctx;
   platform_mutex_unlock(client->lock);
 
   switch (type) {
@@ -381,6 +397,50 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
           error_cb(error_cb_ctx, msg.status_code, msg.message);
         }
         client_api_error_destroy(&msg);
+      }
+      break;
+    }
+    case CLIENT_API_BLOCK_PUT_RESPONSE: {
+      client_api_block_put_response_t msg;
+      memset(&msg, 0, sizeof(msg));
+      if (client_api_block_put_response_decode(frame, &msg) == 0) {
+        if (block_put_cb != NULL) {
+          block_put_cb(block_put_cb_ctx, msg.status, msg.hash_data, msg.hash_len, msg.hash_is_text);
+        }
+        client_api_block_put_response_destroy(&msg);
+      }
+      break;
+    }
+    case CLIENT_API_BLOCK_GET_RESPONSE: {
+      client_api_block_get_response_t msg;
+      memset(&msg, 0, sizeof(msg));
+      if (client_api_block_get_response_decode(frame, &msg) == 0) {
+        if (block_get_cb != NULL) {
+          block_get_cb(block_get_cb_ctx, msg.status, msg.data, msg.data_size);
+        }
+        client_api_block_get_response_destroy(&msg);
+      }
+      break;
+    }
+    case CLIENT_API_BLOCK_DELETE_RESPONSE: {
+      client_api_block_delete_response_t msg;
+      memset(&msg, 0, sizeof(msg));
+      if (client_api_block_delete_response_decode(frame, &msg) == 0) {
+        if (block_delete_cb != NULL) {
+          block_delete_cb(block_delete_cb_ctx, msg.status);
+        }
+        client_api_block_delete_response_destroy(&msg);
+      }
+      break;
+    }
+    case CLIENT_API_HEALTH_RESPONSE: {
+      client_api_health_response_t msg;
+      memset(&msg, 0, sizeof(msg));
+      if (client_api_health_response_decode(frame, &msg) == 0) {
+        if (health_cb != NULL) {
+          health_cb(health_cb_ctx, msg.json_data);
+        }
+        client_api_health_response_destroy(&msg);
       }
       break;
     }
@@ -739,6 +799,14 @@ static offs_client_t* _connect_attempt(const char* transport_url, const char* ap
   client->get_end_cb_ctx = NULL;
   client->error_cb = NULL;
   client->error_cb_ctx = NULL;
+  client->block_put_cb = NULL;
+  client->block_put_cb_ctx = NULL;
+  client->block_get_cb = NULL;
+  client->block_get_cb_ctx = NULL;
+  client->block_delete_cb = NULL;
+  client->block_delete_cb_ctx = NULL;
+  client->health_cb = NULL;
+  client->health_cb_ctx = NULL;
 
   if (api_key != NULL) {
     size_t key_len = strlen(api_key);
@@ -1306,5 +1374,77 @@ int offs_client_get(offs_client_t* client,
   cbor_item_t* frame = client_api_get_request_encode(&msg);
   _send_frame(client, frame);
 
+  return 0;
+}
+
+int offs_client_block_put(offs_client_t* client,
+    const uint8_t* data, size_t data_len, uint8_t encoding,
+    offs_block_put_cb_t callback, void* ctx) {
+  if (client == NULL || !client->connected) return -1;
+
+  platform_mutex_lock(client->lock);
+  client->block_put_cb = callback;
+  client->block_put_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
+  client_api_block_put_request_t msg;
+  msg.data = (uint8_t*)data;
+  msg.data_size = data_len;
+  msg.encoding = encoding;
+
+  cbor_item_t* frame = client_api_block_put_request_encode(&msg);
+  _send_frame(client, frame);
+  return 0;
+}
+
+int offs_client_block_get(offs_client_t* client,
+    const uint8_t* hash_data, size_t hash_len,
+    offs_block_get_cb_t callback, void* ctx) {
+  if (client == NULL || !client->connected) return -1;
+
+  platform_mutex_lock(client->lock);
+  client->block_get_cb = callback;
+  client->block_get_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
+  client_api_block_get_request_t msg;
+  msg.hash_data = (uint8_t*)hash_data;
+  msg.hash_len = hash_len;
+
+  cbor_item_t* frame = client_api_block_get_request_encode(&msg);
+  _send_frame(client, frame);
+  return 0;
+}
+
+int offs_client_block_delete(offs_client_t* client,
+    const uint8_t* hash_data, size_t hash_len,
+    offs_block_delete_cb_t callback, void* ctx) {
+  if (client == NULL || !client->connected) return -1;
+
+  platform_mutex_lock(client->lock);
+  client->block_delete_cb = callback;
+  client->block_delete_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
+  client_api_block_delete_request_t msg;
+  msg.hash_data = (uint8_t*)hash_data;
+  msg.hash_len = hash_len;
+
+  cbor_item_t* frame = client_api_block_delete_request_encode(&msg);
+  _send_frame(client, frame);
+  return 0;
+}
+
+int offs_client_health(offs_client_t* client,
+    offs_health_cb_t callback, void* ctx) {
+  if (client == NULL || !client->connected) return -1;
+
+  platform_mutex_lock(client->lock);
+  client->health_cb = callback;
+  client->health_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
+  cbor_item_t* frame = client_api_health_request_encode();
+  _send_frame(client, frame);
   return 0;
 }
