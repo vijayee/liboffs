@@ -2,6 +2,7 @@
 #include <cstring>
 extern "C" {
 #include "../src/ClientLibs/c/offs_client.h"
+#include "../src/ClientAPI/health_handler.h"
 #include "../src/ClientAPI/Unix/unix_transport.h"
 #include "../src/ClientAPI/client_api_wire.h"
 #include "../src/BlockCache/block_cache.h"
@@ -65,6 +66,70 @@ static void _error_callback(void* ctx, uint8_t status_code, const char* message)
     (void)message;
 }
 
+struct BlockPutCallbackContext {
+    int called;
+    uint8_t status;
+    uint8_t* hash_data;
+    size_t hash_len;
+    uint8_t hash_is_text;
+};
+
+static void _block_put_callback(void* ctx, uint8_t status,
+    const uint8_t* hash_data, size_t hash_len, uint8_t hash_is_text) {
+    BlockPutCallbackContext* bctx = (BlockPutCallbackContext*)ctx;
+    bctx->called = 1;
+    bctx->status = status;
+    if (hash_data != NULL && hash_len > 0) {
+        bctx->hash_data = (uint8_t*)malloc(hash_len);
+        memcpy(bctx->hash_data, hash_data, hash_len);
+        bctx->hash_len = hash_len;
+        bctx->hash_is_text = hash_is_text;
+    }
+}
+
+struct BlockGetCallbackContext {
+    int called;
+    uint8_t status;
+    uint8_t* data;
+    size_t data_len;
+};
+
+static void _block_get_callback(void* ctx, uint8_t status,
+    const uint8_t* data, size_t data_len) {
+    BlockGetCallbackContext* bctx = (BlockGetCallbackContext*)ctx;
+    bctx->called = 1;
+    bctx->status = status;
+    if (data != NULL && data_len > 0) {
+        bctx->data = (uint8_t*)malloc(data_len);
+        memcpy(bctx->data, data, data_len);
+        bctx->data_len = data_len;
+    }
+}
+
+struct BlockDeleteCallbackContext {
+    int called;
+    uint8_t status;
+};
+
+static void _block_delete_callback(void* ctx, uint8_t status) {
+    BlockDeleteCallbackContext* bctx = (BlockDeleteCallbackContext*)ctx;
+    bctx->called = 1;
+    bctx->status = status;
+}
+
+struct HealthCallbackContext {
+    int called;
+    char* json_response;
+};
+
+static void _health_callback(void* ctx, const char* json_response) {
+    HealthCallbackContext* hctx = (HealthCallbackContext*)ctx;
+    hctx->called = 1;
+    if (json_response != NULL) {
+        hctx->json_response = strdup(json_response);
+    }
+}
+
 namespace offs_client_test {
 
 class TestOffsClient : public testing::Test {
@@ -78,6 +143,9 @@ protected:
     char* cache_dir;
     char socket_path[128];
     char url[256];
+    health_context_t health_ctx;
+    uint8_t running_val;
+    uint8_t draining_val;
 
     void SetUp() override {
         pool = scheduler_pool_create(4);
@@ -103,10 +171,17 @@ protected:
         ofd_cache = ofd_cache_create(pool, bc, 300000);
         tc = tuple_cache_create(100, pool);
 
+        running_val = 1;
+        draining_val = 0;
+        memset(&health_ctx, 0, sizeof(health_ctx));
+        health_ctx.block_cache = bc;
+        health_ctx.running = &running_val;
+        health_ctx.draining = &draining_val;
+
         snprintf(socket_path, sizeof(socket_path), "/tmp/test_client_sock_%d", getpid());
         unlink(socket_path);
 
-        transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path, NULL, NULL);
+        transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path, NULL, &health_ctx);
         ASSERT_NE(transport, nullptr);
         unix_transport_start(transport);
 
@@ -301,6 +376,123 @@ TEST_F(TestOffsClient, GetInvalidOri) {
     if (ctx.data != nullptr) {
         free(ctx.data);
     }
+    offs_client_disconnect(client);
+}
+
+TEST_F(TestOffsClient, BlockPut) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+
+    BlockPutCallbackContext ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    const uint8_t data[] = "block put test data";
+    int result = offs_client_block_put(client, data, sizeof(data) - 1, 0,
+                                       _block_put_callback, &ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 200 && !ctx.called; attempts++) {
+        usleep(10000);
+    }
+    EXPECT_EQ(ctx.called, 1);
+    if (ctx.hash_data != nullptr) {
+        free(ctx.hash_data);
+    }
+
+    offs_client_disconnect(client);
+}
+
+TEST_F(TestOffsClient, BlockPutGetRoundTrip) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+
+    const uint8_t data[] = "round trip block data";
+    BlockPutCallbackContext put_ctx;
+    memset(&put_ctx, 0, sizeof(put_ctx));
+
+    int result = offs_client_block_put(client, data, sizeof(data) - 1, 0,
+                                       _block_put_callback, &put_ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 200 && !put_ctx.called; attempts++) {
+        usleep(10000);
+    }
+    EXPECT_EQ(put_ctx.called, 1);
+    ASSERT_NE(put_ctx.hash_data, nullptr);
+    ASSERT_GT(put_ctx.hash_len, 0u);
+
+    BlockGetCallbackContext get_ctx;
+    memset(&get_ctx, 0, sizeof(get_ctx));
+
+    result = offs_client_block_get(client, put_ctx.hash_data, put_ctx.hash_len,
+                                   _block_get_callback, &get_ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 200 && !get_ctx.called; attempts++) {
+        usleep(10000);
+    }
+    EXPECT_EQ(get_ctx.called, 1);
+    ASSERT_NE(get_ctx.data, nullptr);
+    EXPECT_GE(get_ctx.data_len, sizeof(data) - 1);
+    EXPECT_EQ(memcmp(get_ctx.data, data, sizeof(data) - 1), 0);
+
+    free(put_ctx.hash_data);
+    free(get_ctx.data);
+    offs_client_disconnect(client);
+}
+
+TEST_F(TestOffsClient, BlockDelete) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+
+    const uint8_t data[] = "delete test data";
+    BlockPutCallbackContext put_ctx;
+    memset(&put_ctx, 0, sizeof(put_ctx));
+
+    int result = offs_client_block_put(client, data, sizeof(data) - 1, 0,
+                                       _block_put_callback, &put_ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 200 && !put_ctx.called; attempts++) {
+        usleep(10000);
+    }
+    EXPECT_EQ(put_ctx.called, 1);
+    ASSERT_NE(put_ctx.hash_data, nullptr);
+
+    BlockDeleteCallbackContext del_ctx;
+    memset(&del_ctx, 0, sizeof(del_ctx));
+
+    result = offs_client_block_delete(client, put_ctx.hash_data, put_ctx.hash_len,
+                                      _block_delete_callback, &del_ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 200 && !del_ctx.called; attempts++) {
+        usleep(10000);
+    }
+    EXPECT_EQ(del_ctx.called, 1);
+
+    free(put_ctx.hash_data);
+    offs_client_disconnect(client);
+}
+
+TEST_F(TestOffsClient, Health) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+
+    HealthCallbackContext ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    int result = offs_client_health(client, _health_callback, &ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 200 && !ctx.called; attempts++) {
+        usleep(10000);
+    }
+    EXPECT_EQ(ctx.called, 1);
+    ASSERT_NE(ctx.json_response, nullptr);
+    EXPECT_NE(strstr(ctx.json_response, "\"status\""), nullptr);
+
+    free(ctx.json_response);
     offs_client_disconnect(client);
 }
 

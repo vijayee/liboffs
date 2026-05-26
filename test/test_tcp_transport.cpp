@@ -2,6 +2,7 @@
 #include <cstring>
 extern "C" {
 #include "../src/ClientAPI/TCP/tcp_transport.h"
+#include "../src/ClientAPI/health_handler.h"
 #include "../src/ClientAPI/client_api_wire.h"
 #include "../src/Network/stream_framer.h"
 #include "../src/BlockCache/block_cache.h"
@@ -383,6 +384,57 @@ TEST_F(TestTcpTransport, PutAndGetRoundTrip) {
 
     stream_framer_destroy(framer);
     close(fd);
+}
+
+TEST_F(TestTcpTransport, HealthRequest) {
+    uint8_t running = 1;
+    uint8_t draining = 0;
+    health_context_t health_ctx;
+    memset(&health_ctx, 0, sizeof(health_ctx));
+    health_ctx.running = &running;
+    health_ctx.draining = &draining;
+
+    tcp_transport_t* health_transport = tcp_transport_create(
+        pool, bc, ofd_cache, tc, "127.0.0.1", port + 1, NULL, NULL, NULL, &health_ctx);
+    ASSERT_NE(health_transport, nullptr);
+    int tcp_port = port + 1;
+    for (int retry = 0; health_transport == nullptr && retry < 10; retry++) {
+        tcp_port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
+        health_transport = tcp_transport_create(
+            pool, bc, ofd_cache, tc, "127.0.0.1", tcp_port, NULL, NULL, NULL, &health_ctx);
+    }
+    ASSERT_NE(health_transport, nullptr);
+    tcp_transport_start(health_transport);
+
+    int fd = _connect_with_retry("127.0.0.1", tcp_port);
+    ASSERT_GE(fd, 0);
+
+    cbor_item_t* health_req = client_api_health_request_encode();
+    ASSERT_NE(health_req, nullptr);
+    int send_ret = _send_frame(fd, health_req);
+    ASSERT_EQ(send_ret, 0);
+
+    stream_framer_t* framer = stream_framer_create();
+    ASSERT_NE(framer, nullptr);
+
+    cbor_item_t* response = _recv_frame(fd, framer);
+    ASSERT_NE(response, nullptr);
+    uint8_t type = client_api_wire_get_type(response);
+    EXPECT_EQ(type, CLIENT_API_HEALTH_RESPONSE);
+
+    client_api_health_response_t decoded;
+    int decode_ret = client_api_health_response_decode(response, &decoded);
+    ASSERT_EQ(decode_ret, 0);
+    EXPECT_NE(strstr(decoded.json_data, "\"status\": \"running\""), nullptr);
+    client_api_health_response_destroy(&decoded);
+    cbor_decref(&response);
+
+    stream_framer_destroy(framer);
+    close(fd);
+
+    tcp_transport_stop(health_transport);
+    scheduler_pool_wait_for_idle(pool);
+    tcp_transport_destroy(health_transport);
 }
 
 } // namespace tcp_transport_test
