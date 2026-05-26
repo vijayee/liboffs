@@ -107,7 +107,7 @@ static char* _build_sub_ofd_url(const char* server_base, const buffer_t* dir_has
 static int _resolve_ofd_entries(ofd_t* ofd, const char* server_base,
                                  offs_ofd_donor_t** donors, size_t* donor_count,
                                  size_t* donor_cap) {
-  for (int i = 0; i < ofd->entries.length; i++) {
+  for (size_t i = 0; i < ofd->entries.length; i++) {
     ofd_entry_t* entry = &ofd->entries.data[i];
 
     if (entry->type == OFD_ENTRY_FILE && entry->file_ori) {
@@ -160,7 +160,7 @@ static int _resolve_ofd_entries(ofd_t* ofd, const char* server_base,
   }
 
   /* Recurse into subdirectories */
-  for (int i = 0; i < ofd->entries.length; i++) {
+  for (size_t i = 0; i < ofd->entries.length; i++) {
     ofd_entry_t* entry = &ofd->entries.data[i];
     if (entry->type == OFD_ENTRY_DIRECTORY && entry->dir_hash) {
       char* sub_url = _build_sub_ofd_url(server_base, entry->dir_hash, entry->name);

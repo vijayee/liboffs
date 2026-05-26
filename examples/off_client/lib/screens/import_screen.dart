@@ -95,7 +95,7 @@ class _ImportScreenState extends State<ImportScreen> {
 
   /// Upload a directory recursively and return the URL of its top-level OFD.
   Future<String> _uploadDirectory(Directory dir,
-      {List<OfdEntry>? parentDonorPool}) async {
+      {List<OfdEntry>? parentDonorPool, String? parentServerBase}) async {
     final entries = <OfdEntry>[];
     final dirEntries = dir.listSync();
 
@@ -106,7 +106,7 @@ class _ImportScreenState extends State<ImportScreen> {
     // Build donor pool: start from parent, add from matching OFD recyclers
     final donorPool = <OfdEntry>[...?parentDonorPool];
     final ofdEntryMap = <String, OfdEntry>{};
-    String? recyclerServerBase;
+    String? recyclerServerBase = parentServerBase;
 
     if (_recyclerUrls != null) {
       final resolver = RecyclerResolver(_api);
@@ -132,7 +132,8 @@ class _ImportScreenState extends State<ImportScreen> {
     for (final subdir in subdirs) {
       final subDirName = subdir.path.split(Platform.pathSeparator).last;
       final subUrl =
-          await _uploadDirectory(subdir, parentDonorPool: donorPool);
+          await _uploadDirectory(subdir, parentDonorPool: donorPool,
+              parentServerBase: recyclerServerBase);
       final parsed = parseOffUrl(subUrl);
       if (parsed == null) {
         throw Exception('Failed to parse sub-OFD URL: $subUrl');
