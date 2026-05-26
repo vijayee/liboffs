@@ -7,6 +7,8 @@
 #include "ClientAPI/HTTP/block_routes.h"
 #include "ClientAPI/HTTP/cors.h"
 #include "ClientAPI/Unix/unix_transport.h"
+#include "ClientAPI/HTTP/health_routes.h"
+#include "ClientAPI/health_handler.h"
 #include "OFFStreams/tuple_cache.h"
 #include "BlockCache/block_cache.h"
 #include "OFFStreams/ofd_cache.h"
@@ -18,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <time.h>
 #include <unistd.h>
 #include <execinfo.h>
 
@@ -102,12 +105,26 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  uint64_t server_start_ms = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+  uint8_t running_val = 1;
+  uint8_t draining_val = 0;
+
+  health_context_t health_ctx;
+  memset(&health_ctx, 0, sizeof(health_ctx));
+  health_ctx.block_cache = bc;
+  health_ctx.start_time_ms = &server_start_ms;
+  health_ctx.running = &running_val;
+  health_ctx.draining = &draining_val;
+
   off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL);
   block_routes_register(server, pool, bc, NULL, NULL);
+  health_routes_register(server, &health_ctx);
 
   unix_transport_t* unix_transport = NULL;
   if (unix_path != NULL) {
-    unix_transport = unix_transport_create(pool, bc, ofd_cache, tc, unix_path, NULL, NULL);
+    unix_transport = unix_transport_create(pool, bc, ofd_cache, tc, unix_path, NULL, &health_ctx);
     if (unix_transport == NULL) {
       fprintf(stderr, "Failed to create Unix transport on %s\n", unix_path);
       http_server_destroy(server);
