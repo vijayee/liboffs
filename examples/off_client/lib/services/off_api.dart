@@ -177,4 +177,13 @@ class OffApi {
       throw Exception('Delete failed: ${response.statusCode}');
     }
   }
+
+  Future<Map<String, dynamic>> healthCheck() async {
+    final uri = Uri.parse('$baseUrl/health');
+    final response = await http.get(uri);
+    if (response.statusCode == 200) {
+      return json.decode(response.body) as Map<String, dynamic>;
+    }
+    throw Exception('Health check failed: ${response.statusCode}');
+  }
 }
