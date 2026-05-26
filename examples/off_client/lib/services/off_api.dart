@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 
 String mimeFromExtension(String filename) {
@@ -185,5 +186,16 @@ class OffApi {
       return json.decode(response.body) as Map<String, dynamic>;
     }
     throw Exception('Health check failed: ${response.statusCode}');
+  }
+
+  /// Fetch raw OFD CBOR bytes from a URL with ?ofd=raw.
+  Future<Uint8List> fetchRawOfd(String url) async {
+    final separator = url.contains('?') ? '&' : '?';
+    final rawUrl = '$url${separator}ofd=raw';
+    final response = await http.get(Uri.parse(rawUrl));
+    if (response.statusCode == 200) {
+      return response.bodyBytes;
+    }
+    throw Exception('OFD fetch failed: ${response.statusCode}');
   }
 }
