@@ -11,6 +11,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include "../../Platform/platform.h"
 #include "../../Platform/platform_local.h"
 #include <pthread.h>
@@ -1447,4 +1449,134 @@ int offs_client_health(offs_client_t* client,
   cbor_item_t* frame = client_api_health_request_encode();
   _send_frame(client, frame);
   return 0;
+}
+
+buffer_t* offs_http_get(const char* url) {
+  if (!url) return NULL;
+
+  /* Parse URL: http://host[:port]/path */
+  const char* prefix = "http://";
+  if (strncmp(url, prefix, 7) != 0) return NULL;
+  const char* rest = url + 7;
+
+  /* Extract host */
+  const char* host_start = rest;
+  const char* host_end = strchr(host_start, ':');
+  const char* port_end = strchr(host_start, '/');
+  const char* path_start = NULL;
+
+  char host[256];
+  int port = 80;
+
+  if (host_end && (!port_end || host_end < port_end)) {
+    /* Has port */
+    size_t host_len = (size_t)(host_end - host_start);
+    if (host_len >= sizeof(host)) return NULL;
+    memcpy(host, host_start, host_len);
+    host[host_len] = '\0';
+    port = (int)strtol(host_end + 1, NULL, 10);
+    path_start = strchr(host_end, '/');
+  } else if (port_end) {
+    /* No port, has path */
+    size_t host_len = (size_t)(port_end - host_start);
+    if (host_len >= sizeof(host)) return NULL;
+    memcpy(host, host_start, host_len);
+    host[host_len] = '\0';
+    path_start = port_end;
+  } else {
+    /* No port, no path */
+    size_t host_len = strlen(host_start);
+    if (host_len >= sizeof(host)) return NULL;
+    memcpy(host, host_start, host_len);
+    host[host_len] = '\0';
+    path_start = "/";
+  }
+
+  if (port <= 0 || port > 65535) return NULL;
+  if (!path_start) path_start = "/";
+
+  /* Create socket and resolve address using platform abstractions */
+  platform_socket_t* sock = platform_socket_create(PLATFORM_AF_INET, 1);
+  if (sock == NULL) return NULL;
+
+  platform_address_t addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.family = PLATFORM_AF_INET;
+  addr.inet.port = (uint16_t)port;
+  if (platform_address_parse(&addr, host, (uint16_t)port) != 0) {
+    platform_socket_destroy(sock);
+    return NULL;
+  }
+
+  /* Set send/recv timeouts on the underlying fd */
+  {
+    struct timeval tv;
+    tv.tv_sec = 10;
+    tv.tv_usec = 0;
+    int fd = platform_socket_fd(sock);
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+  }
+
+  if (platform_socket_connect(sock, &addr) < 0) {
+    platform_socket_destroy(sock);
+    return NULL;
+  }
+
+  /* Build and send HTTP GET request */
+  {
+    char request[4096];
+    int req_len = snprintf(request, sizeof(request),
+      "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
+      path_start, host);
+    if (req_len < 0 || req_len >= (int)sizeof(request)) {
+      platform_socket_destroy(sock);
+      return NULL;
+    }
+
+    if (platform_socket_send(sock, request, (size_t)req_len) < 0) {
+      platform_socket_destroy(sock);
+      return NULL;
+    }
+  }
+
+  /* Read response */
+  char resp_buf[65536];
+  size_t total = 0;
+  ssize_t n;
+  while ((n = platform_socket_recv(sock, resp_buf + total,
+      sizeof(resp_buf) - total - 1)) > 0) {
+    total += (size_t)n;
+    if (total >= sizeof(resp_buf) - 1) break;
+  }
+  platform_socket_destroy(sock);
+
+  if (total == 0) return NULL;
+  resp_buf[total] = '\0';
+
+  /* Find body (after \r\n\r\n) */
+  char* body = strstr(resp_buf, "\r\n\r\n");
+  if (!body) return NULL;
+  body += 4;
+
+  size_t body_len = (size_t)(resp_buf + total - body);
+
+  /* Parse Content-Length if present */
+  {
+    char* cl_header = strstr(resp_buf, "Content-Length:");
+    if (!cl_header) cl_header = strstr(resp_buf, "content-length:");
+    if (cl_header) {
+      cl_header += 15;
+      while (*cl_header == ' ') cl_header++;
+      size_t cl = (size_t)strtol(cl_header, NULL, 10);
+      if (cl < body_len) body_len = cl;
+    }
+  }
+
+  if (body_len == 0) return NULL;
+
+  buffer_t* result = buffer_create(body_len);
+  if (!result) return NULL;
+  memcpy(result->data, body, body_len);
+  return result;
 }

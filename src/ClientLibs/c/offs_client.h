@@ -7,6 +7,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+typedef struct buffer_t buffer_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -111,6 +113,11 @@ int offs_client_block_delete(offs_client_t* client,
 /* Health check */
 int offs_client_health(offs_client_t* client,
     offs_health_cb_t callback, void* ctx);
+
+/* Raw HTTP GET — opens a temporary TCP connection to fetch data from a URL.
+   Returns a buffer_t* with the response body, or NULL on error.
+   Caller must DESTROY the returned buffer. */
+buffer_t* offs_http_get(const char* url);
 
 #ifdef __cplusplus
 }
