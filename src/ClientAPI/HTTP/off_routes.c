@@ -327,6 +327,7 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
 
     /* Directory content type — needs async resolution */
     if (url->content_type && strstr(url->content_type, "offsystem/directory") != NULL) {
+
         off_get_state_t* state = get_clear_memory(sizeof(off_get_state_t));
         actor_init(&state->actor, state, _off_get_dispatch, ctx->pool);
         state->ctx = ctx;
@@ -336,12 +337,11 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
         refcounter_reference((refcounter_t*)state->response);
         state->url = url;
 
-        /* ?ofd=raw — fetch block directly */
+        /* ?ofd=raw — serve raw OFD bytes via async cache lookup.
+           Falls back to block_cache if not cached. */
         if (request->query_string && strstr(request->query_string, "ofd=raw") != NULL) {
             state->phase = OFF_GET_FETCH_RAW_OFD;
-            buffer_t* hash_ref = (buffer_t*)refcounter_reference((refcounter_t*)url->file_hash);
-            block_cache_get(ctx->bc, hash_ref, &state->actor);
-            DESTROY(hash_ref, buffer);
+            ofd_cache_get(ctx->ofd_cache, url->file_hash, &state->actor);
             return;
         }
 
@@ -414,8 +414,34 @@ static void _off_get_dispatch(void* state, message_t* msg) {
     off_get_state_t* ctx = (off_get_state_t*)state;
 
     switch (msg->type) {
+        case OFD_CACHE_GET_RESULT: {
+            /* ?ofd=raw — OFD cache hit, encode and send */
+            if (ctx->phase == OFF_GET_FETCH_RAW_OFD) {
+                ofd_cache_get_result_payload_t* result = (ofd_cache_get_result_payload_t*)msg->payload;
+
+                if (result->ofd != NULL) {
+                    buffer_t* encoded = ofd_encode(result->ofd);
+                    http_response_set_header(ctx->response, "Content-Type", "application/cbor");
+                    http_response_write(ctx->response, (const char*)encoded->data, encoded->size);
+                    http_response_end(ctx->response);
+                    buffer_destroy(encoded);
+                    /* Null after transfer — payload_destroy handles cleanup */
+                    result->ofd = NULL;
+                    result->hash = NULL;
+                    _off_get_state_destroy(ctx);
+                    return;
+                }
+
+                /* Cache miss — fall back to block_cache */
+                result->hash = NULL;
+                block_cache_get(ctx->ctx->bc, ctx->url->file_hash, &ctx->actor);
+                return;
+            }
+            break;
+        }
+
         case CACHE_GET_RESULT: {
-            /* ?ofd=raw — send the block data as CBOR */
+            /* ?ofd=raw — block_cache fallback, send the block data as CBOR */
             if (ctx->phase == OFF_GET_FETCH_RAW_OFD) {
                 cache_get_result_payload_t* result = (cache_get_result_payload_t*)msg->payload;
                 block_t* block = result->block;
@@ -423,7 +449,7 @@ static void _off_get_dispatch(void* state, message_t* msg) {
                 if (!block) {
                     http_response_set_status(ctx->response, 404);
                     http_response_end(ctx->response);
-                    DESTROY(result->hash, buffer);
+                    /* payload_destroy handles hash and block cleanup */
                     _off_get_state_destroy(ctx);
                     return;
                 }
@@ -437,8 +463,7 @@ static void _off_get_dispatch(void* state, message_t* msg) {
                 http_response_set_header(ctx->response, "Content-Type", "application/cbor");
                 http_response_write(ctx->response, (const char*)block->data->data, block->data->size);
                 http_response_end(ctx->response);
-                block_destroy(block);
-                DESTROY(result->hash, buffer);
+                /* payload_destroy handles hash and block cleanup */
                 _off_get_state_destroy(ctx);
                 return;
             }
@@ -447,21 +472,16 @@ static void _off_get_dispatch(void* state, message_t* msg) {
 
         case OFD_CACHE_RESOLVE_RESULT: {
             ofd_resolve_result_t* result = (ofd_resolve_result_t*)msg->payload;
+            /* payload_destroy cleans up hash, path, and ori.
+               Transfer ori ownership by clearing the pointer before destroy. */
 
             if (ctx->phase == OFF_GET_RESOLVE_INDEX) {
                 if (result->ori != NULL) {
-                    /* Found index.html — stream it.
-                       _send_stream_response takes ownership of the ori reference. */
                     _send_stream_response(ctx->response, ctx->ctx, result->ori, "text/html");
-                    DESTROY(result->hash, buffer);
-                    if (result->path) free(result->path);
+                    result->ori = NULL;
                     _off_get_state_destroy(ctx);
                     return;
                 }
-
-                /* index.html not found — try resolving the path directly */
-                DESTROY(result->hash, buffer);
-                if (result->path) free(result->path);
 
                 ctx->phase = OFF_GET_RESOLVE_DIR;
                 ctx->resolve_path = strdup(ctx->url->file_name);
@@ -473,14 +493,12 @@ static void _off_get_dispatch(void* state, message_t* msg) {
             if (ctx->phase == OFF_GET_RESOLVE_DIR) {
                 if (result->ori != NULL) {
                     const char* mime = mime_type_from_extension(ctx->resolve_path);
-                    /* _send_stream_response takes ownership of the ori reference. */
                     _send_stream_response(ctx->response, ctx->ctx, result->ori, mime);
+                    result->ori = NULL;
                 } else {
                     http_response_set_status(ctx->response, 404);
                     http_response_end(ctx->response);
                 }
-                DESTROY(result->hash, buffer);
-                if (result->path) free(result->path);
                 _off_get_state_destroy(ctx);
                 return;
             }
@@ -507,43 +525,9 @@ typedef struct {
     tuple_cache_t* tc;
     ofd_cache_t* ofd_cache;
     block_cache_t* bc;
+    buffer_t* upload_data;
     uint8_t temporary;
 } put_context_t;
-
-typedef struct {
-  actor_t actor;
-  ofd_cache_t* ofd_cache;
-  buffer_t* file_hash;
-  scheduler_pool_t* pool;
-} ofd_cache_populator_t;
-
-static void _ofd_cache_populator_dispatch(void* state, message_t* msg) {
-  ofd_cache_populator_t* populator = (ofd_cache_populator_t*)state;
-
-  switch (msg->type) {
-    case CACHE_GET_RESULT: {
-      cache_get_result_payload_t* result = (cache_get_result_payload_t*)msg->payload;
-      block_t* block = result->block;
-
-      if (block != NULL) {
-        ofd_t* ofd = ofd_decode(block->data);
-        if (ofd != NULL) {
-          ofd_cache_put(populator->ofd_cache, populator->file_hash, ofd);
-        }
-        block_destroy(block);
-      }
-      DESTROY(result->hash, buffer);
-
-      DESTROY(populator->file_hash, buffer);
-      atomic_fetch_or(&populator->actor.flags, ACTOR_FLAG_DESTROY);
-      actor_destroy(&populator->actor);
-      scheduler_pool_defer_cleanup(populator->pool, populator, free);
-      return;
-    }
-    default:
-      break;
-  }
-}
 
 static void _put_on_descriptor_close(void* ctx, void* unused) {
     (void)unused;
@@ -561,20 +545,18 @@ static void _put_on_descriptor_close(void* ctx, void* unused) {
     url->file_hash = buffer_copy(put_ctx->file_hash);
     url->descriptor_hash = buffer_copy(put_ctx->descriptor_hash);
 
-    /* Populate OFD cache on directory upload */
+    /* Populate OFD cache on directory upload — decode from saved upload data.
+       Cannot use block_cache because block hashes differ from file_hash
+       (blocks are padded to block_size before hashing). */
     if (put_ctx->content_type != NULL &&
         strstr(put_ctx->content_type, "offsystem/directory") != NULL &&
-        put_ctx->ofd_cache != NULL && put_ctx->bc != NULL) {
-        ofd_cache_populator_t* populator = get_clear_memory(sizeof(ofd_cache_populator_t));
-        actor_init(&populator->actor, populator, _ofd_cache_populator_dispatch,
-                   ((stream_t*)put_ctx->ws)->pool);
-        populator->ofd_cache = put_ctx->ofd_cache;
-        populator->file_hash = buffer_copy(put_ctx->file_hash);
-        populator->pool = ((stream_t*)put_ctx->ws)->pool;
-
-        buffer_t* hash_ref = buffer_copy(put_ctx->file_hash);
-        block_cache_get(put_ctx->bc, hash_ref, &populator->actor);
-        DESTROY(hash_ref, buffer);
+        put_ctx->ofd_cache != NULL && put_ctx->file_hash != NULL) {
+        if (put_ctx->upload_data != NULL) {
+            ofd_t* ofd = ofd_decode(put_ctx->upload_data);
+            if (ofd != NULL) {
+                ofd_cache_put(put_ctx->ofd_cache, put_ctx->file_hash, ofd);
+            }
+        }
     }
 
     char* result_url = off_url_to_string(url);
@@ -601,6 +583,9 @@ static void _put_on_descriptor_close(void* ctx, void* unused) {
     off_url_destroy(url);
     buffer_destroy(put_ctx->file_hash);
     buffer_destroy(put_ctx->descriptor_hash);
+    if (put_ctx->upload_data != NULL) {
+        buffer_destroy(put_ctx->upload_data);
+    }
     free(put_ctx->content_type);
     free(put_ctx->file_name);
     free(put_ctx->server_address);
@@ -820,6 +805,7 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
     put_ctx->tc = ctx->tc;
     put_ctx->ofd_cache = ctx->ofd_cache;
     put_ctx->bc = ctx->bc;
+    put_ctx->upload_data = upload_data;  /* saved for OFD cache population */
     put_ctx->temporary = is_temporary;
 
     stream_subscribe((stream_t*)ws, data_event, put_ctx,
@@ -833,7 +819,7 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
 
     if (upload_data != NULL) {
         writeable_off_stream_write(ws, upload_data);
-        buffer_destroy(upload_data);
+        /* Don't buffer_destroy here — put_ctx->upload_data still needs the reference */
     }
 
     writeable_off_stream_finalize(ws);
@@ -843,6 +829,18 @@ static void _put_on_request_data(void* ctx, void* data) {
     put_context_t* put_ctx = (put_context_t*)ctx;
     buffer_t* chunk = (buffer_t*)data;
     writeable_off_stream_write(put_ctx->ws, chunk);
+
+    /* Accumulate raw data for OFD cache population on directory uploads */
+    if (put_ctx->content_type != NULL &&
+        strstr(put_ctx->content_type, "offsystem/directory") != NULL) {
+        if (put_ctx->upload_data == NULL) {
+            put_ctx->upload_data = buffer_copy(chunk);
+        } else {
+            buffer_t* concatenated = buffer_concat(put_ctx->upload_data, chunk);
+            buffer_destroy(put_ctx->upload_data);
+            put_ctx->upload_data = concatenated;
+        }
+    }
 }
 
 static void _put_on_request_close(void* ctx, void* unused) {
@@ -922,6 +920,7 @@ static int _off_put_headers_complete(http_connection_t* connection,
     put_ctx->tc = routes_ctx->tc;
     put_ctx->ofd_cache = routes_ctx->ofd_cache;
     put_ctx->bc = routes_ctx->bc;
+    put_ctx->upload_data = NULL;
     put_ctx->temporary = is_temporary;
 
     stream_subscribe((stream_t*)ws, data_event, put_ctx,

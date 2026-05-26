@@ -14,6 +14,7 @@
 /* Forward declarations for payload structs — avoids circular include with actor.h */
 typedef struct buffer_t buffer_t;
 typedef struct actor_t actor_t;
+typedef struct ofd_t ofd_t;
 
 typedef enum message_type_e {
   SECTION_WRITE = 0,
@@ -81,7 +82,10 @@ typedef enum message_type_e {
   /* HTTP server watcher messages */
   HTTP_SERVER_UPDATE_WATCHER,
   HTTP_SERVER_STOP_WATCHER,
-  /* OFD cache resolve messages */
+  /* OFD cache actor messages */
+  OFD_CACHE_GET,
+  OFD_CACHE_PUT,
+  OFD_CACHE_GET_RESULT,
   OFD_CACHE_RESOLVE,
   OFD_CACHE_RESOLVE_RESULT,
   /* Stream actor messages */
@@ -292,6 +296,24 @@ typedef struct {
   buffer_t* hash;
   uint8_t accepted;          /* 1 = peer accepted, 0 = declined */
 } respiration_store_result_payload_t;
+
+/* OFD cache: request lookup by hash */
+typedef struct {
+  buffer_t* hash;
+  actor_t* reply_to;
+} ofd_cache_get_payload_t;
+
+/* OFD cache: result of a lookup */
+typedef struct {
+  buffer_t* hash;
+  ofd_t* ofd;  /* NULL if not found; caller takes ownership (referenced) */
+} ofd_cache_get_result_payload_t;
+
+/* OFD cache: store an entry */
+typedef struct {
+  buffer_t* hash;
+  ofd_t* ofd;  /* ownership transferred to cache */
+} ofd_cache_put_payload_t;
 
 typedef struct message_t {
   uint32_t type;

@@ -149,15 +149,25 @@ static void* _scheduler_worker_loop(void* arg) {
     } else {
       spin_count++;
       if (spin_count >= STEAL_THRESHOLD) {
-        // Going idle: track idle count and signal if all workers sleeping
+        platform_mutex_lock(pool->inject.lock);
+
+        /* Re-check inject queue under the lock to prevent lost wakeup.
+           _inject_queue_push holds inject.lock while enqueuing work, so if
+           we see an empty queue here, any future push will see our idle_count
+           increment and its signal will arrive after we begin waiting. */
+        if (pool->inject.head != NULL) {
+          platform_mutex_unlock(pool->inject.lock);
+          spin_count = 0;
+          continue;
+        }
+
         atomic_fetch_add(&pool->idle_count, 1);
         if (atomic_load(&pool->idle_count) == pool->worker_count) {
           platform_mutex_lock(pool->idle_lock);
           platform_condvar_signal(pool->idle);
           platform_mutex_unlock(pool->idle_lock);
         }
-        // Suspend: wait on condition variable
-        platform_mutex_lock(pool->inject.lock);
+
         if (!atomic_load_explicit(&pool->terminate, memory_order_acquire)) {
           platform_condvar_wait(pool->inject.condition, pool->inject.lock);
         }

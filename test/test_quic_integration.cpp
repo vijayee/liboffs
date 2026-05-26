@@ -302,6 +302,7 @@ protected:
   void SetUp() override {
     g_pool = scheduler_pool_create(2);
     ASSERT_NE(g_pool, nullptr);
+    scheduler_pool_start(g_pool);
   }
   void TearDown() override {
     if (g_pool != nullptr) {
@@ -606,6 +607,7 @@ TEST(QuicIntegration, NetworkCreateDestroy) {
   // We need minimal dependencies: authority, block_cache, timer, scheduler.
   scheduler_pool_t* pool = scheduler_pool_create(2);
   ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
 
   config_t config = config_default();
   authority_t* authority = authority_create(&config);
@@ -652,6 +654,7 @@ TEST(QuicIntegration, QuicListenerStartStop) {
 
   scheduler_pool_t* pool = scheduler_pool_create(2);
   ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
 
   config_t config = config_default();
   authority_t* authority = authority_create(&config);

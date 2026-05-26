@@ -135,6 +135,7 @@ TEST(NatDetect, CreateDestroyNoLeak) {
   // Verify create/destroy doesn't crash or leak
   scheduler_pool_t* pool = scheduler_pool_create(2);
   ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
 
   nat_detect_t* detect = nat_detect_create(NULL, pool);
   // Without QUIC, create returns NULL — that's expected in stub mode

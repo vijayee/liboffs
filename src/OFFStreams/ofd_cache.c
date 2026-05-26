@@ -11,19 +11,371 @@
 #include "../Scheduler/scheduler.h"
 #include <hashmap.h>
 #include <string.h>
-#include "../Platform/platform.h"
 
 static uint64_t _now_ms(void) {
     return platform_monotonic_ns() / UINT64_C(1000000);
 }
 
+static void _ofd_cache_dispatch(void* state, message_t* msg);
+
+/* ---- Resolver state (declared early so pending_resolver_t can reference it) ---- */
+
+typedef struct resolver_state_t {
+    buffer_t* root_hash;
+    char* path;
+    char* saveptr;
+    ofd_t* current_ofd;
+    actor_t* reply_to;
+} resolver_state_t;
+
+/* ---- Payload destroy functions ---- */
+
+static void _ofd_cache_get_payload_destroy(void* ptr) {
+    ofd_cache_get_payload_t* payload = (ofd_cache_get_payload_t*)ptr;
+    if (payload->hash) DESTROY(payload->hash, buffer);
+    free(payload);
+}
+
+static void _ofd_cache_put_payload_destroy(void* ptr) {
+    ofd_cache_put_payload_t* payload = (ofd_cache_put_payload_t*)ptr;
+    if (payload->hash) DESTROY(payload->hash, buffer);
+    if (payload->ofd) ofd_destroy(payload->ofd);
+    free(payload);
+}
+
+static void _ofd_cache_resolve_payload_destroy(void* ptr) {
+    ofd_cache_resolve_payload_t* payload = (ofd_cache_resolve_payload_t*)ptr;
+    if (payload->hash) DESTROY(payload->hash, buffer);
+    if (payload->path) free(payload->path);
+    free(payload);
+}
+
+static void _ofd_cache_get_result_payload_destroy(void* ptr) {
+    ofd_cache_get_result_payload_t* payload = (ofd_cache_get_result_payload_t*)ptr;
+    if (payload->hash) DESTROY(payload->hash, buffer);
+    if (payload->ofd) DESTROY(payload->ofd, ofd);
+    free(payload);
+}
+
+static void _ofd_resolve_result_destroy(void* ptr) {
+    ofd_resolve_result_t* result = (ofd_resolve_result_t*)ptr;
+    if (result->ori) DESTROY(result->ori, ori);
+    if (result->hash) DESTROY(result->hash, buffer);
+    if (result->path) free(result->path);
+    free(result);
+}
+
+/* ---- Pending resolver list helpers ---- */
+
+static void _resolver_save_pending(ofd_cache_t* cache, buffer_t* waiting_hash,
+                                   resolver_state_t* resolver) {
+    pending_resolver_t* pending = get_clear_memory(sizeof(*pending));
+    pending->waiting_hash = (buffer_t*)refcounter_reference((refcounter_t*)waiting_hash);
+    pending->resolver = resolver;
+    pending->next = cache->pending_resolvers;
+    cache->pending_resolvers = pending;
+}
+
+static void _resolver_remove_pending(ofd_cache_t* cache, resolver_state_t* resolver) {
+    pending_resolver_t** prev = &cache->pending_resolvers;
+    while (*prev) {
+        if ((*prev)->resolver == resolver) {
+            pending_resolver_t* to_free = *prev;
+            *prev = to_free->next;
+            DESTROY(to_free->waiting_hash, buffer);
+            free(to_free);
+            return;
+        }
+        prev = &(*prev)->next;
+    }
+}
+
+/* ---- Resolver helpers ---- */
+
+static void _resolver_send_result(ofd_cache_t* cache, resolver_state_t* resolver, ori_t* ori) {
+    (void)cache;
+    if (!resolver->reply_to) {
+        if (ori) DESTROY(ori, ori);
+        return;
+    }
+
+    ofd_resolve_result_t* result = get_clear_memory(sizeof(*result));
+    result->ori = ori ? (ori_t*)refcounter_reference((refcounter_t*)ori) : NULL;
+    result->hash = (buffer_t*)refcounter_reference((refcounter_t*)resolver->root_hash);
+    result->path = resolver->path ? strdup(resolver->path) : NULL;
+
+    message_t msg;
+    msg.type = OFD_CACHE_RESOLVE_RESULT;
+    msg.payload = result;
+    msg.payload_destroy = _ofd_resolve_result_destroy;
+    actor_send(resolver->reply_to, &msg);
+}
+
+static void _resolver_cleanup(ofd_cache_t* cache, resolver_state_t* resolver) {
+    _resolver_remove_pending(cache, resolver);
+    DESTROY(resolver->root_hash, buffer);
+    if (resolver->path) {
+        free(resolver->path);
+        resolver->path = NULL;
+    }
+    free(resolver);
+}
+
+static void _resolver_continue_path(ofd_cache_t* cache, resolver_state_t* resolver);
+
+/* ---- Cache actor message handlers ---- */
+
+static void _ofd_cache_handle_get(ofd_cache_t* cache, message_t* msg) {
+    ofd_cache_get_payload_t* payload = (ofd_cache_get_payload_t*)msg->payload;
+    msg->payload = NULL;
+
+    ofd_cache_entry_t* entry = hashmap_get(&cache->cache, payload->hash);
+    ofd_t* result_ofd = NULL;
+
+    if (entry) {
+        if (_now_ms() >= entry->expires_at) {
+            hashmap_remove(&cache->cache, payload->hash);
+            DESTROY(entry->hash, buffer);
+            ofd_destroy(entry->ofd);
+            free(entry);
+        } else {
+            entry->expires_at = _now_ms() + cache->ttl_ms;
+            result_ofd = entry->ofd;
+        }
+    }
+
+    ofd_cache_get_result_payload_t* result = get_clear_memory(sizeof(*result));
+    result->hash = payload->hash;
+    result->ofd = result_ofd ? (ofd_t*)refcounter_reference((refcounter_t*)result_ofd) : NULL;
+
+    message_t reply;
+    reply.type = OFD_CACHE_GET_RESULT;
+    reply.payload = result;
+    reply.payload_destroy = _ofd_cache_get_result_payload_destroy;
+    actor_send(payload->reply_to, &reply);
+
+    free(payload);
+}
+
+static void _ofd_cache_handle_put(ofd_cache_t* cache, message_t* msg) {
+    ofd_cache_put_payload_t* payload = (ofd_cache_put_payload_t*)msg->payload;
+    msg->payload = NULL;
+
+    ofd_cache_entry_t* existing = hashmap_get(&cache->cache, payload->hash);
+    if (existing) {
+        ofd_destroy(existing->ofd);
+        existing->ofd = payload->ofd;
+        existing->expires_at = _now_ms() + cache->ttl_ms;
+        DESTROY(payload->hash, buffer);
+        free(payload);
+        return;
+    }
+
+    ofd_cache_entry_t* entry = get_clear_memory(sizeof(*entry));
+    entry->hash = payload->hash;
+    entry->ofd = payload->ofd;
+    entry->expires_at = _now_ms() + cache->ttl_ms;
+    hashmap_put(&cache->cache, payload->hash, entry);
+    free(payload);
+}
+
+static void _ofd_cache_handle_resolve(ofd_cache_t* cache, message_t* msg) {
+    ofd_cache_resolve_payload_t* payload = (ofd_cache_resolve_payload_t*)msg->payload;
+    msg->payload = NULL;
+
+    buffer_t* root_hash = payload->hash;
+    char* path = payload->path;
+    actor_t* reply_to = payload->reply_to;
+
+    resolver_state_t* resolver = get_clear_memory(sizeof(*resolver));
+    resolver->root_hash = (buffer_t*)refcounter_reference((refcounter_t*)root_hash);
+    resolver->path = path;
+    resolver->saveptr = NULL;
+    resolver->current_ofd = NULL;
+    resolver->reply_to = reply_to;
+
+    DESTROY(root_hash, buffer);
+    free(payload);
+
+    if (resolver->path == NULL || strlen(resolver->path) == 0) {
+        _resolver_send_result(cache, resolver, NULL);
+        _resolver_cleanup(cache, resolver);
+        return;
+    }
+
+    ofd_cache_entry_t* entry = hashmap_get(&cache->cache, resolver->root_hash);
+    if (entry && _now_ms() < entry->expires_at) {
+        resolver->current_ofd = entry->ofd;
+        _resolver_continue_path(cache, resolver);
+        return;
+    }
+
+    /* Root hash not cached — save resolver and fetch from block_cache */
+    _resolver_save_pending(cache, resolver->root_hash, resolver);
+    buffer_t* hash_ref = (buffer_t*)refcounter_reference((refcounter_t*)resolver->root_hash);
+    block_cache_get(cache->bc, hash_ref, &cache->actor);
+    DESTROY(hash_ref, buffer);
+}
+
+static void _ofd_cache_handle_block_result(ofd_cache_t* cache, message_t* msg) {
+    cache_get_result_payload_t* result = (cache_get_result_payload_t*)msg->payload;
+    buffer_t* hash = result->hash;
+    result->hash = NULL;
+
+    /* Dequeue any pending resolver waiting for this hash */
+    pending_resolver_t* pending = NULL;
+    pending_resolver_t** prev = &cache->pending_resolvers;
+    while (*prev) {
+        if (compare_buffer((*prev)->waiting_hash, hash) == 0) {
+            pending = *prev;
+            *prev = pending->next;
+            break;
+        }
+        prev = &(*prev)->next;
+    }
+
+    if (result->block == NULL) {
+        if (pending) {
+            _resolver_send_result(cache, pending->resolver, NULL);
+            DESTROY(pending->waiting_hash, buffer);
+            _resolver_cleanup(cache, pending->resolver);
+            free(pending);
+        }
+        DESTROY(hash, buffer);
+        return;
+    }
+
+    ofd_t* ofd = ofd_decode(result->block->data);
+    block_destroy(result->block);
+    result->block = NULL;
+
+    if (ofd == NULL) {
+        if (pending) {
+            _resolver_send_result(cache, pending->resolver, NULL);
+            DESTROY(pending->waiting_hash, buffer);
+            _resolver_cleanup(cache, pending->resolver);
+            free(pending);
+        }
+        DESTROY(hash, buffer);
+        return;
+    }
+
+    /* Store in cache */
+    ofd_cache_entry_t* existing = hashmap_get(&cache->cache, hash);
+    if (existing) {
+        ofd_destroy(existing->ofd);
+        existing->ofd = ofd;
+        existing->expires_at = _now_ms() + cache->ttl_ms;
+    } else {
+        ofd_cache_entry_t* entry = get_clear_memory(sizeof(*entry));
+        entry->hash = (buffer_t*)refcounter_reference((refcounter_t*)hash);
+        entry->ofd = ofd;
+        entry->expires_at = _now_ms() + cache->ttl_ms;
+        hashmap_put(&cache->cache, hash, entry);
+    }
+
+    /* Resume pending resolver */
+    if (pending) {
+        pending->resolver->current_ofd = ofd;
+        DESTROY(pending->waiting_hash, buffer);
+        resolver_state_t* saved_resolver = pending->resolver;
+        free(pending);
+        _resolver_continue_path(cache, saved_resolver);
+    }
+
+    DESTROY(hash, buffer);
+}
+
+static void _resolver_continue_path(ofd_cache_t* cache, resolver_state_t* resolver) {
+    char* segment = (resolver->saveptr == NULL)
+        ? strtok_r(resolver->path, "/", &resolver->saveptr)
+        : strtok_r(NULL, "/", &resolver->saveptr);
+
+    while (segment) {
+        ofd_entry_t* entry = ofd_find(resolver->current_ofd, segment);
+        if (!entry) {
+            _resolver_send_result(cache, resolver, NULL);
+            _resolver_cleanup(cache, resolver);
+            return;
+        }
+
+        if (entry->type == OFD_ENTRY_FILE) {
+            if (resolver->saveptr && *resolver->saveptr) {
+                _resolver_send_result(cache, resolver, NULL);
+                _resolver_cleanup(cache, resolver);
+                return;
+            }
+            _resolver_send_result(cache, resolver, entry->file_ori);
+            _resolver_cleanup(cache, resolver);
+            return;
+        }
+
+        if (entry->type == OFD_ENTRY_DIRECTORY) {
+            ofd_cache_entry_t* cached = hashmap_get(&cache->cache, entry->dir_hash);
+            if (cached && _now_ms() < cached->expires_at) {
+                resolver->current_ofd = cached->ofd;
+                segment = strtok_r(NULL, "/", &resolver->saveptr);
+                continue;
+            }
+
+            if (cached) {
+                hashmap_remove(&cache->cache, entry->dir_hash);
+                DESTROY(cached->hash, buffer);
+                ofd_destroy(cached->ofd);
+                free(cached);
+            }
+
+            /* Directory not cached — save resolver and fetch from block_cache */
+            _resolver_save_pending(cache, entry->dir_hash, resolver);
+            buffer_t* hash_ref = (buffer_t*)refcounter_reference((refcounter_t*)entry->dir_hash);
+            block_cache_get(cache->bc, hash_ref, &cache->actor);
+            DESTROY(hash_ref, buffer);
+            return;
+        }
+
+        segment = strtok_r(NULL, "/", &resolver->saveptr);
+    }
+
+    _resolver_send_result(cache, resolver, NULL);
+    _resolver_cleanup(cache, resolver);
+}
+
+static void _ofd_cache_dispatch(void* state, message_t* msg) {
+    ofd_cache_t* cache = (ofd_cache_t*)state;
+
+    switch (msg->type) {
+        case OFD_CACHE_GET:
+            _ofd_cache_handle_get(cache, msg);
+            break;
+
+        case OFD_CACHE_PUT:
+            _ofd_cache_handle_put(cache, msg);
+            break;
+
+        case OFD_CACHE_RESOLVE:
+            _ofd_cache_handle_resolve(cache, msg);
+            break;
+
+        case CACHE_GET_RESULT:
+            _ofd_cache_handle_block_result(cache, msg);
+            break;
+
+        default:
+            break;
+    }
+}
+
+/* ---- Public API ---- */
+
 ofd_cache_t* ofd_cache_create(scheduler_pool_t* pool, block_cache_t* bc, uint64_t ttl_ms) {
     ofd_cache_t* cache = get_clear_memory(sizeof(ofd_cache_t));
     if (!cache) return NULL;
+    actor_init(&cache->actor, cache, _ofd_cache_dispatch, pool);
     cache->pool = pool;
     cache->bc = bc;
     cache->max_entries = 256;
     cache->ttl_ms = ttl_ms > 0 ? ttl_ms : 300000;
+    cache->pending_resolvers = NULL;
     hashmap_init(&cache->cache, (void*)hash_buffer, (void*)compare_buffer);
     hashmap_set_key_alloc_funcs(&cache->cache, (void*)refcounter_reference, (void*)buffer_destroy);
     return cache;
@@ -32,10 +384,25 @@ ofd_cache_t* ofd_cache_create(scheduler_pool_t* pool, block_cache_t* bc, uint64_
 void ofd_cache_destroy(ofd_cache_t* cache) {
     if (!cache) return;
 
+    actor_destroy(&cache->actor);
+
+    /* Clean up pending resolvers */
+    pending_resolver_t* pending = cache->pending_resolvers;
+    while (pending) {
+        pending_resolver_t* next = pending->next;
+        DESTROY(pending->resolver->root_hash, buffer);
+        if (pending->resolver->path) free(pending->resolver->path);
+        free(pending->resolver);
+        DESTROY(pending->waiting_hash, buffer);
+        free(pending);
+        pending = next;
+    }
+
     ofd_cache_entry_t* entry;
     PLATFORM_DIAGNOSTIC_PUSH
     PLATFORM_DIAGNOSTIC_IGNORE(-Wmissing-field-initializers)
     hashmap_foreach_data(entry, &cache->cache) {
+        DESTROY(entry->hash, buffer);
         ofd_destroy(entry->ofd);
         free(entry);
     }
@@ -44,256 +411,69 @@ void ofd_cache_destroy(ofd_cache_t* cache) {
     free(cache);
 }
 
-ofd_t* ofd_cache_get(ofd_cache_t* cache, buffer_t* hash) {
-    if (!cache || !hash) return NULL;
+void ofd_cache_get(ofd_cache_t* cache, buffer_t* hash, actor_t* reply_to) {
+    if (!cache || !hash || !reply_to) return;
 
-    ofd_cache_entry_t* entry = hashmap_get(&cache->cache, hash);
-    if (!entry) return NULL;
+    ofd_cache_get_payload_t* payload = get_clear_memory(sizeof(*payload));
+    payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)hash);
+    payload->reply_to = reply_to;
 
-    if (_now_ms() >= entry->expires_at) {
-        hashmap_remove(&cache->cache, hash);
-        ofd_destroy(entry->ofd);
-        free(entry);
-        return NULL;
-    }
-
-    entry->expires_at = _now_ms() + cache->ttl_ms;
-    return entry->ofd;
+    message_t msg;
+    msg.type = OFD_CACHE_GET;
+    msg.payload = payload;
+    msg.payload_destroy = _ofd_cache_get_payload_destroy;
+    actor_send(&cache->actor, &msg);
 }
 
 void ofd_cache_put(ofd_cache_t* cache, buffer_t* hash, ofd_t* ofd) {
     if (!cache || !hash || !ofd) return;
 
-    ofd_cache_entry_t* existing = hashmap_get(&cache->cache, hash);
-    if (existing) {
-        ofd_destroy(existing->ofd);
-        existing->ofd = ofd;
-        existing->expires_at = _now_ms() + cache->ttl_ms;
-        return;
-    }
-
-    ofd_cache_entry_t* entry = get_clear_memory(sizeof(ofd_cache_entry_t));
-    entry->hash = hash;
-    entry->ofd = ofd;
-    entry->expires_at = _now_ms() + cache->ttl_ms;
-    hashmap_put(&cache->cache, hash, entry);
-}
-
-/* ---- Async resolver actor ---- */
-
-/* ---- Async resolver actor ---- */
-
-typedef struct {
-    actor_t actor;
-    ofd_cache_t* cache;
-    buffer_t* root_hash;
-    char* path;
-    char* saveptr;
-    ofd_t* current_ofd;
-    actor_t* reply_to;
-    uint8_t resolving_root;  /* 1 if fetching root hash, 0 if fetching directory */
-} ofd_resolver_t;
-
-static void _resolver_send_result(ofd_resolver_t* resolver, ori_t* ori) {
-    if (!resolver->reply_to) {
-        /* No reply target — destroy the referenced ori if any */
-        if (ori) DESTROY(ori, ori);
-        return;
-    }
-
-    ofd_resolve_result_t* result = get_clear_memory(sizeof(ofd_resolve_result_t));
-    result->ori = ori ? (ori_t*)refcounter_reference((refcounter_t*)ori) : NULL;
-    result->hash = (buffer_t*)refcounter_reference((refcounter_t*)resolver->root_hash);
-    result->path = resolver->path ? strdup(resolver->path) : NULL;
+    ofd_cache_put_payload_t* payload = get_clear_memory(sizeof(*payload));
+    payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)hash);
+    payload->ofd = ofd;
 
     message_t msg;
-    msg.type = OFD_CACHE_RESOLVE_RESULT;
-    msg.payload = result;
-    msg.payload_destroy = free;
-
-    actor_send(resolver->reply_to, &msg);
-}
-
-static void _resolver_cleanup(ofd_resolver_t* resolver) {
-    /* current_ofd is owned by the cache — do not destroy it here */
-    DESTROY(resolver->root_hash, buffer);
-    if (resolver->path) {
-        free(resolver->path);
-        resolver->path = NULL;
-    }
-    atomic_fetch_or(&resolver->actor.flags, ACTOR_FLAG_DESTROY);
-    actor_destroy(&resolver->actor);
-    scheduler_pool_defer_cleanup(resolver->cache->pool, resolver, free);
-}
-
-static void _resolver_dispatch(void* state, message_t* msg);
-
-static void _resolver_continue_path(ofd_resolver_t* resolver) {
-    if (resolver->path == NULL) {
-        /* Path was empty — no match */
-        _resolver_send_result(resolver, NULL);
-        _resolver_cleanup(resolver);
-        return;
-    }
-
-    /* First call uses strtok_r(path, ...), subsequent calls use strtok_r(NULL, ...) */
-    char* segment = (resolver->saveptr == NULL)
-        ? strtok_r(resolver->path, "/", &resolver->saveptr)
-        : strtok_r(NULL, "/", &resolver->saveptr);
-
-    while (segment) {
-        ofd_entry_t* entry = ofd_find(resolver->current_ofd, segment);
-        if (!entry) {
-            _resolver_send_result(resolver, NULL);
-            _resolver_cleanup(resolver);
-            return;
-        }
-
-        if (entry->type == OFD_ENTRY_FILE) {
-            /* If there are more segments, path doesn't exist */
-            if (resolver->saveptr && *resolver->saveptr) {
-                _resolver_send_result(resolver, NULL);
-                _resolver_cleanup(resolver);
-                return;
-            }
-            _resolver_send_result(resolver, entry->file_ori);
-            _resolver_cleanup(resolver);
-            return;
-        }
-
-        if (entry->type == OFD_ENTRY_DIRECTORY) {
-            /* Check in-memory cache first */
-            ofd_t* cached = ofd_cache_get(resolver->cache, entry->dir_hash);
-            if (cached) {
-                /* cached is borrowed from the cache — do not destroy current_ofd
-                   since it is also in the cache */
-                resolver->current_ofd = cached;
-                segment = strtok_r(NULL, "/", &resolver->saveptr);
-                continue;
-            }
-
-            /* Need to fetch from block cache asynchronously */
-            buffer_t* hash_ref = (buffer_t*)refcounter_reference((refcounter_t*)entry->dir_hash);
-            block_cache_get(resolver->cache->bc, hash_ref, &resolver->actor);
-            DESTROY(hash_ref, buffer);
-            resolver->resolving_root = 0;
-            return;
-        }
-
-        segment = strtok_r(NULL, "/", &resolver->saveptr);
-    }
-
-    /* Path fully traversed without finding a file */
-    _resolver_send_result(resolver, NULL);
-    _resolver_cleanup(resolver);
-}
-
-static void _resolver_dispatch(void* state, message_t* msg) {
-    ofd_resolver_t* resolver = (ofd_resolver_t*)state;
-
-    switch (msg->type) {
-        case OFD_CACHE_RESOLVE: {
-            /* Initial message to start resolution */
-
-            /* Check in-memory cache for root hash */
-            ofd_t* cached = ofd_cache_get(resolver->cache, resolver->root_hash);
-            if (cached) {
-                resolver->current_ofd = cached;
-                _resolver_continue_path(resolver);
-                return;
-            }
-
-            /* Fetch root OFD from block cache */
-            buffer_t* hash_ref = (buffer_t*)refcounter_reference((refcounter_t*)resolver->root_hash);
-            block_cache_get(resolver->cache->bc, hash_ref, &resolver->actor);
-            DESTROY(hash_ref, buffer);
-            resolver->resolving_root = 1;
-            return;
-        }
-
-        case CACHE_GET_RESULT: {
-            cache_get_result_payload_t* result = (cache_get_result_payload_t*)msg->payload;
-            block_t* block = result->block;
-            buffer_t* hash = result->hash;
-
-            if (!block) {
-                /* Block not found — resolution failed */
-                DESTROY(result->hash, buffer);
-                _resolver_send_result(resolver, NULL);
-                _resolver_cleanup(resolver);
-                return;
-            }
-
-            ofd_t* ofd = ofd_decode(block->data);
-            block_destroy(block);
-
-            if (!ofd) {
-                DESTROY(result->hash, buffer);
-                _resolver_send_result(resolver, NULL);
-                _resolver_cleanup(resolver);
-                return;
-            }
-
-            /* Cache the decoded OFD. For non-root OFDs, ofd_decode doesn't set
-               ofd->hash, so we use the block hash as the cache key. */
-            ofd_cache_put(resolver->cache, resolver->resolving_root ? resolver->root_hash : hash, ofd);
-            DESTROY(result->hash, buffer);
-
-            if (resolver->resolving_root) {
-                /* We just fetched the root OFD */
-                resolver->current_ofd = ofd;
-                _resolver_continue_path(resolver);
-            } else {
-                /* We fetched a directory OFD — replace current_ofd and continue.
-                   current_ofd is owned by the cache, so we just update the pointer. */
-                resolver->current_ofd = ofd;
-                _resolver_continue_path(resolver);
-            }
-            return;
-        }
-
-        default:
-            break;
-    }
+    msg.type = OFD_CACHE_PUT;
+    msg.payload = payload;
+    msg.payload_destroy = _ofd_cache_put_payload_destroy;
+    actor_send(&cache->actor, &msg);
 }
 
 void ofd_cache_resolve(ofd_cache_t* cache, buffer_t* root_hash, const char* path, actor_t* reply_to) {
     if (!cache || !root_hash || !path) {
         if (reply_to) {
-            ofd_resolve_result_t* result = get_clear_memory(sizeof(ofd_resolve_result_t));
-            result->ori = NULL;
-            result->hash = NULL;
-            result->path = path ? strdup(path) : NULL;
+            ofd_resolve_result_t* result = get_clear_memory(sizeof(*result));
             message_t msg;
             msg.type = OFD_CACHE_RESOLVE_RESULT;
             msg.payload = result;
-            msg.payload_destroy = free;
+            msg.payload_destroy = _ofd_resolve_result_destroy;
             actor_send(reply_to, &msg);
         }
         return;
     }
 
-    ofd_resolver_t* resolver = get_clear_memory(sizeof(ofd_resolver_t));
-    actor_init(&resolver->actor, resolver, _resolver_dispatch, cache->pool);
-    resolver->cache = cache;
-    resolver->root_hash = (buffer_t*)refcounter_reference((refcounter_t*)root_hash);
-    resolver->path = strdup(path);
-    resolver->saveptr = NULL;
-    resolver->current_ofd = NULL;
-    resolver->reply_to = reply_to;
-    resolver->resolving_root = 1;
-
     if (strlen(path) == 0) {
-        /* Empty path — send NULL result immediately */
-        _resolver_send_result(resolver, NULL);
-        _resolver_cleanup(resolver);
+        if (reply_to) {
+            ofd_resolve_result_t* result = get_clear_memory(sizeof(*result));
+            result->hash = (buffer_t*)refcounter_reference((refcounter_t*)root_hash);
+            result->path = strdup(path);
+            message_t msg;
+            msg.type = OFD_CACHE_RESOLVE_RESULT;
+            msg.payload = result;
+            msg.payload_destroy = _ofd_resolve_result_destroy;
+            actor_send(reply_to, &msg);
+        }
         return;
     }
 
-    /* Kick off resolution — _resolver_continue_path will tokenize from the start */
+    ofd_cache_resolve_payload_t* payload = get_clear_memory(sizeof(*payload));
+    payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)root_hash);
+    payload->path = strdup(path);
+    payload->reply_to = reply_to;
+
     message_t msg;
     msg.type = OFD_CACHE_RESOLVE;
-    msg.payload = NULL;
-    msg.payload_destroy = NULL;
-    actor_send(&resolver->actor, &msg);
+    msg.payload = payload;
+    msg.payload_destroy = _ofd_cache_resolve_payload_destroy;
+    actor_send(&cache->actor, &msg);
 }

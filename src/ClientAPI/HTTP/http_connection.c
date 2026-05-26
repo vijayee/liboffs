@@ -245,10 +245,6 @@ static int _on_message_complete(http_parser* parser) {
     http_response_destroy(response);
   } else {
     DESTROY(response, http_response);
-
-    if (!connection->request->keep_alive) {
-      platform_socket_shutdown(connection->sock, PLATFORM_SHUT_WR);
-    }
   }
 
   DESTROY(connection->request, http_request);
@@ -536,6 +532,11 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
         msg.payload = NULL;
         msg.payload_destroy = NULL;
         actor_send(&connection->actor, &msg);
+        pd_watcher_t* claimed = ATOMIC_EXCHANGE(&connection->watcher, NULL);
+        if (claimed != NULL) {
+          pd_watcher_stop(claimed);
+          pd_watcher_destroy(claimed);
+        }
         return;
       }
     } else {
@@ -547,6 +548,11 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
           msg.payload = NULL;
           msg.payload_destroy = NULL;
           actor_send(&connection->actor, &msg);
+          pd_watcher_t* claimed = ATOMIC_EXCHANGE(&connection->watcher, NULL);
+          if (claimed != NULL) {
+            pd_watcher_stop(claimed);
+            pd_watcher_destroy(claimed);
+          }
           return;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {

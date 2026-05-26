@@ -194,9 +194,11 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
       if (desc->stream.is_deactivated) {
         if (result->block != NULL) {
           DESTROY(result->block, block);
+          result->block = NULL;
         }
         if (result->hash != NULL) {
           DESTROY(result->hash, buffer);
+          result->hash = NULL;
         }
         break;
       }
@@ -207,9 +209,11 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
           buffer_compare(desc->expected_hash, result->hash) != 0) {
         if (result->block != NULL) {
           DESTROY(result->block, block);
+          result->block = NULL;
         }
         if (result->hash != NULL) {
           DESTROY(result->hash, buffer);
+          result->hash = NULL;
         }
         break;
       }
@@ -235,11 +239,13 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
           actor_send(&desc->network->actor, &msg);
           if (result->hash != NULL) {
             DESTROY(result->hash, buffer);
+            result->hash = NULL;
           }
         } else {
           /* Local-only: deactivate */
           if (result->hash != NULL) {
             DESTROY(result->hash, buffer);
+            result->hash = NULL;
           }
           stream_deactivate((stream_t*)desc, ERROR("Descriptor block not found"));
           desc->stream.is_deactivated = 1;
@@ -250,8 +256,10 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
       buffer_t* block_data = result->block->data;
       int need_more = _process_descriptor(desc, block_data);
       DESTROY(result->block, block);
+      result->block = NULL;
       if (result->hash != NULL) {
         DESTROY(result->hash, buffer);
+        result->hash = NULL;
       }
 
       if (need_more && desc->next_descriptor_hash != NULL && !desc->stream.is_deactivated) {

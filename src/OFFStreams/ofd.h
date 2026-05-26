@@ -32,7 +32,7 @@ typedef struct {
 
 typedef vec_t(ofd_entry_t) vec_ofd_entry_t;
 
-typedef struct {
+typedef struct ofd_t {
   refcounter_t refcounter;
   vec_ofd_entry_t entries;
   buffer_t* hash;

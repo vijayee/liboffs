@@ -1,9 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 import '../services/off_api.dart';
+import '../services/ofd.dart';
+import '../services/base58.dart';
 
 class ImportScreen extends StatefulWidget {
   const ImportScreen({super.key});
@@ -69,6 +72,70 @@ class _ImportScreenState extends State<ImportScreen> {
     }
   }
 
+  /// Upload a directory recursively and return the URL of its top-level OFD.
+  Future<String> _uploadDirectory(Directory dir) async {
+    final entries = <OfdEntry>[];
+    final dirEntries = dir.listSync();
+
+    final files = dirEntries.whereType<File>().toList();
+    final subdirs = dirEntries.whereType<Directory>().toList();
+
+    // Process subdirectories first: each gets its own OFD uploaded
+    for (final subdir in subdirs) {
+      final dirName = subdir.path.split(Platform.pathSeparator).last;
+      final subUrl = await _uploadDirectory(subdir);
+      final parsed = parseOffUrl(subUrl);
+      if (parsed == null) {
+        throw Exception('Failed to parse sub-OFD URL: $subUrl');
+      }
+      final dirHash = Uint8List.fromList(base58Decode(parsed.fileHashB58)!);
+      entries.add(OfdEntry.directory(name: dirName, dirHash: dirHash));
+    }
+
+    // Upload files in this directory
+    for (final file in files) {
+      final fileName = file.path.split(Platform.pathSeparator).last;
+
+      final length = await file.length();
+      final url = await _api.uploadFile(
+        fileName: fileName,
+        streamLength: length,
+        filePath: file.path,
+        recyclerUrls: _recyclerUrls,
+      );
+
+      final parsed = parseOffUrl(url);
+      if (parsed == null) {
+        throw Exception('Failed to parse upload URL: $url');
+      }
+
+      final fileHash = Uint8List.fromList(base58Decode(parsed.fileHashB58)!);
+      final descHash = Uint8List.fromList(base58Decode(parsed.descriptorHashB58)!);
+
+      entries.add(OfdEntry.file(
+        name: fileName,
+        fileHash: fileHash,
+        descriptorHash: descHash,
+        finalByte: parsed.streamLength,
+      ));
+    }
+
+    if (entries.isEmpty) {
+      throw Exception('Empty directory: ${dir.path}');
+    }
+
+    // Build and upload this directory's OFD
+    final ofdBytes = buildOfdCbor(entries);
+    final dirName = dir.path.split(Platform.pathSeparator).last;
+    return _api.uploadFileBuffered(
+      fileName: '$dirName.ofd',
+      streamLength: ofdBytes.length,
+      contentType: 'offsystem/directory',
+      bodyBytes: ofdBytes,
+      recyclerUrls: _recyclerUrls,
+    );
+  }
+
   Future<void> _importFolder() async {
     final dirResult = await FilePicker.platform.getDirectoryPath();
     if (dirResult == null) return;
@@ -81,39 +148,9 @@ class _ImportScreenState extends State<ImportScreen> {
     });
 
     try {
-      final folder = Directory(dirResult);
-      final folderName = folder.path.split(Platform.pathSeparator).last;
-      final ofd = <String, String>{};
-
-      final entries = folder.listSync(recursive: true);
-      final files = entries.whereType<File>().toList();
-
-      for (int i = 0; i < files.length; i++) {
-        final file = files[i];
-        final relativePath = file.path.substring(folder.path.length + 1);
-        final filePath = relativePath.replaceAll(Platform.pathSeparator, '/');
-
-        final length = await file.length();
-        final url = await _api.uploadFile(
-          fileName: filePath.split('/').last,
-          streamLength: length,
-          filePath: file.path,
-          recyclerUrls: _recyclerUrls,
-        );
-
-        ofd[filePath] = url;
-        setState(() => _progress = (i + 1) / (files.length + 1));
-      }
-
-      final ofdJson = jsonEncode(ofd);
-      final ofdBytes = utf8.encode(ofdJson);
-      final finalUrl = await _api.uploadFileBuffered(
-        fileName: '$folderName.ofd',
-        streamLength: ofdBytes.length,
-        contentType: 'offsystem/directory',
-        bodyBytes: ofdBytes,
-        recyclerUrls: _recyclerUrls,
-      );
+      final rootDir = Directory(dirResult);
+      _progress = 0.5; // indeterminate during uploads
+      final finalUrl = await _uploadDirectory(rootDir);
 
       setState(() {
         _progress = 1.0;
@@ -150,6 +187,26 @@ class _ImportScreenState extends State<ImportScreen> {
             onPressed: _isUploading ? null : _pickFile,
             icon: const Icon(Icons.folder_open),
             label: const Text('Select File'),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _recyclerController,
+            decoration: const InputDecoration(
+              labelText: 'Recycler URLs (comma-separated)',
+              hintText: 'http://host/offsystem/v3/...',
+              border: OutlineInputBorder(),
+            ),
+            onChanged: (value) {
+              if (value.trim().isEmpty) {
+                _recyclerUrls = null;
+              } else {
+                _recyclerUrls = value
+                    .split(',')
+                    .map((url) => url.trim())
+                    .where((url) => url.isNotEmpty)
+                    .toList();
+              }
+            },
           ),
           if (_selectedFileName != null) ...[
             const SizedBox(height: 16),

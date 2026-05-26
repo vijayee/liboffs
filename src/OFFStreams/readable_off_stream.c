@@ -194,9 +194,11 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
       if (stream->stream.is_deactivated) {
         if (result->block != NULL) {
           DESTROY(result->block, block);
+          result->block = NULL;
         }
         if (result->hash != NULL) {
           DESTROY(result->hash, buffer);
+          result->hash = NULL;
         }
         break;
       }
@@ -217,6 +219,7 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
           actor_send(&stream->network->actor, &net_msg);
           if (result->hash != NULL) {
             DESTROY(result->hash, buffer);
+            result->hash = NULL;
           }
         } else {
           /* Local-only: deactivate as before */
@@ -226,6 +229,7 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
           }
           if (result->hash != NULL) {
             DESTROY(result->hash, buffer);
+            result->hash = NULL;
           }
           DESTROY(stream->pending_tuple, tuple);
           stream->pending_tuple = NULL;
@@ -244,8 +248,10 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
       }
 
       DESTROY(result->block, block);
+      result->block = NULL;
       if (result->hash != NULL) {
         DESTROY(result->hash, buffer);
+        result->hash = NULL;
       }
 
       stream->blocks_received++;

@@ -85,7 +85,9 @@ buffer_t* ofd_encode(ofd_t* ofd) {
 
     for (int i = 0; i < ofd->entries.length; i++) {
         ofd_entry_t* entry = &ofd->entries.data[i];
-        cbor_item_t* entry_map = cbor_new_definite_map(3);
+        int is_dir = entry->type == OFD_ENTRY_DIRECTORY;
+        int num_fields = is_dir ? 3 : (entry->file_ori->descriptor_hash ? 8 : 7);
+        cbor_item_t* entry_map = cbor_new_definite_map(num_fields);
 
         // name
         cbor_item_t* name_key = cbor_build_string("n");
@@ -96,18 +98,57 @@ buffer_t* ofd_encode(ofd_t* ofd) {
 
         // type
         cbor_item_t* type_key = cbor_build_string("t");
-        cbor_item_t* type_val = cbor_build_uint8(entry->type == OFD_ENTRY_DIRECTORY ? 1 : 0);
+        cbor_item_t* type_val = cbor_build_uint8(is_dir ? 1 : 0);
         (void)cbor_map_add(entry_map, (struct cbor_pair){.key = type_key, .value = type_val});
         cbor_decref(&type_key);
         cbor_decref(&type_val);
 
-        // file hash or dir hash
-        if (entry->type == OFD_ENTRY_FILE) {
+        if (!is_dir) {
+            ori_t* ori = entry->file_ori;
+
+            // file_hash
             cbor_item_t* file_key = cbor_build_string("f");
-            cbor_item_t* file_val = buffer_to_cbor(entry->file_ori->file_hash);
+            cbor_item_t* file_val = buffer_to_cbor(ori->file_hash);
             (void)cbor_map_add(entry_map, (struct cbor_pair){.key = file_key, .value = file_val});
             cbor_decref(&file_key);
             cbor_decref(&file_val);
+
+            // descriptor_hash
+            if (ori->descriptor_hash) {
+                cbor_item_t* desc_key = cbor_build_string("D");
+                cbor_item_t* desc_val = buffer_to_cbor(ori->descriptor_hash);
+                (void)cbor_map_add(entry_map, (struct cbor_pair){.key = desc_key, .value = desc_val});
+                cbor_decref(&desc_key);
+                cbor_decref(&desc_val);
+            }
+
+            // final_byte
+            cbor_item_t* size_key = cbor_build_string("s");
+            cbor_item_t* size_val = cbor_build_uint64(ori->final_byte);
+            (void)cbor_map_add(entry_map, (struct cbor_pair){.key = size_key, .value = size_val});
+            cbor_decref(&size_key);
+            cbor_decref(&size_val);
+
+            // block_type
+            cbor_item_t* btype_key = cbor_build_string("B");
+            cbor_item_t* btype_val = cbor_build_uint64((uint64_t)ori->block_type);
+            (void)cbor_map_add(entry_map, (struct cbor_pair){.key = btype_key, .value = btype_val});
+            cbor_decref(&btype_key);
+            cbor_decref(&btype_val);
+
+            // tuple_size
+            cbor_item_t* tsize_key = cbor_build_string("T");
+            cbor_item_t* tsize_val = cbor_build_uint64(ori->tuple_size);
+            (void)cbor_map_add(entry_map, (struct cbor_pair){.key = tsize_key, .value = tsize_val});
+            cbor_decref(&tsize_key);
+            cbor_decref(&tsize_val);
+
+            // file_offset
+            cbor_item_t* offset_key = cbor_build_string("o");
+            cbor_item_t* offset_val = cbor_build_uint64(ori->file_offset);
+            (void)cbor_map_add(entry_map, (struct cbor_pair){.key = offset_key, .value = offset_val});
+            cbor_decref(&offset_key);
+            cbor_decref(&offset_val);
         } else {
             cbor_item_t* dir_key = cbor_build_string("d");
             cbor_item_t* dir_val = buffer_to_cbor(entry->dir_hash);
@@ -138,6 +179,11 @@ buffer_t* ofd_encode(ofd_t* ofd) {
 
 ofd_t* ofd_decode(buffer_t* data) {
     if (!data || !data->data || data->size == 0) return NULL;
+
+    /* Reject data that isn't a CBOR map (major type 5: 0xA0-0xBF).
+       This guards against legacy JSON-encoded OFDs being fed to the CBOR parser. */
+    uint8_t first_byte = data->data[0];
+    if ((first_byte >> 5) != 5) return NULL;
 
     struct cbor_load_result load_result;
     cbor_item_t* root = cbor_load(data->data, data->size, &load_result);
@@ -198,6 +244,11 @@ ofd_t* ofd_decode(buffer_t* data) {
         char* name = NULL;
         ofd_entry_type_t type = OFD_ENTRY_FILE;
         buffer_t* hash = NULL;
+        buffer_t* descriptor_hash = NULL;
+        uint64_t final_byte = 0;
+        uint64_t block_type_val = (uint64_t)standard;
+        uint64_t tuple_size = 3;
+        uint64_t file_offset = 0;
         ori_t* file_ori = NULL;
 
         for (size_t j = 0; j < entry_map_size; j++) {
@@ -218,23 +269,46 @@ ofd_t* ofd_decode(buffer_t* data) {
                 hash = cbor_to_buffer(eval);
             } else if (ekey_len == 1 && ekey_str[0] == 'd' && cbor_isa_bytestring(eval)) {
                 hash = cbor_to_buffer(eval);
+            } else if (ekey_len == 1 && ekey_str[0] == 'D' && cbor_isa_bytestring(eval)) {
+                descriptor_hash = cbor_to_buffer(eval);
+            } else if (ekey_len == 1 && ekey_str[0] == 's' && cbor_isa_uint(eval)) {
+                final_byte = cbor_get_int(eval);
+            } else if (ekey_len == 1 && ekey_str[0] == 'B' && cbor_isa_uint(eval)) {
+                block_type_val = cbor_get_int(eval);
+            } else if (ekey_len == 1 && ekey_str[0] == 'T' && cbor_isa_uint(eval)) {
+                tuple_size = cbor_get_int(eval);
+            } else if (ekey_len == 1 && ekey_str[0] == 'o' && cbor_isa_uint(eval)) {
+                file_offset = cbor_get_int(eval);
             }
         }
 
         if (name && hash) {
             if (type == OFD_ENTRY_FILE) {
-                file_ori = ori_create(0);
+                file_ori = ori_create((size_t)final_byte);
                 file_ori->file_hash = hash;
-                file_ori->descriptor_hash = buffer_copy(hash);
+                file_ori->descriptor_hash = descriptor_hash
+                    ? descriptor_hash
+                    : buffer_copy(hash);
                 file_ori->file_name = strdup(name);
+                file_ori->block_type = (block_size_e)block_type_val;
+                file_ori->tuple_size = (size_t)tuple_size;
+                file_ori->file_offset = (size_t)file_offset;
                 ofd_add_file(ofd, name, file_ori);
                 DESTROY(file_ori, ori);
             } else {
+                if (descriptor_hash) {
+                    DESTROY(descriptor_hash, buffer);
+                }
                 ofd_add_directory(ofd, name, hash);
                 DESTROY(hash, buffer);
             }
-        } else if (hash) {
-            DESTROY(hash, buffer);
+        } else {
+            if (hash) {
+                DESTROY(hash, buffer);
+            }
+            if (descriptor_hash) {
+                DESTROY(descriptor_hash, buffer);
+            }
         }
         free(name);
         cbor_decref(&entry_map);

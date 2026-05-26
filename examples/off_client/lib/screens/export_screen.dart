@@ -1,10 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 import '../services/file_download.dart';
+import '../services/ofd.dart';
+import '../services/base58.dart';
 
 class ExportScreen extends StatefulWidget {
   const ExportScreen({super.key});
@@ -40,11 +43,12 @@ class _ExportScreenState extends State<ExportScreen> {
     try {
       final fileName = url.split('/').last.split('?').first;
 
-      if (!kIsWeb) {
-        if (_saveDirectory == null) {
-          setState(() => _error = 'Please select a save directory');
-          return;
-        }
+      if (!kIsWeb && _saveDirectory == null) {
+        setState(() {
+          _isDownloading = false;
+          _error = 'Please select a save directory';
+        });
+        return;
       }
 
       final path = await downloadToDisk(url, _saveDirectory, fileName);
@@ -56,9 +60,57 @@ class _ExportScreenState extends State<ExportScreen> {
     }
   }
 
+  /// Construct an offs URL for a file from its OFD entry data.
+  String _buildFileUrl(Uri baseUri, OfdEntry entry) {
+    final fileHashB58 = base58Encode(entry.fileHash!.toList());
+    final descHashB58 = base58Encode(entry.descriptorHash!.toList());
+    final contentType = mimeFromExtension(entry.name);
+    return '${baseUri.origin}/offsystem/v3/$contentType/${entry.finalByte}/$fileHashB58/$descHashB58/${Uri.encodeComponent(entry.name)}';
+  }
+
+  /// Recursively export OFD entries to the local filesystem.
+  Future<void> _exportOfdEntries(
+    Uri baseUri,
+    List<OfdEntry> entries,
+    Directory localDir,
+  ) async {
+    for (final entry in entries) {
+      if (entry.isDirectory) {
+        // Fetch the sub-OFD and recurse
+        final dirHashB58 = base58Encode(entry.dirHash!.toList());
+        final subOfdUrl = '${baseUri.origin}/offsystem/v3/offsystem/directory/0/$dirHashB58/$dirHashB58/${Uri.encodeComponent(entry.name)}.ofd?ofd=raw';
+        final response = await http.get(Uri.parse(subOfdUrl));
+        if (response.statusCode != 200) {
+          throw Exception('Failed to fetch sub-OFD ${entry.name}: ${response.statusCode}');
+        }
+
+        final subOfd = parseOfdCbor(response.bodyBytes);
+        final subDir = Directory('${localDir.path}${Platform.pathSeparator}${entry.name}');
+        if (!await subDir.exists()) {
+          await subDir.create(recursive: true);
+        }
+        await _exportOfdEntries(baseUri, subOfd, subDir);
+      } else {
+        final fileUrl = _buildFileUrl(baseUri, entry);
+        final fileResponse = await http.get(Uri.parse(fileUrl));
+        if (fileResponse.statusCode != 200) {
+          throw Exception('Failed to download ${entry.name}: ${fileResponse.statusCode}');
+        }
+
+        final filePath = '${localDir.path}${Platform.pathSeparator}${entry.name}';
+        final file = File(filePath);
+        await file.writeAsBytes(fileResponse.bodyBytes);
+      }
+    }
+  }
+
   Future<void> _exportFolder() async {
     final url = _urlController.text.trim();
-    if (url.isEmpty || _saveDirectory == null) return;
+    if (url.isEmpty) return;
+    if (_saveDirectory == null) {
+      setState(() => _error = 'Please select a save directory');
+      return;
+    }
 
     setState(() {
       _isDownloading = true;
@@ -67,15 +119,20 @@ class _ExportScreenState extends State<ExportScreen> {
     });
 
     try {
+      final baseUri = Uri.parse(url);
       final rawUrl = url.contains('?') ? '$url&ofd=raw' : '$url?ofd=raw';
       final response = await http.get(Uri.parse(rawUrl));
       if (response.statusCode != 200) {
         throw Exception('Failed to fetch OFD: ${response.statusCode}');
       }
 
-      final ofd = jsonDecode(response.body) as Map<String, dynamic>;
-      final urlParsed = Uri.parse(url);
-      final pathSegments = urlParsed.pathSegments;
+      final ofdEntries = parseOfdCbor(response.bodyBytes);
+      if (ofdEntries.isEmpty) {
+        throw Exception('OFD is empty or could not be parsed');
+      }
+
+      // Determine local directory name from the OFD URL filename
+      final pathSegments = baseUri.pathSegments;
       final rawFileName = pathSegments.isNotEmpty ? pathSegments.last : 'export';
       final dirName = rawFileName.endsWith('.ofd')
           ? rawFileName.substring(0, rawFileName.length - 4)
@@ -85,24 +142,7 @@ class _ExportScreenState extends State<ExportScreen> {
         await localDir.create(recursive: true);
       }
 
-      final entries = ofd.entries.toList();
-      for (int i = 0; i < entries.length; i++) {
-        final path = entries[i].key;
-        final fileUrl = entries[i].value as String;
-
-        final fileResponse = await http.get(Uri.parse(fileUrl));
-        if (fileResponse.statusCode != 200) {
-          throw Exception('Failed to download $path: ${fileResponse.statusCode}');
-        }
-
-        final filePath = '${localDir.path}${Platform.pathSeparator}$path';
-        final file = File(filePath);
-        final parentDir = file.parent;
-        if (!await parentDir.exists()) {
-          await parentDir.create(recursive: true);
-        }
-        await file.writeAsBytes(fileResponse.bodyBytes);
-      }
+      await _exportOfdEntries(baseUri, ofdEntries, localDir);
 
       setState(() => _resultFile = localDir.path);
     } catch (e) {
@@ -110,6 +150,12 @@ class _ExportScreenState extends State<ExportScreen> {
     } finally {
       setState(() => _isDownloading = false);
     }
+  }
+
+  String mimeFromExtension(String filename) {
+    final dot = filename.lastIndexOf('.');
+    if (dot < 0 || dot == filename.length - 1) return 'application/octet-stream';
+    return filename.substring(dot + 1).toLowerCase();
   }
 
   @override
