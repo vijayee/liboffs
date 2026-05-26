@@ -16,29 +16,28 @@ static const char* rate_limit_names[] = {
   "ping"
 };
 
-/* RPC type names (PEER_RPC_TYPE_COUNT = 20, index 0 unused) */
+/* RPC type names (PEER_RPC_TYPE_COUNT = 20, entry[i] maps to wire type i+1) */
 static const char* rpc_names[] = {
-  NULL,
-  "ping",
-  "ping_response",
-  "ping_capacity",
-  "ping_capacity_response",
-  "ping_block",
-  "ping_block_response",
-  "find_block",
-  "find_block_response",
-  "find_node",
-  "find_node_response",
-  "store_block",
-  "store_block_response",
-  "seeking_blocks",
-  "seeking_blocks_response",
-  "rank_block",
-  "recall_block",
-  "recall_accept",
-  "recall_decline",
-  "rate_limited",
-  "salutation"
+  "ping",                    /* WIRE_PING=1 */
+  "ping_response",           /* WIRE_PING_RESPONSE=2 */
+  "ping_capacity",           /* WIRE_PING_CAPACITY=3 */
+  "ping_capacity_response",  /* WIRE_PING_CAPACITY_RESPONSE=4 */
+  "ping_block",              /* WIRE_PING_BLOCK=5 */
+  "ping_block_response",     /* WIRE_PING_BLOCK_RESPONSE=6 */
+  "find_block",              /* WIRE_FIND_BLOCK=7 */
+  "find_block_response",     /* WIRE_FIND_BLOCK_RESPONSE=8 */
+  "find_node",               /* WIRE_FIND_NODE=9 */
+  "find_node_response",      /* WIRE_FIND_NODE_RESPONSE=10 */
+  "store_block",             /* WIRE_STORE_BLOCK=11 */
+  "store_block_response",    /* WIRE_STORE_BLOCK_RESPONSE=12 */
+  "seeking_blocks",          /* WIRE_SEEKING_BLOCKS=13 */
+  "seeking_blocks_response", /* WIRE_SEEKING_BLOCKS_RESPONSE=14 */
+  "rank_block",              /* WIRE_RANK_BLOCK=15 */
+  "recall_block",            /* WIRE_RECALL_BLOCK=16 */
+  "recall_accept",           /* WIRE_RECALL_ACCEPT=17 */
+  "recall_decline",          /* WIRE_RECALL_DECLINE=18 */
+  "rate_limited",            /* WIRE_RATE_LIMITED=19 */
+  "salutation"               /* WIRE_SALUTATION=20 */
 };
 
 health_data_t health_data_collect(const health_context_t* ctx) {
@@ -54,13 +53,13 @@ health_data_t health_data_collect(const health_context_t* ctx) {
     data.uptime_seconds = elapsed / 1000;
   }
 
-  /* Determine status: draining > starting > ok */
+  /* Determine status based on flags */
   if (ctx != NULL && ctx->draining != NULL && *ctx->draining) {
     data.status = "draining";
-  } else if (ctx != NULL && ctx->running != NULL && !*ctx->running) {
-    data.status = "starting";
+  } else if (ctx != NULL && ctx->running != NULL) {
+    data.status = *ctx->running ? "running" : "stopped";
   } else {
-    data.status = "ok";
+    data.status = "unknown";
   }
 
   /* Copy node_id string if available */
@@ -143,7 +142,7 @@ size_t health_data_to_json(const health_data_t* data, char* buf, size_t buf_size
   /* RPC call stats (non-zero entries only) */
   APPEND("  \"rpc_calls\": [\n");
   int first_rpc = 1;
-  for (size_t i = 1; i <= 20; i++) {
+  for (size_t i = 0; i < 20; i++) {
     if (data->total_rpc_calls[i] > 0) {
       if (!first_rpc) {
         APPEND(",\n");
