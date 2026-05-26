@@ -20,6 +20,7 @@
 #include "../../Network/msquic_singleton.h"
 #include <poll-dancer/poll-dancer.h>
 #include "wt_connection.h"
+#include "../health_handler.h"
 
 typedef vec_t(wt_connection_t*) vec_wt_connection_t;
 
@@ -55,6 +56,7 @@ typedef struct wt_transport_t {
   platform_mutex_t* conn_lock;
   vec_wt_connection_t connections;
   char* api_key_hash;
+  health_context_t* health_ctx;
 } wt_transport_t;
 
 wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
@@ -66,7 +68,8 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
                                       const char* cert_path,
                                       const char* key_path,
                                       size_t max_connections,
-                                      const char* api_key_hash);
+                                      const char* api_key_hash,
+                                      health_context_t* health_ctx);
 void wt_transport_destroy(wt_transport_t* transport);
 void wt_transport_start(wt_transport_t* transport);
 void wt_transport_stop(wt_transport_t* transport);

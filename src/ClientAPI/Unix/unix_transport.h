@@ -13,6 +13,7 @@
 #include "../../Platform/platform.h"
 #include <poll-dancer/poll-dancer.h>
 #include "unix_connection.h"
+#include "../health_handler.h"
 
 typedef vec_t(unix_connection_t*) vec_unix_connection_t;
 
@@ -39,6 +40,7 @@ typedef struct unix_transport_t {
   unix_transport_destroy_node_t* destroy_head;
   char* api_key_hash;
   char* socket_path;
+  health_context_t* health_ctx;
 } unix_transport_t;
 
 unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
@@ -46,7 +48,8 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
                                          ofd_cache_t* ofd_cache,
                                          tuple_cache_t* tc,
                                          const char* socket_path,
-                                         const char* api_key_hash);
+                                         const char* api_key_hash,
+                                         health_context_t* health_ctx);
 void unix_transport_destroy(unix_transport_t* transport);
 void unix_transport_start(unix_transport_t* transport);
 void unix_transport_stop(unix_transport_t* transport);

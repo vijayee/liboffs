@@ -76,7 +76,8 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
                                          ofd_cache_t* ofd_cache,
                                          tuple_cache_t* tc,
                                          const char* socket_path,
-                                         const char* api_key_hash) {
+                                         const char* api_key_hash,
+                                         health_context_t* health_ctx) {
   unix_transport_t* transport = get_clear_memory(sizeof(unix_transport_t));
   transport->pool = pool;
   transport->bc = bc;
@@ -101,6 +102,7 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
   } else {
     transport->api_key_hash = NULL;
   }
+  transport->health_ctx = health_ctx;
 
   transport->listen_sock = platform_local_listen(socket_path);
   if (transport->listen_sock == NULL) {

@@ -242,10 +242,10 @@ protected:
         ofd_cache = ofd_cache_create(pool, bc, 300000);
         tc = tuple_cache_create(100, pool);
 
-        transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL);
+        transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL, NULL);
         for (int retry = 0; transport == nullptr && retry < 10; retry++) {
             port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
-            transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL);
+            transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL, NULL);
         }
         ASSERT_NE(transport, nullptr);
         ws_transport_start(transport);

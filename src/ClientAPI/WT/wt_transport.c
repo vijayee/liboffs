@@ -80,7 +80,8 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
                                       const char* cert_path,
                                       const char* key_path,
                                       size_t max_connections,
-                                      const char* api_key_hash) {
+                                      const char* api_key_hash,
+                                      health_context_t* health_ctx) {
   wt_transport_t* transport = get_clear_memory(sizeof(wt_transport_t));
   transport->pool = pool;
   transport->bc = bc;
@@ -109,6 +110,7 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
   } else {
     transport->api_key_hash = NULL;
   }
+  transport->health_ctx = health_ctx;
   if (cert_path != NULL) {
     transport->cert_path = get_memory(strlen(cert_path) + 1);
     memcpy(transport->cert_path, cert_path, strlen(cert_path) + 1);
@@ -467,9 +469,10 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
                                       const char* cert_path,
                                       const char* key_path,
                                       size_t max_connections,
-                                      const char* api_key_hash) {
+                                      const char* api_key_hash,
+                                      health_context_t* health_ctx) {
   (void)pool; (void)bc; (void)ofd_cache; (void)tc;
-  (void)host; (void)port; (void)cert_path; (void)key_path; (void)max_connections; (void)api_key_hash;
+  (void)host; (void)port; (void)cert_path; (void)key_path; (void)max_connections; (void)api_key_hash; (void)health_ctx;
   return NULL;
 }
 

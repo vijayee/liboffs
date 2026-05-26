@@ -600,6 +600,16 @@ static void _tcp_dispatch_frame(tcp_connection_t* conn, uint8_t type, cbor_item_
     case CLIENT_API_BLOCK_DELETE_REQUEST:
       block_handle_delete_request(&conn->block_ctx, frame);
       break;
+    case CLIENT_API_HEALTH_REQUEST: {
+      health_data_t data = health_data_collect(conn->transport->health_ctx);
+      char json[8192];
+      health_data_to_json(&data, json, sizeof(json));
+      client_api_health_response_t resp;
+      resp.json_data = json;
+      cbor_item_t* health_frame = client_api_health_response_encode(&resp);
+      _tcp_connection_send_frame(conn, health_frame);
+      break;
+    }
     default:
       _tcp_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Unknown message type");
       break;

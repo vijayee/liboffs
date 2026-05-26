@@ -130,7 +130,7 @@ protected:
         snprintf(socket_path, sizeof(socket_path), "/tmp/test_unix_sock_%d", getpid());
         unlink(socket_path);
 
-        transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path, NULL);
+        transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path, NULL, NULL);
         ASSERT_NE(transport, nullptr);
         unix_transport_start(transport);
     }
@@ -387,7 +387,7 @@ TEST_F(TestUnixTransport, MaxConnections) {
     snprintf(limited_path, sizeof(limited_path), "/tmp/test_unix_limited_%d", getpid());
     unlink(limited_path);
 
-    unix_transport_t* limited = unix_transport_create(pool, bc, ofd_cache, tc, limited_path, NULL);
+    unix_transport_t* limited = unix_transport_create(pool, bc, ofd_cache, tc, limited_path, NULL, NULL);
     ASSERT_NE(limited, nullptr);
     unix_transport_set_max_connections(limited, 1);
     unix_transport_start(limited);

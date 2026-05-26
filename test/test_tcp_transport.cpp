@@ -135,10 +135,10 @@ protected:
         ofd_cache = ofd_cache_create(pool, bc, 300000);
         tc = tuple_cache_create(100, pool);
 
-        transport = tcp_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, NULL);
+        transport = tcp_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, NULL, NULL);
         for (int retry = 0; transport == nullptr && retry < 10; retry++) {
             port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
-            transport = tcp_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, NULL);
+            transport = tcp_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, NULL, NULL);
         }
         ASSERT_NE(transport, nullptr);
         tcp_transport_start(transport);

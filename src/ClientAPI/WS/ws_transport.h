@@ -17,6 +17,7 @@
 #include "../../Platform/platform.h"
 #include <poll-dancer/poll-dancer.h>
 #include "ws_connection.h"
+#include "../health_handler.h"
 
 typedef vec_t(ws_connection_t*) vec_ws_connection_t;
 
@@ -45,6 +46,7 @@ typedef struct ws_transport_t {
   uint16_t port;
   SSL_CTX* ssl_ctx;
   char* api_key_hash;
+  health_context_t* health_ctx;
 } ws_transport_t;
 
 ws_transport_t* ws_transport_create(scheduler_pool_t* pool,
@@ -56,7 +58,8 @@ ws_transport_t* ws_transport_create(scheduler_pool_t* pool,
                                      const char* cert_path,
                                      const char* key_path,
                                      size_t max_connections,
-                                     const char* api_key_hash);
+                                     const char* api_key_hash,
+                                     health_context_t* health_ctx);
 void ws_transport_destroy(ws_transport_t* transport);
 void ws_transport_start(ws_transport_t* transport);
 void ws_transport_stop(ws_transport_t* transport);

@@ -14,6 +14,7 @@
 #include "../../Platform/platform.h"
 #include <poll-dancer/poll-dancer.h>
 #include "tcp_connection.h"
+#include "../health_handler.h"
 
 typedef vec_t(tcp_connection_t*) vec_tcp_connection_t;
 
@@ -42,6 +43,7 @@ typedef struct tcp_transport_t {
   uint16_t port;
   SSL_CTX* ssl_ctx;
   char* api_key_hash;
+  health_context_t* health_ctx;
 } tcp_transport_t;
 
 tcp_transport_t* tcp_transport_create(scheduler_pool_t* pool,
@@ -52,7 +54,8 @@ tcp_transport_t* tcp_transport_create(scheduler_pool_t* pool,
                                        uint16_t port,
                                        const char* cert_path,
                                        const char* key_path,
-                                       const char* api_key_hash);
+                                       const char* api_key_hash,
+                                       health_context_t* health_ctx);
 void tcp_transport_destroy(tcp_transport_t* transport);
 void tcp_transport_start(tcp_transport_t* transport);
 void tcp_transport_stop(tcp_transport_t* transport);

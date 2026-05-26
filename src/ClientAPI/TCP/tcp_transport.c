@@ -81,7 +81,8 @@ tcp_transport_t* tcp_transport_create(scheduler_pool_t* pool,
                                        uint16_t port,
                                        const char* cert_path,
                                        const char* key_path,
-                                       const char* api_key_hash) {
+                                       const char* api_key_hash,
+                                       health_context_t* health_ctx) {
   tcp_transport_t* transport = get_clear_memory(sizeof(tcp_transport_t));
   transport->pool = pool;
   transport->bc = bc;
@@ -108,6 +109,7 @@ tcp_transport_t* tcp_transport_create(scheduler_pool_t* pool,
   } else {
     transport->api_key_hash = NULL;
   }
+  transport->health_ctx = health_ctx;
 
   /* Set up SSL_CTX if cert_path and key_path are provided */
   if (cert_path != NULL && key_path != NULL) {

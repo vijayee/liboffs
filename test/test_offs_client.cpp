@@ -106,7 +106,7 @@ protected:
         snprintf(socket_path, sizeof(socket_path), "/tmp/test_client_sock_%d", getpid());
         unlink(socket_path);
 
-        transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path, NULL);
+        transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path, NULL, NULL);
         ASSERT_NE(transport, nullptr);
         unix_transport_start(transport);
 
@@ -348,11 +348,11 @@ protected:
         port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
         snprintf(url, sizeof(url), "ws://127.0.0.1:%d/offs", port);
 
-        transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL);
+        transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL, NULL);
         for (int retry = 0; transport == nullptr && retry < 10; retry++) {
             port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
             snprintf(url, sizeof(url), "ws://127.0.0.1:%d/offs", port);
-            transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL);
+            transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL, NULL);
         }
         ASSERT_NE(transport, nullptr);
         ws_transport_start(transport);
@@ -539,7 +539,7 @@ protected:
 
         const char* cp = (cert_path[0] != '\0') ? cert_path : NULL;
         const char* kp = (key_path[0] != '\0') ? key_path : NULL;
-        transport = wt_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, cp, kp, 0, NULL);
+        transport = wt_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, cp, kp, 0, NULL, NULL);
         if (transport != nullptr) {
             wt_transport_start(transport);
             /* Wait for QUIC server listener to be ready */
