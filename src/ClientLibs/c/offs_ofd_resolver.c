@@ -234,10 +234,14 @@ static int _donor_block_cmp(const void* a, const void* b) {
   return 0;
 }
 
-/* Check if two raw hashes are equal */
+/* Check if two raw hashes are equal (constant-time). */
 static int _hash_eq(const uint8_t* a, size_t a_len, const uint8_t* b, size_t b_len) {
   if (a_len != b_len) return 0;
-  return memcmp(a, b, a_len) == 0;
+  uint8_t result = 0;
+  for (size_t i = 0; i < a_len; i++) {
+    result |= a[i] ^ b[i];
+  }
+  return result == 0;
 }
 
 char** offs_ofd_build_recyclers(
