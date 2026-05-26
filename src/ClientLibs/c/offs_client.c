@@ -13,6 +13,8 @@
 #include <stdio.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 #include "../../Platform/platform.h"
 #include "../../Platform/platform_local.h"
 #include <pthread.h>
@@ -1495,15 +1497,26 @@ buffer_t* offs_http_get(const char* url) {
   if (port <= 0 || port > 65535) return NULL;
   if (!path_start) path_start = "/";
 
+  /* Resolve hostname to IP address */
+  char ip_str[INET_ADDRSTRLEN];
+  {
+    struct addrinfo hints;
+    struct addrinfo* res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) return NULL;
+    struct sockaddr_in* sin = (struct sockaddr_in*)res->ai_addr;
+    inet_ntop(AF_INET, &sin->sin_addr, ip_str, sizeof(ip_str));
+    freeaddrinfo(res);
+  }
+
   /* Create socket and resolve address using platform abstractions */
   platform_socket_t* sock = platform_socket_create(PLATFORM_AF_INET, 1);
   if (sock == NULL) return NULL;
 
   platform_address_t addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.family = PLATFORM_AF_INET;
-  addr.inet.port = (uint16_t)port;
-  if (platform_address_parse(&addr, host, (uint16_t)port) != 0) {
+  if (platform_address_parse(&addr, ip_str, (uint16_t)port) != 0) {
     platform_socket_destroy(sock);
     return NULL;
   }
@@ -1561,10 +1574,15 @@ buffer_t* offs_http_get(const char* url) {
 
   size_t body_len = (size_t)(resp_buf + total - body);
 
-  /* Parse Content-Length if present */
+  /* Parse Content-Length if present (case-insensitive, RFC 7230) */
   {
-    char* cl_header = strstr(resp_buf, "Content-Length:");
-    if (!cl_header) cl_header = strstr(resp_buf, "content-length:");
+    char* cl_header = NULL;
+    for (char* scan = resp_buf; *scan; scan++) {
+      if (strncasecmp(scan, "Content-Length:", 15) == 0) {
+        cl_header = scan;
+        break;
+      }
+    }
     if (cl_header) {
       cl_header += 15;
       while (*cl_header == ' ') cl_header++;
