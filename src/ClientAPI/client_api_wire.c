@@ -901,3 +901,62 @@ int client_api_block_delete_response_decode(cbor_item_t* item, client_api_block_
 void client_api_block_delete_response_destroy(client_api_block_delete_response_t* msg) {
   (void)msg;
 }
+
+// --- Health Request ---
+// [type] — no payload
+
+cbor_item_t* client_api_health_request_encode(void) {
+  cbor_item_t* array = cbor_new_definite_array(1);
+  cbor_item_t* item = cbor_build_uint8(CLIENT_API_HEALTH_REQUEST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+  return array;
+}
+
+// --- Health Response ---
+// [type, json_string: tstr]
+
+cbor_item_t* client_api_health_response_encode(const client_api_health_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_HEALTH_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  if (msg->json_data != NULL) {
+    item = cbor_build_string(msg->json_data);
+  } else {
+    item = cbor_build_string("");
+  }
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_health_response_decode(cbor_item_t* item, client_api_health_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* json_item = cbor_array_get(item, 1);
+  if (cbor_isa_string(json_item)) {
+    size_t len = cbor_string_length(json_item);
+    msg->json_data = get_memory(len + 1);
+    memcpy(msg->json_data, cbor_string_handle(json_item), len);
+    msg->json_data[len] = '\0';
+  } else {
+    msg->json_data = get_memory(1);
+    msg->json_data[0] = '\0';
+  }
+  cbor_decref(&json_item);
+
+  return 0;
+}
+
+void client_api_health_response_destroy(client_api_health_response_t* msg) {
+  if (msg != NULL && msg->json_data != NULL) {
+    free(msg->json_data);
+    msg->json_data = NULL;
+  }
+}
