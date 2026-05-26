@@ -830,6 +830,7 @@ static void _ws_handle_put_end(ws_connection_t* conn) {
 static void _ws_handle_auth(ws_connection_t* conn, cbor_item_t* frame) {
   if (conn->transport == NULL || conn->transport->api_key_hash == NULL) {
     conn->is_authenticated = 1;
+    conn->block_ctx.is_authenticated = 1;
     return;
   }
 
@@ -845,6 +846,7 @@ static void _ws_handle_auth(ws_connection_t* conn, cbor_item_t* frame) {
 
   if (bcrypt_check(key, conn->transport->api_key_hash) == 0) {
     conn->is_authenticated = 1;
+    conn->block_ctx.is_authenticated = 1;
   } else {
     _ws_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication failed");
   }
@@ -869,6 +871,15 @@ static void _ws_dispatch_frame(ws_connection_t* conn, uint8_t type, cbor_item_t*
       break;
     case CLIENT_API_AUTH_REQUEST:
       _ws_handle_auth(conn, frame);
+      break;
+    case CLIENT_API_BLOCK_PUT_REQUEST:
+      block_handle_put_request(&conn->block_ctx, frame);
+      break;
+    case CLIENT_API_BLOCK_GET_REQUEST:
+      block_handle_get_request(&conn->block_ctx, frame);
+      break;
+    case CLIENT_API_BLOCK_DELETE_REQUEST:
+      block_handle_delete_request(&conn->block_ctx, frame);
       break;
     default:
       _ws_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Unknown message type");
@@ -966,6 +977,11 @@ void ws_connection_dispatch(void* state, message_t* msg) {
   }
 
   switch (msg->type) {
+    case CACHE_PUT_RESULT:
+    case CACHE_GET_RESULT:
+    case CACHE_REMOVE_RESULT:
+      if (block_handle_cache_result(&connection->block_ctx, msg)) break;
+      break;
     case WS_CONNECTION_DATA: {
       buffer_t* data = (buffer_t*)msg->payload;
       msg->payload = NULL;
@@ -1424,6 +1440,14 @@ ws_connection_t* ws_connection_create(ws_transport_t* transport, platform_socket
       connection->is_ssl = 1;
     }
   }
+
+  connection->block_ctx.conn = (block_connection_t*)connection;
+  connection->block_ctx.bc = transport->bc;
+  connection->block_ctx.actor = &connection->actor;
+  connection->block_ctx.is_authenticated = connection->is_authenticated;
+  connection->block_ctx.send_frame = (block_send_frame_fn)_ws_connection_send_frame;
+  connection->block_ctx.send_error = (block_send_error_fn)_ws_connection_send_error;
+  connection->block_ctx.pending_op = BLOCK_OP_NONE;
 
   actor_init(&connection->actor, connection, ws_connection_dispatch, transport->pool);
 
