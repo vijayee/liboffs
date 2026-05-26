@@ -862,6 +862,27 @@ TEST_F(TestOffsWtClient, GetAfterPut) {
     offs_client_disconnect(client);
 }
 
+TEST_F(TestOffsWtClient, Health) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+
+    HealthCallbackContext ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    int result = offs_client_health(client, _health_callback, &ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 200 && !ctx.called; attempts++) {
+        usleep(10000);
+    }
+    EXPECT_EQ(ctx.called, 1);
+    ASSERT_NE(ctx.json_response, nullptr);
+    EXPECT_NE(strstr(ctx.json_response, "\"status\""), nullptr);
+
+    free(ctx.json_response);
+    offs_client_disconnect(client);
+}
+
 } // namespace offs_wt_client_test
 
 #endif // HAS_MSQUIC

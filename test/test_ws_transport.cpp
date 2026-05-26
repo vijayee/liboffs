@@ -2,6 +2,7 @@
 #include <cstring>
 extern "C" {
 #include "../src/ClientAPI/WS/ws_transport.h"
+#include "../src/ClientAPI/health_handler.h"
 #include "../src/ClientAPI/WS/ws_frame.h"
 #include "../src/ClientAPI/client_api_wire.h"
 #include "../src/Network/stream_framer.h"
@@ -376,6 +377,32 @@ TEST(TestWsFrame, BuildMaskedRoundTrip) {
 
     free(frame);
     ws_frame_destroy(&parsed);
+}
+
+TEST_F(TestWsTransport, HealthRequest) {
+    int fd = _connect_with_retry("127.0.0.1", port);
+    ASSERT_GE(fd, 0);
+    int upgrade_ret = _ws_upgrade(fd);
+    ASSERT_EQ(upgrade_ret, 0);
+
+    cbor_item_t* health_req = client_api_health_request_encode();
+    ASSERT_NE(health_req, nullptr);
+    int send_ret = _ws_send_cbor(fd, health_req);
+    ASSERT_EQ(send_ret, 0);
+
+    cbor_item_t* response = _ws_recv_cbor(fd, 5000);
+    ASSERT_NE(response, nullptr);
+    uint8_t type = client_api_wire_get_type(response);
+    EXPECT_EQ(type, CLIENT_API_HEALTH_RESPONSE);
+
+    client_api_health_response_t decoded;
+    int decode_ret = client_api_health_response_decode(response, &decoded);
+    ASSERT_EQ(decode_ret, 0);
+    EXPECT_NE(strstr(decoded.json_data, "\"status\""), nullptr);
+    client_api_health_response_destroy(&decoded);
+    cbor_decref(&response);
+
+    close(fd);
 }
 
 } // namespace ws_transport_test
