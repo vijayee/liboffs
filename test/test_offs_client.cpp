@@ -345,10 +345,15 @@ protected:
         ofd_cache = ofd_cache_create(pool, bc, 300000);
         tc = tuple_cache_create(100, pool);
 
-        port = _next_port++;
+        port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
         snprintf(url, sizeof(url), "ws://127.0.0.1:%d/offs", port);
 
         transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL);
+        for (int retry = 0; transport == nullptr && retry < 10; retry++) {
+            port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
+            snprintf(url, sizeof(url), "ws://127.0.0.1:%d/offs", port);
+            transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL);
+        }
         ASSERT_NE(transport, nullptr);
         ws_transport_start(transport);
 
@@ -529,7 +534,7 @@ protected:
         ofd_cache = ofd_cache_create(pool, bc, 300000);
         tc = tuple_cache_create(100, pool);
 
-        port = _next_port++;
+        port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
         snprintf(url, sizeof(url), "wt://127.0.0.1:%d", port);
 
         const char* cp = (cert_path[0] != '\0') ? cert_path : NULL;

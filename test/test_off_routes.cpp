@@ -100,7 +100,7 @@ protected:
     char* cache_dir;
 
     void SetUp() override {
-        port = _next_port++;
+        port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
         pool = scheduler_pool_create(4);
         scheduler_pool_start(pool);
 

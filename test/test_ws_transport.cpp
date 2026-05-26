@@ -218,7 +218,7 @@ protected:
     uint16_t port;
 
     void SetUp() override {
-        port = _next_port++;
+        port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
         pool = scheduler_pool_create(4);
         scheduler_pool_start(pool);
         timer = timer_actor_create();
@@ -243,6 +243,10 @@ protected:
         tc = tuple_cache_create(100, pool);
 
         transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL);
+        for (int retry = 0; transport == nullptr && retry < 10; retry++) {
+            port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
+            transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL);
+        }
         ASSERT_NE(transport, nullptr);
         ws_transport_start(transport);
     }
