@@ -11,6 +11,7 @@ set(cbor_ROOT_DIR ${CMAKE_BINARY_DIR}/deps/libcbor)
 
 file(GLOB_RECURSE C_SRC "src/*/*.c")
 list(FILTER C_SRC EXCLUDE REGEX "relay_server_main\\.c$")
+list(FILTER C_SRC EXCLUDE REGEX "test_.*\\.c$")
 
 file(GLOB_RECURSE C_INC "src/*/*.h")
 
@@ -59,6 +60,19 @@ target_include_directories(offs PUBLIC ${LIBCBOR_BUILD_PATH}/include)
 target_link_libraries(offs PRIVATE ${POLL_DANCER_ROOT}/build/libpoll_dancer.a)
 target_link_libraries(offs PRIVATE http-parser)
 target_link_libraries(offs PRIVATE crypt)
+
+# Standalone C test for OFD resolver (not gtest-based)
+add_executable(test_offs_ofd_resolver
+  src/ClientLibs/c/test_offs_ofd_resolver.c
+)
+add_dependencies(test_offs_ofd_resolver cbor)
+add_dependencies(test_offs_ofd_resolver offs)
+target_link_libraries(test_offs_ofd_resolver PRIVATE offs)
+target_link_libraries(test_offs_ofd_resolver PRIVATE ssl crypto)
+target_link_libraries(test_offs_ofd_resolver PUBLIC cbor)
+target_include_directories(test_offs_ofd_resolver PRIVATE ${C_INC})
+target_include_directories(test_offs_ofd_resolver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(test_offs_ofd_resolver PUBLIC ${LIBCBOR_BUILD_PATH}/include)
 
 # msquic QUIC library (conditional — built if submodule is present)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/CMakeLists.txt)
