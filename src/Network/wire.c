@@ -106,11 +106,11 @@ int wire_ping_decode(cbor_item_t* item, wire_ping_t* msg) {
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* ts = cbor_array_get(item, 4);
-  msg->timestamp = cbor_get_uint64(ts);
+  msg->timestamp = cbor_get_int(ts);
   cbor_decref(&ts);
   return 0;
 }
@@ -164,11 +164,11 @@ int wire_ping_response_decode(cbor_item_t* item, wire_ping_response_t* msg) {
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* echo = cbor_array_get(item, 4);
-  msg->echo_time = cbor_get_uint64(echo);
+  msg->echo_time = cbor_get_int(echo);
   cbor_decref(&echo);
   cbor_item_t* cap = cbor_array_get(item, 5);
   msg->capacity = (float)cbor_float_get_float8(cap);
@@ -223,7 +223,7 @@ int wire_ping_block_decode(cbor_item_t* item, wire_ping_block_t* msg) {
   if (cbor_array_size(id_arr) < 2) { cbor_decref(&id_arr); return -1; }
   cbor_item_t* id_hi = cbor_array_get(id_arr, 0);
   cbor_item_t* id_lo = cbor_array_get(id_arr, 1);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_decref(&id_arr);
@@ -282,7 +282,7 @@ int wire_ping_block_response_decode(cbor_item_t* item, wire_ping_block_response_
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* exists = cbor_array_get(item, 4);
@@ -337,7 +337,7 @@ int wire_find_node_decode(cbor_item_t* item, wire_find_node_t* msg) {
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* target = cbor_array_get(item, 4);
@@ -391,7 +391,7 @@ int wire_find_node_response_decode(cbor_item_t* item, wire_find_node_response_t*
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* nodes = cbor_array_get(item, 4);
@@ -568,7 +568,7 @@ int wire_recall_block_decode(cbor_item_t* item, wire_recall_block_t* msg) {
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* hash_item = cbor_array_get(item, 4);
@@ -638,7 +638,7 @@ int wire_recall_accept_decode(cbor_item_t* item, wire_recall_accept_t* msg) {
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* hash = cbor_array_get(item, 4);
@@ -656,7 +656,7 @@ int wire_recall_accept_decode(cbor_item_t* item, wire_recall_accept_t* msg) {
     }
     cbor_decref(&data);
     cbor_item_t* data_len = cbor_array_get(item, 6);
-    msg->block_data_len = (size_t)cbor_get_uint64(data_len);
+    msg->block_data_len = (size_t)cbor_get_int(data_len);
     cbor_decref(&data_len);
     cbor_item_t* bfib = cbor_array_get(item, 7);
     msg->block_fib = cbor_get_uint32(bfib);
@@ -704,7 +704,7 @@ int wire_recall_decline_decode(cbor_item_t* item, wire_recall_decline_t* msg) {
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* hash = cbor_array_get(item, 4);
@@ -764,7 +764,7 @@ int wire_rate_limited_decode(cbor_item_t* item, wire_rate_limited_t* msg) {
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* rpc_type = cbor_array_get(item, 4);
@@ -829,7 +829,7 @@ int wire_salutation_decode(cbor_item_t* item, wire_salutation_t* msg) {
   }
   cbor_decref(&key_data);
   cbor_item_t* key_len = cbor_array_get(item, 3);
-  size_t declared_len = (size_t)cbor_get_uint64(key_len);
+  size_t declared_len = (size_t)cbor_get_int(key_len);
   cbor_decref(&key_len);
   // If declared length disagrees with actual bytestring length, trust the bytestring
   if (msg->public_key_len != 0 && declared_len != msg->public_key_len) {
@@ -888,7 +888,7 @@ int wire_ping_capacity_decode(cbor_item_t* item, wire_ping_capacity_t* msg) {
   cbor_decref(&type_item);
   cbor_item_t* id_hi = cbor_array_get(item, 1);
   cbor_item_t* id_lo = cbor_array_get(item, 2);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* source = cbor_array_get(item, 3);
@@ -949,7 +949,7 @@ int wire_ping_capacity_response_decode(cbor_item_t* item, wire_ping_capacity_res
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* cap = cbor_array_get(item, 4);
@@ -1022,7 +1022,7 @@ int wire_find_block_decode(cbor_item_t* item, wire_find_block_t* msg) {
   cbor_decref(&type_item);
   cbor_item_t* id_hi = cbor_array_get(item, 1);
   cbor_item_t* id_lo = cbor_array_get(item, 2);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* hash = cbor_array_get(item, 3);
@@ -1050,7 +1050,7 @@ int wire_find_block_decode(cbor_item_t* item, wire_find_block_t* msg) {
   }
   cbor_decref(&path_arr);
   cbor_item_t* start = cbor_array_get(item, 8);
-  msg->start_time = cbor_get_uint64(start);
+  msg->start_time = cbor_get_int(start);
   cbor_decref(&start);
   cbor_item_t* source = cbor_array_get(item, 9);
   int rc = _node_id_decode(source, &msg->original_source);
@@ -1135,7 +1135,7 @@ int wire_find_block_response_decode(cbor_item_t* item, wire_find_block_response_
   cbor_decref(&type_item);
   cbor_item_t* id_hi = cbor_array_get(item, 1);
   cbor_item_t* id_lo = cbor_array_get(item, 2);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* hash = cbor_array_get(item, 3);
@@ -1163,7 +1163,7 @@ int wire_find_block_response_decode(cbor_item_t* item, wire_find_block_response_
   }
   cbor_decref(&path_arr);
   cbor_item_t* latency = cbor_array_get(item, 8);
-  msg->latency_ms = (uint64_t)cbor_get_uint64(latency);
+  msg->latency_ms = (uint64_t)cbor_get_int(latency);
   cbor_decref(&latency);
   if (array_size >= 12) {
     cbor_item_t* data = cbor_array_get(item, 9);
@@ -1176,7 +1176,7 @@ int wire_find_block_response_decode(cbor_item_t* item, wire_find_block_response_
     }
     cbor_decref(&data);
     cbor_item_t* data_len = cbor_array_get(item, 10);
-    msg->block_data_len = (size_t)cbor_get_uint64(data_len);
+    msg->block_data_len = (size_t)cbor_get_int(data_len);
     cbor_decref(&data_len);
     cbor_item_t* bfib = cbor_array_get(item, 11);
     msg->block_fib = cbor_get_uint32(bfib);
@@ -1266,7 +1266,7 @@ int wire_store_block_decode(cbor_item_t* item, wire_store_block_t* msg) {
   cbor_decref(&type_item);
   cbor_item_t* id_hi = cbor_array_get(item, 1);
   cbor_item_t* id_lo = cbor_array_get(item, 2);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* hash = cbor_array_get(item, 3);
@@ -1303,7 +1303,7 @@ int wire_store_block_decode(cbor_item_t* item, wire_store_block_t* msg) {
   }
   cbor_decref(&path_arr);
   cbor_item_t* start = cbor_array_get(item, 11);
-  msg->start_time = cbor_get_uint64(start);
+  msg->start_time = cbor_get_int(start);
   cbor_decref(&start);
   cbor_item_t* carry = cbor_array_get(item, 12);
   msg->carry_data = cbor_get_uint8(carry);
@@ -1381,7 +1381,7 @@ int wire_store_block_response_decode(cbor_item_t* item, wire_store_block_respons
   cbor_decref(&type_item);
   cbor_item_t* id_hi = cbor_array_get(item, 1);
   cbor_item_t* id_lo = cbor_array_get(item, 2);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* accepted = cbor_array_get(item, 3);
@@ -1405,7 +1405,7 @@ int wire_store_block_response_decode(cbor_item_t* item, wire_store_block_respons
   }
   cbor_decref(&path_arr);
   cbor_item_t* latency = cbor_array_get(item, 7);
-  msg->latency_ms = (uint64_t)cbor_get_uint64(latency);
+  msg->latency_ms = (uint64_t)cbor_get_int(latency);
   cbor_decref(&latency);
   cbor_item_t* hash = cbor_array_get(item, 8);
   if (cbor_isa_bytestring(hash) && cbor_bytestring_length(hash) == 32) {
@@ -1465,7 +1465,7 @@ int wire_seeking_blocks_decode(cbor_item_t* item, wire_seeking_blocks_t* msg) {
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* cap = cbor_array_get(item, 4);
@@ -1549,7 +1549,7 @@ int wire_seeking_blocks_response_decode(cbor_item_t* item, wire_seeking_blocks_r
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* offers_arr = cbor_array_get(item, 4);
@@ -1729,7 +1729,7 @@ int wire_addr_request_decode(cbor_item_t* item, wire_addr_request_t* msg) {
   cbor_decref(&type_item);
   cbor_item_t* id_hi = cbor_array_get(item, 1);
   cbor_item_t* id_lo = cbor_array_get(item, 2);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   return 0;
@@ -1775,7 +1775,7 @@ int wire_addr_response_decode(cbor_item_t* item, wire_addr_response_t* msg) {
   cbor_decref(&type_item);
   cbor_item_t* id_hi = cbor_array_get(item, 1);
   cbor_item_t* id_lo = cbor_array_get(item, 2);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* endpoint = cbor_array_get(item, 3);
@@ -1843,7 +1843,7 @@ int wire_gossip_decode(cbor_item_t* item, wire_gossip_t* msg) {
   cbor_decref(&type_item);
   cbor_item_t* id_hi = cbor_array_get(item, 1);
   cbor_item_t* id_lo = cbor_array_get(item, 2);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* sender = cbor_array_get(item, 3);
@@ -1926,7 +1926,7 @@ int wire_gossip_pull_decode(cbor_item_t* item, wire_gossip_pull_t* msg) {
   cbor_decref(&type_item);
   cbor_item_t* id_hi = cbor_array_get(item, 1);
   cbor_item_t* id_lo = cbor_array_get(item, 2);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* sender = cbor_array_get(item, 3);
@@ -2059,7 +2059,7 @@ int wire_closest_nodes_decode(cbor_item_t* item, wire_closest_nodes_t* msg) {
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* target = cbor_array_get(item, 4);
@@ -2101,7 +2101,7 @@ int wire_closest_nodes_decode(cbor_item_t* item, wire_closest_nodes_t* msg) {
   cbor_decref(&path_len_item);
   cbor_item_t* start_hi = cbor_array_get(item, 13);
   cbor_item_t* start_lo = cbor_array_get(item, 14);
-  msg->start_time = ((uint64_t)cbor_get_uint64(start_hi) << 32) | (uint64_t)cbor_get_uint64(start_lo);
+  msg->start_time = ((uint64_t)cbor_get_int(start_hi) << 32) | (uint64_t)cbor_get_int(start_lo);
   cbor_decref(&start_hi);
   cbor_decref(&start_lo);
   cbor_item_t* source = cbor_array_get(item, 15);
@@ -2205,7 +2205,7 @@ int wire_closest_nodes_response_decode(cbor_item_t* item, wire_closest_nodes_res
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* target = cbor_array_get(item, 4);
@@ -2238,7 +2238,7 @@ int wire_closest_nodes_response_decode(cbor_item_t* item, wire_closest_nodes_res
   cbor_decref(&path_len_item);
   cbor_item_t* lat_hi = cbor_array_get(item, 10);
   cbor_item_t* lat_lo = cbor_array_get(item, 11);
-  msg->latency_us = ((uint64_t)cbor_get_uint64(lat_hi) << 32) | (uint64_t)cbor_get_uint64(lat_lo);
+  msg->latency_us = ((uint64_t)cbor_get_int(lat_hi) << 32) | (uint64_t)cbor_get_int(lat_lo);
   cbor_decref(&lat_hi);
   cbor_decref(&lat_lo);
   cbor_item_t* ring_nodes_arr = cbor_array_get(item, 12);
@@ -2316,7 +2316,7 @@ int wire_measure_nodes_decode(cbor_item_t* item, wire_measure_nodes_t* msg) {
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* probe_type = cbor_array_get(item, 4);
@@ -2393,7 +2393,7 @@ int wire_measure_nodes_response_decode(cbor_item_t* item, wire_measure_nodes_res
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* target_count_item = cbor_array_get(item, 4);
@@ -2466,7 +2466,7 @@ int wire_closest_nodes_progress_decode(cbor_item_t* item, wire_closest_nodes_pro
   if (sender_rc != 0) return sender_rc;
   cbor_item_t* id_hi = cbor_array_get(item, 2);
   cbor_item_t* id_lo = cbor_array_get(item, 3);
-  msg->message_id = ((uint64_t)cbor_get_uint64(id_hi) << 32) | (uint64_t)cbor_get_uint64(id_lo);
+  msg->message_id = ((uint64_t)cbor_get_int(id_hi) << 32) | (uint64_t)cbor_get_int(id_lo);
   cbor_decref(&id_hi);
   cbor_decref(&id_lo);
   cbor_item_t* target = cbor_array_get(item, 4);
