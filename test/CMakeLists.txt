@@ -55,7 +55,10 @@ if (BUILD_TESTING)
             test_auth_middleware.cpp
             test_auth_wire.cpp
             test_recycler_wire.cpp
-            test_block_cache_api.cpp)
+            test_block_cache_api.cpp
+            test_health_handler.cpp
+            test_health_wire.cpp
+            test_health_http.cpp)
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)

@@ -939,6 +939,13 @@ int client_api_health_response_decode(cbor_item_t* item, client_api_health_respo
   if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
   memset(msg, 0, sizeof(*msg));
 
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_HEALTH_RESPONSE) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
   cbor_item_t* json_item = cbor_array_get(item, 1);
   if (cbor_isa_string(json_item)) {
     size_t len = cbor_string_length(json_item);
