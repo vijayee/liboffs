@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import '../services/off_api.dart';
 import '../services/ofd.dart';
 import '../services/base58.dart';
+import '../services/recycler_resolver.dart';
 
 class ImportScreen extends StatefulWidget {
   const ImportScreen({super.key});
@@ -72,36 +73,94 @@ class _ImportScreenState extends State<ImportScreen> {
     }
   }
 
+  /// Check if a URL is an OFD (off file descriptor) by URL pattern.
+  static bool _isOfdUrl(String url) {
+    return url.contains('offsystem/directory') || url.endsWith('.ofd');
+  }
+
+  /// Check if an OFD URL's filename matches a directory name.
+  static bool _ofdMatchesDir(String url, String dirName) {
+    final uri = Uri.parse(url);
+    final segments = uri.pathSegments;
+    if (segments.isEmpty) return false;
+    final filename = segments.last;
+    return filename == '$dirName.ofd' || filename == dirName;
+  }
+
+  /// Filter recycler URLs to those that are NOT OFDs.
+  List<String> _nonOfdRecyclers() {
+    if (_recyclerUrls == null) return [];
+    return _recyclerUrls!.where((u) => !_isOfdUrl(u)).toList();
+  }
+
   /// Upload a directory recursively and return the URL of its top-level OFD.
-  Future<String> _uploadDirectory(Directory dir) async {
+  Future<String> _uploadDirectory(Directory dir,
+      {List<OfdEntry>? parentDonorPool}) async {
     final entries = <OfdEntry>[];
     final dirEntries = dir.listSync();
 
     final files = dirEntries.whereType<File>().toList();
     final subdirs = dirEntries.whereType<Directory>().toList();
+    final dirName = dir.path.split(Platform.pathSeparator).last;
+
+    // Build donor pool: start from parent, add from matching OFD recyclers
+    final donorPool = <OfdEntry>[...?parentDonorPool];
+    final ofdEntryMap = <String, OfdEntry>{};
+    String? recyclerServerBase;
+
+    if (_recyclerUrls != null) {
+      final resolver = RecyclerResolver(_api);
+      for (final url in _recyclerUrls!) {
+        if (_isOfdUrl(url) && _ofdMatchesDir(url, dirName)) {
+          try {
+            final resolved = await resolver.resolveOfd(url);
+            recyclerServerBase = resolved.serverBase;
+            for (final entry in resolved.entries) {
+              donorPool.add(entry);
+              ofdEntryMap[entry.name] = entry;
+            }
+          } catch (_) {
+            // OFD resolution failed -- continue without it
+          }
+        }
+      }
+    }
+
+    final fallbackRecyclers = _nonOfdRecyclers();
 
     // Process subdirectories first: each gets its own OFD uploaded
     for (final subdir in subdirs) {
-      final dirName = subdir.path.split(Platform.pathSeparator).last;
-      final subUrl = await _uploadDirectory(subdir);
+      final subDirName = subdir.path.split(Platform.pathSeparator).last;
+      final subUrl =
+          await _uploadDirectory(subdir, parentDonorPool: donorPool);
       final parsed = parseOffUrl(subUrl);
       if (parsed == null) {
         throw Exception('Failed to parse sub-OFD URL: $subUrl');
       }
       final dirHash = Uint8List.fromList(base58Decode(parsed.fileHashB58)!);
-      entries.add(OfdEntry.directory(name: dirName, dirHash: dirHash));
+      entries.add(OfdEntry.directory(name: subDirName, dirHash: dirHash));
     }
 
-    // Upload files in this directory
+    // Upload files in this directory with per-file recycler lists
     for (final file in files) {
       final fileName = file.path.split(Platform.pathSeparator).last;
-
       final length = await file.length();
+
+      // Build per-file recycler list from OFD entries
+      final matched = ofdEntryMap[fileName];
+      final fileRecyclers = RecyclerResolver.buildRecyclerList(
+        matched: matched,
+        fileSize: length,
+        donorPool: donorPool,
+        fallback: fallbackRecyclers,
+        serverBase: recyclerServerBase ?? '',
+      );
+
       final url = await _api.uploadFile(
         fileName: fileName,
         streamLength: length,
         filePath: file.path,
-        recyclerUrls: _recyclerUrls,
+        recyclerUrls: fileRecyclers.isNotEmpty ? fileRecyclers : null,
       );
 
       final parsed = parseOffUrl(url);
@@ -110,7 +169,8 @@ class _ImportScreenState extends State<ImportScreen> {
       }
 
       final fileHash = Uint8List.fromList(base58Decode(parsed.fileHashB58)!);
-      final descHash = Uint8List.fromList(base58Decode(parsed.descriptorHashB58)!);
+      final descHash =
+          Uint8List.fromList(base58Decode(parsed.descriptorHashB58)!);
 
       entries.add(OfdEntry.file(
         name: fileName,
@@ -126,7 +186,6 @@ class _ImportScreenState extends State<ImportScreen> {
 
     // Build and upload this directory's OFD
     final ofdBytes = buildOfdCbor(entries);
-    final dirName = dir.path.split(Platform.pathSeparator).last;
     return _api.uploadFileBuffered(
       fileName: '$dirName.ofd',
       streamLength: ofdBytes.length,
