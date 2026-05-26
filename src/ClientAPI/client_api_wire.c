@@ -4,6 +4,7 @@
 
 #include "client_api_wire.h"
 #include "../Util/allocator.h"
+#include "../Util/base58.h"
 #include "../Util/validation.h"
 #include <stdlib.h>
 #include <string.h>
@@ -614,4 +615,283 @@ void client_api_auth_request_destroy(client_api_auth_request_t* auth) {
     free(auth->api_key);
   }
   memset(auth, 0, sizeof(*auth));
+}
+
+// --- Block PUT Request ---
+// [type, data: bstr, encoding: uint]
+
+cbor_item_t* client_api_block_put_request_encode(const client_api_block_put_request_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(3);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_BLOCK_PUT_REQUEST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_bytestring(msg->data, msg->data_size);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->encoding);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_block_put_request_decode(cbor_item_t* item, client_api_block_put_request_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* data_item = cbor_array_get(item, 1);
+  if (!cbor_isa_bytestring(data_item)) {
+    cbor_decref(&data_item);
+    return -1;
+  }
+  msg->data_size = cbor_bytestring_length(data_item);
+  if (msg->data_size > 0) {
+    msg->data = get_memory(msg->data_size);
+    memcpy(msg->data, cbor_bytestring_handle(data_item), msg->data_size);
+  }
+  cbor_decref(&data_item);
+
+  if (cbor_array_size(item) >= 3) {
+    cbor_item_t* enc_item = cbor_array_get(item, 2);
+    if (cbor_isa_uint(enc_item)) {
+      msg->encoding = cbor_get_uint8(enc_item);
+    }
+    cbor_decref(&enc_item);
+  }
+
+  return 0;
+}
+
+void client_api_block_put_request_destroy(client_api_block_put_request_t* msg) {
+  if (msg == NULL) return;
+  free(msg->data);
+}
+
+// --- Block PUT Response ---
+// [type, status: uint, hash: bstr|tstr]
+
+cbor_item_t* client_api_block_put_response_encode(const client_api_block_put_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(3);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_BLOCK_PUT_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->status);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  if (msg->hash_is_text) {
+    item = cbor_build_string((const char*)msg->hash_data);
+  } else {
+    item = cbor_build_bytestring(msg->hash_data, msg->hash_len);
+  }
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_block_put_response_decode(cbor_item_t* item, client_api_block_put_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 3) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* status_item = cbor_array_get(item, 1);
+  msg->status = (uint8_t)cbor_get_uint8(status_item);
+  cbor_decref(&status_item);
+
+  cbor_item_t* hash_item = cbor_array_get(item, 2);
+  if (cbor_isa_string(hash_item)) {
+    msg->hash_is_text = 1;
+    msg->hash_len = cbor_string_length(hash_item);
+    msg->hash_data = get_memory(msg->hash_len + 1);
+    memcpy(msg->hash_data, cbor_string_handle(hash_item), msg->hash_len);
+    msg->hash_data[msg->hash_len] = '\0';
+  } else if (cbor_isa_bytestring(hash_item)) {
+    msg->hash_is_text = 0;
+    msg->hash_len = cbor_bytestring_length(hash_item);
+    if (msg->hash_len > 0) {
+      msg->hash_data = get_memory(msg->hash_len);
+      memcpy(msg->hash_data, cbor_bytestring_handle(hash_item), msg->hash_len);
+    }
+  } else {
+    cbor_decref(&hash_item);
+    return -1;
+  }
+  cbor_decref(&hash_item);
+
+  return 0;
+}
+
+void client_api_block_put_response_destroy(client_api_block_put_response_t* msg) {
+  if (msg == NULL) return;
+  free(msg->hash_data);
+}
+
+// --- Block GET Request ---
+// [type, hash: bstr]
+
+cbor_item_t* client_api_block_get_request_encode(const client_api_block_get_request_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_BLOCK_GET_REQUEST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_bytestring(msg->hash_data, msg->hash_len);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_block_get_request_decode(cbor_item_t* item, client_api_block_get_request_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* hash_item = cbor_array_get(item, 1);
+  msg->hash_data = _decode_bytestring(hash_item, &msg->hash_len);
+  cbor_decref(&hash_item);
+
+  if (msg->hash_data == NULL || msg->hash_len != 32) {
+    free(msg->hash_data);
+    msg->hash_data = NULL;
+    return -1;
+  }
+  return 0;
+}
+
+void client_api_block_get_request_destroy(client_api_block_get_request_t* msg) {
+  if (msg == NULL) return;
+  free(msg->hash_data);
+}
+
+// --- Block GET Response ---
+// [type, status: uint, data: bstr]
+
+cbor_item_t* client_api_block_get_response_encode(const client_api_block_get_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(3);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_BLOCK_GET_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->status);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  if (msg->data != NULL && msg->data_size > 0) {
+    item = cbor_build_bytestring(msg->data, msg->data_size);
+  } else {
+    item = cbor_build_bytestring(NULL, 0);
+  }
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_block_get_response_decode(cbor_item_t* item, client_api_block_get_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 3) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* status_item = cbor_array_get(item, 1);
+  msg->status = (uint8_t)cbor_get_uint8(status_item);
+  cbor_decref(&status_item);
+
+  cbor_item_t* data_item = cbor_array_get(item, 2);
+  if (!cbor_is_null(data_item) && cbor_isa_bytestring(data_item)) {
+    msg->data_size = cbor_bytestring_length(data_item);
+    if (msg->data_size > 0) {
+      msg->data = get_memory(msg->data_size);
+      memcpy(msg->data, cbor_bytestring_handle(data_item), msg->data_size);
+    }
+  }
+  cbor_decref(&data_item);
+
+  return 0;
+}
+
+void client_api_block_get_response_destroy(client_api_block_get_response_t* msg) {
+  if (msg == NULL) return;
+  free(msg->data);
+}
+
+// --- Block DELETE Request ---
+// [type, hash: bstr]
+
+cbor_item_t* client_api_block_delete_request_encode(const client_api_block_delete_request_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_BLOCK_DELETE_REQUEST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_bytestring(msg->hash_data, msg->hash_len);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_block_delete_request_decode(cbor_item_t* item, client_api_block_delete_request_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* hash_item = cbor_array_get(item, 1);
+  msg->hash_data = _decode_bytestring(hash_item, &msg->hash_len);
+  cbor_decref(&hash_item);
+
+  if (msg->hash_data == NULL || msg->hash_len != 32) {
+    free(msg->hash_data);
+    msg->hash_data = NULL;
+    return -1;
+  }
+  return 0;
+}
+
+void client_api_block_delete_request_destroy(client_api_block_delete_request_t* msg) {
+  if (msg == NULL) return;
+  free(msg->hash_data);
+}
+
+// --- Block DELETE Response ---
+// [type, status: uint]
+
+cbor_item_t* client_api_block_delete_response_encode(const client_api_block_delete_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_BLOCK_DELETE_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->status);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_block_delete_response_decode(cbor_item_t* item, client_api_block_delete_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* status_item = cbor_array_get(item, 1);
+  msg->status = (uint8_t)cbor_get_uint8(status_item);
+  cbor_decref(&status_item);
+
+  return 0;
+}
+
+void client_api_block_delete_response_destroy(client_api_block_delete_response_t* msg) {
+  (void)msg;
 }
