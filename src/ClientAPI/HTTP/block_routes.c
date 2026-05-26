@@ -46,6 +46,13 @@ static void _block_http_state_destroy(block_http_state_t* state) {
 static void _block_http_dispatch(void* vstate, message_t* msg) {
   block_http_state_t* state = (block_http_state_t*)vstate;
 
+  if (msg->payload == NULL) {
+    http_response_set_status(state->response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_end(state->response);
+    _block_http_state_destroy(state);
+    return;
+  }
+
   switch (msg->type) {
     case CACHE_PUT_RESULT: {
       if (state->op != BLOCK_HTTP_PUT) break;
@@ -67,6 +74,8 @@ static void _block_http_dispatch(void* vstate, message_t* msg) {
         int written = base58_encode(result->hash->data, result->hash->size, encoded, encoded_len);
         if (written > 0) {
           http_response_write(state->response, encoded, (size_t)written);
+        } else {
+          http_response_set_status(state->response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
         }
         free(encoded);
       } else {

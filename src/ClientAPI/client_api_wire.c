@@ -649,10 +649,12 @@ int client_api_block_put_request_decode(cbor_item_t* item, client_api_block_put_
     return -1;
   }
   msg->data_size = cbor_bytestring_length(data_item);
-  if (msg->data_size > 0) {
-    msg->data = get_memory(msg->data_size);
-    memcpy(msg->data, cbor_bytestring_handle(data_item), msg->data_size);
+  if (msg->data_size == 0 || msg->data_size > 128000) {
+    cbor_decref(&data_item);
+    return -1;
   }
+  msg->data = get_memory(msg->data_size);
+  memcpy(msg->data, cbor_bytestring_handle(data_item), msg->data_size);
   cbor_decref(&data_item);
 
   if (cbor_array_size(item) >= 3) {
@@ -809,6 +811,10 @@ int client_api_block_get_response_decode(cbor_item_t* item, client_api_block_get
   cbor_item_t* data_item = cbor_array_get(item, 2);
   if (!cbor_is_null(data_item) && cbor_isa_bytestring(data_item)) {
     msg->data_size = cbor_bytestring_length(data_item);
+    if (msg->data_size > 128000) {
+      cbor_decref(&data_item);
+      return -1;
+    }
     if (msg->data_size > 0) {
       msg->data = get_memory(msg->data_size);
       memcpy(msg->data, cbor_bytestring_handle(data_item), msg->data_size);
