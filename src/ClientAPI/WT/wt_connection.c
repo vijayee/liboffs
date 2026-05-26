@@ -479,6 +479,7 @@ static void _wt_handle_put_end(wt_connection_t* conn) {
 static void _wt_handle_auth(wt_connection_t* conn, cbor_item_t* frame) {
   if (conn->transport == NULL || conn->transport->api_key_hash == NULL) {
     conn->is_authenticated = 1;
+    conn->block_ctx.is_authenticated = 1;
     return;
   }
 
@@ -494,6 +495,7 @@ static void _wt_handle_auth(wt_connection_t* conn, cbor_item_t* frame) {
 
   if (bcrypt_check(key, conn->transport->api_key_hash) == 0) {
     conn->is_authenticated = 1;
+    conn->block_ctx.is_authenticated = 1;
   } else {
     wt_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication failed");
   }
@@ -518,6 +520,15 @@ static void _wt_dispatch_frame(wt_connection_t* conn, uint8_t type, cbor_item_t*
       break;
     case CLIENT_API_AUTH_REQUEST:
       _wt_handle_auth(conn, frame);
+      break;
+    case CLIENT_API_BLOCK_PUT_REQUEST:
+      block_handle_put_request(&conn->block_ctx, frame);
+      break;
+    case CLIENT_API_BLOCK_GET_REQUEST:
+      block_handle_get_request(&conn->block_ctx, frame);
+      break;
+    case CLIENT_API_BLOCK_DELETE_REQUEST:
+      block_handle_delete_request(&conn->block_ctx, frame);
       break;
     default:
       wt_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Unknown message type");
@@ -596,6 +607,12 @@ void wt_connection_dispatch(void* state, message_t* msg) {
   }
 
   switch (msg->type) {
+    case CACHE_PUT_RESULT:
+    case CACHE_GET_RESULT:
+    case CACHE_REMOVE_RESULT:
+      if (block_handle_cache_result(&connection->block_ctx, msg)) break;
+      break;
+
     case WT_CONNECTION_DATA: {
       buffer_t* data = (buffer_t*)msg->payload;
       msg->payload = NULL;
@@ -672,6 +689,14 @@ wt_connection_t* wt_connection_create(wt_transport_t* transport, HQUIC connectio
   conn->write_buffer = NULL;
 
   conn->framer = stream_framer_create();
+
+  conn->block_ctx.conn = (block_connection_t*)conn;
+  conn->block_ctx.bc = transport->bc;
+  conn->block_ctx.actor = &conn->actor;
+  conn->block_ctx.is_authenticated = conn->is_authenticated;
+  conn->block_ctx.send_frame = (block_send_frame_fn)wt_connection_send_frame;
+  conn->block_ctx.send_error = (block_send_error_fn)wt_connection_send_error;
+  conn->block_ctx.pending_op = BLOCK_OP_NONE;
 
   actor_init(&conn->actor, conn, wt_connection_dispatch, transport->pool);
 
