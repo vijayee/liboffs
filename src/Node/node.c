@@ -3,6 +3,7 @@
 //
 
 #include "node.h"
+#include <time.h>
 #include "../BlockCache/block_cache.h"
 #include "../ClientAPI/HTTP/http_server.h"
 #include "../Network/network.h"
@@ -37,6 +38,10 @@ offs_node_t* offs_node_create(config_t* config, authority_t* authority) {
 
 int offs_node_start(offs_node_t* node) {
   if (node == NULL) return -1;
+
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  node->start_time_ms = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
 
   if (node->config == NULL || config_validate(node->config) != 0) {
     log_error("offs_node_start: invalid configuration");
