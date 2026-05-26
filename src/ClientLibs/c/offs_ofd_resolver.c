@@ -134,12 +134,26 @@ static int _resolve_ofd_entries(ofd_t* ofd, const char* server_base,
       offs_ofd_donor_t* donor = &(*donors)[*donor_count];
       memset(donor, 0, sizeof(*donor));
       donor->name = strdup(entry->name);
+      if (!donor->name) {
+        free(ori_url);
+        return -1;
+      }
+      if (!ori->file_hash || !ori->file_hash->data) {
+        free(donor->name);
+        free(ori_url);
+        continue;
+      }
       donor->url = ori_url;
       donor->final_byte = ori->final_byte;
       donor->block_type = (int)ori->block_type;
       donor->tuple_size = ori->tuple_size;
       donor->hash_len = ori->file_hash->size;
       donor->file_hash = get_clear_memory(ori->file_hash->size);
+      if (!donor->file_hash) {
+        free(donor->name);
+        free(ori_url);
+        return -1;
+      }
       memcpy(donor->file_hash, ori->file_hash->data, ori->file_hash->size);
       (*donor_count)++;
     }
@@ -165,7 +179,9 @@ static int _resolve_ofd_entries(ofd_t* ofd, const char* server_base,
       if (raw_data) {
         ofd_t* sub_ofd = ofd_decode(raw_data);
         if (sub_ofd) {
-          _resolve_ofd_entries(sub_ofd, server_base, donors, donor_count, donor_cap);
+          if (_resolve_ofd_entries(sub_ofd, server_base, donors, donor_count, donor_cap) != 0) {
+            fprintf(stderr, "[WARN] Failed to resolve sub-OFD entry '%s'\n", entry->name);
+          }
           DESTROY(sub_ofd, ofd);
         }
         DESTROY(raw_data, buffer);
