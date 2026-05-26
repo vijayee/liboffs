@@ -884,7 +884,11 @@ static void _ws_dispatch_frame(ws_connection_t* conn, uint8_t type, cbor_item_t*
     case CLIENT_API_HEALTH_REQUEST: {
       health_data_t data = health_data_collect(conn->transport->health_ctx);
       char json[8192];
-      health_data_to_json(&data, json, sizeof(json));
+      size_t len = health_data_to_json(&data, json, sizeof(json));
+      if (len == 0) {
+        _ws_connection_send_error(conn, CLIENT_API_STATUS_INTERNAL_ERROR, "Health data serialization failed");
+        break;
+      }
       client_api_health_response_t resp;
       resp.json_data = json;
       cbor_item_t* health_frame = client_api_health_response_encode(&resp);
