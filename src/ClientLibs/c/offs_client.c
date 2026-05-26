@@ -9,6 +9,7 @@
 #include "../../ClientAPI/WS/ws_frame.h"
 
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <sys/socket.h>
