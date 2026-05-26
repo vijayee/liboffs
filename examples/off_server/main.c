@@ -4,6 +4,7 @@
 
 #include "ClientAPI/HTTP/http_server.h"
 #include "ClientAPI/HTTP/off_routes.h"
+#include "ClientAPI/HTTP/block_routes.h"
 #include "ClientAPI/HTTP/cors.h"
 #include "ClientAPI/Unix/unix_transport.h"
 #include "OFFStreams/tuple_cache.h"
@@ -102,6 +103,7 @@ int main(int argc, char** argv) {
   }
 
   off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL);
+  block_routes_register(server, pool, bc, NULL, NULL);
 
   unix_transport_t* unix_transport = NULL;
   if (unix_path != NULL) {
