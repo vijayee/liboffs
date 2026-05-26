@@ -20,6 +20,12 @@
 #define CLIENT_API_GET_END              8
 #define CLIENT_API_ERROR                11
 #define CLIENT_API_AUTH_REQUEST        12
+#define CLIENT_API_BLOCK_PUT_REQUEST     13
+#define CLIENT_API_BLOCK_PUT_RESPONSE    14
+#define CLIENT_API_BLOCK_GET_REQUEST     15
+#define CLIENT_API_BLOCK_GET_RESPONSE    16
+#define CLIENT_API_BLOCK_DELETE_REQUEST  17
+#define CLIENT_API_BLOCK_DELETE_RESPONSE 18
 
 // Status codes for responses
 #define CLIENT_API_STATUS_OK                0
@@ -105,6 +111,53 @@ typedef struct {
   size_t   api_key_len;
 } client_api_auth_request_t;
 
+// --- Block PUT Request ---
+// [type, data: bstr, encoding: uint]
+// encoding: 0 = raw bytes, 1 = base58 text
+typedef struct {
+  uint8_t* data;
+  size_t data_size;
+  uint8_t encoding;
+} client_api_block_put_request_t;
+
+// --- Block PUT Response ---
+// [type, status: uint, hash: bstr|tstr]
+// hash is raw bytes when encoding=0, base58 text string when encoding=1
+typedef struct {
+  uint8_t status;
+  uint8_t* hash_data;
+  size_t hash_len;
+  uint8_t hash_is_text;  // 0 = bstr, 1 = tstr
+} client_api_block_put_response_t;
+
+// --- Block GET Request ---
+// [type, hash: bstr]
+typedef struct {
+  uint8_t* hash_data;
+  size_t hash_len;
+} client_api_block_get_request_t;
+
+// --- Block GET Response ---
+// [type, status: uint, data: bstr]
+typedef struct {
+  uint8_t status;
+  uint8_t* data;
+  size_t data_size;
+} client_api_block_get_response_t;
+
+// --- Block DELETE Request ---
+// [type, hash: bstr]
+typedef struct {
+  uint8_t* hash_data;
+  size_t hash_len;
+} client_api_block_delete_request_t;
+
+// --- Block DELETE Response ---
+// [type, status: uint]
+typedef struct {
+  uint8_t status;
+} client_api_block_delete_response_t;
+
 // Encode functions — return CBOR item (caller must cbor_decref)
 cbor_item_t* client_api_put_request_encode(const client_api_put_request_t* msg);
 cbor_item_t* client_api_put_data_encode(const client_api_put_data_t* msg);
@@ -130,6 +183,30 @@ int client_api_error_decode(cbor_item_t* item, client_api_error_t* msg);
 cbor_item_t* client_api_auth_request_encode(const client_api_auth_request_t* auth);
 int client_api_auth_request_decode(cbor_item_t* item, client_api_auth_request_t* auth);
 void client_api_auth_request_destroy(client_api_auth_request_t* auth);
+
+cbor_item_t* client_api_block_put_request_encode(const client_api_block_put_request_t* msg);
+int client_api_block_put_request_decode(cbor_item_t* item, client_api_block_put_request_t* msg);
+void client_api_block_put_request_destroy(client_api_block_put_request_t* msg);
+
+cbor_item_t* client_api_block_put_response_encode(const client_api_block_put_response_t* msg);
+int client_api_block_put_response_decode(cbor_item_t* item, client_api_block_put_response_t* msg);
+void client_api_block_put_response_destroy(client_api_block_put_response_t* msg);
+
+cbor_item_t* client_api_block_get_request_encode(const client_api_block_get_request_t* msg);
+int client_api_block_get_request_decode(cbor_item_t* item, client_api_block_get_request_t* msg);
+void client_api_block_get_request_destroy(client_api_block_get_request_t* msg);
+
+cbor_item_t* client_api_block_get_response_encode(const client_api_block_get_response_t* msg);
+int client_api_block_get_response_decode(cbor_item_t* item, client_api_block_get_response_t* msg);
+void client_api_block_get_response_destroy(client_api_block_get_response_t* msg);
+
+cbor_item_t* client_api_block_delete_request_encode(const client_api_block_delete_request_t* msg);
+int client_api_block_delete_request_decode(cbor_item_t* item, client_api_block_delete_request_t* msg);
+void client_api_block_delete_request_destroy(client_api_block_delete_request_t* msg);
+
+cbor_item_t* client_api_block_delete_response_encode(const client_api_block_delete_response_t* msg);
+int client_api_block_delete_response_decode(cbor_item_t* item, client_api_block_delete_response_t* msg);
+void client_api_block_delete_response_destroy(client_api_block_delete_response_t* msg);
 
 // Helper: extract type byte from CBOR item
 uint8_t client_api_wire_get_type(cbor_item_t* item);
