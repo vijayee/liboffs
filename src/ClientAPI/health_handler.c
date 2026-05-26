@@ -5,7 +5,7 @@
 #include "health_handler.h"
 #include <stdio.h>
 #include <string.h>
-#include <sys/time.h>
+#include <time.h>
 
 /* Rate limit type names (RPC_TYPE_COUNT = 5) */
 static const char* rate_limit_names[] = {
@@ -46,9 +46,9 @@ health_data_t health_data_collect(const health_context_t* ctx) {
 
   /* Compute uptime from start_time_ms if available */
   if (ctx != NULL && ctx->start_time_ms != NULL) {
-    struct timeval now;
-    gettimeofday(&now, NULL);
-    uint64_t now_ms = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_usec / 1000;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t now_ms = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
     uint64_t elapsed = now_ms - *ctx->start_time_ms;
     data.uptime_seconds = elapsed / 1000;
   }
@@ -127,8 +127,8 @@ size_t health_data_to_json(const health_data_t* data, char* buf, size_t buf_size
 
   /* Rate limit stats */
   APPEND("  \"rate_limits\": [\n");
-  for (size_t i = 0; i < 5; i++) {
-    const char* comma = (i < 4) ? "," : "";
+  for (size_t i = 0; i < RPC_TYPE_COUNT; i++) {
+    const char* comma = (i < RPC_TYPE_COUNT - 1) ? "," : "";
     APPEND("    {\n");
     APPEND("      \"type\": \"%s\",\n", rate_limit_names[i]);
     APPEND("      \"accepted\": %lu,\n", (unsigned long)data->rate_limit_accepted[i]);
@@ -142,7 +142,7 @@ size_t health_data_to_json(const health_data_t* data, char* buf, size_t buf_size
   /* RPC call stats (non-zero entries only) */
   APPEND("  \"rpc_calls\": [\n");
   int first_rpc = 1;
-  for (size_t i = 0; i < 20; i++) {
+  for (size_t i = 0; i < PEER_RPC_TYPE_COUNT; i++) {
     if (data->total_rpc_calls[i] > 0) {
       if (!first_rpc) {
         APPEND(",\n");
@@ -154,12 +154,7 @@ size_t health_data_to_json(const health_data_t* data, char* buf, size_t buf_size
       first_rpc = 0;
     }
   }
-  if (first_rpc) {
-    /* No non-zero entries — emit empty array on its own line */
-    APPEND("\n");
-  } else {
-    APPEND("\n");
-  }
+  APPEND("\n");
   APPEND("  ]\n");
 
   APPEND("}\n");

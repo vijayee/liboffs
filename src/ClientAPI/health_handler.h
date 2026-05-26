@@ -30,11 +30,11 @@ typedef struct health_data_t {
   size_t      block_cache_current_bytes;
   size_t      block_cache_max_bytes;
   size_t      block_cache_block_count;
-  uint64_t    rate_limit_accepted[5];
-  uint64_t    rate_limit_rejected[5];
-  float       avg_rate_limit_tokens[5];
-  float       effective_rate[5];
-  uint64_t    total_rpc_calls[20];
+  uint64_t    rate_limit_accepted[RPC_TYPE_COUNT];
+  uint64_t    rate_limit_rejected[RPC_TYPE_COUNT];
+  float       avg_rate_limit_tokens[RPC_TYPE_COUNT];
+  float       effective_rate[RPC_TYPE_COUNT];
+  uint64_t    total_rpc_calls[PEER_RPC_TYPE_COUNT];
 } health_data_t;
 
 health_data_t health_data_collect(const health_context_t* ctx);
