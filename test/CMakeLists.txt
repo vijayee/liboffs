@@ -144,4 +144,14 @@ if (BUILD_TESTING)
     gtest_add_tests(TARGET test_rpc_integration TEST_LIST rpc_test_list)
 
     file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/test.pdf DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+
+    # offs-ca tool tests
+    add_executable(test_offs_ca
+      test_offs_ca.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/../tools/offs-ca/ca_ops.c
+    )
+    target_include_directories(test_offs_ca PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../tools/offs-ca)
+    target_link_libraries(test_offs_ca PRIVATE ssl crypto)
+    target_link_libraries(test_offs_ca PRIVATE GTest::gtest_main)
+    gtest_add_tests(TARGET test_offs_ca TEST_LIST ca_test_list)
 endif()
