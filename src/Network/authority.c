@@ -12,6 +12,7 @@
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include "../Util/base58.h"
+#include "peer_info.h"
 #include <string.h>
 #include <stdio.h>
 #include <cbor.h>
@@ -55,6 +56,13 @@ void authority_destroy(authority_t* authority) {
   if (authority->node_key_path != NULL) free(authority->node_key_path);
   if (authority->relay_url != NULL) free(authority->relay_url);
   if (authority->public_key != NULL) free(authority->public_key);
+  if (authority->friend_peers != NULL) {
+    for (size_t index = 0; index < authority->friend_peer_count; index++) {
+      peer_info_destroy(authority->friend_peers[index]);
+      free(authority->friend_peers[index]);
+    }
+    free(authority->friend_peers);
+  }
   free(authority);
 }
 
@@ -168,6 +176,7 @@ int authority_load(authority_t* authority) {
 //   bytes (DER-encoded CA cert),        // index 2 — empty bytestring if none
 //   [ [bytes[32], float], ... ],        // hebbian (index 3)
 //   [ [bytes[32], uint32, uint16, float, float, float, uint8, float], ... ]  // peers (index 4)
+//   [ string, ... ]                     // friend peers as Base58 strings (index 5)
 // ]
 
 int authority_save_peers(const authority_t* authority, const network_t* network) {
@@ -177,7 +186,7 @@ int authority_save_peers(const authority_t* authority, const network_t* network)
   size_t hebbian_count = network->hebbian.count;
   size_t peer_count = ring_set_total_nodes(network->rings);
 
-  cbor_item_t* root = cbor_new_definite_array(5);
+  cbor_item_t* root = cbor_new_definite_array(6);
 
   // Index 0: version
   {
@@ -264,6 +273,20 @@ int authority_save_peers(const authority_t* authority, const network_t* network)
   }
   (void)cbor_array_push(root, peers_array);
   cbor_decref(&peers_array);
+
+  // Index 5: friend peers as Base58-encoded peer_info strings
+  cbor_item_t* friends_arr = cbor_new_definite_array(authority->friend_peer_count);
+  for (size_t index = 0; index < authority->friend_peer_count; index++) {
+    char* b58 = peer_info_to_base58(authority->friend_peers[index]);
+    if (b58 != NULL) {
+      cbor_item_t* b58_item = cbor_build_string(b58);
+      (void)cbor_array_push(friends_arr, b58_item);
+      cbor_decref(&b58_item);
+      free(b58);
+    }
+  }
+  (void)cbor_array_push(root, friends_arr);
+  cbor_decref(&friends_arr);
 
   unsigned char* buffer = NULL;
   size_t buffer_size = 0;
@@ -433,6 +456,41 @@ int authority_load_peers(authority_t* authority, network_t* network) {
         }
       }
       cbor_decref(&peers_item);
+    }
+
+    // Index 5: friend peers
+    if (arr_size >= 6) {
+      cbor_item_t* friends_item = cbor_array_get(root, 5);
+      if (cbor_isa_array(friends_item)) {
+        size_t friend_count = cbor_array_size(friends_item);
+        if (authority->friend_peers != NULL) {
+          for (size_t idx = 0; idx < authority->friend_peer_count; idx++) {
+            peer_info_destroy(authority->friend_peers[idx]);
+            free(authority->friend_peers[idx]);
+          }
+          free(authority->friend_peers);
+          authority->friend_peers = NULL;
+          authority->friend_peer_count = 0;
+        }
+        if (friend_count > 0) {
+          authority->friend_peers = get_clear_memory(friend_count * sizeof(peer_info_t*));
+          for (size_t index = 0; index < friend_count; index++) {
+            cbor_item_t* b58_item = cbor_array_get(friends_item, index);
+            if (cbor_isa_string(b58_item)) {
+              char* b58 = strndup((char*)cbor_string_handle(b58_item), cbor_string_length(b58_item));
+              peer_info_t* friend_info = get_clear_memory(sizeof(peer_info_t));
+              if (peer_info_from_base58(b58, friend_info) == 0) {
+                authority->friend_peers[authority->friend_peer_count++] = friend_info;
+              } else {
+                free(friend_info);
+              }
+              free(b58);
+            }
+            cbor_decref(&b58_item);
+          }
+        }
+      }
+      cbor_decref(&friends_item);
     }
 
     cbor_decref(&root);
