@@ -68,6 +68,7 @@ typedef struct peer_connection_t {
 
   bool connected;
   int64_t connected_at_ms;
+  bool is_friend;       /* Pinned peer — immune to Hebbian decay, auto-reconnect on drop */
 } peer_connection_t;
 
 peer_connection_t* peer_connection_create(const node_id_t* remote_id,

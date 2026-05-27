@@ -34,6 +34,7 @@ peer_connection_t* peer_connection_create(const node_id_t* remote_id,
   peer->direct_attempts = 0;
   peer->connected = true;
   peer->connected_at_ms = (int64_t)time(NULL) * 1000;
+  peer->is_friend = false;
 
   peer->eabf = eabf_create(&peer->remote_node_id);
   if (peer->eabf == NULL) {
