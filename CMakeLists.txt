@@ -74,6 +74,21 @@ target_include_directories(test_offs_ofd_resolver PRIVATE ${C_INC})
 target_include_directories(test_offs_ofd_resolver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_include_directories(test_offs_ofd_resolver PUBLIC ${LIBCBOR_BUILD_PATH}/include)
 
+# Peer info unit test
+add_executable(test_peer_info
+  test/test_peer_info.c
+)
+add_dependencies(test_peer_info cbor)
+add_dependencies(test_peer_info blake3)
+add_dependencies(test_peer_info offs)
+target_link_libraries(test_peer_info PRIVATE offs)
+target_link_libraries(test_peer_info PRIVATE ssl crypto)
+target_link_libraries(test_peer_info PRIVATE blake3)
+target_link_libraries(test_peer_info PUBLIC cbor)
+target_include_directories(test_peer_info PRIVATE ${C_INC})
+target_include_directories(test_peer_info PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(test_peer_info PUBLIC ${LIBCBOR_BUILD_PATH}/include)
+
 # msquic QUIC library (conditional — built if submodule is present)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/CMakeLists.txt)
   set(QUIC_DISABLE_WERROR ON CACHE BOOL "" FORCE)
