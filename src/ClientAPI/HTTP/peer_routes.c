@@ -19,6 +19,10 @@
 #include <stdio.h>
 #include <cbor.h>
 
+#ifdef HAS_QRENCODE
+#include <qrencode.h>
+#endif
+
 typedef struct {
   offs_node_t* node;
 } peer_routes_ctx_t;
@@ -170,12 +174,84 @@ static void _peer_info_handler(http_request_t* request, http_response_t* respons
 
   peer_info_t* info = _build_local_peer_info(ctx->node);
 
+#ifdef HAS_QRENCODE
   if (strcmp(format, "qrcode") == 0) {
-    http_response_set_status(response, HTTP_STATUS_NOT_IMPLEMENTED);
+    cbor_item_t* qr_cbor = peer_info_encode(info);
+    if (qr_cbor == NULL) {
+      http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+      http_response_set_header(response, "Content-Type", "text/plain");
+      http_response_write(response, "Failed to encode peer info", 25);
+      http_response_end(response);
+      peer_info_destroy(info);
+      free(info);
+      return;
+    }
+
+    size_t buf_size = cbor_serialized_size(qr_cbor);
+    uint8_t* buf = get_clear_memory(buf_size);
+    cbor_serialize(qr_cbor, buf, buf_size);
+    cbor_decref(&qr_cbor);
+
+    QRcode* qr = QRcode_encodeData((int)buf_size, buf, 0, QR_ECLEVEL_M);
+    free(buf);
+
+    if (qr == NULL) {
+      http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+      http_response_set_header(response, "Content-Type", "text/plain");
+      http_response_write(response, "QR encoding failed", 18);
+      http_response_end(response);
+      peer_info_destroy(info);
+      free(info);
+      return;
+    }
+
+    // Generate a simple PPM (portable pixmap) image from QR bitmap
+    // PPM is trivial to generate without libpng, widely supported
+    int qr_size = qr->width;
+    int scale = 4;
+    int img_size = qr_size * scale;
+    size_t ppm_header_len = snprintf(NULL, 0, "P6\n%d %d\n255\n", img_size, img_size);
+    size_t ppm_size = ppm_header_len + (size_t)(img_size * img_size * 3);
+    char* ppm = get_clear_memory(ppm_size);
+    snprintf(ppm, ppm_size, "P6\n%d %d\n255\n", img_size, img_size);
+    size_t offset = ppm_header_len;
+    for (int y = 0; y < qr_size; y++) {
+      for (int sy = 0; sy < scale; sy++) {
+        for (int x = 0; x < qr_size; x++) {
+          uint8_t pixel = (qr->data[y * qr_size + x] & 1) ? 0 : 255;
+          for (int sx = 0; sx < scale; sx++) {
+            ppm[offset++] = (char)pixel;
+            ppm[offset++] = (char)pixel;
+            ppm[offset++] = (char)pixel;
+          }
+        }
+      }
+    }
+
+    QRcode_free(qr);
+
+    http_response_set_status(response, HTTP_STATUS_OK);
+    http_response_set_header(response, "Content-Type", "image/x-portable-pixmap");
+    http_response_write(response, ppm, ppm_size);
+    free(ppm);
     http_response_end(response);
     peer_info_destroy(info);
+    free(info);
     return;
   }
+#endif
+
+#ifndef HAS_QRENCODE
+  if (strcmp(format, "qrcode") == 0) {
+    http_response_set_status(response, 501);
+    http_response_set_header(response, "Content-Type", "text/plain");
+    http_response_write(response, "QR code generation not available", 30);
+    http_response_end(response);
+    peer_info_destroy(info);
+    free(info);
+    return;
+  }
+#endif
 
   if (strcmp(format, "base58") == 0) {
     char* b58 = peer_info_to_base58(info);
