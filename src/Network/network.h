@@ -91,6 +91,9 @@ typedef struct network_t {
 
   pending_quic_t* pending_connections;  /* QUIC connections awaiting salutation */
 
+  // Friend peer reconnect state
+  uint64_t friend_reconnect_timer_id;
+
   closest_nodes_pending_t closest_pending[CLOSEST_NODES_PENDING_MAX];
   size_t closest_pending_count;
 
@@ -109,5 +112,8 @@ void network_dispatch(void* state, message_t* msg);
 int network_connect_relay(network_t* network, const char* host, uint16_t port);
 int network_connect_peer(network_t* network, const char* host, uint16_t port);
 void network_shutdown_connections(network_t* network);
+
+// Start connections to bootstrap and friend peers. Called after node start.
+void network_start_connections(network_t* network);
 
 #endif // OFFS_NETWORK_H
