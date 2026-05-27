@@ -9,6 +9,10 @@
 #include "ClientAPI/Unix/unix_transport.h"
 #include "ClientAPI/HTTP/health_routes.h"
 #include "ClientAPI/health_handler.h"
+#include "../../src/ClientAPI/HTTP/peer_routes.h"
+#include "../../src/Node/node.h"
+#include "../../src/Network/authority.h"
+#include "../../src/Network/network.h"
 #include "OFFStreams/tuple_cache.h"
 #include "BlockCache/block_cache.h"
 #include "OFFStreams/ofd_cache.h"
@@ -118,15 +122,45 @@ int main(int argc, char** argv) {
   health_ctx.running = &running_val;
   health_ctx.draining = &draining_val;
 
+  authority_t* authority = authority_create(&config);
+  authority_init_local_id(authority);
+
+  network_t* network = network_create(authority, bc, timer, pool, &config);
+  if (network == NULL) {
+    fprintf(stderr, "Failed to create network\n");
+    authority_destroy(authority);
+    http_server_destroy(server);
+    tuple_cache_destroy(tc);
+    ofd_cache_destroy(ofd_cache);
+    block_cache_destroy(bc);
+    timer_actor_destroy(timer);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
+    return 1;
+  }
+
+  offs_node_t node_obj;
+  memset(&node_obj, 0, sizeof(node_obj));
+  node_obj.config = &config;
+  node_obj.authority = authority;
+  node_obj.network = network;
+  node_obj.block_cache = bc;
+  node_obj.http_server = server;
+  node_obj.scheduler = pool;
+  node_obj.timer = timer;
+
   off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL);
   block_routes_register(server, pool, bc, NULL, NULL);
   health_routes_register(server, &health_ctx);
+  peer_routes_register(server, &node_obj, &config, NULL);
 
   unix_transport_t* unix_transport = NULL;
   if (unix_path != NULL) {
     unix_transport = unix_transport_create(pool, bc, ofd_cache, tc, unix_path, NULL, &health_ctx);
     if (unix_transport == NULL) {
       fprintf(stderr, "Failed to create Unix transport on %s\n", unix_path);
+      authority_save_peers(authority, network);
+      network_destroy(network);
       http_server_destroy(server);
       tuple_cache_destroy(tc);
       ofd_cache_destroy(ofd_cache);
@@ -134,6 +168,7 @@ int main(int argc, char** argv) {
       timer_actor_destroy(timer);
       scheduler_pool_stop(pool);
       scheduler_pool_destroy(pool);
+      authority_destroy(authority);
       return 1;
     }
   }
@@ -147,6 +182,9 @@ int main(int argc, char** argv) {
     printf("Listening on unix://%s\n", unix_path);
   }
 
+  authority_load_peers(authority, network);
+  network_start_connections(network);
+
   printf("Listening on http://%s:%u\n", host, port);
   printf("Press Ctrl+C to stop\n");
 
@@ -158,14 +196,18 @@ int main(int argc, char** argv) {
     unix_transport_stop(unix_transport);
     unix_transport_destroy(unix_transport);
   }
+  ATOMIC_STORE(&network->running, 0);
+  network_shutdown_connections(network);
   http_server_stop(server);
   scheduler_pool_stop(pool);
   http_server_destroy(server);
+  network_destroy(network);
   tuple_cache_destroy(tc);
   ofd_cache_destroy(ofd_cache);
   block_cache_destroy(bc);
   timer_actor_destroy(timer);
   scheduler_pool_destroy(pool);
+  authority_destroy(authority);
 
   printf("Server stopped\n");
   return 0;
