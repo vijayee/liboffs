@@ -144,6 +144,7 @@ if (BUILD_TESTING)
     gtest_add_tests(TARGET test_rpc_integration TEST_LIST rpc_test_list)
 
     file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/test.pdf DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/certs DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 
     # offs-ca tool tests
     add_executable(test_offs_ca
