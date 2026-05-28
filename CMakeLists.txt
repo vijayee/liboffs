@@ -128,6 +128,9 @@ else()
   message(STATUS "libqrencode not found — QR code generation disabled")
 endif()
 
+# Standalone updater binary (no dependency on liboffs)
+add_executable(offs-updater src/Updater/updater_main.c)
+
 add_subdirectory(src/Platform)
 add_subdirectory(src/Network/Relay)
 add_subdirectory(tools/offs-ca)
