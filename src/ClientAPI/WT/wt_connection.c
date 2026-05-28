@@ -7,6 +7,8 @@
 #ifdef HAS_MSQUIC
 
 #include "../client_api_wire.h"
+#include <cJSON.h>
+#include <stdlib.h>
 #include "../../OFFStreams/off_url.h"
 #include "../../OFFStreams/ori.h"
 #include "../../OFFStreams/readable_off_stream.h"
@@ -532,16 +534,18 @@ static void _wt_dispatch_frame(wt_connection_t* conn, uint8_t type, cbor_item_t*
       break;
     case CLIENT_API_HEALTH_REQUEST: {
       health_data_t data = health_data_collect(conn->transport->health_ctx);
-      char json[8192];
-      size_t len = health_data_to_json(&data, json, sizeof(json));
-      if (len == 0) {
+      cJSON* json_obj = health_data_to_json(&data);
+      char* json_str = cJSON_Print(json_obj);
+      cJSON_Delete(json_obj);
+      if (json_str == NULL) {
         wt_connection_send_error(conn, CLIENT_API_STATUS_INTERNAL_ERROR, "Health data serialization failed");
         break;
       }
       client_api_health_response_t resp;
-      resp.json_data = json;
+      resp.json_data = json_str;
       cbor_item_t* health_frame = client_api_health_response_encode(&resp);
       wt_connection_send_frame(conn, health_frame);
+      free(json_str);
       break;
     }
     default:

@@ -112,15 +112,16 @@ TEST(HealthHTTP, GetHealthReturns200) {
 
   EXPECT_NE(strstr(response, "200"), nullptr);
   EXPECT_NE(strstr(response, "application/json"), nullptr);
-  EXPECT_NE(strstr(response, "\"status\": \"running\""), nullptr);
+  EXPECT_NE(strstr(response, "\"status\""), nullptr);
+  EXPECT_NE(strstr(response, "\"running\""), nullptr);
   EXPECT_NE(strstr(response, "\"block_cache\""), nullptr);
 
   close(fd);
   http_server_stop(server);
   http_server_destroy(server);
-  block_cache_destroy(bc);
-  timer_actor_destroy(timer);
   scheduler_pool_stop(pool);
+  timer_actor_destroy(timer);
+  block_cache_destroy(bc);
   scheduler_pool_destroy(pool);
 }
 
@@ -237,9 +238,9 @@ TEST(HealthHTTP, HealthResponseContainsExpectedFields) {
   close(fd);
   http_server_stop(server);
   http_server_destroy(server);
-  block_cache_destroy(bc);
-  timer_actor_destroy(timer);
   scheduler_pool_stop(pool);
+  timer_actor_destroy(timer);
+  block_cache_destroy(bc);
   scheduler_pool_destroy(pool);
 }
 

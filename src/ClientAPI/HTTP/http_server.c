@@ -91,6 +91,7 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
   server->max_connections = 0;
   atomic_store(&server->active_connections, 0);
   atomic_store(&server->draining, 0);
+  server->is_local_binding = 0;
   _destroy_stack_init(server);
 
   server->listen_sock = platform_socket_create(PLATFORM_AF_INET, 1);
@@ -123,6 +124,12 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
     platform_socket_destroy(server->listen_sock);
     free(server);
     return NULL;
+  }
+
+  if (host != NULL) {
+    server->is_local_binding = (strcmp(host, "127.0.0.1") == 0 ||
+                                strcmp(host, "localhost") == 0 ||
+                                strcmp(host, "::1") == 0);
   }
 
   return server;
@@ -445,4 +452,8 @@ void http_server_drain(http_server_t* server) {
 
 void http_server_set_max_connections(http_server_t* server, size_t max_connections) {
   server->max_connections = max_connections;
+}
+
+uint8_t http_server_is_local_binding(const http_server_t* server) {
+  return server != NULL ? server->is_local_binding : 0;
 }

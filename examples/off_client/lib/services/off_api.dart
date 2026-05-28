@@ -66,8 +66,10 @@ String mimeFromExtension(String filename) {
 
 class OffApi {
   final String baseUrl;
+  final String? _apiKey;
 
-  OffApi({this.baseUrl = 'http://localhost:23402'});
+  OffApi({this.baseUrl = 'http://localhost:23402', String? apiKey})
+      : _apiKey = apiKey;
 
   /// Stream a file upload without loading the entire file into memory.
   /// The server processes data as it arrives via the streaming PUT pipeline.
@@ -197,5 +199,81 @@ class OffApi {
       return response.bodyBytes;
     }
     throw Exception('OFD fetch failed: ${response.statusCode}');
+  }
+
+  Future<Uint8List> getPeerInfo({String format = 'cbor'}) async {
+    final uri = Uri.parse('$baseUrl/peer/info?format=$format');
+    final response = await http.get(uri, headers: {
+      if (_apiKey != null) 'Authorization': 'Bearer $_apiKey',
+    });
+    if (response.statusCode == 200) return response.bodyBytes;
+    throw Exception('Peer info failed: ${response.statusCode}');
+  }
+
+  Future<String> connectPeer(Uint8List peerInfoCbor) async {
+    final uri = Uri.parse('$baseUrl/peer/connect');
+    final response = await http.post(uri, headers: {
+      if (_apiKey != null) 'Authorization': 'Bearer $_apiKey',
+      'Content-Type': 'application/cbor',
+    }, body: peerInfoCbor);
+    if (response.statusCode == 200) return utf8.decode(response.bodyBytes);
+    throw Exception('Peer connect failed: ${response.statusCode}');
+  }
+
+  Future<String> connectPeerBase58(String peerInfoBase58) async {
+    final uri = Uri.parse('$baseUrl/peer/connect');
+    final response = await http.post(uri, headers: {
+      if (_apiKey != null) 'Authorization': 'Bearer $_apiKey',
+      'Content-Type': 'text/plain',
+    }, body: peerInfoBase58);
+    if (response.statusCode == 200) return utf8.decode(response.bodyBytes);
+    throw Exception('Peer connect failed: ${response.statusCode}');
+  }
+
+  Future<List<Map<String, dynamic>>> listPeers() async {
+    final uri = Uri.parse('$baseUrl/peers');
+    final response = await http.get(uri, headers: {
+      if (_apiKey != null) 'Authorization': 'Bearer $_apiKey',
+    });
+    if (response.statusCode == 200) {
+      return (json.decode(response.body) as List)
+          .map((e) => e as Map<String, dynamic>)
+          .toList();
+    }
+    throw Exception('Peer list failed: ${response.statusCode}');
+  }
+
+  Future<void> addFriend(Uint8List peerInfoCbor) async {
+    final uri = Uri.parse('$baseUrl/friends');
+    final response = await http.post(uri, headers: {
+      if (_apiKey != null) 'Authorization': 'Bearer $_apiKey',
+      'Content-Type': 'application/cbor',
+    }, body: peerInfoCbor);
+    if (response.statusCode != 200) {
+      throw Exception('Friend add failed: ${response.statusCode}');
+    }
+  }
+
+  Future<void> removeFriend(String nodeId) async {
+    final uri = Uri.parse('$baseUrl/friends/$nodeId');
+    final response = await http.delete(uri, headers: {
+      if (_apiKey != null) 'Authorization': 'Bearer $_apiKey',
+    });
+    if (response.statusCode != 200) {
+      throw Exception('Friend remove failed: ${response.statusCode}');
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> listFriends() async {
+    final uri = Uri.parse('$baseUrl/friends');
+    final response = await http.get(uri, headers: {
+      if (_apiKey != null) 'Authorization': 'Bearer $_apiKey',
+    });
+    if (response.statusCode == 200) {
+      return (json.decode(response.body) as List)
+          .map((e) => e as Map<String, dynamic>)
+          .toList();
+    }
+    throw Exception('Friend list failed: ${response.statusCode}');
   }
 }

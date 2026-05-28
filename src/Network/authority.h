@@ -13,6 +13,8 @@
 
 typedef struct topology_metrics_t topology_metrics_t;
 
+#include "peer_info.h"
+
 typedef enum node_phase_e {
   NODE_PHASE_INHALE = 0,
   NODE_PHASE_NEUTRAL = 1,
@@ -42,6 +44,9 @@ typedef struct authority_t {
 
   uint8_t* public_key;      // Raw public key for salutation (NULL if random node_id)
   size_t   public_key_len;  // Length of public_key
+
+  peer_info_t** friend_peers;
+  size_t friend_peer_count;
 
   ATOMIC(float) capacity;
   ATOMIC(node_phase_e) phase;

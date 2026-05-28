@@ -89,6 +89,32 @@ peer_connection_t* connection_manager_add(connection_manager_t* mgr,
   return peer;
 }
 
+peer_connection_t* connection_manager_add_friend(connection_manager_t* mgr,
+                                                  const node_id_t* remote_id,
+                                                  const struct sockaddr_storage* peer_addr,
+                                                  scheduler_pool_t* pool) {
+  peer_connection_t* peer = connection_manager_add(mgr, remote_id, peer_addr, pool);
+  if (peer != NULL) {
+    peer->is_friend = true;
+  }
+  return peer;
+}
+
+bool connection_manager_is_friend(const connection_manager_t* mgr,
+                                  const node_id_t* remote_id) {
+  peer_connection_t* peer = connection_manager_lookup(mgr, remote_id);
+  return (peer != NULL && peer->is_friend);
+}
+
+size_t connection_manager_friend_count(const connection_manager_t* mgr) {
+  if (mgr == NULL) return 0;
+  size_t count = 0;
+  for (size_t index = 0; index < mgr->peer_count; index++) {
+    if (mgr->peers[index]->is_friend) count++;
+  }
+  return count;
+}
+
 int connection_manager_remove(connection_manager_t* mgr, const node_id_t* remote_id) {
   if (mgr == NULL || remote_id == NULL) {
     return -1;
@@ -229,6 +255,13 @@ size_t connection_manager_decay_tick(connection_manager_t* mgr) {
 
   while (index < mgr->peer_count) {
     peer_connection_t* peer = mgr->peers[index];
+
+    // Skip friend peers — they are pinned and immune to decay
+    if (peer->is_friend) {
+      index++;
+      continue;
+    }
+
     peer_hebbian_decay(peer, mgr->hebbian.decay_rate);
 
     if (peer->hebbian_weight < mgr->hebbian.drop_threshold) {

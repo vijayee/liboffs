@@ -52,9 +52,16 @@ typedef struct {
   bool     wt_enabled;
   uint16_t wt_port;
 
+  /* TCP TLS */
+  bool     tcp_tls_enabled;
+  char*    tcp_tls_cert_path;
+  char*    tcp_tls_key_path;
+
   /* Auth */
   char*    api_key_hash;        // bcrypt hash ($2b$ prefix), NULL if auth disabled
 } config_t;
 config_t config_default();
 int config_validate(const config_t* config);
+config_t* config_deep_copy(const config_t* src);
+void config_free(config_t* config);
 #endif //OFFS_CONFIG_H

@@ -28,6 +28,16 @@
 #define CLIENT_API_BLOCK_DELETE_RESPONSE 18
 #define CLIENT_API_HEALTH_REQUEST   19
 #define CLIENT_API_HEALTH_RESPONSE  20
+#define CLIENT_API_PEER_INFO_REQUEST      21
+#define CLIENT_API_PEER_INFO_RESPONSE     22
+#define CLIENT_API_PEER_CONNECT           23
+#define CLIENT_API_PEER_CONNECT_RESULT    24
+#define CLIENT_API_PEER_LIST_REQUEST      25
+#define CLIENT_API_PEER_LIST_RESPONSE     26
+#define CLIENT_API_FRIEND_ADD             27
+#define CLIENT_API_FRIEND_REMOVE          28
+#define CLIENT_API_FRIEND_LIST            29
+#define CLIENT_API_FRIEND_LIST_RESPONSE   30
 
 // Status codes for responses
 #define CLIENT_API_STATUS_OK                0
@@ -169,6 +179,65 @@ typedef struct {
   char* json_data;  // caller must free
 } client_api_health_response_t;
 
+// --- Peer Info Request ---
+// [type] — no payload
+
+// --- Peer Info Response ---
+// [type, format_byte, data: bstr]
+// format_byte: 0 = raw CBOR, 1 = Base58 text
+typedef struct {
+  uint8_t format;
+  uint8_t* data;
+  size_t data_size;
+} client_api_peer_info_response_t;
+
+// --- Peer Connect ---
+// [type, format_byte, data: bstr]
+typedef struct {
+  uint8_t format;
+  uint8_t* data;
+  size_t data_size;
+} client_api_peer_connect_t;
+
+// --- Peer Connect Result ---
+// [type, status: uint]
+typedef struct {
+  uint8_t status;
+} client_api_peer_connect_result_t;
+
+// --- Peer List Request ---
+// [type] — no payload
+
+// --- Peer List Response ---
+// [type, peers: cbor_array]
+typedef struct {
+  cbor_item_t* peers;  // owned by struct, freed by _destroy
+} client_api_peer_list_response_t;
+
+// --- Friend Add ---
+// [type, format_byte, data: bstr]
+typedef struct {
+  uint8_t format;
+  uint8_t* data;
+  size_t data_size;
+} client_api_friend_add_t;
+
+// --- Friend Remove ---
+// [type, node_id: bstr]
+typedef struct {
+  uint8_t* node_id;
+  size_t node_id_len;
+} client_api_friend_remove_t;
+
+// --- Friend List Request ---
+// [type] — no payload
+
+// --- Friend List Response ---
+// [type, friends: cbor_array]
+typedef struct {
+  cbor_item_t* friends;  // owned by struct, freed by _destroy
+} client_api_friend_list_response_t;
+
 // Encode functions — return CBOR item (caller must cbor_decref)
 cbor_item_t* client_api_put_request_encode(const client_api_put_request_t* msg);
 cbor_item_t* client_api_put_data_encode(const client_api_put_data_t* msg);
@@ -223,6 +292,38 @@ cbor_item_t* client_api_health_request_encode(void);
 cbor_item_t* client_api_health_response_encode(const client_api_health_response_t* msg);
 int client_api_health_response_decode(cbor_item_t* item, client_api_health_response_t* msg);
 void client_api_health_response_destroy(client_api_health_response_t* msg);
+
+cbor_item_t* client_api_peer_info_request_encode(void);
+
+cbor_item_t* client_api_peer_info_response_encode(const client_api_peer_info_response_t* msg);
+int client_api_peer_info_response_decode(cbor_item_t* item, client_api_peer_info_response_t* msg);
+void client_api_peer_info_response_destroy(client_api_peer_info_response_t* msg);
+
+cbor_item_t* client_api_peer_connect_encode(const client_api_peer_connect_t* msg);
+int client_api_peer_connect_decode(cbor_item_t* item, client_api_peer_connect_t* msg);
+void client_api_peer_connect_destroy(client_api_peer_connect_t* msg);
+
+cbor_item_t* client_api_peer_connect_result_encode(const client_api_peer_connect_result_t* msg);
+int client_api_peer_connect_result_decode(cbor_item_t* item, client_api_peer_connect_result_t* msg);
+void client_api_peer_connect_result_destroy(client_api_peer_connect_result_t* msg);
+
+cbor_item_t* client_api_peer_list_request_encode(void);
+cbor_item_t* client_api_peer_list_response_encode(const client_api_peer_list_response_t* msg);
+int client_api_peer_list_response_decode(cbor_item_t* item, client_api_peer_list_response_t* msg);
+void client_api_peer_list_response_destroy(client_api_peer_list_response_t* msg);
+
+cbor_item_t* client_api_friend_add_encode(const client_api_friend_add_t* msg);
+int client_api_friend_add_decode(cbor_item_t* item, client_api_friend_add_t* msg);
+void client_api_friend_add_destroy(client_api_friend_add_t* msg);
+
+cbor_item_t* client_api_friend_remove_encode(const client_api_friend_remove_t* msg);
+int client_api_friend_remove_decode(cbor_item_t* item, client_api_friend_remove_t* msg);
+void client_api_friend_remove_destroy(client_api_friend_remove_t* msg);
+
+cbor_item_t* client_api_friend_list_request_encode(void);
+cbor_item_t* client_api_friend_list_response_encode(const client_api_friend_list_response_t* msg);
+int client_api_friend_list_response_decode(cbor_item_t* item, client_api_friend_list_response_t* msg);
+void client_api_friend_list_response_destroy(client_api_friend_list_response_t* msg);
 
 // Helper: extract type byte from CBOR item
 uint8_t client_api_wire_get_type(cbor_item_t* item);

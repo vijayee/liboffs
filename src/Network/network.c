@@ -3,6 +3,8 @@
 //
 
 #include "network.h"
+#include "peer_info.h"
+#include "connection_manager.h"
 #include "wire.h"
 #include "quic_listener.h"
 #include "find_block.h"
@@ -34,6 +36,7 @@
 
 #define TOPOLOGY_METRICS_PUSH_INTERVAL_MS 300000  // 5 minutes
 #define PING_CAPACITY_INTERVAL_MS 900000  // 15 minutes
+#define FRIEND_RECONNECT_INTERVAL_MS 5000
 
 // Forward declarations for internal handlers
 static void network_sync_hebbian_to_rings(network_t* network);
@@ -137,6 +140,7 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   network->hebbian_decay_timer_id = 0;
   network->metrics_push_timer_id = 0;
   network->ping_capacity_timer_id = 0;
+  network->friend_reconnect_timer_id = 0;
   network->relay = NULL;
   network->nat_detect = NULL;
   network->local_nat_type = NAT_TYPE_UNKNOWN;
@@ -197,6 +201,13 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
       &network->actor,
       NETWORK_PING_CAPACITY_TICK);
 
+  // Friend reconnect timer: attempt reconnection periodically
+  network->friend_reconnect_timer_id = timer_actor_set(timer,
+      FRIEND_RECONNECT_INTERVAL_MS,
+      FRIEND_RECONNECT_INTERVAL_MS,
+      &network->actor,
+      NETWORK_FRIEND_RECONNECT_TICK);
+
   return network;
 }
 
@@ -251,6 +262,10 @@ void network_destroy(network_t* network) {
   if (network->ping_capacity_timer_id != 0) {
     timer_actor_cancel(network->timer, network->ping_capacity_timer_id);
     network->ping_capacity_timer_id = 0;
+  }
+  if (network->friend_reconnect_timer_id != 0) {
+    timer_actor_cancel(network->timer, network->friend_reconnect_timer_id);
+    network->friend_reconnect_timer_id = 0;
   }
   if (network->relay != NULL) {
     relay_client_destroy(network->relay);
@@ -523,6 +538,10 @@ static void network_handle_ping_response(network_t* network, message_t* msg) {
   if (peer != NULL) {
     peer_update_rtt(peer, (double)rtt_ms);
   }
+
+  // Hebbian frequency update: responsive peers get weight increase
+  float delta_w = hebbian_compute_delta(rtt_ms, 1.0f);
+  hebbian_frequency(&network->hebbian, &response->sender_id, delta_w);
 }
 
 // --- PingBlock handler ---
@@ -2782,6 +2801,70 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
   }
 }
 
+// --- Friend reconnect tick handler ---
+static void network_handle_friend_reconnect_tick(network_t* network, message_t* msg) {
+  (void)msg;
+  if (network->authority == NULL || network->authority->friend_peers == NULL) return;
+
+  for (size_t index = 0; index < network->authority->friend_peer_count; index++) {
+    peer_info_t* friend_info = network->authority->friend_peers[index];
+    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &friend_info->node_id);
+    if (peer != NULL && peer->connected) continue;  // Already connected
+
+    // Attempt reconnect on first direct address
+    for (size_t addr_index = 0; addr_index < friend_info->address_count; addr_index++) {
+      peer_address_t* addr = &friend_info->addresses[addr_index];
+      if (addr->type == PEER_ADDR_DIRECT) {
+        if (peer == NULL) {
+          peer = connection_manager_add_friend(&network->conn_mgr,
+              &friend_info->node_id, NULL, network->pool);
+        }
+        if (peer != NULL && !peer->connected) {
+          network_connect_peer(network, addr->host, addr->port);
+        }
+        break;
+      }
+    }
+  }
+}
+
+// --- Start connections to bootstrap and friend peers ---
+void network_start_connections(network_t* network) {
+  if (network == NULL) return;
+
+  // Connect to bootstrap peers (fire-and-forget)
+  if (network->authority != NULL && network->authority->bootstrap_peers != NULL) {
+    for (size_t index = 0; index < network->authority->bootstrap_peer_count; index++) {
+      char* peer_str = network->authority->bootstrap_peers[index];
+      // Parse host:port from string
+      char* colon = strchr(peer_str, ':');
+      if (colon != NULL) {
+        *colon = '\0';
+        uint16_t port = (uint16_t)atoi(colon + 1);
+        network_connect_peer(network, peer_str, port);
+        *colon = ':';
+      }
+    }
+  }
+
+  // Connect to friend peers
+  if (network->authority != NULL && network->authority->friend_peers != NULL) {
+    for (size_t index = 0; index < network->authority->friend_peer_count; index++) {
+      peer_info_t* friend_info = network->authority->friend_peers[index];
+      peer_connection_t* existing = connection_manager_lookup(&network->conn_mgr, &friend_info->node_id);
+      if (existing != NULL && existing->connected) continue;
+      for (size_t addr_index = 0; addr_index < friend_info->address_count; addr_index++) {
+        peer_address_t* addr = &friend_info->addresses[addr_index];
+        if (addr->type == PEER_ADDR_DIRECT) {
+          connection_manager_add_friend(&network->conn_mgr, &friend_info->node_id, NULL, network->pool);
+          network_connect_peer(network, addr->host, addr->port);
+          break;  // Use first direct address
+        }
+      }
+    }
+  }
+}
+
 // --- Network dispatch ---
 
 void network_dispatch(void* state, message_t* msg) {
@@ -2855,6 +2938,9 @@ void network_dispatch(void* state, message_t* msg) {
       break;
     case NETWORK_PING_CAPACITY_TICK:
       network_handle_ping_capacity_tick(network, msg);
+      break;
+    case NETWORK_FRIEND_RECONNECT_TICK:
+      network_handle_friend_reconnect_tick(network, msg);
       break;
     case NETWORK_GOSSIP_RECEIVED:
       network_handle_gossip_received(network, msg);

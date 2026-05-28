@@ -50,6 +50,7 @@ typedef struct http_server_t {
   size_t max_connections;
   ATOMIC(size_t) active_connections;
   ATOMIC(uint8_t) draining;
+  uint8_t is_local_binding;
   platform_mutex_t* destroy_lock;
   server_destroy_node_t* destroy_head;
 } http_server_t;
@@ -80,5 +81,7 @@ void http_server_dispatch(http_server_t* server, http_request_t* request, http_r
 http_route_t* http_server_match_route(http_server_t* server, int method, const char* path);
 
 void http_server_use(http_server_t* server, http_middleware_t middleware, void* user_data, void (*user_data_destroy)(void*));
+
+uint8_t http_server_is_local_binding(const http_server_t* server);
 
 #endif // OFFS_HTTP_SERVER_H

@@ -967,3 +967,405 @@ void client_api_health_response_destroy(client_api_health_response_t* msg) {
     msg->json_data = NULL;
   }
 }
+
+// --- Peer Info Request ---
+// [type] — no payload
+
+cbor_item_t* client_api_peer_info_request_encode(void) {
+  cbor_item_t* array = cbor_new_definite_array(1);
+  cbor_item_t* item = cbor_build_uint8(CLIENT_API_PEER_INFO_REQUEST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+  return array;
+}
+
+// --- Peer Info Response ---
+// [type, format_byte, data: bstr]
+
+cbor_item_t* client_api_peer_info_response_encode(const client_api_peer_info_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(3);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_PEER_INFO_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->format);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_bytestring(msg->data, msg->data_size);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_peer_info_response_decode(cbor_item_t* item, client_api_peer_info_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 3) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_PEER_INFO_RESPONSE) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* format_item = cbor_array_get(item, 1);
+  if (!cbor_isa_uint(format_item)) {
+    cbor_decref(&format_item);
+    return -1;
+  }
+  msg->format = cbor_get_uint8(format_item);
+  cbor_decref(&format_item);
+
+  cbor_item_t* data_item = cbor_array_get(item, 2);
+  if (!cbor_isa_bytestring(data_item)) {
+    cbor_decref(&data_item);
+    return -1;
+  }
+  msg->data_size = cbor_bytestring_length(data_item);
+  if (msg->data_size > 65536) {
+    cbor_decref(&data_item);
+    return -1;
+  }
+  if (msg->data_size > 0) {
+    msg->data = get_memory(msg->data_size);
+    memcpy(msg->data, cbor_bytestring_handle(data_item), msg->data_size);
+  }
+  cbor_decref(&data_item);
+
+  return 0;
+}
+
+void client_api_peer_info_response_destroy(client_api_peer_info_response_t* msg) {
+  if (msg == NULL) return;
+  free(msg->data);
+}
+
+// --- Peer Connect ---
+// [type, format_byte, data: bstr]
+
+cbor_item_t* client_api_peer_connect_encode(const client_api_peer_connect_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(3);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_PEER_CONNECT);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->format);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_bytestring(msg->data, msg->data_size);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_peer_connect_decode(cbor_item_t* item, client_api_peer_connect_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 3) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_PEER_CONNECT) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* format_item = cbor_array_get(item, 1);
+  if (!cbor_isa_uint(format_item)) {
+    cbor_decref(&format_item);
+    return -1;
+  }
+  msg->format = cbor_get_uint8(format_item);
+  cbor_decref(&format_item);
+
+  cbor_item_t* data_item = cbor_array_get(item, 2);
+  if (!cbor_isa_bytestring(data_item)) {
+    cbor_decref(&data_item);
+    return -1;
+  }
+  msg->data_size = cbor_bytestring_length(data_item);
+  if (msg->data_size > 65536) {
+    cbor_decref(&data_item);
+    return -1;
+  }
+  if (msg->data_size > 0) {
+    msg->data = get_memory(msg->data_size);
+    memcpy(msg->data, cbor_bytestring_handle(data_item), msg->data_size);
+  }
+  cbor_decref(&data_item);
+
+  return 0;
+}
+
+void client_api_peer_connect_destroy(client_api_peer_connect_t* msg) {
+  if (msg == NULL) return;
+  free(msg->data);
+}
+
+// --- Peer Connect Result ---
+// [type, status: uint]
+
+cbor_item_t* client_api_peer_connect_result_encode(const client_api_peer_connect_result_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_PEER_CONNECT_RESULT);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->status);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_peer_connect_result_decode(cbor_item_t* item, client_api_peer_connect_result_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_PEER_CONNECT_RESULT) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* status_item = cbor_array_get(item, 1);
+  if (!cbor_isa_uint(status_item)) {
+    cbor_decref(&status_item);
+    return -1;
+  }
+  msg->status = cbor_get_uint8(status_item);
+  cbor_decref(&status_item);
+
+  return 0;
+}
+
+void client_api_peer_connect_result_destroy(client_api_peer_connect_result_t* msg) {
+  (void)msg;
+}
+
+// --- Peer List Request ---
+// [type] — no payload
+
+cbor_item_t* client_api_peer_list_request_encode(void) {
+  cbor_item_t* array = cbor_new_definite_array(1);
+  cbor_item_t* item = cbor_build_uint8(CLIENT_API_PEER_LIST_REQUEST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+  return array;
+}
+
+// --- Peer List Response ---
+// [type, peers: cbor_array]
+
+cbor_item_t* client_api_peer_list_response_encode(const client_api_peer_list_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_PEER_LIST_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  if (msg->peers != NULL) {
+    (void)cbor_array_push(array, msg->peers);
+  } else {
+    item = cbor_new_definite_array(0);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+  }
+
+  return array;
+}
+
+void client_api_peer_list_response_destroy(client_api_peer_list_response_t* msg) {
+  if (msg == NULL) return;
+  if (msg->peers != NULL) {
+    cbor_decref(&msg->peers);
+  }
+}
+
+int client_api_peer_list_response_decode(cbor_item_t* item, client_api_peer_list_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_PEER_LIST_RESPONSE) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+  msg->peers = cbor_array_get(item, 1);
+  return 0;
+}
+
+// --- Friend Add ---
+// [type, format_byte, data: bstr]
+
+cbor_item_t* client_api_friend_add_encode(const client_api_friend_add_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(3);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_FRIEND_ADD);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->format);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_bytestring(msg->data, msg->data_size);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_friend_add_decode(cbor_item_t* item, client_api_friend_add_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 3) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_FRIEND_ADD) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* format_item = cbor_array_get(item, 1);
+  if (!cbor_isa_uint(format_item)) {
+    cbor_decref(&format_item);
+    return -1;
+  }
+  msg->format = cbor_get_uint8(format_item);
+  cbor_decref(&format_item);
+
+  cbor_item_t* data_item = cbor_array_get(item, 2);
+  if (!cbor_isa_bytestring(data_item)) {
+    cbor_decref(&data_item);
+    return -1;
+  }
+  msg->data_size = cbor_bytestring_length(data_item);
+  if (msg->data_size > 65536) {
+    cbor_decref(&data_item);
+    return -1;
+  }
+  if (msg->data_size > 0) {
+    msg->data = get_memory(msg->data_size);
+    memcpy(msg->data, cbor_bytestring_handle(data_item), msg->data_size);
+  }
+  cbor_decref(&data_item);
+
+  return 0;
+}
+
+void client_api_friend_add_destroy(client_api_friend_add_t* msg) {
+  if (msg == NULL) return;
+  free(msg->data);
+}
+
+// --- Friend Remove ---
+// [type, node_id: bstr]
+
+cbor_item_t* client_api_friend_remove_encode(const client_api_friend_remove_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_FRIEND_REMOVE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_bytestring(msg->node_id, msg->node_id_len);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_friend_remove_decode(cbor_item_t* item, client_api_friend_remove_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_FRIEND_REMOVE) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* node_id_item = cbor_array_get(item, 1);
+  msg->node_id = _decode_bytestring(node_id_item, &msg->node_id_len);
+  cbor_decref(&node_id_item);
+
+  if (msg->node_id == NULL || msg->node_id_len == 0) {
+    free(msg->node_id);
+    msg->node_id = NULL;
+    return -1;
+  }
+  return 0;
+}
+
+void client_api_friend_remove_destroy(client_api_friend_remove_t* msg) {
+  if (msg == NULL) return;
+  free(msg->node_id);
+}
+
+// --- Friend List Request ---
+// [type] — no payload
+
+cbor_item_t* client_api_friend_list_request_encode(void) {
+  cbor_item_t* array = cbor_new_definite_array(1);
+  cbor_item_t* item = cbor_build_uint8(CLIENT_API_FRIEND_LIST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+  return array;
+}
+
+// --- Friend List Response ---
+// [type, friends: cbor_array]
+
+cbor_item_t* client_api_friend_list_response_encode(const client_api_friend_list_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_FRIEND_LIST_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  if (msg->friends != NULL) {
+    (void)cbor_array_push(array, msg->friends);
+  } else {
+    item = cbor_new_definite_array(0);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+  }
+
+  return array;
+}
+
+void client_api_friend_list_response_destroy(client_api_friend_list_response_t* msg) {
+  if (msg == NULL) return;
+  if (msg->friends != NULL) {
+    cbor_decref(&msg->friends);
+  }
+}
+
+int client_api_friend_list_response_decode(cbor_item_t* item, client_api_friend_list_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_FRIEND_LIST_RESPONSE) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+  msg->friends = cbor_array_get(item, 1);
+  return 0;
+}

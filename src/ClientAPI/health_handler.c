@@ -3,7 +3,7 @@
 //
 
 #include "health_handler.h"
-#include <stdio.h>
+#include <cJSON.h>
 #include <string.h>
 #include <time.h>
 
@@ -92,74 +92,51 @@ health_data_t health_data_collect(const health_context_t* ctx) {
   return data;
 }
 
-size_t health_data_to_json(const health_data_t* data, char* buf, size_t buf_size) {
-  size_t offset = 0;
+cJSON* health_data_to_json(const health_data_t* data) {
+  cJSON* root = cJSON_CreateObject();
 
-  /* Macro to append formatted text, returns early if buffer exhausted */
-#define APPEND(fmt, ...) do {                                 \
-    if (offset >= buf_size) return 0;                         \
-    int written = snprintf(buf + offset, buf_size - offset,   \
-                           fmt, ##__VA_ARGS__);               \
-    if (written < 0 || (size_t)written >= buf_size - offset) { \
-      return 0;                                                \
-    }                                                          \
-    offset += (size_t)written;                                  \
-  } while (0)
-
-  APPEND("{\n");
-  APPEND("  \"status\": \"%s\",\n", data->status);
-  APPEND("  \"uptime_seconds\": %lu,\n", (unsigned long)data->uptime_seconds);
+  cJSON_AddStringToObject(root, "status", data->status);
+  cJSON_AddNumberToObject(root, "uptime_seconds", (double)data->uptime_seconds);
 
   if (data->node_id_str[0] != '\0') {
-    APPEND("  \"node_id\": \"%s\",\n", data->node_id_str);
+    cJSON_AddStringToObject(root, "node_id", data->node_id_str);
   }
 
-  APPEND("  \"peer_count\": %zu,\n", data->peer_count);
-  APPEND("  \"total_connections\": %zu,\n", data->total_connections);
-  APPEND("  \"avg_hebbian_weight\": %.6f,\n", (double)data->avg_hebbian_weight);
+  cJSON_AddNumberToObject(root, "peer_count", (double)data->peer_count);
+  cJSON_AddNumberToObject(root, "total_connections", (double)data->total_connections);
+  cJSON_AddNumberToObject(root, "avg_hebbian_weight", (double)data->avg_hebbian_weight);
 
   /* Block cache stats */
-  APPEND("  \"block_cache\": {\n");
-  APPEND("    \"current_bytes\": %zu,\n", data->block_cache_current_bytes);
-  APPEND("    \"max_bytes\": %zu,\n", data->block_cache_max_bytes);
-  APPEND("    \"block_count\": %zu\n", data->block_cache_block_count);
-  APPEND("  },\n");
+  cJSON* block_cache = cJSON_CreateObject();
+  cJSON_AddNumberToObject(block_cache, "current_bytes", (double)data->block_cache_current_bytes);
+  cJSON_AddNumberToObject(block_cache, "max_bytes", (double)data->block_cache_max_bytes);
+  cJSON_AddNumberToObject(block_cache, "block_count", (double)data->block_cache_block_count);
+  cJSON_AddItemToObject(root, "block_cache", block_cache);
 
   /* Rate limit stats */
-  APPEND("  \"rate_limits\": [\n");
+  cJSON* rate_limits = cJSON_CreateArray();
   for (size_t i = 0; i < RPC_TYPE_COUNT; i++) {
-    const char* comma = (i < RPC_TYPE_COUNT - 1) ? "," : "";
-    APPEND("    {\n");
-    APPEND("      \"type\": \"%s\",\n", rate_limit_names[i]);
-    APPEND("      \"accepted\": %lu,\n", (unsigned long)data->rate_limit_accepted[i]);
-    APPEND("      \"rejected\": %lu,\n", (unsigned long)data->rate_limit_rejected[i]);
-    APPEND("      \"avg_tokens\": %.4f,\n", (double)data->avg_rate_limit_tokens[i]);
-    APPEND("      \"effective_rate\": %.4f\n", (double)data->effective_rate[i]);
-    APPEND("    }%s\n", comma);
+    cJSON* entry = cJSON_CreateObject();
+    cJSON_AddStringToObject(entry, "type", rate_limit_names[i]);
+    cJSON_AddNumberToObject(entry, "accepted", (double)data->rate_limit_accepted[i]);
+    cJSON_AddNumberToObject(entry, "rejected", (double)data->rate_limit_rejected[i]);
+    cJSON_AddNumberToObject(entry, "avg_tokens", (double)data->avg_rate_limit_tokens[i]);
+    cJSON_AddNumberToObject(entry, "effective_rate", (double)data->effective_rate[i]);
+    cJSON_AddItemToArray(rate_limits, entry);
   }
-  APPEND("  ],\n");
+  cJSON_AddItemToObject(root, "rate_limits", rate_limits);
 
   /* RPC call stats (non-zero entries only) */
-  APPEND("  \"rpc_calls\": [\n");
-  int first_rpc = 1;
+  cJSON* rpc_calls = cJSON_CreateArray();
   for (size_t i = 0; i < PEER_RPC_TYPE_COUNT; i++) {
     if (data->total_rpc_calls[i] > 0) {
-      if (!first_rpc) {
-        APPEND(",\n");
-      }
-      APPEND("    {\n");
-      APPEND("      \"name\": \"%s\",\n", rpc_names[i]);
-      APPEND("      \"count\": %lu\n", (unsigned long)data->total_rpc_calls[i]);
-      APPEND("    }");
-      first_rpc = 0;
+      cJSON* entry = cJSON_CreateObject();
+      cJSON_AddStringToObject(entry, "name", rpc_names[i]);
+      cJSON_AddNumberToObject(entry, "count", (double)data->total_rpc_calls[i]);
+      cJSON_AddItemToArray(rpc_calls, entry);
     }
   }
-  APPEND("\n");
-  APPEND("  ]\n");
+  cJSON_AddItemToObject(root, "rpc_calls", rpc_calls);
 
-  APPEND("}\n");
-
-#undef APPEND
-
-  return offset;
+  return root;
 }

@@ -56,4 +56,17 @@ size_t connection_manager_collect_metrics(const connection_manager_t* mgr,
 // Return number of connected peers
 size_t connection_manager_count(const connection_manager_t* mgr);
 
+// Add a peer with friend pinning. Friend peers skip Hebbian decay eviction.
+peer_connection_t* connection_manager_add_friend(connection_manager_t* mgr,
+                                                  const node_id_t* remote_id,
+                                                  const struct sockaddr_storage* peer_addr,
+                                                  scheduler_pool_t* pool);
+
+// Check if a peer is a friend
+bool connection_manager_is_friend(const connection_manager_t* mgr,
+                                  const node_id_t* remote_id);
+
+// Count friend peers (connected or not)
+size_t connection_manager_friend_count(const connection_manager_t* mgr);
+
 #endif // OFFS_CONNECTION_MANAGER_H

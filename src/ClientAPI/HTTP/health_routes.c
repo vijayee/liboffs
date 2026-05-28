@@ -4,6 +4,8 @@
 #include "health_routes.h"
 #include "http_request.h"
 #include "http_response.h"
+#include <cJSON.h>
+#include <stdlib.h>
 #include <string.h>
 #include <http_parser.h>
 
@@ -16,9 +18,11 @@ static int _health_middleware(http_request_t* request, http_response_t* response
   const health_context_t* ctx = (const health_context_t*)user_data;
   health_data_t data = health_data_collect(ctx);
 
-  char json[8192];
-  size_t len = health_data_to_json(&data, json, sizeof(json));
-  if (len == 0) {
+  cJSON* json = health_data_to_json(&data);
+  char* json_str = cJSON_Print(json);
+  cJSON_Delete(json);
+
+  if (json_str == NULL) {
     http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
     http_response_end(response);
     return 1;
@@ -26,8 +30,9 @@ static int _health_middleware(http_request_t* request, http_response_t* response
 
   http_response_set_status(response, HTTP_STATUS_OK);
   http_response_set_header(response, "Content-Type", "application/json");
-  http_response_write(response, json, len);
+  http_response_write(response, json_str, strlen(json_str));
   http_response_end(response);
+  free(json_str);
   return 1;
 }
 

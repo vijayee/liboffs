@@ -6,6 +6,7 @@
 #include <time.h>
 #include "../BlockCache/block_cache.h"
 #include "../ClientAPI/HTTP/http_server.h"
+#include "../Configuration/config_pending.h"
 #include "../Network/network.h"
 #include "../Platform/platform.h"
 #include "../Util/allocator.h"
@@ -15,13 +16,14 @@
 
 offs_node_t* offs_node_create(config_t* config, authority_t* authority) {
   offs_node_t* node = get_clear_memory(sizeof(offs_node_t));
-  node->config = config;
+  node->config = config_deep_copy(config);
   node->authority = authority;
   node->running = ATOMIC_VAR_INIT(0);
   node->draining = ATOMIC_VAR_INIT(0);
 
   node->scheduler = scheduler_pool_create(config->scheduler_thread_count);
   if (node->scheduler == NULL) {
+    config_free(node->config);
     free(node);
     return NULL;
   }
@@ -29,6 +31,7 @@ offs_node_t* offs_node_create(config_t* config, authority_t* authority) {
   node->timer = timer_actor_create();
   if (node->timer == NULL) {
     scheduler_pool_destroy(node->scheduler);
+    config_free(node->config);
     free(node);
     return NULL;
   }
@@ -176,5 +179,73 @@ void offs_node_destroy(offs_node_t* node) {
     scheduler_pool_destroy(node->scheduler);
   }
 
+  config_free(node->config);
   free(node);
+}
+
+void offs_node_restart(offs_node_t* node, const char* data_dir) {
+  if (node == NULL || data_dir == NULL) return;
+
+  log_info("offs_node_restart: beginning graceful restart");
+
+  /* Phase 1: Stop everything */
+  offs_node_stop(node);
+
+  /* Phase 2: Tear down subsystems */
+  if (node->network != NULL) {
+    network_destroy(node->network);
+    node->network = NULL;
+  }
+  if (node->block_cache != NULL) {
+    block_cache_destroy(node->block_cache);
+    node->block_cache = NULL;
+  }
+  if (node->http_server != NULL) {
+    http_server_destroy(node->http_server);
+    node->http_server = NULL;
+  }
+  if (node->timer != NULL) {
+    timer_actor_destroy(node->timer);
+    node->timer = NULL;
+  }
+  if (node->scheduler != NULL) {
+    scheduler_pool_destroy(node->scheduler);
+    node->scheduler = NULL;
+  }
+
+  /* Phase 3: Load pending config */
+  config_t* new_config = config_pending_load(data_dir);
+  if (new_config == NULL) {
+    log_error("offs_node_restart: failed to load pending config, restarting with current config");
+    new_config = config_deep_copy(node->config);
+  }
+
+  config_free(node->config);
+  node->config = new_config;
+
+  /* Phase 4: Re-create scheduler and timer */
+  node->scheduler = scheduler_pool_create(new_config->scheduler_thread_count);
+  if (node->scheduler == NULL) {
+    log_error("offs_node_restart: failed to create scheduler pool");
+    return;
+  }
+
+  node->timer = timer_actor_create();
+  if (node->timer == NULL) {
+    log_error("offs_node_restart: failed to create timer actor");
+    scheduler_pool_destroy(node->scheduler);
+    node->scheduler = NULL;
+    return;
+  }
+
+  /* Phase 5: Start with new config */
+  if (offs_node_start(node) != 0) {
+    log_error("offs_node_restart: offs_node_start failed");
+    return;
+  }
+
+  /* Phase 6: Mark pending config as applied */
+  config_pending_mark_applied(data_dir);
+
+  log_info("offs_node_restart: restart complete");
 }
