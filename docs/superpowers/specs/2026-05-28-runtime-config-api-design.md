@@ -2,23 +2,24 @@
 
 ## Overview
 
-Add a client API to read and update node configuration at runtime. Dynamic settings
-apply immediately. Static settings are saved to a pending config file and take effect
-on the next node restart — which the API can also trigger.
+Add a client API to read and update node configuration. All config changes are
+validated and saved to a pending config file, then take effect on the next node
+restart — which the API can also trigger. There is no partial/dynamic application;
+every change follows the same validate → save → restart path.
 
 ## Endpoints
 
-| Method | Path              | Auth                          | Description                                |
-|--------|-------------------|-------------------------------|--------------------------------------------|
-| GET    | `/config`         | Transport-gated               | Return full current config as JSON         |
-| PUT    | `/config`         | Transport-gated               | Update config; apply dynamic, stage static |
-| POST   | `/config/restart` | Local transports only         | Trigger graceful node restart              |
+| Method | Path              | Auth                          | Description                              |
+|--------|-------------------|-------------------------------|------------------------------------------|
+| GET    | `/config`         | Transport-gated               | Return full current config as JSON       |
+| PUT    | `/config`         | Transport-gated               | Validate and save pending config changes |
+| POST   | `/config/restart` | Local transports only         | Trigger graceful node restart            |
 
 ## Auth Model — Transport-Gated
 
-The auth middleware is refactored to always run, but is a no-op when
-`api_key_hash == NULL`. Once a key is set, every request requires a valid Bearer
-token **unless** the transport is locally bound.
+The existing auth middleware (registered only when `api_key_hash != NULL`)
+continues to work as-is. Config endpoints check auth the same way block_routes
+and peer_routes do.
 
 | Transport | Binding              | Auth for `/config` | `/config/restart` |
 |-----------|----------------------|--------------------|--------------------|
@@ -39,7 +40,8 @@ requests arriving on that server are trusted. If another HTTP server is bound to
 
 ## PUT /config — Request
 
-All fields optional; send only what you want to change.
+All fields optional; send only what you want to change. Every field listed here
+requires a restart to take effect.
 
 ```json
 {
@@ -76,37 +78,18 @@ All fields optional; send only what you want to change.
 
 ```json
 {
-  "applied": ["api_key_hash", "rate_limits.STORE_BLOCK.base_rate", "max_capacity_bytes"],
-  "pending_restart": ["cache_size", "http_port", "https_enabled", "https_cert_path"],
+  "staged": ["api_key_hash", "cache_size", "http_port", "rate_limits.STORE_BLOCK.base_rate"],
   "rejected": [],
   "restart_required": true
 }
 ```
 
-- **applied**: Dynamic fields changed immediately.
-- **pending_restart**: Static fields saved to disk; take effect on next node start.
-- **rejected**: Fields that failed validation with reason strings.
-- **restart_required**: `true` if any static field was changed.
+- **staged**: Fields validated and saved to pending config.
+- **rejected**: Fields that failed validation, each with a reason string.
+- **restart_required**: `true` if any fields were staged (always `true` when `staged` is non-empty).
 
-## Field Classification
-
-### Dynamic (applied immediately)
-
-| Field              | How applied                                                       |
-|--------------------|-------------------------------------------------------------------|
-| `api_key_hash`     | Update `config_t.api_key_hash`. Auth middleware reads it per-request — takes effect immediately. NULL→value activates auth; value→NULL deactivates; value→value rotates the key. |
-| `rate_limits.*`    | Store mutable config copy on `rate_limit_table_t`. Update the table's config fields. Next `rate_limit_check` call uses new values. |
-| `max_capacity_bytes`| Update `block_cache->max_capacity_bytes`. Must be >= current bytes used (shrink only). If new value < current usage, reject. |
-
-### Static (saved to pending config, restart required)
-
-`cache_size`, `max_snapshots`, `max_wals`, `scheduler_thread_count`,
-`http_enabled`, `http_port`, `https_enabled`, `https_port`, `https_cert_path`,
-`https_key_path`, `unix_enabled`, `tcp_enabled`, `tcp_port`, `ws_enabled`,
-`ws_port`, `wt_enabled`, `wt_port`
-
-These are all bind-time or alloc-time decisions — changing them requires tearing
-down and re-creating the affected subsystem.
+If no fields were staged (all rejected or empty body), `restart_required` is
+`false` and no file is written.
 
 ## Validation Flow
 
@@ -116,17 +99,21 @@ PUT /config
   → For each key in request:
       ├─ Unknown key?       → rejected: "unknown field: <key>"
       ├─ Wrong type?        → rejected: "expected <type> for <key>, got <actual>"
-      ├─ Fails range check? → rejected: "<key>: <reason>"
-      ├─ Dynamic field?     → apply immediately → applied
-      └─ Static field?      → stage in pending_config → pending_restart
-  → If any static fields staged: write pending config to disk
-  → If api_key_hash changed: update auth middleware state
-  → Return combined result
+      └─ Fails range check? → rejected: "<key>: <reason>"
+  → Merge valid fields into pending config
+  → config_validate() on the merged config
+  → If any cross-field constraints fail → all rejected with reasons
+  → Write pending_config.json to disk
+  → Return result
 ```
 
 Validation rules are the same as `config_validate()` — numeric ranges,
 cross-field constraints (e.g., `lru_size <= cache_size`), cert/key file
 existence for TLS settings.
+
+Fields that pass per-field validation but fail cross-field validation are all
+rejected together (no partial staging). This avoids writing an internally
+inconsistent config to disk.
 
 ## Pending Config File
 
@@ -139,22 +126,28 @@ renamed to `pending_config.applied` so it isn't re-applied on subsequent starts.
 If the file exists but startup fails (config invalid), the file is preserved so
 the operator can fix it.
 
+Each PUT to `/config` merges the new fields into the existing pending config (if
+any). Fields not mentioned in the request retain their previously staged values.
+Sending `null` for a field removes it from the pending config (reverts to
+compiled default on next restart).
+
 ## POST /config/restart
 
-Available only on local transports. Sequence:
+Available only on local transports (see auth table above). Sequence:
 
 1. Verify a pending config file exists (return 409 if not)
 2. Validate the pending config (return 400 if invalid)
-3. Return `202 Accepted`
+3. Return `202 Accepted` with `{"message": "restarting"}`
 4. Begin graceful restart on a background thread:
    a. `offs_node_stop()` — drain HTTP connections, stop network, flush, persist peers
    b. `offs_node_destroy()` — free all subsystems
-   c. Load pending config, merge into new `config_t`
+   c. Load pending config, merge into a new `config_t`
    d. `offs_node_create()` + `offs_node_start()` — bring up with new config
-   e. Re-create and re-bind HTTP server(s) with the same transport settings
+   e. Re-create and re-bind HTTP server(s) using the new transport settings
    f. Rename `pending_config.json` → `pending_config.applied`
    g. Re-register all routes (off, block, peer, config, health)
-   h. Send response to any waiting client (or client polls GET /config to confirm)
+   h. Caller can poll `GET /config` to confirm the restart completed (new config
+      values will be reflected, and `restart_required` will be `false`)
 
 The `202 Accepted` response is sent before the restart begins because the HTTP
 server will be torn down during the restart.
@@ -162,8 +155,8 @@ server will be torn down during the restart.
 ## cJSON Integration
 
 We add [cJSON](https://github.com/DaveGamble/cJSON) (MIT, single `.c`/`.h`) as a
-vendored dependency. It handles both parsing (cJSON_Parse) and generation
-(cJSON_CreateObject, cJSON_Print).
+vendored dependency. It handles both parsing (`cJSON_Parse`) and generation
+(`cJSON_CreateObject`, `cJSON_Print`).
 
 ### New usage
 
@@ -174,14 +167,14 @@ vendored dependency. It handles both parsing (cJSON_Parse) and generation
 
 All existing manual `snprintf`/`asprintf` JSON construction is replaced with cJSON:
 
-| File                  | Current approach                  | Replace with                          |
-|-----------------------|-----------------------------------|---------------------------------------|
-| `health_handler.c`    | 30+ APPEND macro calls            | cJSON object builder                  |
-| `peer_routes.c`       | snprintf into 64KB buffer + asprintf | cJSON object/array builder          |
-| `ws_connection.c`     | stack buffer + health_data_to_json | cJSON → cJSON_Print                   |
-| `tcp_connection.c`    | stack buffer + health_data_to_json | cJSON → cJSON_Print                   |
-| `wt_connection.c`     | stack buffer + health_data_to_json | cJSON → cJSON_Print                   |
-| `unix_connection.c`   | stack buffer + health_data_to_json | cJSON → cJSON_Print                   |
+| File                  | Current approach                    | Replace with                    |
+|-----------------------|-------------------------------------|---------------------------------|
+| `health_handler.c`    | 30+ APPEND macro calls              | cJSON object builder            |
+| `peer_routes.c`       | snprintf into 64KB buffer + asprintf| cJSON object/array builder      |
+| `ws_connection.c`     | stack buffer + health_data_to_json  | cJSON → cJSON_Print             |
+| `tcp_connection.c`    | stack buffer + health_data_to_json  | cJSON → cJSON_Print             |
+| `wt_connection.c`     | stack buffer + health_data_to_json  | cJSON → cJSON_Print             |
+| `unix_connection.c`   | stack buffer + health_data_to_json  | cJSON → cJSON_Print             |
 
 `health_data_to_json` is refactored to return a `cJSON*` tree instead of writing
 into a pre-allocated buffer. Callers use `cJSON_Print()` to serialize. This
@@ -191,30 +184,20 @@ tracking).
 
 ## Implementation Pieces
 
-1. **Vendor cJSON** — add `cJSON.c`/`cJSON.h` to `src/Util/` or a new `src/JSON/`
+1. **Vendor cJSON** — add `cJSON.c`/`cJSON.h` to `src/JSON/`
 2. **`config_routes.c`/`.h`** — new route module: GET, PUT, POST /config/restart
-3. **`config_pending.c`/`.h`** — save/load/apply pending config file
-4. **`rate_limit_config_update()`** — `rate_limit.c` — mutate rate limit config at runtime
-5. **`block_cache_set_max_capacity()`** — `block_cache.c` — update max capacity
-6. **`offs_node_restart()`** — `node.c` — graceful in-process restart
-7. **Auth middleware refactor** — always register; no-op when `api_key_hash == NULL`
-8. **Transport local-binding check** — `http_server_t` exposes whether it is locally bound
-9. **Wire `rate_limit_check` into RPC dispatch** — prerequisite; currently only called in tests
-10. **Retrofit existing JSON users** — health_handler, peer_routes, transport connections
-
-## Dependencies
-
-- `rate_limit_check` must be wired into `network.c` RPC dispatch before
-  rate limit config updates are meaningful. Without this, rate limit config
-  changes are stored but have no effect on actual traffic.
+3. **`config_pending.c`/`.h`** — save/load/merge pending config file
+4. **`offs_node_restart()`** — `node.c` — graceful in-process restart
+5. **Transport local-binding check** — `http_server_t` exposes whether it is locally bound
+6. **Retrofit existing JSON users** — health_handler, peer_routes, transport connections
 
 ## Out of Scope
 
 - Config update via non-HTTP transports (WS, WT, TCP) — can be added later using
   the same internal functions
-- Rollback of failed config changes (dynamic fields are applied immediately with
-  no undo)
+- Rollback of failed restarts — if the new config fails to start, the node is down
+  and requires manual intervention
 - Config profiles or presets
 - `index_bucket_size`, `section_size`, `max_tuple_size`, `min_tuple_size`,
-  `descriptor_pad`, `section_cache_count` — these remain static-only
-  (startup config file), not exposed via the runtime API
+  `descriptor_pad`, `section_cache_count` — these remain startup-only
+  (config file), not exposed via the runtime API
