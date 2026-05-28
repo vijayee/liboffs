@@ -39,4 +39,8 @@ void offs_node_stop_http(offs_node_t* node);
 void offs_node_stop_network(offs_node_t* node);
 void offs_node_destroy(offs_node_t* node);
 
+/* Trigger a graceful restart using pending config.
+   Must only be called from a local transport handler. */
+void offs_node_restart(offs_node_t* node, const char* data_dir);
+
 #endif // OFFS_NODE_H
