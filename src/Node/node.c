@@ -23,6 +23,7 @@ offs_node_t* offs_node_create(config_t* config, authority_t* authority) {
 
   node->scheduler = scheduler_pool_create(config->scheduler_thread_count);
   if (node->scheduler == NULL) {
+    config_free(node->config);
     free(node);
     return NULL;
   }
@@ -30,6 +31,7 @@ offs_node_t* offs_node_create(config_t* config, authority_t* authority) {
   node->timer = timer_actor_create();
   if (node->timer == NULL) {
     scheduler_pool_destroy(node->scheduler);
+    config_free(node->config);
     free(node);
     return NULL;
   }

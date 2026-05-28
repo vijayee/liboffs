@@ -5,7 +5,6 @@
 #define OFFS_CONFIG_ROUTES_H
 
 #include "http_server.h"
-#include "../../Scheduler/scheduler.h"
 #include "../../Configuration/config.h"
 
 typedef struct offs_node_t offs_node_t;

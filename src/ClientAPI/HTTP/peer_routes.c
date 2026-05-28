@@ -257,6 +257,7 @@ static void _peer_info_handler(http_request_t* request, http_response_t* respons
       http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
       http_response_end(response);
       peer_info_destroy(info);
+      free(info);
       return;
     }
 
@@ -267,6 +268,7 @@ static void _peer_info_handler(http_request_t* request, http_response_t* respons
 
     free(b58);
     peer_info_destroy(info);
+    free(info);
     return;
   }
 
@@ -276,6 +278,7 @@ static void _peer_info_handler(http_request_t* request, http_response_t* respons
     http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
     http_response_end(response);
     peer_info_destroy(info);
+    free(info);
     return;
   }
 
@@ -287,6 +290,7 @@ static void _peer_info_handler(http_request_t* request, http_response_t* respons
     http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
     http_response_end(response);
     peer_info_destroy(info);
+    free(info);
     return;
   }
 
@@ -297,6 +301,7 @@ static void _peer_info_handler(http_request_t* request, http_response_t* respons
 
   free(cbor_bytes);
   peer_info_destroy(info);
+  free(info);
 }
 
 /* --- POST /peer/connect --- */

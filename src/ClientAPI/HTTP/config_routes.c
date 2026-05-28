@@ -157,7 +157,6 @@ static void _config_put_handler(http_request_t* request, http_response_t* respon
   cJSON* rejected = cJSON_CreateArray();
   cJSON* staged = cJSON_CreateArray();
   bool has_valid = false;
-  bool has_rejected = false;
 
   cJSON* item = incoming->child;
   while (item != NULL) {
@@ -166,7 +165,6 @@ static void _config_put_handler(http_request_t* request, http_response_t* respon
       cJSON_AddStringToObject(entry, "field", item->string);
       cJSON_AddStringToObject(entry, "reason", "unknown field");
       cJSON_AddItemToArray(rejected, entry);
-      has_rejected = true;
       item = item->next;
       continue;
     }
@@ -183,7 +181,6 @@ static void _config_put_handler(http_request_t* request, http_response_t* respon
       cJSON_AddStringToObject(entry, "field", item->string);
       cJSON_AddStringToObject(entry, "reason", "expected string or null");
       cJSON_AddItemToArray(rejected, entry);
-      has_rejected = true;
       item = item->next;
       continue;
     }
@@ -200,7 +197,6 @@ static void _config_put_handler(http_request_t* request, http_response_t* respon
       cJSON_AddStringToObject(entry, "field", item->string);
       cJSON_AddStringToObject(entry, "reason", "expected boolean");
       cJSON_AddItemToArray(rejected, entry);
-      has_rejected = true;
       item = item->next;
       continue;
     }
@@ -211,7 +207,6 @@ static void _config_put_handler(http_request_t* request, http_response_t* respon
       cJSON_AddStringToObject(entry, "field", item->string);
       cJSON_AddStringToObject(entry, "reason", "expected number");
       cJSON_AddItemToArray(rejected, entry);
-      has_rejected = true;
       item = item->next;
       continue;
     }
@@ -235,7 +230,6 @@ static void _config_put_handler(http_request_t* request, http_response_t* respon
       cJSON_AddStringToObject(entry, "field", "*");
       cJSON_AddStringToObject(entry, "reason", "failed to write pending config");
       cJSON_AddItemToArray(rejected, entry);
-      has_rejected = true;
       cJSON_Delete(staged);
       staged = cJSON_CreateArray();
       restart_required = false;
@@ -297,6 +291,12 @@ static void _config_restart_handler(http_request_t* request, http_response_t* re
   offs_node_restart(ctx->node, ctx->data_dir);
 }
 
+static void _config_routes_ctx_destroy(void* data) {
+  config_routes_ctx_t* ctx = (config_routes_ctx_t*)data;
+  free(ctx->data_dir);
+  free(ctx);
+}
+
 void config_routes_register(http_server_t* server, offs_node_t* node,
                             const config_t* config, const char* data_dir) {
   (void)config; /* unused — config is accessed via node->config */
@@ -305,7 +305,8 @@ void config_routes_register(http_server_t* server, offs_node_t* node,
   ctx->node = node;
   ctx->data_dir = strdup(data_dir);
 
-  http_server_get_with_data(server, "/config", _config_get_handler, ctx, free);
+  http_server_get_with_data(server, "/config", _config_get_handler, ctx,
+                            _config_routes_ctx_destroy);
   http_server_put_with_data(server, "/config", _config_put_handler, ctx, NULL);
   http_server_post_with_data(server, "/config/restart", _config_restart_handler, ctx, NULL);
 }
