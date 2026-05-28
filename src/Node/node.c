@@ -13,11 +13,10 @@
 #include "../Util/log.h"
 #include <stdbool.h>
 #include <stdlib.h>
-#include <string.h>
 
 offs_node_t* offs_node_create(config_t* config, authority_t* authority) {
   offs_node_t* node = get_clear_memory(sizeof(offs_node_t));
-  node->config = config;
+  node->config = config_deep_copy(config);
   node->authority = authority;
   node->running = ATOMIC_VAR_INIT(0);
   node->draining = ATOMIC_VAR_INIT(0);
@@ -178,23 +177,8 @@ void offs_node_destroy(offs_node_t* node) {
     scheduler_pool_destroy(node->scheduler);
   }
 
+  config_free(node->config);
   free(node);
-}
-
-static config_t* _config_deep_copy(const config_t* src) {
-  config_t* new_config = get_clear_memory(sizeof(config_t));
-  *new_config = *src;
-  if (src->api_key_hash)
-    new_config->api_key_hash = strdup(src->api_key_hash);
-  if (src->https_cert_path)
-    new_config->https_cert_path = strdup(src->https_cert_path);
-  if (src->https_key_path)
-    new_config->https_key_path = strdup(src->https_key_path);
-  if (src->tcp_tls_cert_path)
-    new_config->tcp_tls_cert_path = strdup(src->tcp_tls_cert_path);
-  if (src->tcp_tls_key_path)
-    new_config->tcp_tls_key_path = strdup(src->tcp_tls_key_path);
-  return new_config;
 }
 
 void offs_node_restart(offs_node_t* node, const char* data_dir) {
@@ -231,9 +215,10 @@ void offs_node_restart(offs_node_t* node, const char* data_dir) {
   config_t* new_config = config_pending_load(data_dir);
   if (new_config == NULL) {
     log_error("offs_node_restart: failed to load pending config, restarting with current config");
-    new_config = _config_deep_copy(node->config);
+    new_config = config_deep_copy(node->config);
   }
 
+  config_free(node->config);
   node->config = new_config;
 
   /* Phase 4: Re-create scheduler and timer */

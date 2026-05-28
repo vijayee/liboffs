@@ -3,8 +3,10 @@
 //
 
 #include "config.h"
+#include "../Util/allocator.h"
 #include "../Util/log.h"
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 config_t config_default() {
@@ -222,4 +224,30 @@ int config_validate(const config_t* config) {
   }
 
   return valid ? 0 : -1;
+}
+
+config_t* config_deep_copy(const config_t* src) {
+  config_t* copy = get_clear_memory(sizeof(config_t));
+  *copy = *src;
+  if (src->api_key_hash)
+    copy->api_key_hash = strdup(src->api_key_hash);
+  if (src->https_cert_path)
+    copy->https_cert_path = strdup(src->https_cert_path);
+  if (src->https_key_path)
+    copy->https_key_path = strdup(src->https_key_path);
+  if (src->tcp_tls_cert_path)
+    copy->tcp_tls_cert_path = strdup(src->tcp_tls_cert_path);
+  if (src->tcp_tls_key_path)
+    copy->tcp_tls_key_path = strdup(src->tcp_tls_key_path);
+  return copy;
+}
+
+void config_free(config_t* config) {
+  if (config == NULL) return;
+  free(config->api_key_hash);
+  free(config->https_cert_path);
+  free(config->https_key_path);
+  free(config->tcp_tls_cert_path);
+  free(config->tcp_tls_key_path);
+  free(config);
 }

@@ -62,4 +62,6 @@ typedef struct {
 } config_t;
 config_t config_default();
 int config_validate(const config_t* config);
+config_t* config_deep_copy(const config_t* src);
+void config_free(config_t* config);
 #endif //OFFS_CONFIG_H
