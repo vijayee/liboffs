@@ -10,6 +10,7 @@
 #include "../Network/topology_metrics.h"
 #include "../Network/node_id.h"
 #include "../BlockCache/block_cache.h"
+#include <cJSON.h>
 
 typedef struct health_context_t {
   topology_metrics_t* topology_metrics;
@@ -38,6 +39,6 @@ typedef struct health_data_t {
 } health_data_t;
 
 health_data_t health_data_collect(const health_context_t* ctx);
-size_t health_data_to_json(const health_data_t* data, char* buf, size_t buf_size);
+cJSON* health_data_to_json(const health_data_t* data);
 
 #endif
