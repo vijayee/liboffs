@@ -32,6 +32,8 @@ and peer_routes do.
 | WS        | 0.0.0.0 / public     | Bearer token       | Blocked            |
 | WT        | any                  | Bearer token       | Blocked            |
 | TCP       | any                  | Bearer token       | Blocked            |
+| TCPS      | 127.0.0.1 / local IP | Never              | Allowed            |
+| TCPS      | 0.0.0.0 / public     | Bearer token       | Blocked            |
 
 "Local IP" means the socket's bind address is a loopback or link-local address.
 The decision is per-server — if an HTTP server is bound to `127.0.0.1:8080`, all
@@ -70,7 +72,10 @@ requires a restart to take effect.
   "ws_enabled": true,
   "ws_port": 9001,
   "wt_enabled": false,
-  "wt_port": 9002
+  "wt_port": 9002,
+  "tcp_tls_enabled": false,
+  "tcp_tls_cert_path": "/etc/offs/tcp-cert.pem",
+  "tcp_tls_key_path": "/etc/offs/tcp-key.pem"
 }
 ```
 
