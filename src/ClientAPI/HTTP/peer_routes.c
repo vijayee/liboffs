@@ -14,9 +14,9 @@
 #include "../../Node/node.h"
 #include "../../Util/allocator.h"
 #include "../../Util/base58.h"
+#include <cJSON.h>
 #include <string.h>
 #include <stdlib.h>
-#include <stdio.h>
 #include <cbor.h>
 
 #ifdef HAS_QRENCODE
@@ -33,8 +33,6 @@ typedef struct {
 #define CONNECT_STATUS_INVALID_INFO     2
 #define CONNECT_STATUS_FAILED           3
 #define CONNECT_STATUS_REJECTED         4
-
-#define JSON_BUF_SIZE 65536
 
 /* --- Auth helper --- */
 
@@ -311,20 +309,16 @@ static void _peer_connect_handler(http_request_t* request, http_response_t* resp
 
   peer_info_t info;
   if (_decode_peer_info_body(request, &info) != 0) {
-    char* json = NULL;
-    int written = asprintf(&json,
-                           "{\"status\":%d,\"message\":\"Invalid peer info\"}",
-                           CONNECT_STATUS_INVALID_INFO);
-    if (written < 0 || json == NULL) {
-      http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
-      http_response_end(response);
-      return;
-    }
+    cJSON* json = cJSON_CreateObject();
+    cJSON_AddNumberToObject(json, "status", CONNECT_STATUS_INVALID_INFO);
+    cJSON_AddStringToObject(json, "message", "Invalid peer info");
+    char* json_str = cJSON_Print(json);
+    cJSON_Delete(json);
     http_response_set_status(response, HTTP_STATUS_OK);
     http_response_set_header(response, "Content-Type", "application/json");
-    http_response_write(response, json, (size_t)written);
+    http_response_write(response, json_str, strlen(json_str));
     http_response_end(response);
-    free(json);
+    free(json_str);
     return;
   }
 
@@ -349,11 +343,15 @@ static void _peer_connect_handler(http_request_t* request, http_response_t* resp
       break;
   }
 
-  char* json = NULL;
-  int written = asprintf(&json, "{\"status\":%d,\"message\":\"%s\"}", status, message);
+  cJSON* json = cJSON_CreateObject();
+  cJSON_AddNumberToObject(json, "status", status);
+  cJSON_AddStringToObject(json, "message", message);
   peer_info_destroy(&info);
 
-  if (written < 0 || json == NULL) {
+  char* json_str = cJSON_Print(json);
+  cJSON_Delete(json);
+
+  if (json_str == NULL) {
     http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
     http_response_end(response);
     return;
@@ -361,16 +359,12 @@ static void _peer_connect_handler(http_request_t* request, http_response_t* resp
 
   http_response_set_status(response, HTTP_STATUS_OK);
   http_response_set_header(response, "Content-Type", "application/json");
-  http_response_write(response, json, (size_t)written);
+  http_response_write(response, json_str, strlen(json_str));
   http_response_end(response);
-  free(json);
+  free(json_str);
 }
 
 /* --- GET /peers --- */
-
-static const char* _bool_str(bool value) {
-  return value ? "true" : "false";
-}
 
 static void _peer_list_handler(http_request_t* request, http_response_t* response,
                                 void* user_data) {
@@ -380,43 +374,30 @@ static void _peer_list_handler(http_request_t* request, http_response_t* respons
 
   connection_manager_t* mgr = &ctx->node->network->conn_mgr;
 
-  /* Build JSON array */
-  char* json = get_clear_memory(JSON_BUF_SIZE);
-  size_t offset = 0;
-  int written = snprintf(json, JSON_BUF_SIZE, "[");
-  if (written < 0) goto json_error;
-  offset = (size_t)written;
-
-  size_t entry_index = 0;
+  cJSON* arr = cJSON_CreateArray();
   for (size_t index = 0; index < mgr->peer_count; index++) {
     peer_connection_t* peer = mgr->peers[index];
     if (!peer->connected) continue;
-
-    const char* comma = (entry_index > 0) ? "," : "";
-    written = snprintf(json + offset, JSON_BUF_SIZE - offset,
-                       "%s{\"node_id\":\"%s\",\"connected\":true,\"is_friend\":%s}",
-                       comma, peer->remote_node_id.str,
-                       _bool_str(peer->is_friend));
-    if (written < 0 || (size_t)written >= JSON_BUF_SIZE - offset) goto json_error;
-    offset += (size_t)written;
-    entry_index++;
+    cJSON* entry = cJSON_CreateObject();
+    cJSON_AddStringToObject(entry, "node_id", peer->remote_node_id.str);
+    cJSON_AddBoolToObject(entry, "connected", true);
+    cJSON_AddBoolToObject(entry, "is_friend", peer->is_friend);
+    cJSON_AddItemToArray(arr, entry);
   }
 
-  written = snprintf(json + offset, JSON_BUF_SIZE - offset, "]");
-  if (written < 0) goto json_error;
-  offset += (size_t)written;
+  char* json_str = cJSON_Print(arr);
+  cJSON_Delete(arr);
+  if (json_str == NULL) {
+    http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_end(response);
+    return;
+  }
 
   http_response_set_status(response, HTTP_STATUS_OK);
   http_response_set_header(response, "Content-Type", "application/json");
-  http_response_write(response, json, offset);
+  http_response_write(response, json_str, strlen(json_str));
   http_response_end(response);
-  free(json);
-  return;
-
-json_error:
-  free(json);
-  http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
-  http_response_end(response);
+  free(json_str);
 }
 
 /* --- POST /friends --- */
@@ -464,11 +445,15 @@ static void _friend_add_handler(http_request_t* request, http_response_t* respon
   if (add_result != 0) {
     if (add_result == -2) {
       /* Already a friend */
-      const char* json = "{\"status\":\"already_friend\"}";
+      cJSON* json = cJSON_CreateObject();
+      cJSON_AddStringToObject(json, "status", "already_friend");
+      char* json_str = cJSON_Print(json);
+      cJSON_Delete(json);
       http_response_set_status(response, HTTP_STATUS_CONFLICT);
       http_response_set_header(response, "Content-Type", "application/json");
-      http_response_write(response, json, strlen(json));
+      http_response_write(response, json_str, strlen(json_str));
       http_response_end(response);
+      free(json_str);
     } else {
       /* OOM or other internal error */
       http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
@@ -485,11 +470,15 @@ static void _friend_add_handler(http_request_t* request, http_response_t* respon
   /* Try to connect immediately */
   _connect_to_peer(ctx->node, info);
 
-  const char* json = "{\"status\":\"added\"}";
+  cJSON* json = cJSON_CreateObject();
+  cJSON_AddStringToObject(json, "status", "added");
+  char* json_str = cJSON_Print(json);
+  cJSON_Delete(json);
   http_response_set_status(response, HTTP_STATUS_OK);
   http_response_set_header(response, "Content-Type", "application/json");
-  http_response_write(response, json, strlen(json));
+  http_response_write(response, json_str, strlen(json_str));
   http_response_end(response);
+  free(json_str);
 }
 
 /* --- DELETE /friends/:node_id --- */
@@ -563,11 +552,15 @@ static void _friend_remove_handler(http_request_t* request, http_response_t* res
   peer_info_destroy(removed);
   free(removed);
 
-  const char* json = "{\"status\":\"removed\"}";
+  cJSON* json = cJSON_CreateObject();
+  cJSON_AddStringToObject(json, "status", "removed");
+  char* json_str = cJSON_Print(json);
+  cJSON_Delete(json);
   http_response_set_status(response, HTTP_STATUS_OK);
   http_response_set_header(response, "Content-Type", "application/json");
-  http_response_write(response, json, strlen(json));
+  http_response_write(response, json_str, strlen(json_str));
   http_response_end(response);
+  free(json_str);
 }
 
 /* --- GET /friends --- */
@@ -581,42 +574,30 @@ static void _friend_list_handler(http_request_t* request, http_response_t* respo
   authority_t* authority = ctx->node->authority;
   connection_manager_t* mgr = &ctx->node->network->conn_mgr;
 
-  /* Build JSON array */
-  char* json = get_clear_memory(JSON_BUF_SIZE);
-  size_t offset = 0;
-  int written = snprintf(json, JSON_BUF_SIZE, "[");
-  if (written < 0) goto friend_json_error;
-  offset = (size_t)written;
-
+  cJSON* arr = cJSON_CreateArray();
   for (size_t index = 0; index < authority->friend_peer_count; index++) {
     peer_info_t* friend_peer = authority->friend_peers[index];
     peer_connection_t* conn = connection_manager_lookup(mgr, &friend_peer->node_id);
     bool connected = (conn != NULL && conn->connected);
-
-    const char* comma = (index > 0) ? "," : "";
-    written = snprintf(json + offset, JSON_BUF_SIZE - offset,
-                       "%s{\"node_id\":\"%s\",\"connected\":%s}",
-                       comma, friend_peer->node_id.str,
-                       _bool_str(connected));
-    if (written < 0 || (size_t)written >= JSON_BUF_SIZE - offset) goto friend_json_error;
-    offset += (size_t)written;
+    cJSON* entry = cJSON_CreateObject();
+    cJSON_AddStringToObject(entry, "node_id", friend_peer->node_id.str);
+    cJSON_AddBoolToObject(entry, "connected", connected);
+    cJSON_AddItemToArray(arr, entry);
   }
 
-  written = snprintf(json + offset, JSON_BUF_SIZE - offset, "]");
-  if (written < 0) goto friend_json_error;
-  offset += (size_t)written;
+  char* json_str = cJSON_Print(arr);
+  cJSON_Delete(arr);
+  if (json_str == NULL) {
+    http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_end(response);
+    return;
+  }
 
   http_response_set_status(response, HTTP_STATUS_OK);
   http_response_set_header(response, "Content-Type", "application/json");
-  http_response_write(response, json, offset);
+  http_response_write(response, json_str, strlen(json_str));
   http_response_end(response);
-  free(json);
-  return;
-
-friend_json_error:
-  free(json);
-  http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
-  http_response_end(response);
+  free(json_str);
 }
 
 /* --- Registration --- */
