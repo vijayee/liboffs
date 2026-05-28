@@ -10,6 +10,7 @@
 #include "ClientAPI/HTTP/health_routes.h"
 #include "ClientAPI/health_handler.h"
 #include "../../src/ClientAPI/HTTP/peer_routes.h"
+#include "../../src/ClientAPI/HTTP/config_routes.h"
 #include "../../src/Node/node.h"
 #include "../../src/Network/authority.h"
 #include "../../src/Network/network.h"
@@ -153,6 +154,7 @@ int main(int argc, char** argv) {
   block_routes_register(server, pool, bc, NULL, NULL);
   health_routes_register(server, &health_ctx);
   peer_routes_register(server, &node_obj, &config, NULL);
+  config_routes_register(server, &node_obj, &config, ".");
 
   unix_transport_t* unix_transport = NULL;
   if (unix_path != NULL) {
