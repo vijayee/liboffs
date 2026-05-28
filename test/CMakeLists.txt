@@ -90,6 +90,7 @@ if (BUILD_TESTING)
     # Use gtest_add_tests instead of gtest_discover_tests because msquic init
     # errors at runtime cause discover_tests to fail during build.
     gtest_add_tests(TARGET testliboffs TEST_LIST test_list)
+    set_tests_properties(${test_list} PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
     add_executable(test_file_transfer_integration test_file_transfer_integration.cpp test_node_main.c)
     add_dependencies(test_file_transfer_integration cbor)
     add_dependencies(test_file_transfer_integration offs)
@@ -148,6 +149,7 @@ if (BUILD_TESTING)
 
     file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/test.pdf DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
     file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/certs DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/certs DESTINATION ${CMAKE_BINARY_DIR})
 
     # offs-ca tool tests
     add_executable(test_offs_ca
