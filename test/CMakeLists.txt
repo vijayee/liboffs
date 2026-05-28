@@ -176,4 +176,11 @@ if (BUILD_TESTING)
     target_include_directories(test_client_api_wire_config PUBLIC ${C_INC})
     target_include_directories(test_client_api_wire_config PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
     add_test(NAME test_client_api_wire_config COMMAND test_client_api_wire_config)
+
+    add_executable(test_version
+      test_version.cpp
+    )
+    target_link_libraries(test_version PRIVATE offs GTest::gtest GTest::gtest_main)
+    target_include_directories(test_version PRIVATE ${C_INC} ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+    gtest_add_tests(TARGET test_version TEST_LIST version_test_list)
 endif()
