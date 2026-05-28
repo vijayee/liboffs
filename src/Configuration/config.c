@@ -50,6 +50,9 @@ config_t config_default() {
   config.ws_port = 9001;
   config.wt_enabled = false;
   config.wt_port = 9002;
+  config.tcp_tls_enabled = false;
+  config.tcp_tls_cert_path = NULL;
+  config.tcp_tls_key_path = NULL;
   config.api_key_hash = NULL;
   return config;
 }
@@ -192,6 +195,14 @@ int config_validate(const config_t* config) {
     }
   }
 
+  /* TCP TLS requires cert and key paths */
+  if (config->tcp_tls_enabled) {
+    if (config->tcp_tls_cert_path == NULL || config->tcp_tls_key_path == NULL) {
+      log_error("tcp_tls_enabled requires tcp_tls_cert_path and tcp_tls_key_path");
+      valid = false;
+    }
+  }
+
   /* API key hash format validation */
   if (config->api_key_hash != NULL) {
     size_t hash_len = strlen(config->api_key_hash);
@@ -200,8 +211,8 @@ int config_validate(const config_t* config) {
       valid = false;
     }
     /* API keys over plaintext remote transports are forbidden */
-    if (config->tcp_enabled) {
-      log_error("tcp_enabled cannot be used with api_key_hash (plaintext remote transport)");
+    if (config->tcp_enabled && !config->tcp_tls_enabled) {
+      log_error("tcp_enabled without TLS cannot be used with api_key_hash (plaintext remote transport)");
       valid = false;
     }
     if (config->ws_enabled) {

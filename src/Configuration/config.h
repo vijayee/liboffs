@@ -52,6 +52,11 @@ typedef struct {
   bool     wt_enabled;
   uint16_t wt_port;
 
+  /* TCP TLS */
+  bool     tcp_tls_enabled;
+  char*    tcp_tls_cert_path;
+  char*    tcp_tls_key_path;
+
   /* Auth */
   char*    api_key_hash;        // bcrypt hash ($2b$ prefix), NULL if auth disabled
 } config_t;
