@@ -112,7 +112,8 @@ TEST(HealthHTTP, GetHealthReturns200) {
 
   EXPECT_NE(strstr(response, "200"), nullptr);
   EXPECT_NE(strstr(response, "application/json"), nullptr);
-  EXPECT_NE(strstr(response, "\"status\": \"running\""), nullptr);
+  EXPECT_NE(strstr(response, "\"status\""), nullptr);
+  EXPECT_NE(strstr(response, "\"running\""), nullptr);
   EXPECT_NE(strstr(response, "\"block_cache\""), nullptr);
 
   close(fd);

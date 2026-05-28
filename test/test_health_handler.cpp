@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <cstring>
+#include <cstdlib>
 extern "C" {
 #include "../src/ClientAPI/health_handler.h"
 #include "../src/BlockCache/block_cache.h"
@@ -157,25 +158,17 @@ TEST(HealthHandler, ToJsonProducesValidOutput) {
   data.peer_count = 5;
   data.total_connections = 10;
 
-  char buf[4096];
-  size_t len = health_data_to_json(&data, buf, sizeof(buf));
-  ASSERT_GT(len, 0u);
-  EXPECT_LT(len, sizeof(buf));
+  cJSON* json = health_data_to_json(&data);
+  ASSERT_NE(json, nullptr);
+  char* json_str = cJSON_PrintUnformatted(json);
+  cJSON_Delete(json);
+  ASSERT_NE(json_str, nullptr);
 
-  EXPECT_NE(strstr(buf, "\"status\": \"running\""), nullptr);
-  EXPECT_NE(strstr(buf, "\"uptime_seconds\": 3600"), nullptr);
-  EXPECT_NE(strstr(buf, "\"peer_count\": 5"), nullptr);
-  EXPECT_NE(strstr(buf, "\"total_connections\": 10"), nullptr);
-}
-
-TEST(HealthHandler, ToJsonHandlesSmallBuffer) {
-  health_data_t data;
-  memset(&data, 0, sizeof(data));
-  data.status = "running";
-
-  char buf[8];
-  size_t len = health_data_to_json(&data, buf, sizeof(buf));
-  EXPECT_EQ(len, 0u);
+  EXPECT_NE(strstr(json_str, "\"status\":\"running\""), nullptr);
+  EXPECT_NE(strstr(json_str, "\"uptime_seconds\":3600"), nullptr);
+  EXPECT_NE(strstr(json_str, "\"peer_count\":5"), nullptr);
+  EXPECT_NE(strstr(json_str, "\"total_connections\":10"), nullptr);
+  free(json_str);
 }
 
 TEST(HealthHandler, ToJsonIncludesRpcCalls) {
@@ -184,11 +177,15 @@ TEST(HealthHandler, ToJsonIncludesRpcCalls) {
   data.status = "running";
   data.total_rpc_calls[0] = 99;
 
-  char buf[4096];
-  size_t len = health_data_to_json(&data, buf, sizeof(buf));
-  ASSERT_GT(len, 0u);
-  EXPECT_NE(strstr(buf, "\"name\": \"ping\""), nullptr);
-  EXPECT_NE(strstr(buf, "\"count\": 99"), nullptr);
+  cJSON* json = health_data_to_json(&data);
+  ASSERT_NE(json, nullptr);
+  char* json_str = cJSON_PrintUnformatted(json);
+  cJSON_Delete(json);
+  ASSERT_NE(json_str, nullptr);
+
+  EXPECT_NE(strstr(json_str, "\"name\":\"ping\""), nullptr);
+  EXPECT_NE(strstr(json_str, "\"count\":99"), nullptr);
+  free(json_str);
 }
 
 TEST(HealthHandler, ToJsonSkipsZeroRpcCalls) {
@@ -196,8 +193,12 @@ TEST(HealthHandler, ToJsonSkipsZeroRpcCalls) {
   memset(&data, 0, sizeof(data));
   data.status = "running";
 
-  char buf[4096];
-  size_t len = health_data_to_json(&data, buf, sizeof(buf));
-  ASSERT_GT(len, 0u);
-  EXPECT_EQ(strstr(buf, "\"name\": \"ping\""), nullptr);
+  cJSON* json = health_data_to_json(&data);
+  ASSERT_NE(json, nullptr);
+  char* json_str = cJSON_PrintUnformatted(json);
+  cJSON_Delete(json);
+  ASSERT_NE(json_str, nullptr);
+
+  EXPECT_NE(strstr(json_str, "\"rpc_calls\":[]"), nullptr);
+  free(json_str);
 }

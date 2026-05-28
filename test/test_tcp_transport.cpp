@@ -425,7 +425,8 @@ TEST_F(TestTcpTransport, HealthRequest) {
     client_api_health_response_t decoded;
     int decode_ret = client_api_health_response_decode(response, &decoded);
     ASSERT_EQ(decode_ret, 0);
-    EXPECT_NE(strstr(decoded.json_data, "\"status\": \"running\""), nullptr);
+    EXPECT_NE(strstr(decoded.json_data, "\"status\""), nullptr);
+    EXPECT_NE(strstr(decoded.json_data, "\"running\""), nullptr);
     client_api_health_response_destroy(&decoded);
     cbor_decref(&response);
 
