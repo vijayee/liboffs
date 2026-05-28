@@ -35,7 +35,7 @@ protected:
   std::vector<uint8_t> ca_der;
 
   void SetUp() override {
-    ca_der = pem_to_der("test/certs/ca_cert.pem");
+    ca_der = pem_to_der("certs/ca_cert.pem");
   }
 };
 

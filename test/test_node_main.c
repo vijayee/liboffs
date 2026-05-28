@@ -840,53 +840,51 @@ static void handle_measure_nodes_cmd(int client_fd, const char* args) {
     return;
   }
 
-  /* Parse space-separated target node_id strings */
-  wire_measure_nodes_t* payload = get_clear_memory(sizeof(wire_measure_nodes_t));
-  if (payload == NULL) {
-    send_response(client_fd, CTRL_RESP_ERROR " allocation failed");
+  /* Parse target node_id hex string */
+  char node_id_str[NODE_ID_STRING_SIZE];
+  if (sscanf(args, "%47s", node_id_str) != 1) {
+    send_response(client_fd, CTRL_RESP_ERROR " invalid args");
     return;
   }
 
-  memcpy(&payload->sender_id, &g_node.network->authority->local_id, sizeof(node_id_t));
-  payload->message_id = (uint64_t)(time(NULL)) ^ ((uint64_t)rand() << 32);
-  payload->probe_type = 0;
-  payload->target_count = 0;
-
-  /* Parse target node IDs from space-separated string */
-  char args_copy[512];
-  strncpy(args_copy, args, sizeof(args_copy) - 1);
-  args_copy[sizeof(args_copy) - 1] = '\0';
-
-  char* saveptr = NULL;
-  char* token = strtok_r(args_copy, " ", &saveptr);
-  while (token != NULL && payload->target_count < MEASURE_NODES_MAX_TARGETS) {
-    node_id_t target_id;
-    memset(&target_id, 0, sizeof(target_id));
-    if (node_id_from_string(token, &target_id) == 0) {
-      memcpy(&payload->targets[payload->target_count], &target_id, sizeof(node_id_t));
-      payload->target_count++;
-    }
-    token = strtok_r(NULL, " ", &saveptr);
-  }
-
-  if (payload->target_count == 0) {
-    free(payload);
-    send_response(client_fd, CTRL_RESP_ERROR " no valid target node_ids");
+  node_id_t target_id;
+  memset(&target_id, 0, sizeof(target_id));
+  if (node_id_from_string(node_id_str, &target_id) != 0) {
+    send_response(client_fd, CTRL_RESP_ERROR " invalid node_id");
     return;
   }
 
-  message_t msg;
-  memset(&msg, 0, sizeof(msg));
-  msg.type = NETWORK_MEASURE_NODES;
-  msg.payload = payload;
-  msg.payload_destroy = free;
+  peer_connection_t* peer = connection_manager_lookup(&g_node.network->conn_mgr, &target_id);
+  if (peer == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " peer not found");
+    return;
+  }
 
-  actor_send(&g_node.network->actor, &msg);
+  wire_measure_nodes_t measure;
+  memset(&measure, 0, sizeof(measure));
+  measure.message_id = (uint64_t)(time(NULL)) ^ ((uint64_t)rand() << 32);
+  memcpy(&measure.sender_id, &g_node.network->authority->local_id, sizeof(node_id_t));
+  measure.probe_type = 0;
+  measure.target_count = 1;
+  memcpy(&measure.targets[0], &target_id, sizeof(node_id_t));
 
-  char response[128];
-  snprintf(response, sizeof(response), "%s measure_nodes_injected",
-           CTRL_RESP_OK);
-  send_response(client_fd, response);
+  cbor_item_t* cbor = wire_measure_nodes_encode(&measure);
+  if (cbor == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " encode failed");
+    return;
+  }
+
+  int result = conn_state_send(g_node.network, peer, cbor);
+  cbor_decref(&cbor);
+
+  if (result == 0) {
+    char response[128];
+    snprintf(response, sizeof(response), "%s %llu",
+             CTRL_RESP_OK, (unsigned long long)measure.message_id);
+    send_response(client_fd, response);
+  } else {
+    send_response(client_fd, CTRL_RESP_ERROR " send failed");
+  }
 }
 static void handle_ping_capacity_cmd(int client_fd, const char* node_id_hex) {
   if (g_node.network == NULL) {

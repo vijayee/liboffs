@@ -538,6 +538,10 @@ static void network_handle_ping_response(network_t* network, message_t* msg) {
   if (peer != NULL) {
     peer_update_rtt(peer, (double)rtt_ms);
   }
+
+  // Hebbian frequency update: responsive peers get weight increase
+  float delta_w = hebbian_compute_delta(rtt_ms, 1.0f);
+  hebbian_frequency(&network->hebbian, &response->sender_id, delta_w);
 }
 
 // --- PingBlock handler ---
