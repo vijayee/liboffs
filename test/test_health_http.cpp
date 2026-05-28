@@ -119,9 +119,9 @@ TEST(HealthHTTP, GetHealthReturns200) {
   close(fd);
   http_server_stop(server);
   http_server_destroy(server);
-  block_cache_destroy(bc);
-  timer_actor_destroy(timer);
   scheduler_pool_stop(pool);
+  timer_actor_destroy(timer);
+  block_cache_destroy(bc);
   scheduler_pool_destroy(pool);
 }
 
@@ -238,9 +238,9 @@ TEST(HealthHTTP, HealthResponseContainsExpectedFields) {
   close(fd);
   http_server_stop(server);
   http_server_destroy(server);
-  block_cache_destroy(bc);
-  timer_actor_destroy(timer);
   scheduler_pool_stop(pool);
+  timer_actor_destroy(timer);
+  block_cache_destroy(bc);
   scheduler_pool_destroy(pool);
 }
 
