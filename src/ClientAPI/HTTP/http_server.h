@@ -50,6 +50,7 @@ typedef struct http_server_t {
   size_t max_connections;
   ATOMIC(size_t) active_connections;
   ATOMIC(uint8_t) draining;
+  uint8_t is_local_binding;
   platform_mutex_t* destroy_lock;
   server_destroy_node_t* destroy_head;
 } http_server_t;
