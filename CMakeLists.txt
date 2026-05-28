@@ -47,6 +47,10 @@ add_dependencies(cbor libcbor)
 add_library(http-parser STATIC deps/http-parser/http_parser.c)
 target_include_directories(http-parser PUBLIC deps/http-parser)
 
+# cJSON
+add_library(cjson STATIC deps/cJSON/cJSON.c)
+target_include_directories(cjson PUBLIC deps/cJSON)
+
 add_library(offs STATIC ${C_SRC})
 add_dependencies(offs cbor)
 add_dependencies(offs http-parser)
@@ -57,8 +61,10 @@ target_include_directories(offs PRIVATE ${hashmap_SOURCE_DIR}/include)
 target_include_directories(offs PRIVATE ${POLL_DANCER_ROOT}/include)
 target_include_directories(offs PRIVATE ${POLL_DANCER_ROOT}/src)
 target_include_directories(offs PUBLIC ${LIBCBOR_BUILD_PATH}/include)
+target_include_directories(offs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps/cJSON)
 target_link_libraries(offs PRIVATE ${POLL_DANCER_ROOT}/build/libpoll_dancer.a)
 target_link_libraries(offs PRIVATE http-parser)
+target_link_libraries(offs PRIVATE cjson)
 target_link_libraries(offs PRIVATE crypt)
 
 # Standalone C test for OFD resolver (not gtest-based)
