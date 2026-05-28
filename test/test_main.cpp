@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 #include <string.h>
+#include <openssl/crypto.h>
 extern "C" {
 #include "../src/RefCounter/refcounter.h"
 #include "../src/Buffer/buffer.h"
@@ -15,6 +16,14 @@ extern "C" {
 #include "../src/BlockCache/index.h"
 #include "Platform/platform.h"
 #include <time.h>
+}
+
+int main(int argc, char** argv) {
+  OPENSSL_init_crypto(OPENSSL_INIT_NO_LOAD_CONFIG, NULL);
+  testing::InitGoogleTest(&argc, argv);
+  int result = RUN_ALL_TESTS();
+  OPENSSL_cleanup();
+  return result;
 }
 
 TEST(TestFRand, TestFRandFunction) {
