@@ -19,6 +19,33 @@ typedef enum {
   UPDATE_MSG_APPLY = 3
 } update_msg_e;
 
+static const char* _state_to_string(update_state_e state) {
+  switch (state) {
+    case update_state_idle:        return "idle";
+    case update_state_checking:    return "checking";
+    case update_state_downloading: return "downloading";
+    case update_state_staged:      return "staged";
+    case update_state_draining:    return "draining";
+    case update_state_applying:    return "applying";
+    default:                       return "unknown";
+  }
+}
+
+static void _update_status_ctx(update_actor_t* ua) {
+  if (ua->status_ctx == NULL) return;
+  snprintf(ua->status_ctx->state, sizeof(ua->status_ctx->state),
+           "%s", _state_to_string(ua->state));
+  version_to_string(&ua->current_version, ua->status_ctx->current_version,
+                    sizeof(ua->status_ctx->current_version));
+  if (ua->pending_update != NULL) {
+    version_to_string(&ua->pending_update->version,
+                      ua->status_ctx->available_version,
+                      sizeof(ua->status_ctx->available_version));
+  } else {
+    ua->status_ctx->available_version[0] = '\0';
+  }
+}
+
 static void _start_check(update_actor_t* ua);
 static void _drain_tick(update_actor_t* ua);
 static void _apply_update(update_actor_t* ua);
@@ -50,24 +77,29 @@ static void _start_check(update_actor_t* ua) {
   update_info_t* info;
 
   ua->state = update_state_checking;
+  _update_status_ctx(ua);
   info = update_check_fetch(&ua->config, &ua->current_version);
   if (info == NULL) {
     ua->state = update_state_idle;
+    _update_status_ctx(ua);
     return;
   }
   if (!info->available) {
     update_info_free(info);
     ua->state = update_state_idle;
+    _update_status_ctx(ua);
     return;
   }
 
   ua->state = update_state_downloading;
+  _update_status_ctx(ua);
   ua->pending_update = info;
 
   if (!update_download(info, ua->staging_dir, ua->config.github_token)) {
     update_info_free(info);
     ua->pending_update = NULL;
     ua->state = update_state_idle;
+    _update_status_ctx(ua);
     return;
   }
 
@@ -75,10 +107,12 @@ static void _start_check(update_actor_t* ua) {
     update_info_free(info);
     ua->pending_update = NULL;
     ua->state = update_state_idle;
+    _update_status_ctx(ua);
     return;
   }
 
   ua->state = update_state_staged;
+  _update_status_ctx(ua);
 
   /* Begin draining */
   {
@@ -88,6 +122,7 @@ static void _start_check(update_actor_t* ua) {
   }
   *ua->draining_flag = 1;
   ua->state = update_state_draining;
+  _update_status_ctx(ua);
 
   timer_actor_set(ua->timer, 1000, 0, &ua->actor, UPDATE_MSG_DRAIN_TICK);
 }
@@ -118,6 +153,7 @@ static void _drain_tick(update_actor_t* ua) {
 
 static void _apply_update(update_actor_t* ua) {
   ua->state = update_state_applying;
+  _update_status_ctx(ua);
   pid_t pid = fork();
   if (pid == 0) {
     /* Child: replace self with updater binary */
@@ -137,7 +173,8 @@ update_actor_t* update_actor_create(scheduler_pool_t* pool,
                                     const char* install_dir,
                                     const char* backup_dir,
                                     uint8_t* draining_flag,
-                                    ATOMIC(uint32_t)* open_stream_count) {
+                                    ATOMIC(uint32_t)* open_stream_count,
+                                    update_status_context_t* status_ctx) {
   update_actor_t* ua = get_clear_memory(sizeof(update_actor_t));
   actor_init(&ua->actor, ua, _dispatch, pool);
   ua->pool = pool;
@@ -147,6 +184,7 @@ update_actor_t* update_actor_create(scheduler_pool_t* pool,
   ua->state = update_state_idle;
   ua->draining_flag = draining_flag;
   ua->open_stream_count = open_stream_count;
+  ua->status_ctx = status_ctx;
   ua->drain_timeout_ms = 300000;
   snprintf(ua->staging_dir, sizeof(ua->staging_dir), "%s", staging_dir);
   snprintf(ua->install_dir, sizeof(ua->install_dir), "%s", install_dir);

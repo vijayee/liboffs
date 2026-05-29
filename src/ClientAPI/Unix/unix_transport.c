@@ -261,3 +261,8 @@ void unix_transport_stop(unix_transport_t* transport) {
 void unix_transport_set_max_connections(unix_transport_t* transport, size_t max_connections) {
   transport->max_connections = max_connections;
 }
+
+void unix_transport_set_update_status_ctx(unix_transport_t* transport,
+                                           update_status_context_t* ctx) {
+  transport->update_status_ctx = ctx;
+}

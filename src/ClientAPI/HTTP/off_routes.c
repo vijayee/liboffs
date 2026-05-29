@@ -961,7 +961,9 @@ static void _off_post_handler(http_request_t* request, http_response_t* response
 
 void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
                          block_cache_t* bc, ofd_cache_t* ofd_cache, tuple_cache_t* tc,
-                         const config_t* config, const char* api_key) {
+                         const config_t* config, const char* api_key,
+                         ATOMIC(uint32_t)* open_stream_count) {
+    (void)open_stream_count;
     off_routes_context_t* ctx = off_routes_context_create(pool, bc, ofd_cache, tc);
 
     http_server_use(server, _draining_middleware, server, NULL);

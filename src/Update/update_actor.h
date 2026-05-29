@@ -10,6 +10,7 @@
 #include "../Scheduler/scheduler.h"
 #include "../Version/version.h"
 #include "update_check.h"
+#include "../ClientAPI/update_status_handler.h"
 #include <stdint.h>
 
 typedef enum {
@@ -37,6 +38,7 @@ typedef struct update_actor_t {
   uint64_t drain_timeout_ms;
   uint8_t* draining_flag;
   ATOMIC(uint32_t)* open_stream_count;
+  update_status_context_t* status_ctx;
 } update_actor_t;
 
 update_actor_t* update_actor_create(scheduler_pool_t* pool,
@@ -46,7 +48,8 @@ update_actor_t* update_actor_create(scheduler_pool_t* pool,
                                     const char* install_dir,
                                     const char* backup_dir,
                                     uint8_t* draining_flag,
-                                    ATOMIC(uint32_t)* open_stream_count);
+                                    ATOMIC(uint32_t)* open_stream_count,
+                                    update_status_context_t* status_ctx);
 void update_actor_destroy(update_actor_t* actor);
 void update_actor_check_now(update_actor_t* actor);
 update_state_e update_actor_get_state(update_actor_t* actor);
