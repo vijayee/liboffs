@@ -22,6 +22,7 @@ typedef struct {
   char github_api_url[256];
   char github_token[128];
   update_channel_e channel;
+  int check_interval_hours;
 } update_check_config_t;
 
 update_info_t* update_check_fetch(const update_check_config_t* config,
