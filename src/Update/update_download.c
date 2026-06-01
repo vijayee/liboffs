@@ -5,6 +5,7 @@
 #include "update_download.h"
 
 #include "../Util/allocator.h"
+#include "../Util/log.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -348,6 +349,7 @@ bool update_download(const update_info_t* info,
 
   /* Download */
   if (!_download_file(info->download_url, github_token, output_path)) {
+    log_error("update_download: download from %s failed", info->download_url);
     return false;
   }
 
@@ -357,11 +359,14 @@ bool update_download(const update_info_t* info,
     memset(computed_sha256, 0, sizeof(computed_sha256));
 
     if (!_compute_sha256(output_path, computed_sha256)) {
+      log_error("update_download: SHA256 computation failed for %s", output_path);
       remove(output_path);
       return false;
     }
 
     if (strcmp(computed_sha256, info->sha256) != 0) {
+      log_error("update_download: SHA256 verification failed for %s — expected %s, got %s",
+                output_path, info->sha256, computed_sha256);
       remove(output_path);
       return false;
     }

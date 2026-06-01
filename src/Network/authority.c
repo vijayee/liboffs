@@ -55,6 +55,7 @@ void authority_destroy(authority_t* authority) {
   if (authority->node_cert_path != NULL) free(authority->node_cert_path);
   if (authority->node_key_path != NULL) free(authority->node_key_path);
   if (authority->relay_url != NULL) free(authority->relay_url);
+  if (authority->metrics_server_url != NULL) free(authority->metrics_server_url);
   if (authority->public_key != NULL) free(authority->public_key);
   if (authority->friend_peers != NULL) {
     for (size_t index = 0; index < authority->friend_peer_count; index++) {

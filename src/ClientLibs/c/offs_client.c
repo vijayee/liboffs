@@ -6,6 +6,7 @@
 #include "../../Network/stream_framer.h"
 #include "../../Buffer/buffer.h"
 #include "../../Util/allocator.h"
+#include "../../Util/log.h"
 #include "../../ClientAPI/WS/ws_frame.h"
 
 #include <string.h>
@@ -632,18 +633,23 @@ static platform_socket_t* _connect_unix(const char* path) {
 
 static platform_socket_t* _connect_tcp(const char* host, uint16_t port) {
   platform_socket_t* sock = platform_socket_create(PLATFORM_AF_INET, 1);
-  if (sock == NULL) return NULL;
+  if (sock == NULL) {
+    log_error("_connect_tcp: socket creation failed for %s:%u", host, port);
+    return NULL;
+  }
 
   platform_address_t addr;
   memset(&addr, 0, sizeof(addr));
   addr.family = PLATFORM_AF_INET;
   addr.inet.port = port;
   if (platform_address_parse(&addr, host, port) != 0) {
+    log_error("_connect_tcp: address parse failed for %s:%u", host, port);
     platform_socket_destroy(sock);
     return NULL;
   }
 
   if (platform_socket_connect(sock, &addr) < 0) {
+    log_error("_connect_tcp: connect to %s:%u failed", host, port);
     platform_socket_destroy(sock);
     return NULL;
   }
@@ -1533,6 +1539,7 @@ buffer_t* offs_http_get(const char* url) {
   }
 
   if (platform_socket_connect(sock, &addr) < 0) {
+    log_error("offs_http_get: connect to %s:%d failed", ip_str, port);
     platform_socket_destroy(sock);
     return NULL;
   }
@@ -1549,6 +1556,7 @@ buffer_t* offs_http_get(const char* url) {
     }
 
     if (platform_socket_send(sock, request, (size_t)req_len) < 0) {
+      log_error("offs_http_get: send request to %s:%d failed", ip_str, port);
       platform_socket_destroy(sock);
       return NULL;
     }

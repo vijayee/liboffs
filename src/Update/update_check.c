@@ -5,6 +5,7 @@
 #include "update_check.h"
 
 #include "../Util/allocator.h"
+#include "../Util/log.h"
 #include <cJSON.h>
 
 #include <stdio.h>
@@ -283,6 +284,7 @@ update_info_t* update_check_fetch(const update_check_config_t* config,
 
   char* json_body = _https_get(host, path, config->github_token);
   if (json_body == NULL) {
+    log_error("update_check_fetch: GitHub API request failed for %s", api_url);
     return NULL;
   }
 
@@ -291,6 +293,7 @@ update_info_t* update_check_fetch(const update_check_config_t* config,
   json_body = NULL;
 
   if (root == NULL) {
+    log_error("update_check_fetch: failed to parse JSON response");
     return NULL;
   }
 
@@ -334,6 +337,7 @@ update_info_t* update_check_fetch(const update_check_config_t* config,
   }
 
   if (release_entry == NULL) {
+    log_error("update_check_fetch: no release matching channel found");
     cJSON_Delete(root);
     return NULL;
   }
@@ -432,6 +436,10 @@ update_info_t* update_check_fetch(const update_check_config_t* config,
       }
       info->sha256[sha_index] = '\0';
     }
+  }
+
+  if (is_newer && info->download_url[0] == '\0') {
+    log_error("update_check_fetch: no asset found for platform in release %s", tag_name_item->valuestring);
   }
 
   info->available = is_newer;

@@ -6,9 +6,11 @@
 #include "../../Platform/platform.h"
 #include "../../Actor/message.h"
 #include "../../Actor/message_queue.h"
+#include "../../Util/log.h"
 #include <poll-dancer/poll-dancer.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 
 static void* _server_thread(void* arg);
 static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
@@ -106,6 +108,7 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
 
   transport->listen_sock = platform_local_listen(socket_path);
   if (transport->listen_sock == NULL) {
+    log_error("unix_transport_create: platform_local_listen failed for %s", socket_path);
     perror("platform_local_listen");
     pd_loop_destroy(transport->loop);
     _destroy_stack_destroy(transport);
@@ -203,7 +206,11 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   if (events & PD_EVENT_READ) {
     platform_socket_t* client_sock = platform_local_accept(transport->listen_sock);
     if (client_sock == NULL) {
-      perror("accept");
+      /* Only log permanent accept failures (EBADF, EINVAL, ENOTSOCK, EOPNOTSUPP).
+         Transient errors like EAGAIN, ECONNABORTED, EINTR are normal. */
+      if (errno == EBADF || errno == EINVAL || errno == ENOTSOCK || errno == EOPNOTSUPP) {
+        log_error("unix_transport: accept failed permanently (errno=%d)", errno);
+      }
       return;
     }
 
@@ -248,6 +255,7 @@ static void* _server_thread(void* arg) {
 }
 
 void unix_transport_start(unix_transport_t* transport) {
+  log_info("unix_transport_start: transport starting on %s", transport->socket_path);
   atomic_store(&transport->running, 1);
   transport->thread = platform_thread_create(_server_thread, transport);
 }

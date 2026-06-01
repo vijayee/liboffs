@@ -14,6 +14,8 @@
 #include "peer_connection.h"
 #include "timing_wheel.h"
 #include "topology_metrics.h"
+#include "topology_report.h"
+#include "ring_set.h"
 #include "wanted_list.h"
 #include "relay_client.h"
 #include "nat_detect.h"
@@ -2964,6 +2966,37 @@ void network_dispatch(void* state, message_t* msg) {
           }
           topology_metrics_update_peers(network->topology_metrics, snapshots, index);
           free(snapshots);
+        }
+      }
+
+      /* Collect ring topology entries */
+      if (network->rings != NULL) {
+        size_t ring_capacity = network->topology_metrics->ring_entry_capacity;
+        if (ring_capacity == 0) {
+          ring_capacity = 64;
+          network->topology_metrics->ring_entries = get_clear_memory(
+            ring_capacity * sizeof(ring_topology_entry_t));
+          network->topology_metrics->ring_entry_capacity = ring_capacity;
+        }
+        size_t ring_count = ring_set_collect_topology(
+          network->rings,
+          network->topology_metrics->ring_entries,
+          ring_capacity);
+        network->topology_metrics->ring_entry_count = ring_count;
+      }
+
+      /* Push to metrics server if configured */
+      if (network->authority != NULL &&
+          network->authority->metrics_server_url != NULL) {
+        uint64_t timestamp_ms = (uint64_t)time(NULL) * 1000;
+        cbor_item_t* report = topology_report_encode(
+          &network->authority->local_id,
+          timestamp_ms,
+          network->topology_metrics);
+        if (report != NULL) {
+          topology_report_post(
+            network->authority->metrics_server_url, report);
+          cbor_decref(&report);
         }
       }
       break;

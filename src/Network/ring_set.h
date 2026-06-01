@@ -7,6 +7,7 @@
 
 #include "ring.h"
 #include "net_node.h"
+#include "topology_metrics.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -47,5 +48,12 @@ size_t ring_set_get_random_nodes(const ring_set_t* set,
                                   net_node_t* nodes,
                                   size_t max_nodes,
                                   const node_id_t* exclude_id);
+
+// Collect ring topology entries for metrics reporting.
+// Fills `entries` with up to `max_entries` ring_topology_entry_t structs.
+// Returns the number of entries collected.
+size_t ring_set_collect_topology(const ring_set_t* set,
+                                  ring_topology_entry_t* entries,
+                                  size_t max_entries);
 
 #endif // OFFS_RING_SET_H
