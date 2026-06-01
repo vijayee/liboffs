@@ -10,9 +10,11 @@
 #include "../../Platform/platform.h"
 #include "../../Actor/message.h"
 #include "../../Actor/message_queue.h"
+#include "../../Util/log.h"
 #include <poll-dancer/poll-dancer.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 
 static void* _server_thread(void* arg);
 static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
@@ -96,6 +98,7 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
 
   server->listen_sock = platform_socket_create(PLATFORM_AF_INET, 1);
   if (server->listen_sock == NULL) {
+    log_error("http_server_create: socket creation failed");
     perror("socket");
     free(server);
     return NULL;
@@ -113,6 +116,7 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
   }
 
   if (platform_socket_bind(server->listen_sock, &addr) < 0) {
+    log_error("http_server_create: bind failed for port %u", port);
     perror("bind");
     platform_socket_destroy(server->listen_sock);
     free(server);
@@ -120,6 +124,7 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
   }
 
   if (platform_socket_listen(server->listen_sock, 128) < 0) {
+    log_error("http_server_create: listen failed");
     perror("listen");
     platform_socket_destroy(server->listen_sock);
     free(server);
@@ -383,7 +388,11 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   if (events & PD_EVENT_READ) {
     platform_socket_t* client_sock = platform_socket_accept(server->listen_sock, NULL);
     if (client_sock == NULL) {
-      perror("accept");
+      /* Only log permanent accept failures (EBADF, EINVAL, ENOTSOCK, EOPNOTSUPP).
+         Transient errors like EAGAIN, ECONNABORTED, EINTR are normal. */
+      if (errno == EBADF || errno == EINVAL || errno == ENOTSOCK || errno == EOPNOTSUPP) {
+        log_error("http_server: accept failed permanently (errno=%d)", errno);
+      }
       return;
     }
 
@@ -435,6 +444,7 @@ static void* _server_thread(void* arg) {
 }
 
 void http_server_listen(http_server_t* server) {
+  log_info("HTTP server starting");
   atomic_store(&server->running, 1);
   server->thread = platform_thread_create(_server_thread, server);
 }

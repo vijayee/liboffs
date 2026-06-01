@@ -25,6 +25,7 @@
 #include "../../OFFStreams/ofd.h"
 #include "../../BlockCache/block_cache.h"
 #include "../../Util/atomic_compat.h"
+#include "../../Util/log.h"
 #include "../../Util/validation.h"
 
 static int _draining_middleware(http_request_t* request, http_response_t* response,
@@ -961,7 +962,14 @@ static void _off_post_handler(http_request_t* request, http_response_t* response
 
 void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
                          block_cache_t* bc, ofd_cache_t* ofd_cache, tuple_cache_t* tc,
-                         const config_t* config, const char* api_key) {
+                         const config_t* config, const char* api_key,
+                         ATOMIC(uint32_t)* open_stream_count) {
+    (void)open_stream_count;
+    if (server == NULL || pool == NULL || bc == NULL) {
+        log_error("off_routes_register: required parameter is NULL (server=%p, pool=%p, bc=%p)",
+                  (void*)server, (void*)pool, (void*)bc);
+        return;
+    }
     off_routes_context_t* ctx = off_routes_context_create(pool, bc, ofd_cache, tc);
 
     http_server_use(server, _draining_middleware, server, NULL);

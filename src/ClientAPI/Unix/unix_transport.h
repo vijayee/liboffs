@@ -14,6 +14,7 @@
 #include <poll-dancer/poll-dancer.h>
 #include "unix_connection.h"
 #include "../health_handler.h"
+#include "../update_status_handler.h"
 
 typedef vec_t(unix_connection_t*) vec_unix_connection_t;
 
@@ -41,6 +42,7 @@ typedef struct unix_transport_t {
   char* api_key_hash;
   char* socket_path;
   health_context_t* health_ctx;
+  update_status_context_t* update_status_ctx;
 } unix_transport_t;
 
 unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
@@ -54,5 +56,7 @@ void unix_transport_destroy(unix_transport_t* transport);
 void unix_transport_start(unix_transport_t* transport);
 void unix_transport_stop(unix_transport_t* transport);
 void unix_transport_set_max_connections(unix_transport_t* transport, size_t max_connections);
+void unix_transport_set_update_status_ctx(unix_transport_t* transport,
+                                           update_status_context_t* ctx);
 
 #endif // OFFS_UNIX_TRANSPORT_H

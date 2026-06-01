@@ -38,6 +38,8 @@
 #define CLIENT_API_FRIEND_REMOVE          28
 #define CLIENT_API_FRIEND_LIST            29
 #define CLIENT_API_FRIEND_LIST_RESPONSE   30
+#define CLIENT_API_UPDATE_STATUS_REQUEST  31
+#define CLIENT_API_UPDATE_STATUS_RESPONSE 32
 
 // Status codes for responses
 #define CLIENT_API_STATUS_OK                0
@@ -179,6 +181,15 @@ typedef struct {
   char* json_data;  // caller must free
 } client_api_health_response_t;
 
+// --- Update Status Request ---
+// [type] — no payload
+
+// --- Update Status Response ---
+// [type, json_string: tstr]
+typedef struct {
+  char* json_data;  // caller must free
+} client_api_update_status_response_t;
+
 // --- Peer Info Request ---
 // [type] — no payload
 
@@ -292,6 +303,11 @@ cbor_item_t* client_api_health_request_encode(void);
 cbor_item_t* client_api_health_response_encode(const client_api_health_response_t* msg);
 int client_api_health_response_decode(cbor_item_t* item, client_api_health_response_t* msg);
 void client_api_health_response_destroy(client_api_health_response_t* msg);
+
+cbor_item_t* client_api_update_status_request_encode(void);
+cbor_item_t* client_api_update_status_response_encode(const client_api_update_status_response_t* msg);
+int client_api_update_status_response_decode(cbor_item_t* item, client_api_update_status_response_t* msg);
+void client_api_update_status_response_destroy(client_api_update_status_response_t* msg);
 
 cbor_item_t* client_api_peer_info_request_encode(void);
 

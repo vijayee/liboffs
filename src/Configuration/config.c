@@ -56,6 +56,11 @@ config_t config_default() {
   config.tcp_tls_cert_path = NULL;
   config.tcp_tls_key_path = NULL;
   config.api_key_hash = NULL;
+  config.log_level = LOG_INFO;
+  config.log_structured = false;
+  for (int mod_index = 0; mod_index < 9; mod_index++) {
+    config.log_module_levels[mod_index] = LOG_INFO;
+  }
   return config;
 }
 
@@ -203,6 +208,13 @@ int config_validate(const config_t* config) {
       log_error("tcp_tls_enabled requires tcp_tls_cert_path and tcp_tls_key_path");
       valid = false;
     }
+  }
+
+  /* Log level range check */
+  if (config->log_level < LOG_TRACE || config->log_level > LOG_FATAL) {
+    log_error("config_validate: log_level (%d) must be %d..%d (TRACE..FATAL)",
+              config->log_level, LOG_TRACE, LOG_FATAL);
+    valid = false;
   }
 
   /* API key hash format validation */

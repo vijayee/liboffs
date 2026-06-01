@@ -612,6 +612,25 @@ static void _unix_dispatch_frame(unix_connection_t* conn, uint8_t type, cbor_ite
       free(json_str);
       break;
     }
+    case CLIENT_API_UPDATE_STATUS_REQUEST: {
+      if (conn->transport->update_status_ctx == NULL) {
+        _unix_connection_send_error(conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                                    "Update status not available");
+        break;
+      }
+      char* json_str = update_status_to_json(conn->transport->update_status_ctx);
+      if (json_str == NULL) {
+        _unix_connection_send_error(conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                                    "Update status serialization failed");
+        break;
+      }
+      client_api_update_status_response_t resp;
+      resp.json_data = json_str;
+      cbor_item_t* update_frame = client_api_update_status_response_encode(&resp);
+      _unix_connection_send_frame(conn, update_frame);
+      free(json_str);
+      break;
+    }
     default:
       _unix_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Unknown message type");
       break;

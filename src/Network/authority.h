@@ -11,8 +11,6 @@
 #include "../Util/atomic_compat.h"
 #include "node_id.h"
 
-typedef struct topology_metrics_t topology_metrics_t;
-
 #include "peer_info.h"
 
 typedef enum node_phase_e {
@@ -51,7 +49,7 @@ typedef struct authority_t {
   ATOMIC(float) capacity;
   ATOMIC(node_phase_e) phase;
 
-  topology_metrics_t* metrics_server;  // NULL if not configured
+  char* metrics_server_url;            // http://host:port/report, NULL if disabled
 } authority_t;
 
 authority_t* authority_create(config_t* config);

@@ -59,7 +59,7 @@ if (BUILD_TESTING)
             test_health_handler.cpp
             test_health_wire.cpp
             test_health_http.cpp
-            test_client_api_wire_config.cpp)
+            )
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
@@ -162,18 +162,10 @@ if (BUILD_TESTING)
     target_link_libraries(test_offs_ca PRIVATE GTest::gtest_main)
     gtest_add_tests(TARGET test_offs_ca TEST_LIST ca_test_list)
 
-    # Standalone wire protocol config tests — compiles client_api_wire.c directly
-    # to avoid the full offs library and its poll-dancer dependency.
-    add_executable(test_client_api_wire_config
-      test_client_api_wire_config.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/../src/ClientAPI/client_api_wire.c
+    add_executable(test_version
+      test_version.cpp
     )
-    add_dependencies(test_client_api_wire_config cbor)
-    add_dependencies(test_client_api_wire_config offs)
-    target_link_libraries(test_client_api_wire_config PRIVATE offs)
-    target_link_libraries(test_client_api_wire_config PUBLIC cbor)
-    target_link_libraries(test_client_api_wire_config PRIVATE GTest::gtest_main)
-    target_include_directories(test_client_api_wire_config PUBLIC ${C_INC})
-    target_include_directories(test_client_api_wire_config PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
-    add_test(NAME test_client_api_wire_config COMMAND test_client_api_wire_config)
+    target_link_libraries(test_version PRIVATE offs GTest::gtest GTest::gtest_main)
+    target_include_directories(test_version PRIVATE ${C_INC} ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+    gtest_add_tests(TARGET test_version TEST_LIST version_test_list)
 endif()

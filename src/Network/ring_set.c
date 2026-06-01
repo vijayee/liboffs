@@ -190,3 +190,28 @@ size_t ring_set_get_random_nodes(const ring_set_t* set,
   }
   return count;
 }
+
+size_t ring_set_collect_topology(const ring_set_t* set,
+                                  ring_topology_entry_t* entries,
+                                  size_t max_entries) {
+  if (set == NULL || entries == NULL) return 0;
+  size_t count = 0;
+  for (size_t ring_index = 0;
+       ring_index < set->ring_count && count < max_entries;
+       ring_index++) {
+    const ring_t* ring = &set->rings[ring_index];
+    for (size_t node_index = 0;
+         node_index < ring->primary.length && count < max_entries;
+         node_index++) {
+      const net_node_t* node = ring->primary.data[node_index];
+      if (node == NULL) continue;
+      entries[count].node_id = node->id;
+      entries[count].ring_level = (uint32_t)ring_index;
+      entries[count].rtt_ms = node->latency_ms;
+      entries[count].capacity = node->capacity;
+      entries[count].is_active_connection = true;
+      count++;
+    }
+  }
+  return count;
+}

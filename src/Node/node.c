@@ -42,6 +42,8 @@ offs_node_t* offs_node_create(config_t* config, authority_t* authority) {
 int offs_node_start(offs_node_t* node) {
   if (node == NULL) return -1;
 
+  log_info("offs_node_start: node starting");
+
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
   node->start_time_ms = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
@@ -92,6 +94,8 @@ static bool _shutdown_deadline_exceeded(uint64_t deadline) {
 
 void offs_node_stop(offs_node_t* node) {
   if (node == NULL) return;
+
+  log_info("offs_node_stop: graceful shutdown begin");
 
   uint64_t deadline = _shutdown_deadline_ms(node);
 

@@ -224,7 +224,7 @@ void scheduler_pool_start(scheduler_pool_t* pool) {
   for (size_t index = 0; index < pool->worker_count; index++) {
     pool->workers[index].thread = platform_thread_create(_scheduler_worker_loop, pool);
     if (pool->workers[index].thread == NULL) {
-      log_error("Failed to start scheduler worker thread");
+      log_error("scheduler_pool_start: failed to create worker thread %zu of %zu", index, pool->worker_count);
       abort();
     }
   }

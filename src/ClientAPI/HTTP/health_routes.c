@@ -4,6 +4,7 @@
 #include "health_routes.h"
 #include "http_request.h"
 #include "http_response.h"
+#include "../../Metrics/metrics.h"
 #include <cJSON.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +20,7 @@ static int _health_middleware(http_request_t* request, http_response_t* response
   health_data_t data = health_data_collect(ctx);
 
   cJSON* json = health_data_to_json(&data);
+  metrics_registry_to_json(json);
   char* json_str = cJSON_Print(json);
   cJSON_Delete(json);
 

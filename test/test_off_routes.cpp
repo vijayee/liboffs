@@ -146,7 +146,7 @@ protected:
 };
 
 TEST_F(TestOffRoutes, PutMissingHeaders) {
-    off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL);
+    off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL, NULL);
     http_server_listen(server);
 
     int fd = -1;
@@ -167,7 +167,7 @@ TEST_F(TestOffRoutes, PutMissingHeaders) {
 }
 
 TEST_F(TestOffRoutes, GetInvalidUrl) {
-    off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL);
+    off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL, NULL);
     http_server_listen(server);
 
     int fd = -1;
@@ -189,7 +189,7 @@ TEST_F(TestOffRoutes, GetInvalidUrl) {
 }
 
 TEST_F(TestOffRoutes, DeleteInvalidUrl) {
-    off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL);
+    off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL, NULL);
     http_server_listen(server);
 
     int fd = -1;
@@ -211,7 +211,7 @@ TEST_F(TestOffRoutes, DeleteInvalidUrl) {
 }
 
 TEST_F(TestOffRoutes, PutAndGetRoundTrip) {
-    off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL);
+    off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL, NULL);
     http_server_listen(server);
 
     int fd = -1;
@@ -282,7 +282,7 @@ TEST_F(TestOffRoutes, PutAndGetRoundTrip) {
 }
 
 TEST_F(TestOffRoutes, DirectoryOfdRawRoundTrip) {
-    off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL);
+    off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL, NULL);
     http_server_listen(server);
 
     int fd = -1;

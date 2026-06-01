@@ -59,6 +59,11 @@ typedef struct {
 
   /* Auth */
   char*    api_key_hash;        // bcrypt hash ($2b$ prefix), NULL if auth disabled
+
+  /* Logging */
+  int      log_level;            // LOG_TRACE..LOG_FATAL from Util/log.h
+  bool     log_structured;       // enable key=value structured output
+  int      log_module_levels[9]; // per-module levels, indexed by log_module_t
 } config_t;
 config_t config_default();
 int config_validate(const config_t* config);
