@@ -1,5 +1,6 @@
-add_executable(meridian_relay relay_server.c relay_server_main.c)
-target_include_directories(meridian_relay PRIVATE
+add_executable(offs_relay relay_server.c relay_server_main.c)
+set_target_properties(offs_relay PROPERTIES OUTPUT_NAME offs_relay)
+target_include_directories(offs_relay PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/../..
   ${CMAKE_SOURCE_DIR}/src
@@ -8,7 +9,7 @@ target_include_directories(meridian_relay PRIVATE
   ${CMAKE_SOURCE_DIR}/../poll-dancer/src
   ${CMAKE_BINARY_DIR}/deps/libcbor/include
 )
-target_link_libraries(meridian_relay PRIVATE
+target_link_libraries(offs_relay PRIVATE
   offs
   cbor
   http-parser
@@ -16,7 +17,7 @@ target_link_libraries(meridian_relay PRIVATE
   ${OPENSSL_LIBRARIES}
 )
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../../../deps/msquic/CMakeLists.txt)
-  target_compile_definitions(meridian_relay PRIVATE HAS_MSQUIC)
-  target_include_directories(meridian_relay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../../deps/msquic/src/inc)
-  target_link_libraries(meridian_relay PRIVATE msquic::msquic msquic::platform)
+  target_compile_definitions(offs_relay PRIVATE HAS_MSQUIC)
+  target_include_directories(offs_relay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../../deps/msquic/src/inc)
+  target_link_libraries(offs_relay PRIVATE msquic::msquic msquic::platform)
 endif()

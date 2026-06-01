@@ -39,7 +39,7 @@ int main(int argc, char* argv[]) {
       key_path = argv[index + 1];
       index++;
     } else if (strcmp(argv[index], "--help") == 0 || strcmp(argv[index], "-h") == 0) {
-      printf("Usage: meridian_relay [--port PORT] [--host HOST] [--cert PATH] [--key PATH]\n");
+      printf("Usage: offs_relay [--port PORT] [--host HOST] [--cert PATH] [--key PATH]\n");
       printf("  --port PORT   Listen port (default: 14000)\n");
       printf("  --host HOST   Bind host (default: all interfaces)\n");
       printf("  --cert PATH   TLS certificate file path\n");
@@ -78,7 +78,7 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  printf("meridian_relay: started on port %u\n", port);
+  printf("offs_relay: started on port %u\n", port);
 
   struct sigaction signal_action;
   memset(&signal_action, 0, sizeof(signal_action));
@@ -93,12 +93,12 @@ int main(int argc, char* argv[]) {
     nanosleep(&timeout, NULL);
   }
 
-  printf("meridian_relay: shutting down...\n");
+  printf("offs_relay: shutting down...\n");
   relay_server_stop(server);
   relay_server_destroy(server);
   scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 
-  printf("meridian_relay: stopped\n");
+  printf("offs_relay: stopped\n");
   return 0;
 }
