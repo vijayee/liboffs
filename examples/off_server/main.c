@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
   node_obj.scheduler = pool;
   node_obj.timer = timer;
 
-  off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL);
+  off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL, NULL);
   block_routes_register(server, pool, bc, NULL, NULL);
   health_routes_register(server, &health_ctx);
   peer_routes_register(server, &node_obj, &config, NULL);
