@@ -9,6 +9,7 @@
 #include <poll-dancer/poll-dancer.h>
 #include <internal/timer.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -47,15 +48,16 @@ static void _destroy_stack_destroy(timer_actor_t* ta) {
   platform_mutex_destroy(ta->destroy_lock);
 }
 
-static void _timer_actor_track(timer_actor_t* ta, pd_timer_t* timer) {
+static bool _timer_actor_track(timer_actor_t* ta, pd_timer_t* timer) {
   if (ta->active_timer_count >= ta->active_timer_capacity) {
     size_t new_cap = ta->active_timer_capacity == 0 ? 8 : ta->active_timer_capacity * 2;
     pd_timer_t** new_arr = realloc(ta->active_timers, new_cap * sizeof(pd_timer_t*));
-    if (new_arr == NULL) return;
+    if (new_arr == NULL) return false;
     ta->active_timers = new_arr;
     ta->active_timer_capacity = new_cap;
   }
   ta->active_timers[ta->active_timer_count++] = timer;
+  return true;
 }
 
 static void _timer_actor_untrack(timer_actor_t* ta, pd_timer_t* timer) {
@@ -131,13 +133,21 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
           _timer_completion_callback, completion);
       if (timer != NULL) {
         pd_timer_start(timer);
-        completion->timer_id = (uint64_t)(uintptr_t)timer;
-        _timer_actor_track(timer_actor, timer);
+        if (_timer_actor_track(timer_actor, timer)) {
+          completion->timer_id = (uint64_t)(uintptr_t)timer;
+        } else {
+          /* Tracking failed (OOM) — stop and destroy the timer to avoid leak. */
+          pd_timer_stop(timer);
+          _destroy_stack_push(timer_actor, timer, completion);
+          completion = NULL;
+        }
       } else {
         free(completion);
+        completion = NULL;
       }
       if (payload->out_timer_id != NULL) {
-        atomic_store(payload->out_timer_id, completion->timer_id);
+        atomic_store(payload->out_timer_id,
+                     completion != NULL ? completion->timer_id : 0);
       }
       if (msg->payload_destroy != NULL) {
         msg->payload_destroy(msg->payload);
@@ -193,18 +203,29 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
           _timer_completion_callback, completion);
       if (timer != NULL && entry != NULL) {
         pd_timer_start(timer);
-        completion->timer_id = (uint64_t)(uintptr_t)timer;
-        _timer_actor_track(timer_actor, timer);
-        entry->target = payload->target;
-        entry->completion_type = payload->completion_type;
-        entry->timer = timer;
-        entry->completion_payload = completion;
+        if (_timer_actor_track(timer_actor, timer)) {
+          completion->timer_id = (uint64_t)(uintptr_t)timer;
+          entry->target = payload->target;
+          entry->completion_type = payload->completion_type;
+          entry->timer = timer;
+          entry->completion_payload = completion;
+        } else {
+          /* Tracking failed (OOM) — stop and destroy the timer. */
+          pd_timer_stop(timer);
+          _destroy_stack_push(timer_actor, timer, completion);
+          /* Clear the debounce entry since the timer wasn't set up. */
+          if (entry->timer == NULL) {
+            entry->target = NULL;
+            entry->completion_type = 0;
+          }
+        }
       } else {
         if (timer != NULL) {
-          _timer_actor_untrack(timer_actor, timer);
-          pd_timer_destroy(timer);
+          pd_timer_stop(timer);
+          _destroy_stack_push(timer_actor, timer, completion);
+        } else {
+          free(completion);
         }
-        free(completion);
       }
       if (msg->payload_destroy != NULL) {
         msg->payload_destroy(msg->payload);
@@ -250,9 +271,11 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
     }
     case TIMER_COMPLETION: {
       timer_completion_payload_t* completion = (timer_completion_payload_t*)msg->payload;
-      if (atomic_load(&completion->target->flags) & ACTOR_FLAG_DESTROY) {
-        break;
-      }
+      /* Forward the completion to the target actor. actor_send checks
+         ACTOR_FLAG_DESTROY and drops the message if the target has been
+         destroyed, freeing the payload via payload_destroy. Callers must
+         cancel their timers before destroying their actor — this is a
+         defense-in-depth path for the case where they don't. */
       message_t target_msg = {0};
       target_msg.type = completion->completion_type;
       target_msg.payload = completion;
