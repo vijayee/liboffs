@@ -127,7 +127,7 @@ TEST(HealthHandler, CollectBlockCacheStats) {
   ASSERT_NE(pool, nullptr);
   scheduler_pool_start(pool);
 
-  timer_actor_t* timer = timer_actor_create();
+  timer_actor_t* timer = timer_actor_create(pool);
   ASSERT_NE(timer, nullptr);
 
   config_t config = config_default();
@@ -146,6 +146,7 @@ TEST(HealthHandler, CollectBlockCacheStats) {
 
   block_cache_destroy(bc);
   timer_actor_destroy(timer);
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }

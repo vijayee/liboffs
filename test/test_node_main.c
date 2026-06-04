@@ -1781,7 +1781,7 @@ int node_main(int argc, char* argv[]) {
     g_node.authority->node_key_path = strdup(g_node.key_path);
   }
 
-  g_node.timer = timer_actor_create();
+  g_node.timer = timer_actor_create(g_node.pool);
   if (!g_node.timer) {
     fprintf(stderr, "node: timer_actor_create failed\n");
     authority_destroy(g_node.authority);

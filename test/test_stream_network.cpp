@@ -118,7 +118,7 @@ protected:
     rm_rf(path);
     mkdir_p(path);
 
-    timer = timer_actor_create();
+    timer = timer_actor_create(pool);
     bc = block_cache_create(
         (config_t){.index_bucket_size = 10, .index_wait = 1000,
                    .index_max_wait = 5000, .section_size = 128000,
@@ -369,7 +369,7 @@ protected:
     rm_rf(path);
     mkdir_p(path);
 
-    timer = timer_actor_create();
+    timer = timer_actor_create(pool);
     bc = block_cache_create(
         (config_t){.index_bucket_size = 10, .index_wait = 1000,
                    .index_max_wait = 5000, .section_size = 128000,

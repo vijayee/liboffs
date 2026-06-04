@@ -78,7 +78,7 @@ TEST(HealthHTTP, GetHealthReturns200) {
   ASSERT_NE(pool, nullptr);
   scheduler_pool_start(pool);
 
-  timer_actor_t* timer = timer_actor_create();
+  timer_actor_t* timer = timer_actor_create(pool);
   ASSERT_NE(timer, nullptr);
 
   config_t config = config_default();
@@ -119,6 +119,7 @@ TEST(HealthHTTP, GetHealthReturns200) {
   close(fd);
   http_server_stop(server);
   http_server_destroy(server);
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   timer_actor_destroy(timer);
   block_cache_destroy(bc);
@@ -194,7 +195,7 @@ TEST(HealthHTTP, HealthResponseContainsExpectedFields) {
   ASSERT_NE(pool, nullptr);
   scheduler_pool_start(pool);
 
-  timer_actor_t* timer = timer_actor_create();
+  timer_actor_t* timer = timer_actor_create(pool);
   ASSERT_NE(timer, nullptr);
 
   config_t config = config_default();
@@ -238,6 +239,7 @@ TEST(HealthHTTP, HealthResponseContainsExpectedFields) {
   close(fd);
   http_server_stop(server);
   http_server_destroy(server);
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   timer_actor_destroy(timer);
   block_cache_destroy(bc);

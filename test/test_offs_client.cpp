@@ -150,7 +150,7 @@ protected:
     void SetUp() override {
         pool = scheduler_pool_create(4);
         scheduler_pool_start(pool);
-        timer = timer_actor_create();
+        timer = timer_actor_create(pool);
 
         char dir_template[] = "/tmp/test_offs_client_XXXXXX";
         cache_dir = mkdtemp(dir_template);
@@ -516,7 +516,7 @@ protected:
     void SetUp() override {
         pool = scheduler_pool_create(4);
         scheduler_pool_start(pool);
-        timer = timer_actor_create();
+        timer = timer_actor_create(pool);
 
         char dir_template[] = "/tmp/test_offs_ws_client_XXXXXX";
         cache_dir = mkdtemp(dir_template);
@@ -690,7 +690,7 @@ protected:
     void SetUp() override {
         pool = scheduler_pool_create(4);
         scheduler_pool_start(pool);
-        timer = timer_actor_create();
+        timer = timer_actor_create(pool);
 
         char dir_template[] = "/tmp/test_offs_wt_client_XXXXXX";
         cache_dir = mkdtemp(dir_template);

@@ -9,6 +9,7 @@ extern "C" {
 #include "../src/Actor/message_queue.h"
 #include "../src/Util/allocator.h"
 #include "../src/Platform/platform.h"
+#include "../src/Scheduler/scheduler.h"
 }
 
 /* A simple test actor that records received message types. */
@@ -25,11 +26,15 @@ static void test_actor_dispatch(void* state, message_t* msg) {
 }
 
 TEST(TestTimerDebounceFlush, FlushDispatchesImmediately) {
-  timer_actor_t* timer = timer_actor_create();
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  timer_actor_t* timer = timer_actor_create(pool);
   ASSERT_NE(timer, nullptr);
 
   test_actor_t target;
-  actor_init(&target.actor, &target, test_actor_dispatch, NULL);
+  actor_init(&target.actor, &target, test_actor_dispatch, pool);
   target.last_msg_type = 0;
   target.msg_count = 0;
 
@@ -41,27 +46,34 @@ TEST(TestTimerDebounceFlush, FlushDispatchesImmediately) {
   timer_actor_debounce_flush(timer, &target.actor, 42);
   platform_sleep_ms(50);  /* let the timer thread process the flush */
 
-  /* Drain the target actor's queue to process the dispatched message. */
+  /* Wait for the dispatched message via the scheduler pool. */
   for (int i = 0; i < 100; i++) {
+    scheduler_pool_wait_for_idle(pool);
     if (target.msg_count >= 1) break;
-    actor_run(&target.actor, ACTOR_BATCH_SIZE);
     platform_sleep_ms(1);
   }
 
   EXPECT_EQ(target.msg_count, 1);
   EXPECT_EQ(target.last_msg_type, (uint32_t)42);
 
-  /* Clean up. The test_actor is stack-allocated, no actor_destroy needed. */
-  message_queue_destroy(&target.actor.queue);
+  /* Clean up. */
   timer_actor_destroy(timer);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
+  message_queue_destroy(&target.actor.queue);
 }
 
 TEST(TestTimerDebounceFlush, FlushNoExistingDebounceIsNoop) {
-  timer_actor_t* timer = timer_actor_create();
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  timer_actor_t* timer = timer_actor_create(pool);
   ASSERT_NE(timer, nullptr);
 
   test_actor_t target;
-  actor_init(&target.actor, &target, test_actor_dispatch, NULL);
+  actor_init(&target.actor, &target, test_actor_dispatch, pool);
   target.last_msg_type = 0;
   target.msg_count = 0;
 
@@ -69,11 +81,14 @@ TEST(TestTimerDebounceFlush, FlushNoExistingDebounceIsNoop) {
   timer_actor_debounce_flush(timer, &target.actor, 99);
   platform_sleep_ms(50);
 
-  /* Drain the target actor's queue. */
-  actor_run(&target.actor, ACTOR_BATCH_SIZE);
+  /* Wait for any pending work. */
+  scheduler_pool_wait_for_idle(pool);
 
   EXPECT_EQ(target.msg_count, 0);
 
-  message_queue_destroy(&target.actor.queue);
   timer_actor_destroy(timer);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
+  message_queue_destroy(&target.actor.queue);
 }

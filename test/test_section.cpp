@@ -19,6 +19,7 @@ extern "C" {
 #include "../src/BlockCache/section.h"
 #include "../src/BlockCache/sections.h"
 #include "../src/Util/allocator.h"
+#include "../src/Scheduler/scheduler.h"
 }
 
 /* ---- Completion actor state for section async tests ---- */
@@ -210,11 +211,19 @@ class TestSection : public testing::Test {
 public:
   char* section_location;
   char* meta_location;
+  scheduler_pool_t* pool;
   void SetUp() override {
     section_location = path_join("/tmp", "sections");
     meta_location = path_join("/tmp", "meta");
     rm_rf(section_location);
     rm_rf(meta_location);
+    pool = scheduler_pool_create(2);
+    scheduler_pool_start(pool);
+  }
+  void TearDown() override {
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
   }
 };
 
@@ -230,7 +239,7 @@ TEST_F(TestSection, TestSectionFunction) {
 
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 20, 4000, mini);
+  section_t* section = section_create(section_location, meta_location, 20, 4000, mini, pool);
   for (size_t i = 0; i < block_count; i++) {
     size_t section_index = 0;
     int result = section_write_sync(section, blocks[i]->data, &section_index, &full);
@@ -265,7 +274,7 @@ TEST_F(TestSection, TestSectionFunction) {
   }
 
   section_destroy(section);
-  section = section_create(section_location, meta_location, 20, 4000, mini);
+  section = section_create(section_location, meta_location, 20, 4000, mini, pool);
 
   for (size_t i = 0; i < block_count; i++) {
     index_entry_t* entry =  entries[i];
@@ -332,7 +341,7 @@ TEST_F(TestSection, TestSectionFunction) {
 TEST_F(TestSection, TestSectionAsyncWrite) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 20, 5000, mini);
+  section_t* section = section_create(section_location, meta_location, 20, 5000, mini, pool);
 
   /* Create completion actor for async results */
   section_completion_state_t completion_state;
@@ -431,7 +440,7 @@ public:
     mkdir_p(meta_location);
 
     for (size_t i = 0; i < 8; i++) {
-      sections[i] = section_create(section_location, meta_location, 20, id, mini);
+      sections[i] = section_create(section_location, meta_location, 20, id, mini, NULL);
       id++;
     }
   }
@@ -523,17 +532,23 @@ class TestRoundRobin : public testing::Test {
 public:
   char* robin_location;
   timer_actor_t* timer_actor_inst;
+  scheduler_pool_t* pool;
   round_robin_t* robin;
   void SetUp() override {
     robin_location = path_join("/tmp", "robin");
     rm_rf(robin_location);
-    timer_actor_inst = timer_actor_create();
+    pool = scheduler_pool_create(2);
+    scheduler_pool_start(pool);
+    timer_actor_inst = timer_actor_create(pool);
     mkdir_p(robin_location);
   }
   void TearDown() override {
     round_robin_destroy(robin);
     free(robin_location);
     timer_actor_destroy(timer_actor_inst);
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
   }
 };
 
@@ -574,20 +589,26 @@ public:
   uint64_t max_wait = 5000;
   char* path;
   timer_actor_t* timer_actor_inst;
+  scheduler_pool_t* pool;
   sections_t* sections = NULL;
   void SetUp() override {
     path = path_join("/tmp", "sections");
     rm_rf(path);
-    timer_actor_inst = timer_actor_create();
+    pool = scheduler_pool_create(2);
+    scheduler_pool_start(pool);
+    timer_actor_inst = timer_actor_create(pool);
     mkdir_p(path);
     for (size_t i = 0; i < 25; i++) {
       blocks[i] = block_create_random_block_by_type(block_type);
       entries[i] = index_entry_create(blocks[i]->hash);
     }
-    sections = sections_create(path, size, cache_size, max_tuple_size, block_type, timer_actor_inst, NULL, wait, max_wait);
+    sections = sections_create(path, size, cache_size, max_tuple_size, block_type, timer_actor_inst, pool, wait, max_wait);
   }
   void TearDown() override {
     timer_actor_destroy(timer_actor_inst);
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
     for (size_t i = 0; i < 25; i++) {
       block_destroy(blocks[i]);
       index_entry_destroy(entries[i]);
@@ -634,7 +655,7 @@ TEST_F(TestSections, SectionsFunctions) {
 TEST_F(TestSection, TestBitmapAllocationOrder) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 32, 6000, mini);
+  section_t* section = section_create(section_location, meta_location, 32, 6000, mini, pool);
 
   uint8_t full;
   for (size_t i = 0; i < 32; i++) {
@@ -655,7 +676,7 @@ TEST_F(TestSection, TestBitmapAllocationOrder) {
 TEST_F(TestSection, TestBitmapFullDetection) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 5, 7000, mini);
+  section_t* section = section_create(section_location, meta_location, 5, 7000, mini, pool);
 
   EXPECT_EQ(section_full(section), 0);
 
@@ -690,7 +711,7 @@ TEST_F(TestSection, TestBitmapFullDetection) {
 TEST_F(TestSection, TestBitmapDeallocateDoubleFree) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 10, 8000, mini);
+  section_t* section = section_create(section_location, meta_location, 10, 8000, mini, pool);
 
   uint8_t full;
   block_t* block = block_create_random_block_by_type(mini);
@@ -713,7 +734,7 @@ TEST_F(TestSection, TestBitmapDeallocateDoubleFree) {
 TEST_F(TestSection, TestBitmapPersistenceRoundTrip) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 10, 9000, mini);
+  section_t* section = section_create(section_location, meta_location, 10, 9000, mini, pool);
 
   uint8_t full;
   block_t* blocks[7];
@@ -729,7 +750,7 @@ TEST_F(TestSection, TestBitmapPersistenceRoundTrip) {
   section_save_meta(section);
 
   section_destroy(section);
-  section = section_create(section_location, meta_location, 10, 9000, mini);
+  section = section_create(section_location, meta_location, 10, 9000, mini, pool);
 
   size_t new_index1, new_index2;
   int result = section_write_sync(section, blocks[1]->data, &new_index1, &full);
@@ -753,7 +774,7 @@ TEST_F(TestSection, TestBitmapPersistenceRoundTrip) {
 TEST_F(TestSection, TestActorMultipleMessagesQueued) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 10, 10000, mini);
+  section_t* section = section_create(section_location, meta_location, 10, 10000, mini, pool);
 
   section_completion_state_t completion_state;
 

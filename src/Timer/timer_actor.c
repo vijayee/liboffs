@@ -297,6 +297,13 @@ void timer_actor_destroy(timer_actor_t* timer_actor) {
   if (timer_actor == NULL) {
     return;
   }
+  /* Mark the actor as destroyed so scheduler workers drop any pending messages,
+     then wait for any in-flight dispatches to finish before freeing memory. */
+  scheduler_pool_t* pool = timer_actor->actor.pool;
+  actor_destroy(&timer_actor->actor);
+  if (pool != NULL) {
+    scheduler_pool_wait_for_idle(pool);
+  }
   atomic_store(&timer_actor->running, 0);
   /* Wake the loop so it notices the stop flag */
   pd_loop_async_send(timer_actor->loop, NULL);
@@ -316,7 +323,6 @@ void timer_actor_destroy(timer_actor_t* timer_actor) {
   free(timer_actor->active_timers);
   _destroy_stack_destroy(timer_actor);
   pd_loop_destroy(timer_actor->loop);
-  actor_destroy(&timer_actor->actor);
   free(timer_actor);
 }
 

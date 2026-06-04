@@ -11,6 +11,7 @@ extern "C" {
 #include "../src/Timer/timer_actor.h"
 #include "../src/Actor/actor.h"
 #include "../src/Actor/message.h"
+#include "../src/Scheduler/scheduler.h"
 }
 
 /* A custom completion type for test actors */
@@ -39,13 +40,25 @@ static void completion_dispatch(void* state, message_t* msg) {
 /* ---- tests ---- */
 
 TEST(TestTimerActor, TestCreateDestroy) {
-  timer_actor_t* timer = timer_actor_create();
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  timer_actor_t* timer = timer_actor_create(pool);
   ASSERT_NE(timer, nullptr);
   timer_actor_destroy(timer);
+
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
 }
 
 TEST(TestTimerActor, TestOneShotTimer) {
-  timer_actor_t* ta = timer_actor_create();
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  timer_actor_t* ta = timer_actor_create(pool);
   ASSERT_NE(ta, nullptr);
 
   completion_state state;
@@ -53,26 +66,33 @@ TEST(TestTimerActor, TestOneShotTimer) {
   state.last_timer_id.store(0);
 
   actor_t target;
-  actor_init(&target, &state, completion_dispatch, NULL);
+  actor_init(&target, &state, completion_dispatch, pool);
 
   /* Set a one-shot timer (interval=0) with 50ms timeout */
   timer_actor_set(ta, 50, 0, &target, COMPLETION_FIRE);
 
   /* Wait up to 500ms for the completion to fire */
   for (int i = 0; i < 500; i++) {
+    scheduler_pool_wait_for_idle(pool);
     if (state.fire_count.load() >= 1) break;
-    actor_run(&target, ACTOR_BATCH_SIZE);
     usleep(1000);
   }
 
   EXPECT_GE(state.fire_count.load(), 1);
 
   timer_actor_destroy(ta);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
   actor_destroy(&target);
 }
 
 TEST(TestTimerActor, TestRepeatingTimer) {
-  timer_actor_t* ta = timer_actor_create();
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  timer_actor_t* ta = timer_actor_create(pool);
   ASSERT_NE(ta, nullptr);
 
   completion_state state;
@@ -80,26 +100,33 @@ TEST(TestTimerActor, TestRepeatingTimer) {
   state.last_timer_id.store(0);
 
   actor_t target;
-  actor_init(&target, &state, completion_dispatch, NULL);
+  actor_init(&target, &state, completion_dispatch, pool);
 
   /* Set a repeating timer: 30ms initial, 30ms interval */
   timer_actor_set(ta, 30, 30, &target, COMPLETION_FIRE);
 
   /* Wait up to 1s for at least 3 firings */
   for (int i = 0; i < 1000; i++) {
+    scheduler_pool_wait_for_idle(pool);
     if (state.fire_count.load() >= 3) break;
-    actor_run(&target, ACTOR_BATCH_SIZE);
     usleep(1000);
   }
 
   EXPECT_GE(state.fire_count.load(), 3);
 
   timer_actor_destroy(ta);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
   actor_destroy(&target);
 }
 
 TEST(TestTimerActor, TestCancelTimer) {
-  timer_actor_t* ta = timer_actor_create();
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  timer_actor_t* ta = timer_actor_create(pool);
   ASSERT_NE(ta, nullptr);
 
   completion_state state;
@@ -107,7 +134,7 @@ TEST(TestTimerActor, TestCancelTimer) {
   state.last_timer_id.store(0);
 
   actor_t target;
-  actor_init(&target, &state, completion_dispatch, NULL);
+  actor_init(&target, &state, completion_dispatch, pool);
 
   /* Set a one-shot timer with 500ms timeout */
   (void)timer_actor_set(ta, 500, 0, &target, COMPLETION_FIRE);
@@ -123,8 +150,8 @@ TEST(TestTimerActor, TestCancelTimer) {
 
   /* Wait for at least one firing to get the timer_id */
   for (int i = 0; i < 200; i++) {
+    scheduler_pool_wait_for_idle(pool);
     if (state.fire_count.load() >= 1) break;
-    actor_run(&target, ACTOR_BATCH_SIZE);
     usleep(1000);
   }
   EXPECT_GE(state.fire_count.load(), 1);
@@ -137,19 +164,26 @@ TEST(TestTimerActor, TestCancelTimer) {
 
   int count_at_cancel = state.fire_count.load();
 
-  /* Wait 200ms — no more firings should occur */
+  /* Wait 200ms -- no more firings should occur */
   usleep(200000);
-  actor_run(&target, ACTOR_BATCH_SIZE);
+  scheduler_pool_wait_for_idle(pool);
 
   /* The count should not have increased significantly after cancel */
   EXPECT_LE(state.fire_count.load(), count_at_cancel + 1);
 
   timer_actor_destroy(ta);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
   actor_destroy(&target);
 }
 
 TEST(TestTimerActor, TestDebounceResetsTimer) {
-  timer_actor_t* ta = timer_actor_create();
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  timer_actor_t* ta = timer_actor_create(pool);
   ASSERT_NE(ta, nullptr);
 
   completion_state state;
@@ -157,7 +191,7 @@ TEST(TestTimerActor, TestDebounceResetsTimer) {
   state.last_timer_id.store(0);
 
   actor_t target;
-  actor_init(&target, &state, completion_dispatch, NULL);
+  actor_init(&target, &state, completion_dispatch, pool);
 
   /* First debounce: create a timer with 100ms timeout.
      timer_actor_debounce now tracks timers internally by (target, completion_type)
@@ -166,31 +200,38 @@ TEST(TestTimerActor, TestDebounceResetsTimer) {
 
   /* Wait for the first timer to fire and capture its timer_id */
   for (int i = 0; i < 300; i++) {
+    scheduler_pool_wait_for_idle(pool);
     if (state.fire_count.load() >= 1) break;
-    actor_run(&target, ACTOR_BATCH_SIZE);
     usleep(1000);
   }
   EXPECT_GE(state.fire_count.load(), 1);
 
-  /* Now debounce again — this cancels the old timer and creates a new one,
+  /* Now debounce again -- this cancels the old timer and creates a new one,
      demonstrating the internal debounce pattern. */
   timer_actor_debounce(ta, 200, 0, &target, COMPLETION_FIRE);
 
   /* Wait for the second timer to fire */
   int count_before = state.fire_count.load();
   for (int i = 0; i < 300; i++) {
+    scheduler_pool_wait_for_idle(pool);
     if (state.fire_count.load() > count_before) break;
-    actor_run(&target, ACTOR_BATCH_SIZE);
     usleep(1000);
   }
   EXPECT_GT(state.fire_count.load(), count_before);
 
   timer_actor_destroy(ta);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
   actor_destroy(&target);
 }
 
 TEST(TestTimerActor, TestMultipleConcurrentTimers) {
-  timer_actor_t* ta = timer_actor_create();
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  timer_actor_t* ta = timer_actor_create(pool);
   ASSERT_NE(ta, nullptr);
 
   completion_state state;
@@ -198,7 +239,7 @@ TEST(TestTimerActor, TestMultipleConcurrentTimers) {
   state.last_timer_id.store(0);
 
   actor_t target;
-  actor_init(&target, &state, completion_dispatch, NULL);
+  actor_init(&target, &state, completion_dispatch, pool);
 
   /* Set 3 one-shot timers with different timeouts */
   timer_actor_set(ta, 30, 0, &target, COMPLETION_FIRE);
@@ -207,19 +248,26 @@ TEST(TestTimerActor, TestMultipleConcurrentTimers) {
 
   /* Wait up to 500ms for all 3 to fire */
   for (int i = 0; i < 500; i++) {
+    scheduler_pool_wait_for_idle(pool);
     if (state.fire_count.load() >= 3) break;
-    actor_run(&target, ACTOR_BATCH_SIZE);
     usleep(1000);
   }
 
   EXPECT_GE(state.fire_count.load(), 3);
 
   timer_actor_destroy(ta);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
   actor_destroy(&target);
 }
 
 TEST(TestTimerActor, TestDestroyCleansUpTimers) {
-  timer_actor_t* ta = timer_actor_create();
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  timer_actor_t* ta = timer_actor_create(pool);
   ASSERT_NE(ta, nullptr);
 
   completion_state state;
@@ -227,33 +275,49 @@ TEST(TestTimerActor, TestDestroyCleansUpTimers) {
   state.last_timer_id.store(0);
 
   actor_t target;
-  actor_init(&target, &state, completion_dispatch, NULL);
+  actor_init(&target, &state, completion_dispatch, pool);
 
-  /* Set a long timer then immediately destroy — should not crash */
+  /* Set a long timer then immediately destroy -- should not crash */
   timer_actor_set(ta, 5000, 0, &target, COMPLETION_FIRE);
   timer_actor_set(ta, 5000, 5000, &target, COMPLETION_FIRE);
 
   /* Destroy the timer actor while timers are active */
   timer_actor_destroy(ta);
 
-  /* Clean up the target actor — the timer payloads that were already sent
+  scheduler_pool_wait_for_idle(pool);
+
+  /* Clean up the target actor -- the timer payloads that were already sent
      to the target's queue may still reference freed timer memory, but
      destroying the target will drain and free them safely. */
   actor_destroy(&target);
+
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
 }
 
 TEST(TestTimerActor, TestCancelZeroTimerId) {
-  timer_actor_t* ta = timer_actor_create();
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  timer_actor_t* ta = timer_actor_create(pool);
   ASSERT_NE(ta, nullptr);
 
   /* Canceling with timer_id=0 should be a no-op, not a crash */
   timer_actor_cancel(ta, 0);
 
   timer_actor_destroy(ta);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
 }
 
 TEST(TestTimerActor, TestDebounceWithZeroExistingId) {
-  timer_actor_t* ta = timer_actor_create();
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  timer_actor_t* ta = timer_actor_create(pool);
   ASSERT_NE(ta, nullptr);
 
   completion_state state;
@@ -261,19 +325,22 @@ TEST(TestTimerActor, TestDebounceWithZeroExistingId) {
   state.last_timer_id.store(0);
 
   actor_t target;
-  actor_init(&target, &state, completion_dispatch, NULL);
+  actor_init(&target, &state, completion_dispatch, pool);
 
   /* Debounce should create a new timer */
   timer_actor_debounce(ta, 50, 0, &target, COMPLETION_FIRE);
 
   for (int i = 0; i < 300; i++) {
+    scheduler_pool_wait_for_idle(pool);
     if (state.fire_count.load() >= 1) break;
-    actor_run(&target, ACTOR_BATCH_SIZE);
     usleep(1000);
   }
 
   EXPECT_GE(state.fire_count.load(), 1);
 
   timer_actor_destroy(ta);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
   actor_destroy(&target);
 }

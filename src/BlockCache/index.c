@@ -46,9 +46,6 @@ void index_dispatch(void* state, message_t* msg) {
     default:
       break;
   }
-  if (msg->payload_destroy != NULL) {
-    msg->payload_destroy(msg->payload);
-  }
 }
 
 uint8_t get_bit(buffer_t* buffer, size_t index) {
