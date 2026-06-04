@@ -605,6 +605,7 @@ public:
     sections = sections_create(path, size, cache_size, max_tuple_size, block_type, timer_actor_inst, pool, wait, max_wait);
   }
   void TearDown() override {
+    sections_destroy(sections);
     timer_actor_destroy(timer_actor_inst);
     scheduler_pool_wait_for_idle(pool);
     scheduler_pool_stop(pool);
@@ -614,7 +615,6 @@ public:
       index_entry_destroy(entries[i]);
     }
     free(path);
-    sections_destroy(sections);
   }
 };
 

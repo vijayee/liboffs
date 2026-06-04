@@ -114,9 +114,6 @@ void nat_detect_dispatch(void* state, message_t* msg) {
       break;
   }
 
-  if (msg->payload_destroy != NULL && msg->payload != NULL) {
-    msg->payload_destroy(msg->payload);
-  }
 }
 
 /* --- Public API --- */
