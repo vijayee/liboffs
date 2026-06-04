@@ -605,7 +605,7 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
   block_cache->lru = block_lru_cache_create(config.lru_size);
   block_cache->sections = sections_create(folder, config.section_size, config.cache_size, config.max_tuple_size, type, timer_actor, pool, config.section_wait, config.section_max_wait);
   int error_code;
-  block_cache->index = index_create(config.index_bucket_size, folder, timer_actor, config.index_wait, config.index_max_wait, config.max_snapshots, config.max_wals, &error_code);
+  block_cache->index = index_create(config.index_bucket_size, folder, timer_actor, pool, config.index_wait, config.index_max_wait, config.max_snapshots, config.max_wals, &error_code);
   if (block_cache->index == NULL) {
     log_error("block_cache_create: index_create returned NULL (error_code=%d)", error_code);
   }

@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include "../Actor/actor.h"
+#include "../Scheduler/scheduler.h"
 #include "../RefCounter/refcounter.h"
 #include "../Platform/platform.h"
 #include "../Util/atomic_compat.h"
@@ -106,7 +107,7 @@ typedef struct section_t {
   void* on_dirty_context;
 } section_t;
 
-section_t* section_create(char* path, char* meta_path, size_t size, size_t id, block_size_e type);
+section_t* section_create(char* path, char* meta_path, size_t size, size_t id, block_size_e type, scheduler_pool_t* pool);
 void section_destroy(section_t* section);
 uint8_t section_full(section_t* section);
 void section_save_meta(section_t* section);

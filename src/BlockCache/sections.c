@@ -201,7 +201,7 @@ void sections_dispatch(void* state, message_t* msg) {
         section_t* section = sections_lru_cache_get(sections->lru, p->section_id);
         if (section == NULL) {
           section = section_create(sections->data_path, sections->meta_path,
-                                   sections->size, p->section_id, sections->type);
+                                   sections->size, p->section_id, sections->type, sections->pool);
           section->on_dirty = section_on_dirty;
           section->on_dirty_context = sections;
           refcounter_yield((refcounter_t*) section);
@@ -251,7 +251,7 @@ void sections_dispatch(void* state, message_t* msg) {
       section_t* section = sections_lru_cache_get(sections->lru, p->section_id);
       if (section == NULL) {
         section = section_create(sections->data_path, sections->meta_path,
-                                 sections->size, p->section_id, sections->type);
+                                 sections->size, p->section_id, sections->type, sections->pool);
         section->on_dirty = section_on_dirty;
         section->on_dirty_context = sections;
         refcounter_yield((refcounter_t*) section);
@@ -290,7 +290,7 @@ void sections_dispatch(void* state, message_t* msg) {
       section_t* section = sections_lru_cache_get(sections->lru, p->section_id);
       if (section == NULL) {
         section = section_create(sections->data_path, sections->meta_path,
-                                 sections->size, p->section_id, sections->type);
+                                 sections->size, p->section_id, sections->type, sections->pool);
         section->on_dirty = section_on_dirty;
         section->on_dirty_context = sections;
         refcounter_yield((refcounter_t*) section);
@@ -685,7 +685,7 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
     }
     for (size_t i = 0; i < robin_size; i++) {
       section_t* section = section_create(sections->data_path, sections->meta_path,
-                                          sections->size, ids[i], sections->type);
+                                          sections->size, ids[i], sections->type, sections->pool);
       section->on_dirty = section_on_dirty;
       section->on_dirty_context = sections;
       refcounter_yield((refcounter_t*) section);
@@ -697,7 +697,7 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
   }
 
   while (sections->robin->size < sections->max_tuple_size) {
-    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type);
+    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type, sections->pool);
     section->on_dirty = section_on_dirty;
     section->on_dirty_context = sections;
     refcounter_yield((refcounter_t*) section);
@@ -720,7 +720,7 @@ void sections_destroy(sections_t* sections) {
 void sections_full(sections_t* sections, size_t section_id) {
   round_robin_remove(sections->robin, section_id);
   while (sections->robin->size < sections->max_tuple_size) {
-    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type);
+    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type, sections->pool);
     section->on_dirty = section_on_dirty;
     section->on_dirty_context = sections;
     refcounter_yield((refcounter_t*) section);
