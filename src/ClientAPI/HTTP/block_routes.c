@@ -31,7 +31,7 @@ typedef struct {
   http_connection_t* connection;
   block_routes_context_t* ctx;
   uint8_t put_encoding;
-  enum { BLOCK_HTTP_PUT, BLOCK_HTTP_GET, BLOCK_HTTP_DELETE } op;
+  enum { BLOCK_HTTP_PUT, BLOCK_HTTP_GET, BLOCK_HTTP_DELETE, BLOCK_HTTP_DEFRAGMENT } op;
 } block_http_state_t;
 
 static void _block_http_state_destroy(block_http_state_t* state) {
@@ -117,6 +117,23 @@ static void _block_http_dispatch(void* vstate, message_t* msg) {
       } else {
         http_response_set_status(state->response, HTTP_STATUS_NO_CONTENT);
       }
+      http_response_end(state->response);
+      _block_http_state_destroy(state);
+      return;
+    }
+
+    case CACHE_DEFRAGMENT_RESULT: {
+      if (state->op != BLOCK_HTTP_DEFRAGMENT) break;
+      cache_defragment_result_payload_t* result = (cache_defragment_result_payload_t*)msg->payload;
+
+      http_response_set_status(state->response, HTTP_STATUS_OK);
+      http_response_set_header(state->response, "Content-Type", "application/json");
+
+      char json_buf[256];
+      int len = snprintf(json_buf, sizeof(json_buf),
+          "{\"result\":%d,\"sections_defragmented\":%zu,\"blocks_relocated\":%zu}",
+          result->result, result->sections_defragmented, result->blocks_relocated);
+      http_response_write(state->response, json_buf, (size_t)len);
       http_response_end(state->response);
       _block_http_state_destroy(state);
       return;
@@ -252,6 +269,33 @@ static void _block_delete_handler(http_request_t* request, http_response_t* resp
   block_cache_remove(ctx->bc, hash, &state->actor);
 }
 
+/* --- DEFRAGMENT handler --- */
+
+static void _block_defragment_handler(http_request_t* request, http_response_t* response,
+                                       void* user_data) {
+  block_routes_context_t* ctx = (block_routes_context_t*)user_data;
+
+  float threshold = 0.5f;
+  if (request->query_string) {
+    const char* param = strstr(request->query_string, "threshold=");
+    if (param != NULL) {
+      threshold = (float)atof(param + 10);
+      if (threshold <= 0.0f || threshold > 1.0f) threshold = 0.5f;
+    }
+  }
+
+  block_http_state_t* state = get_clear_memory(sizeof(block_http_state_t));
+  state->ctx = ctx;
+  state->response = response;
+  state->connection = response->connection;
+  state->op = BLOCK_HTTP_DEFRAGMENT;
+  refcounter_reference((refcounter_t*)state->connection);
+  refcounter_reference((refcounter_t*)state->response);
+
+  actor_init(&state->actor, state, _block_http_dispatch, ctx->pool);
+  block_cache_defragment(ctx->bc, threshold, &state->actor);
+}
+
 /* --- Registration --- */
 
 void block_routes_register(http_server_t* server, scheduler_pool_t* pool,
@@ -275,4 +319,6 @@ void block_routes_register(http_server_t* server, scheduler_pool_t* pool,
                              _block_get_handler, ctx, NULL);
   http_server_delete_with_data(server, BLOCK_HASH_PATTERN,
                                 _block_delete_handler, ctx, NULL);
+  http_server_post_with_data(server, "/blocks/defragment",
+                              _block_defragment_handler, ctx, NULL);
 }

@@ -121,6 +121,25 @@ typedef struct {
   actor_t* reply_to;
 } cache_remove_result_payload_t;
 
+/* Payload for CACHE_DEFRAGMENT message.
+   When reply_to is NULL (sync), result is filled by dispatch.
+   When reply_to is set (async), a CACHE_DEFRAGMENT_RESULT is sent back. */
+typedef struct {
+  float occupancy_threshold;
+  actor_t* reply_to;
+  int result;
+  size_t sections_defragmented;
+  size_t blocks_relocated;
+} cache_defragment_payload_t;
+
+/* Result payload for CACHE_DEFRAGMENT_RESULT */
+typedef struct {
+  int result;
+  size_t sections_defragmented;
+  size_t blocks_relocated;
+  actor_t* reply_to;
+} cache_defragment_result_payload_t;
+
 block_cache_t* block_cache_create(config_t config, char* location, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool, authority_t* authority, size_t max_capacity_bytes);
 void block_cache_destroy(block_cache_t* block_cache);
 void block_cache_sync(block_cache_t* block_cache);
@@ -133,5 +152,6 @@ void block_cache_dispatch(void* state, message_t* msg);
 void block_cache_get(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
 void block_cache_put(block_cache_t* block_cache, block_t* block, uint32_t incoming_fib, actor_t* reply_to);
 void block_cache_remove(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
+void block_cache_defragment(block_cache_t* block_cache, float occupancy_threshold, actor_t* reply_to);
 
 #endif //OFFS_BLOCK_CACHE_H

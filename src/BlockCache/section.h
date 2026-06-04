@@ -23,6 +23,13 @@ typedef struct {
   size_t total_blocks;
 } free_map_t;
 
+/* Result of free_map defragmentation. Relocation array maps old_index → new_index.
+   (size_t)-1 means the slot was free (no block to relocate). */
+typedef struct {
+  size_t* relocation;  /* array[total_blocks] */
+  size_t  new_count;   /* number of occupied slots after compaction */
+} free_map_defrag_result_t;
+
 /* Payload for SECTION_WRITE message.
    When reply_to is NULL (sync), result/index/full are filled by dispatch.
    When reply_to is set (async), a SECTION_WRITE_COMPLETE is sent back. */
@@ -90,6 +97,24 @@ typedef struct {
   actor_t* reply_to;
 } section_deallocate_result_payload_t;
 
+/* Payload for SECTION_DEFRAGMENT message.
+   When reply_to is NULL (sync), result/defrag are filled by dispatch.
+   When reply_to is set (async), a SECTION_DEFRAGMENT_RESULT is sent back. */
+typedef struct {
+  actor_t* reply_to;
+  int result;
+  size_t section_id;
+  free_map_defrag_result_t defrag;
+} section_defragment_payload_t;
+
+/* Result payload for SECTION_DEFRAGMENT_RESULT */
+typedef struct {
+  int result;
+  size_t section_id;
+  free_map_defrag_result_t defrag;
+  actor_t* reply_to;
+} section_defragment_result_payload_t;
+
 typedef struct section_t {
   refcounter_t refcounter;
   actor_t actor;
@@ -110,6 +135,7 @@ typedef struct section_t {
 section_t* section_create(char* path, char* meta_path, size_t size, size_t id, block_size_e type, scheduler_pool_t* pool);
 void section_destroy(section_t* section);
 uint8_t section_full(section_t* section);
+size_t section_count_free(section_t* section);
 void section_save_meta(section_t* section);
 void section_dispatch(void* state, message_t* msg);
 
@@ -117,6 +143,7 @@ void section_dispatch(void* state, message_t* msg);
 void section_read(section_t* section, size_t index, actor_t* reply_to);
 void section_write(section_t* section, buffer_t* data, actor_t* reply_to);
 void section_deallocate(section_t* section, size_t index, actor_t* reply_to);
+void section_defragment(section_t* section, actor_t* reply_to);
 
 
 #endif //OFFS_SECTION_H

@@ -67,6 +67,11 @@
     return fsync(file->fd);
   }
 
+  int platform_file_truncate(platform_file_t* file, uint64_t length) {
+    if (file == NULL) return -1;
+    return ftruncate(file->fd, (off_t)length);
+  }
+
   int platform_file_exists(const char* path) {
     return access(path, F_OK) == 0 ? 1 : 0;
   }
@@ -222,6 +227,14 @@
   int platform_file_sync(platform_file_t* file) {
     if (file == NULL) return -1;
     return FlushFileBuffers(file->handle) ? 0 : -1;
+  }
+
+  int platform_file_truncate(platform_file_t* file, uint64_t length) {
+    if (file == NULL) return -1;
+    LARGE_INTEGER li;
+    li.QuadPart = (LONGLONG)length;
+    if (!SetFilePointerEx(file->handle, li, NULL, FILE_BEGIN)) return -1;
+    return SetEndOfFile(file->handle) ? 0 : -1;
   }
 
   int platform_file_exists(const char* path) {

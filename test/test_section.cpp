@@ -806,3 +806,143 @@ TEST_F(TestSection, TestActorMultipleMessagesQueued) {
   free(meta_location);
   free(section_location);
 }
+
+/* ---- Defragmentation tests ---- */
+
+TEST_F(TestSection, TestDefragmentMovesBlocksToFront) {
+  mkdir_p(section_location);
+  mkdir_p(meta_location);
+  section_t* section = section_create(section_location, meta_location, 10, 11000, mini, pool);
+
+  /* Write blocks to slots 0-4 */
+  uint8_t full;
+  block_t* blocks[5];
+  size_t indices[5];
+  for (size_t i = 0; i < 5; i++) {
+    blocks[i] = block_create_random_block_by_type(mini);
+    int result = section_write_sync(section, blocks[i]->data, &indices[i], &full);
+    EXPECT_EQ(result, 0);
+    EXPECT_EQ(indices[i], i);
+  }
+
+  /* Deallocate slots 1 and 3, leaving 0, 2, 4 occupied */
+  section_deallocate_sync(section, indices[1]);
+  section_deallocate_sync(section, indices[3]);
+
+  /* Verify section_count_free reports 7 free slots (10 total - 3 occupied) */
+  EXPECT_EQ(section_count_free(section), 7u);
+
+  /* Dispatch SECTION_DEFRAGMENT synchronously */
+  section_defragment_payload_t defrag_payload;
+  memset(&defrag_payload, 0, sizeof(defrag_payload));
+  defrag_payload.reply_to = NULL;
+  defrag_payload.result = -1;
+  message_t defrag_msg;
+  defrag_msg.type = SECTION_DEFRAGMENT;
+  defrag_msg.payload = &defrag_payload;
+  defrag_msg.payload_destroy = NULL;
+  section_dispatch(section, &defrag_msg);
+
+  EXPECT_EQ(defrag_payload.result, 0);
+  ASSERT_NE(defrag_payload.defrag.relocation, (size_t*)NULL);
+
+  /* After defragmentation, 3 blocks should be at slots 0, 1, 2 */
+  EXPECT_EQ(defrag_payload.defrag.new_count, 3u);
+
+  /* Slot 0 (was at 0) stays at 0 */
+  EXPECT_EQ(defrag_payload.defrag.relocation[0], 0u);
+  /* Slot 2 (was at 2) moves to 1 */
+  EXPECT_EQ(defrag_payload.defrag.relocation[2], 1u);
+  /* Slot 4 (was at 4) moves to 2 */
+  EXPECT_EQ(defrag_payload.defrag.relocation[4], 2u);
+  /* Slots 1 and 3 were free */
+  EXPECT_EQ(defrag_payload.defrag.relocation[1], (size_t)-1);
+  EXPECT_EQ(defrag_payload.defrag.relocation[3], (size_t)-1);
+
+  free(defrag_payload.defrag.relocation);
+
+  /* Verify data is readable at the new positions */
+  buffer_t* buf0 = section_read_sync(section, 0);
+  ASSERT_NE(buf0, (buffer_t*)NULL);
+  EXPECT_EQ(buffer_compare(buf0, blocks[0]->data), 0);
+  buffer_destroy(buf0);
+
+  buffer_t* buf1 = section_read_sync(section, 1);
+  ASSERT_NE(buf1, (buffer_t*)NULL);
+  EXPECT_EQ(buffer_compare(buf1, blocks[2]->data), 0);
+  buffer_destroy(buf1);
+
+  buffer_t* buf2 = section_read_sync(section, 2);
+  ASSERT_NE(buf2, (buffer_t*)NULL);
+  EXPECT_EQ(buffer_compare(buf2, blocks[4]->data), 0);
+  buffer_destroy(buf2);
+
+  for (size_t i = 0; i < 5; i++) {
+    block_destroy(blocks[i]);
+  }
+  section_destroy(section);
+  free(meta_location);
+  free(section_location);
+}
+
+TEST_F(TestSection, TestDefragmentAlreadyCompact) {
+  mkdir_p(section_location);
+  mkdir_p(meta_location);
+  section_t* section = section_create(section_location, meta_location, 10, 12000, mini, pool);
+
+  /* Write 3 blocks to slots 0-2 (already compact) */
+  uint8_t full;
+  block_t* blocks[3];
+  for (size_t i = 0; i < 3; i++) {
+    blocks[i] = block_create_random_block_by_type(mini);
+    size_t index;
+    int result = section_write_sync(section, blocks[i]->data, &index, &full);
+    EXPECT_EQ(result, 0);
+  }
+
+  /* Defragment — should be a no-op since blocks are already at 0-2 */
+  section_defragment_payload_t defrag_payload;
+  memset(&defrag_payload, 0, sizeof(defrag_payload));
+  defrag_payload.reply_to = NULL;
+  defrag_payload.result = -1;
+  message_t defrag_msg;
+  defrag_msg.type = SECTION_DEFRAGMENT;
+  defrag_msg.payload = &defrag_payload;
+  defrag_msg.payload_destroy = NULL;
+  section_dispatch(section, &defrag_msg);
+
+  EXPECT_EQ(defrag_payload.result, 0);
+  if (defrag_payload.defrag.relocation != NULL) {
+    free(defrag_payload.defrag.relocation);
+  }
+
+  for (size_t i = 0; i < 3; i++) {
+    block_destroy(blocks[i]);
+  }
+  section_destroy(section);
+  free(meta_location);
+  free(section_location);
+}
+
+TEST_F(TestSection, TestDefragmentEmptySection) {
+  mkdir_p(section_location);
+  mkdir_p(meta_location);
+  section_t* section = section_create(section_location, meta_location, 10, 13000, mini, pool);
+
+  /* Defragment an empty section — should be a no-op */
+  section_defragment_payload_t defrag_payload;
+  memset(&defrag_payload, 0, sizeof(defrag_payload));
+  defrag_payload.reply_to = NULL;
+  defrag_payload.result = -1;
+  message_t defrag_msg;
+  defrag_msg.type = SECTION_DEFRAGMENT;
+  defrag_msg.payload = &defrag_payload;
+  defrag_msg.payload_destroy = NULL;
+  section_dispatch(section, &defrag_msg);
+
+  EXPECT_EQ(defrag_payload.result, 0);
+
+  section_destroy(section);
+  free(meta_location);
+  free(section_location);
+}
