@@ -946,3 +946,47 @@ TEST_F(TestSection, TestDefragmentEmptySection) {
   free(meta_location);
   free(section_location);
 }
+
+/* Verify that free_map_highest_used handles non-power-of-2 total_blocks.
+   With 5 slots and only slot 0 occupied, the section is already compact
+   (highest_used = 0 < used_count = 1), so defragmentation should be a no-op. */
+TEST_F(TestSection, TestDefragmentNonPowerOf2Compact) {
+  mkdir_p(section_location);
+  mkdir_p(meta_location);
+  /* 5 slots — non-power-of-2, triggers the padding bit bug in highest_used */
+  section_t* section = section_create(section_location, meta_location, 5, 14000, mini, pool);
+
+  /* Write 1 block to slot 0 (already compact position) */
+  block_t* block = block_create_random_block_by_type(mini);
+  size_t index;
+  uint8_t full;
+  int result = section_write_sync(section, block->data, &index, &full);
+  EXPECT_EQ(result, 0);
+  EXPECT_EQ(index, 0);
+
+  /* Defragment — should detect as already compact and do nothing */
+  section_defragment_payload_t defrag_payload;
+  memset(&defrag_payload, 0, sizeof(defrag_payload));
+  defrag_payload.reply_to = NULL;
+  defrag_payload.result = -1;
+  message_t defrag_msg;
+  defrag_msg.type = SECTION_DEFRAGMENT;
+  defrag_msg.payload = &defrag_payload;
+  defrag_msg.payload_destroy = NULL;
+  section_dispatch(section, &defrag_msg);
+
+  EXPECT_EQ(defrag_payload.result, 0);
+  EXPECT_EQ(defrag_payload.defrag.relocation, nullptr);
+
+  /* Verify the block is still readable at slot 0 */
+  buffer_t* read_data = section_read_sync(section, 0);
+  EXPECT_NE(read_data, nullptr);
+  EXPECT_EQ(read_data->size, block->data->size);
+  EXPECT_EQ(memcmp(read_data->data, block->data->data, read_data->size), 0);
+  buffer_destroy(read_data);
+
+  block_destroy(block);
+  section_destroy(section);
+  free(meta_location);
+  free(section_location);
+}

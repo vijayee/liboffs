@@ -279,8 +279,11 @@ static void _block_defragment_handler(http_request_t* request, http_response_t* 
   if (request->query_string) {
     const char* param = strstr(request->query_string, "threshold=");
     if (param != NULL) {
-      threshold = (float)atof(param + 10);
-      if (threshold <= 0.0f || threshold > 1.0f) threshold = 0.5f;
+      char* endptr = NULL;
+      double val = strtod(param + 10, &endptr);
+      if (endptr != param + 10 && val > 0.0 && val <= 1.0) {
+        threshold = (float)val;
+      }
     }
   }
 

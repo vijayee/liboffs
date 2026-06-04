@@ -82,8 +82,17 @@ static size_t free_map_count_free(free_map_t* fm) {
 static size_t free_map_highest_used(free_map_t* fm) {
   for (size_t word = fm->map_capacity; word > 0; word--) {
     size_t w = word - 1;
-    if (fm->map[w] != 0xFFFFFFFFU) {
-      uint32_t occupied = ~fm->map[w];
+    /* Mask out padding bits beyond total_blocks in the last word.
+       Padding bits are 0 (appear occupied) but don't represent real slots. */
+    size_t bits_in_word = 32;
+    if (w == fm->map_capacity - 1 && fm->total_blocks % 32 != 0) {
+      bits_in_word = fm->total_blocks % 32;
+    }
+    uint32_t valid_mask = (bits_in_word == 32)
+        ? 0xFFFFFFFFU
+        : ((1U << bits_in_word) - 1);
+    uint32_t occupied = (~fm->map[w]) & valid_mask;
+    if (occupied != 0) {
       int bit = 31 - PLATFORM_CLZ(occupied);
       return w * 32 + (size_t)bit;
     }
@@ -293,25 +302,60 @@ static int _section_defrag_plan_recover(section_t* section) {
     }
   }
 
+  /* Check if the file has already been truncated (crash after truncate but
+     before plan deletion). If so, data movement is already complete — skip
+     straight to rebuilding the free_map and deleting the plan file. */
+  int64_t current_file_size = platform_file_seek(section->file, 0, PLATFORM_SEEK_END);
+  uint64_t truncated_size = (uint64_t)(new_count * section->block_size);
+  int data_move_needed = 1;
+  if (current_file_size >= 0 && (uint64_t)current_file_size <= truncated_size) {
+    log_info("Recovery: file already truncated, skipping data movement for section %zu", section->id);
+    data_move_needed = 0;
+  }
+
   /* Move data for each relocation where old != new */
-  uint8_t* block_buf = get_memory(section->block_size);
-  for (size_t i = 0; i < total_blocks; i++) {
-    if (relocation[i] != (size_t)-1 && relocation[i] != i) {
-      size_t old_offset = i * section->block_size;
-      size_t new_offset = relocation[i] * section->block_size;
-      ssize_t rd = platform_file_pread(section->file, block_buf,
-                                        section->block_size, (uint64_t)old_offset);
-      if (rd == (ssize_t)section->block_size) {
-        platform_file_pwrite(section->file, block_buf,
+  uint8_t* block_buf = NULL;
+  int io_error = 0;
+  if (data_move_needed) {
+    block_buf = get_memory(section->block_size);
+    for (size_t i = 0; i < total_blocks; i++) {
+      if (relocation[i] != (size_t)-1 && relocation[i] != i) {
+        size_t old_offset = i * section->block_size;
+        size_t new_offset = relocation[i] * section->block_size;
+        ssize_t rd = platform_file_pread(section->file, block_buf,
+                                          section->block_size, (uint64_t)old_offset);
+        if (rd != (ssize_t)section->block_size) {
+          log_error("Recovery read failed at offset %zu for section %zu", old_offset, section->id);
+          io_error = 1;
+          break;
+        }
+        ssize_t wr = platform_file_pwrite(section->file, block_buf,
                               section->block_size, (uint64_t)new_offset);
+        if (wr != (ssize_t)section->block_size) {
+          log_error("Recovery write failed at offset %zu for section %zu", new_offset, section->id);
+          io_error = 1;
+          break;
+        }
       }
     }
-  }
-  free(block_buf);
+    free(block_buf);
 
-  /* Truncate file to new_count * block_size */
-  platform_file_truncate(section->file, (uint64_t)(new_count * section->block_size));
-  platform_file_sync(section->file);
+    if (io_error) {
+      log_error("Recovery I/O error for section %zu, plan file preserved for next recovery", section->id);
+      free(relocation);
+      free(plan_path);
+      return -1;
+    }
+
+    /* Truncate file to new_count * block_size */
+    if (platform_file_truncate(section->file, (uint64_t)(new_count * section->block_size)) != 0) {
+      log_error("Recovery truncate failed for section %zu, plan file preserved for next recovery", section->id);
+      free(relocation);
+      free(plan_path);
+      return -1;
+    }
+    platform_file_sync(section->file);
+  }
 
   /* Rebuild free_map: slots 0..new_count-1 occupied, rest free */
   for (size_t word = 0; word < section->free_map.map_capacity; word++) {
@@ -357,6 +401,14 @@ static void section_defragment_result_destroy(void* ptr) {
     free(result->defrag.relocation);
   }
   free(result);
+}
+
+static void section_defragment_payload_destroy(void* ptr) {
+  section_defragment_payload_t* payload = (section_defragment_payload_t*)ptr;
+  if (payload->defrag.relocation != NULL) {
+    free(payload->defrag.relocation);
+  }
+  free(payload);
 }
 
 /* ---- section dispatch ---- */
@@ -508,23 +560,21 @@ void section_dispatch(void* state, message_t* msg) {
         break;
       }
 
+      /* Save a copy of the original free_map for rollback on failure */
+      size_t original_map_bytes = section->free_map.map_capacity * sizeof(uint32_t);
+      uint32_t* original_map = get_memory(original_map_bytes);
+      memcpy(original_map, section->free_map.map, original_map_bytes);
+
       /* Compact the free_map and get the relocation map */
       free_map_defrag_result_t defrag = free_map_defragment(&section->free_map);
 
       /* Write relocation plan file for crash recovery before moving data */
       if (_section_defrag_plan_write(section, &defrag) != 0) {
         log_error("Failed to write defrag plan file for section %zu", section->id);
-        /* Restore free_map by re-init from scratch */
+        /* Restore free_map from the saved original */
         free(defrag.relocation);
-        free_map_destroy(&section->free_map);
-        free_map_init(&section->free_map, total);
-        /* Mark occupied slots based on what was there before — we lost the
-           original map. Best effort: mark 0..used_count-1 as occupied. */
-        for (size_t i = 0; i < used_count; i++) {
-          size_t word = i / 32;
-          size_t bit = i % 32;
-          section->free_map.map[word] &= ~((uint32_t)1 << bit);
-        }
+        memcpy(section->free_map.map, original_map, original_map_bytes);
+        free(original_map);
         break;
       }
 
@@ -535,30 +585,59 @@ void section_dispatch(void* state, message_t* msg) {
         if (section->file == NULL) {
           log_error("Failed to open section file for defragmentation");
           free(defrag.relocation);
+          memcpy(section->free_map.map, original_map, original_map_bytes);
+          free(original_map);
           break;
         }
       }
 
       /* Move data for each relocation where old != new */
       uint8_t* block_buf = get_memory(section->block_size);
+      int io_error = 0;
       for (size_t i = 0; i < total; i++) {
         if (defrag.relocation[i] != (size_t)-1 && defrag.relocation[i] != i) {
           size_t old_offset = i * section->block_size;
           size_t new_offset = defrag.relocation[i] * section->block_size;
           ssize_t rd = platform_file_pread(section->file, block_buf,
               section->block_size, (uint64_t)old_offset);
-          if (rd == (ssize_t)section->block_size) {
-            platform_file_pwrite(section->file, block_buf,
-                section->block_size, (uint64_t)new_offset);
+          if (rd != (ssize_t)section->block_size) {
+            log_error("Defragment read failed at offset %zu for section %zu", old_offset, section->id);
+            io_error = 1;
+            break;
+          }
+          ssize_t wr = platform_file_pwrite(section->file, block_buf,
+              section->block_size, (uint64_t)new_offset);
+          if (wr != (ssize_t)section->block_size) {
+            log_error("Defragment write failed at offset %zu for section %zu", new_offset, section->id);
+            io_error = 1;
+            break;
           }
         }
       }
       free(block_buf);
 
+      if (io_error) {
+        log_error("Defragmentation I/O error for section %zu, plan file preserved for recovery", section->id);
+        free(defrag.relocation);
+        memcpy(section->free_map.map, original_map, original_map_bytes);
+        free(original_map);
+        p->defrag.relocation = NULL;
+        break;
+      }
+
       /* Truncate file to the compacted size */
       uint64_t new_file_size = (uint64_t)(defrag.new_count * section->block_size);
-      platform_file_truncate(section->file, new_file_size);
+      if (platform_file_truncate(section->file, new_file_size) != 0) {
+        log_error("Defragmentation truncate failed for section %zu, plan file preserved for recovery", section->id);
+        free(defrag.relocation);
+        memcpy(section->free_map.map, original_map, original_map_bytes);
+        free(original_map);
+        p->defrag.relocation = NULL;
+        break;
+      }
       platform_file_sync(section->file);
+
+      free(original_map);
 
       /* Save metadata and delete plan file */
       atomic_store(&section->dirty, 1);
@@ -765,7 +844,7 @@ void section_defragment(section_t* section, actor_t* reply_to) {
   message_t msg;
   msg.type = SECTION_DEFRAGMENT;
   msg.payload = payload;
-  msg.payload_destroy = free;
+  msg.payload_destroy = section_defragment_payload_destroy;
 
   actor_send(&section->actor, &msg);
 }

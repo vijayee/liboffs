@@ -3,9 +3,36 @@
 /build*
 .env
 
-# Test data directories
-BlockCache*/
+# CMake build artifacts
+CMakeCache.txt
+CMakeFiles/
+CPackConfig.cmake
+CPackSourceConfig.cmake
+CTestTestfile.cmake
+DartConfiguration.tcl
+Makefile
+_deps/
+cmake_install.cmake
+lib/
+msquic-config.cmake
+test/CMakeFiles/
+test/CTestTestfile.cmake
+test/Makefile
+test/cmake_install.cmake
+
+# Compiled binaries
+offs
+offsd
+offs-metrics
+offs-updater
+sections/
+test/testoffs
+test/testliboffs
+
+# Test data directories (generated at runtime, not source code)
+/BlockCache*/
 block_index/
+certs/
 
 # Test outputs
 browser_video_*.png
