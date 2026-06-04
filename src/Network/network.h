@@ -67,11 +67,11 @@ typedef struct network_t {
   topology_metrics_t* topology_metrics;
   connection_manager_t conn_mgr;
   struct respiration_actor_t* respiration;
-  uint64_t gossip_timer_id;
-  uint64_t eabf_maintenance_timer_id;
+  ATOMIC(uint64_t) gossip_timer_id;
+  ATOMIC(uint64_t) eabf_maintenance_timer_id;
   uint64_t hebbian_decay_timer_id;
-  uint64_t metrics_push_timer_id;
-  uint64_t ping_capacity_timer_id;
+  ATOMIC(uint64_t) metrics_push_timer_id;
+  ATOMIC(uint64_t) ping_capacity_timer_id;
   ATOMIC(uint8_t) running;
   uint32_t gossip_init_interval_s;
   size_t gossip_init_count;
@@ -92,7 +92,7 @@ typedef struct network_t {
   pending_quic_t* pending_connections;  /* QUIC connections awaiting salutation */
 
   // Friend peer reconnect state
-  uint64_t friend_reconnect_timer_id;
+  ATOMIC(uint64_t) friend_reconnect_timer_id;
 
   closest_nodes_pending_t closest_pending[CLOSEST_NODES_PENDING_MAX];
   size_t closest_pending_count;

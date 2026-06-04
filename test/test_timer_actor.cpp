@@ -69,7 +69,7 @@ TEST(TestTimerActor, TestOneShotTimer) {
   actor_init(&target, &state, completion_dispatch, pool);
 
   /* Set a one-shot timer (interval=0) with 50ms timeout */
-  timer_actor_set(ta, 50, 0, &target, COMPLETION_FIRE);
+  timer_actor_set(ta, 50, 0, &target, COMPLETION_FIRE, NULL);
 
   /* Wait up to 500ms for the completion to fire */
   for (int i = 0; i < 500; i++) {
@@ -103,7 +103,7 @@ TEST(TestTimerActor, TestRepeatingTimer) {
   actor_init(&target, &state, completion_dispatch, pool);
 
   /* Set a repeating timer: 30ms initial, 30ms interval */
-  timer_actor_set(ta, 30, 30, &target, COMPLETION_FIRE);
+  timer_actor_set(ta, 30, 30, &target, COMPLETION_FIRE, NULL);
 
   /* Wait up to 1s for at least 3 firings */
   for (int i = 0; i < 1000; i++) {
@@ -137,7 +137,7 @@ TEST(TestTimerActor, TestCancelTimer) {
   actor_init(&target, &state, completion_dispatch, pool);
 
   /* Set a one-shot timer with 500ms timeout */
-  (void)timer_actor_set(ta, 500, 0, &target, COMPLETION_FIRE);
+  (void)timer_actor_set(ta, 500, 0, &target, COMPLETION_FIRE, NULL);
 
   /* We can't get the real timer_id synchronously (it's filled in on the timer
      thread), so we wait briefly for the dispatch to create it, then read the
@@ -146,7 +146,7 @@ TEST(TestTimerActor, TestCancelTimer) {
      cancel the timer we learn about from the first firing. */
 
   /* Alternative approach: use a short timer, let it fire once, then cancel */
-  timer_actor_set(ta, 30, 30, &target, COMPLETION_FIRE);
+  timer_actor_set(ta, 30, 30, &target, COMPLETION_FIRE, NULL);
 
   /* Wait for at least one firing to get the timer_id */
   for (int i = 0; i < 200; i++) {
@@ -242,9 +242,9 @@ TEST(TestTimerActor, TestMultipleConcurrentTimers) {
   actor_init(&target, &state, completion_dispatch, pool);
 
   /* Set 3 one-shot timers with different timeouts */
-  timer_actor_set(ta, 30, 0, &target, COMPLETION_FIRE);
-  timer_actor_set(ta, 60, 0, &target, COMPLETION_FIRE);
-  timer_actor_set(ta, 90, 0, &target, COMPLETION_FIRE);
+  timer_actor_set(ta, 30, 0, &target, COMPLETION_FIRE, NULL);
+  timer_actor_set(ta, 60, 0, &target, COMPLETION_FIRE, NULL);
+  timer_actor_set(ta, 90, 0, &target, COMPLETION_FIRE, NULL);
 
   /* Wait up to 500ms for all 3 to fire */
   for (int i = 0; i < 500; i++) {
@@ -278,8 +278,8 @@ TEST(TestTimerActor, TestDestroyCleansUpTimers) {
   actor_init(&target, &state, completion_dispatch, pool);
 
   /* Set a long timer then immediately destroy -- should not crash */
-  timer_actor_set(ta, 5000, 0, &target, COMPLETION_FIRE);
-  timer_actor_set(ta, 5000, 5000, &target, COMPLETION_FIRE);
+  timer_actor_set(ta, 5000, 0, &target, COMPLETION_FIRE, NULL);
+  timer_actor_set(ta, 5000, 5000, &target, COMPLETION_FIRE, NULL);
 
   /* Destroy the timer actor while timers are active */
   timer_actor_destroy(ta);
@@ -337,6 +337,45 @@ TEST(TestTimerActor, TestDebounceWithZeroExistingId) {
   }
 
   EXPECT_GE(state.fire_count.load(), 1);
+
+  timer_actor_destroy(ta);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
+  actor_destroy(&target);
+}
+
+TEST(TestTimerActor, TestOutTimerId) {
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  timer_actor_t* ta = timer_actor_create(pool);
+  ASSERT_NE(ta, nullptr);
+
+  completion_state state;
+  state.fire_count.store(0);
+  state.last_timer_id.store(0);
+
+  actor_t target;
+  actor_init(&target, &state, completion_dispatch, pool);
+
+  /* Set a timer and retrieve its id via out_timer_id */
+  ATOMIC(uint64_t) timer_id = 0;
+  timer_actor_set(ta, 50, 0, &target, COMPLETION_FIRE, &timer_id);
+
+  /* Wait for dispatch to create the timer */
+  for (int i = 0; i < 100; i++) {
+    scheduler_pool_wait_for_idle(pool);
+    if (atomic_load(&timer_id) != 0) break;
+    usleep(1000);
+  }
+
+  /* The timer_id should be >0 after dispatch runs */
+  EXPECT_NE(atomic_load(&timer_id), 0u);
+
+  /* Cancel the timer using the retrieved id */
+  timer_actor_cancel(ta, atomic_load(&timer_id));
 
   timer_actor_destroy(ta);
   scheduler_pool_wait_for_idle(pool);

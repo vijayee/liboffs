@@ -49,6 +49,7 @@ typedef struct {
   uint64_t interval_ms;
   actor_t* target;
   uint32_t completion_type;
+  ATOMIC(uint64_t)* out_timer_id;
 } timer_set_payload_t;
 
 typedef struct {
@@ -73,7 +74,8 @@ timer_actor_t* timer_actor_create(scheduler_pool_t* pool);
 void timer_actor_destroy(timer_actor_t* timer_actor);
 uint64_t timer_actor_set(timer_actor_t* timer_actor, uint64_t timeout_ms,
                          uint64_t interval_ms, actor_t* target,
-                         uint32_t completion_type);
+                         uint32_t completion_type,
+                         ATOMIC(uint64_t)* out_timer_id);
 void timer_actor_cancel(timer_actor_t* timer_actor, uint64_t timer_id);
 uint64_t timer_actor_debounce(timer_actor_t* timer_actor,
                               uint64_t timeout_ms, uint64_t interval_ms,

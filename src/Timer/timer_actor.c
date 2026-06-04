@@ -136,6 +136,9 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
       } else {
         free(completion);
       }
+      if (payload->out_timer_id != NULL) {
+        atomic_store(payload->out_timer_id, completion->timer_id);
+      }
       if (msg->payload_destroy != NULL) {
         msg->payload_destroy(msg->payload);
       }
@@ -328,13 +331,15 @@ void timer_actor_destroy(timer_actor_t* timer_actor) {
 
 uint64_t timer_actor_set(timer_actor_t* timer_actor, uint64_t timeout_ms,
                          uint64_t interval_ms, actor_t* target,
-                         uint32_t completion_type) {
+                         uint32_t completion_type,
+                         ATOMIC(uint64_t)* out_timer_id) {
   timer_set_payload_t* payload = get_clear_memory(sizeof(timer_set_payload_t));
   payload->timeout_ms = timeout_ms;
   payload->interval_ms = interval_ms;
   payload->target = target;
   payload->completion_type = completion_type;
   payload->timer_id = 0;
+  payload->out_timer_id = out_timer_id;
 
   message_t msg = {0};
   msg.type = TIMER_SET;
@@ -344,9 +349,10 @@ uint64_t timer_actor_set(timer_actor_t* timer_actor, uint64_t timeout_ms,
   actor_send(&timer_actor->actor, &msg);
   pd_loop_async_send(timer_actor->loop, NULL);
 
-  /* The timer_id is filled in by the dispatch on the timer thread.
-     Since actor_send is async, we return 0 here. Callers should use
-     TIMER_DEBOUNCE for auto-cancelling repeating timers. */
+  /* The timer_id is filled in by the dispatch on the scheduler worker.
+     Since actor_send is async, the out_timer_id will be 0 until the
+     dispatch runs. Caller can read it after scheduler_pool_wait_for_idle.
+     Returns 0 — use out_timer_id to get the actual timer_id. */
   return 0;
 }
 
