@@ -433,6 +433,11 @@ round_robin_t* round_robin_create(char* robin_path, timer_actor_t* timer_actor, 
 }
 
 void round_robin_destroy(round_robin_t* robin) {
+  if (robin->timer_actor != NULL && robin->save_target != NULL) {
+    timer_actor_debounce_flush(robin->timer_actor, robin->save_target, SECTION_SAVE_META);
+    platform_sleep_ms(10);
+    scheduler_pool_wait_for_idle(robin->save_target->pool);
+  }
   round_robin_save(robin);
   free(robin->path);
   round_robin_node_t* current = robin->first;
@@ -708,6 +713,11 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
 }
 
 void sections_destroy(sections_t* sections) {
+  if (sections->timer_actor != NULL) {
+    timer_actor_debounce_flush(sections->timer_actor, &sections->actor, SECTION_WRITE_META);
+    platform_sleep_ms(10);
+    scheduler_pool_wait_for_idle(sections->actor.pool);
+  }
   sections_lru_cache_destroy(sections->lru);
   actor_destroy(&sections->actor);
   round_robin_destroy(sections->robin);

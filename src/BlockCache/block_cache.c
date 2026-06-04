@@ -624,6 +624,12 @@ void block_cache_destroy(block_cache_t* block_cache) {
   }
   if (refcounter_dereference_is_zero((refcounter_t*) block_cache)) {
     refcounter_destroy_lock((refcounter_t*) block_cache);
+    if (block_cache->index != NULL && block_cache->index->timer_actor != NULL) {
+      timer_actor_debounce_flush(block_cache->index->timer_actor,
+                                  &block_cache->index->actor, INDEX_SAVE);
+      platform_sleep_ms(10);
+      scheduler_pool_wait_for_idle(block_cache->pool);
+    }
     index_destroy(block_cache->index);
     sections_destroy(block_cache->sections);
     block_lru_cache_destroy(block_cache->lru);

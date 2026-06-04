@@ -942,6 +942,11 @@ void index_destroy(index_t* index) {
     return;
   }
   if (refcounter_dereference_is_zero((refcounter_t*) index)) {
+    if (index->timer_actor != NULL) {
+      timer_actor_debounce_flush(index->timer_actor, &index->actor, INDEX_SAVE);
+      platform_sleep_ms(10);
+      scheduler_pool_wait_for_idle(index->actor.pool);
+    }
     index_debounce(index);
     refcounter_destroy_lock((refcounter_t*) index);
     index_destroy_node(index, index->root);
