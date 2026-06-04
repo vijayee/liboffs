@@ -28,7 +28,7 @@ offs_node_t* offs_node_create(config_t* config, authority_t* authority) {
     return NULL;
   }
 
-  node->timer = timer_actor_create();
+  node->timer = timer_actor_create(node->scheduler);
   if (node->timer == NULL) {
     scheduler_pool_destroy(node->scheduler);
     config_free(node->config);
@@ -234,7 +234,7 @@ void offs_node_restart(offs_node_t* node, const char* data_dir) {
     return;
   }
 
-  node->timer = timer_actor_create();
+  node->timer = timer_actor_create(node->scheduler);
   if (node->timer == NULL) {
     log_error("offs_node_restart: failed to create timer actor");
     scheduler_pool_destroy(node->scheduler);
