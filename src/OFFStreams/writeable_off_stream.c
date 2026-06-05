@@ -49,10 +49,10 @@ static void _get_random_blocks(writeable_off_stream_t* stream);
 static void _maybe_finalize(writeable_off_stream_t* stream) {
   if (stream->pending_finalize && stream->entries.length == 0 && !stream->has_pulled) {
     stream->pending_finalize = 0;
+    stream->stream.is_deactivated = 1;
     stream_notify((stream_t*)stream, finished_event, NULL, NULL);
     stream_notify((stream_t*)stream, complete_event, NULL, NULL);
     stream_notify((stream_t*)stream, close_event, NULL, NULL);
-    stream->stream.is_deactivated = 1;
   }
 }
 
@@ -112,10 +112,10 @@ static void _create_tuple(writeable_off_stream_t* stream, off_stream_tuple_entry
   if (is_final) {
     block_destroy(stream->final_block);
     stream->final_block = NULL;
+    stream->stream.is_deactivated = 1;
     stream_notify((stream_t*)stream, finished_event, NULL, NULL);
     stream_notify((stream_t*)stream, complete_event, NULL, NULL);
     stream_notify((stream_t*)stream, close_event, NULL, NULL);
-    stream->stream.is_deactivated = 1;
   } else if (stream->entries.length > 0 && !stream->stream.is_deactivated) {
     _get_random_blocks(stream);
   } else {
@@ -250,10 +250,10 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
       }
 
       if (stream->entries.length == 0 && !stream->has_pulled) {
+        stream->stream.is_deactivated = 1;
         stream_notify((stream_t*)stream, finished_event, NULL, NULL);
         stream_notify((stream_t*)stream, complete_event, NULL, NULL);
         stream_notify((stream_t*)stream, close_event, NULL, NULL);
-        stream->stream.is_deactivated = 1;
       } else {
         stream->pending_finalize = 1;
       }

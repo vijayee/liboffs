@@ -75,7 +75,7 @@ TEST(OffStreamIntegration, WriteableOffStreamEncodesData) {
   rm_rf(wstream_path);
   mkdir_p(wstream_path);
 
-  timer_actor_t* timer = timer_actor_create();
+  timer_actor_t* timer = timer_actor_create(pool);
   block_cache_t* bc = block_cache_create(
       (config_t){.index_bucket_size = 10, .index_wait = 1000, .index_max_wait = 5000, .section_size = 128000, .section_wait = 1000, .section_max_wait = 5000, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
       wstream_path, standard, timer, pool, NULL, 0);
@@ -135,7 +135,7 @@ TEST(OffStreamIntegration, ReadableOffStreamDecodesBlock) {
   rm_rf(rstream_path);
   mkdir_p(rstream_path);
 
-  timer_actor_t* timer = timer_actor_create();
+  timer_actor_t* timer = timer_actor_create(pool);
   block_cache_t* bc = block_cache_create(
       (config_t){.index_bucket_size = 10, .index_wait = 1000, .index_max_wait = 5000, .section_size = 128000, .section_wait = 1000, .section_max_wait = 5000, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
       rstream_path, standard, timer, pool, NULL, 0);

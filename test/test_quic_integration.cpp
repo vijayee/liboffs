@@ -613,7 +613,7 @@ TEST(QuicIntegration, NetworkCreateDestroy) {
   authority_t* authority = authority_create(&config);
   ASSERT_NE(authority, nullptr);
 
-  timer_actor_t* timer = timer_actor_create();
+  timer_actor_t* timer = timer_actor_create(pool);
   ASSERT_NE(timer, nullptr);
 
   block_cache_t* cache = block_cache_create(config, (char*)"/tmp/test_quic_bc", standard, timer, pool, NULL, 0);
@@ -660,7 +660,7 @@ TEST(QuicIntegration, QuicListenerStartStop) {
   authority_t* authority = authority_create(&config);
   ASSERT_NE(authority, nullptr);
 
-  timer_actor_t* timer = timer_actor_create();
+  timer_actor_t* timer = timer_actor_create(pool);
   ASSERT_NE(timer, nullptr);
 
   block_cache_t* cache = block_cache_create(config, (char*)"/tmp/test_quic_bc2", standard, timer, pool, NULL, 0);

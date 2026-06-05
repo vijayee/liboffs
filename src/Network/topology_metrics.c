@@ -51,9 +51,6 @@ void topology_metrics_dispatch(void* state, message_t* msg) {
       break;
   }
 
-  if (msg->payload != NULL && msg->payload_destroy != NULL) {
-    msg->payload_destroy(msg->payload);
-  }
 }
 
 void topology_metrics_update_peers(topology_metrics_t* metrics,

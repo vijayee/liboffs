@@ -19,6 +19,7 @@ extern "C" {
 #include "../src/BlockCache/section.h"
 #include "../src/BlockCache/sections.h"
 #include "../src/Util/allocator.h"
+#include "../src/Scheduler/scheduler.h"
 }
 
 /* ---- Completion actor state for section async tests ---- */
@@ -210,11 +211,19 @@ class TestSection : public testing::Test {
 public:
   char* section_location;
   char* meta_location;
+  scheduler_pool_t* pool;
   void SetUp() override {
     section_location = path_join("/tmp", "sections");
     meta_location = path_join("/tmp", "meta");
     rm_rf(section_location);
     rm_rf(meta_location);
+    pool = scheduler_pool_create(2);
+    scheduler_pool_start(pool);
+  }
+  void TearDown() override {
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
   }
 };
 
@@ -230,7 +239,7 @@ TEST_F(TestSection, TestSectionFunction) {
 
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 20, 4000, mini);
+  section_t* section = section_create(section_location, meta_location, 20, 4000, mini, pool);
   for (size_t i = 0; i < block_count; i++) {
     size_t section_index = 0;
     int result = section_write_sync(section, blocks[i]->data, &section_index, &full);
@@ -265,7 +274,7 @@ TEST_F(TestSection, TestSectionFunction) {
   }
 
   section_destroy(section);
-  section = section_create(section_location, meta_location, 20, 4000, mini);
+  section = section_create(section_location, meta_location, 20, 4000, mini, pool);
 
   for (size_t i = 0; i < block_count; i++) {
     index_entry_t* entry =  entries[i];
@@ -332,7 +341,7 @@ TEST_F(TestSection, TestSectionFunction) {
 TEST_F(TestSection, TestSectionAsyncWrite) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 20, 5000, mini);
+  section_t* section = section_create(section_location, meta_location, 20, 5000, mini, pool);
 
   /* Create completion actor for async results */
   section_completion_state_t completion_state;
@@ -431,7 +440,7 @@ public:
     mkdir_p(meta_location);
 
     for (size_t i = 0; i < 8; i++) {
-      sections[i] = section_create(section_location, meta_location, 20, id, mini);
+      sections[i] = section_create(section_location, meta_location, 20, id, mini, NULL);
       id++;
     }
   }
@@ -523,17 +532,23 @@ class TestRoundRobin : public testing::Test {
 public:
   char* robin_location;
   timer_actor_t* timer_actor_inst;
+  scheduler_pool_t* pool;
   round_robin_t* robin;
   void SetUp() override {
     robin_location = path_join("/tmp", "robin");
     rm_rf(robin_location);
-    timer_actor_inst = timer_actor_create();
+    pool = scheduler_pool_create(2);
+    scheduler_pool_start(pool);
+    timer_actor_inst = timer_actor_create(pool);
     mkdir_p(robin_location);
   }
   void TearDown() override {
     round_robin_destroy(robin);
     free(robin_location);
     timer_actor_destroy(timer_actor_inst);
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
   }
 };
 
@@ -574,26 +589,32 @@ public:
   uint64_t max_wait = 5000;
   char* path;
   timer_actor_t* timer_actor_inst;
+  scheduler_pool_t* pool;
   sections_t* sections = NULL;
   void SetUp() override {
     path = path_join("/tmp", "sections");
     rm_rf(path);
-    timer_actor_inst = timer_actor_create();
+    pool = scheduler_pool_create(2);
+    scheduler_pool_start(pool);
+    timer_actor_inst = timer_actor_create(pool);
     mkdir_p(path);
     for (size_t i = 0; i < 25; i++) {
       blocks[i] = block_create_random_block_by_type(block_type);
       entries[i] = index_entry_create(blocks[i]->hash);
     }
-    sections = sections_create(path, size, cache_size, max_tuple_size, block_type, timer_actor_inst, NULL, wait, max_wait);
+    sections = sections_create(path, size, cache_size, max_tuple_size, block_type, timer_actor_inst, pool, wait, max_wait);
   }
   void TearDown() override {
+    sections_destroy(sections);
     timer_actor_destroy(timer_actor_inst);
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
     for (size_t i = 0; i < 25; i++) {
       block_destroy(blocks[i]);
       index_entry_destroy(entries[i]);
     }
     free(path);
-    sections_destroy(sections);
   }
 };
 
@@ -634,7 +655,7 @@ TEST_F(TestSections, SectionsFunctions) {
 TEST_F(TestSection, TestBitmapAllocationOrder) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 32, 6000, mini);
+  section_t* section = section_create(section_location, meta_location, 32, 6000, mini, pool);
 
   uint8_t full;
   for (size_t i = 0; i < 32; i++) {
@@ -655,7 +676,7 @@ TEST_F(TestSection, TestBitmapAllocationOrder) {
 TEST_F(TestSection, TestBitmapFullDetection) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 5, 7000, mini);
+  section_t* section = section_create(section_location, meta_location, 5, 7000, mini, pool);
 
   EXPECT_EQ(section_full(section), 0);
 
@@ -690,7 +711,7 @@ TEST_F(TestSection, TestBitmapFullDetection) {
 TEST_F(TestSection, TestBitmapDeallocateDoubleFree) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 10, 8000, mini);
+  section_t* section = section_create(section_location, meta_location, 10, 8000, mini, pool);
 
   uint8_t full;
   block_t* block = block_create_random_block_by_type(mini);
@@ -713,7 +734,7 @@ TEST_F(TestSection, TestBitmapDeallocateDoubleFree) {
 TEST_F(TestSection, TestBitmapPersistenceRoundTrip) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 10, 9000, mini);
+  section_t* section = section_create(section_location, meta_location, 10, 9000, mini, pool);
 
   uint8_t full;
   block_t* blocks[7];
@@ -729,7 +750,7 @@ TEST_F(TestSection, TestBitmapPersistenceRoundTrip) {
   section_save_meta(section);
 
   section_destroy(section);
-  section = section_create(section_location, meta_location, 10, 9000, mini);
+  section = section_create(section_location, meta_location, 10, 9000, mini, pool);
 
   size_t new_index1, new_index2;
   int result = section_write_sync(section, blocks[1]->data, &new_index1, &full);
@@ -753,7 +774,7 @@ TEST_F(TestSection, TestBitmapPersistenceRoundTrip) {
 TEST_F(TestSection, TestActorMultipleMessagesQueued) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 10, 10000, mini);
+  section_t* section = section_create(section_location, meta_location, 10, 10000, mini, pool);
 
   section_completion_state_t completion_state;
 
@@ -781,6 +802,190 @@ TEST_F(TestSection, TestActorMultipleMessagesQueued) {
     block_destroy(blocks[i]);
   }
 
+  section_destroy(section);
+  free(meta_location);
+  free(section_location);
+}
+
+/* ---- Defragmentation tests ---- */
+
+TEST_F(TestSection, TestDefragmentMovesBlocksToFront) {
+  mkdir_p(section_location);
+  mkdir_p(meta_location);
+  section_t* section = section_create(section_location, meta_location, 10, 11000, mini, pool);
+
+  /* Write blocks to slots 0-4 */
+  uint8_t full;
+  block_t* blocks[5];
+  size_t indices[5];
+  for (size_t i = 0; i < 5; i++) {
+    blocks[i] = block_create_random_block_by_type(mini);
+    int result = section_write_sync(section, blocks[i]->data, &indices[i], &full);
+    EXPECT_EQ(result, 0);
+    EXPECT_EQ(indices[i], i);
+  }
+
+  /* Deallocate slots 1 and 3, leaving 0, 2, 4 occupied */
+  section_deallocate_sync(section, indices[1]);
+  section_deallocate_sync(section, indices[3]);
+
+  /* Verify section_count_free reports 7 free slots (10 total - 3 occupied) */
+  EXPECT_EQ(section_count_free(section), 7u);
+
+  /* Dispatch SECTION_DEFRAGMENT synchronously */
+  section_defragment_payload_t defrag_payload;
+  memset(&defrag_payload, 0, sizeof(defrag_payload));
+  defrag_payload.reply_to = NULL;
+  defrag_payload.result = -1;
+  message_t defrag_msg;
+  defrag_msg.type = SECTION_DEFRAGMENT;
+  defrag_msg.payload = &defrag_payload;
+  defrag_msg.payload_destroy = NULL;
+  section_dispatch(section, &defrag_msg);
+
+  EXPECT_EQ(defrag_payload.result, 0);
+  ASSERT_NE(defrag_payload.defrag.relocation, (size_t*)NULL);
+
+  /* After defragmentation, 3 blocks should be at slots 0, 1, 2 */
+  EXPECT_EQ(defrag_payload.defrag.new_count, 3u);
+
+  /* Slot 0 (was at 0) stays at 0 */
+  EXPECT_EQ(defrag_payload.defrag.relocation[0], 0u);
+  /* Slot 2 (was at 2) moves to 1 */
+  EXPECT_EQ(defrag_payload.defrag.relocation[2], 1u);
+  /* Slot 4 (was at 4) moves to 2 */
+  EXPECT_EQ(defrag_payload.defrag.relocation[4], 2u);
+  /* Slots 1 and 3 were free */
+  EXPECT_EQ(defrag_payload.defrag.relocation[1], (size_t)-1);
+  EXPECT_EQ(defrag_payload.defrag.relocation[3], (size_t)-1);
+
+  free(defrag_payload.defrag.relocation);
+
+  /* Verify data is readable at the new positions */
+  buffer_t* buf0 = section_read_sync(section, 0);
+  ASSERT_NE(buf0, (buffer_t*)NULL);
+  EXPECT_EQ(buffer_compare(buf0, blocks[0]->data), 0);
+  buffer_destroy(buf0);
+
+  buffer_t* buf1 = section_read_sync(section, 1);
+  ASSERT_NE(buf1, (buffer_t*)NULL);
+  EXPECT_EQ(buffer_compare(buf1, blocks[2]->data), 0);
+  buffer_destroy(buf1);
+
+  buffer_t* buf2 = section_read_sync(section, 2);
+  ASSERT_NE(buf2, (buffer_t*)NULL);
+  EXPECT_EQ(buffer_compare(buf2, blocks[4]->data), 0);
+  buffer_destroy(buf2);
+
+  for (size_t i = 0; i < 5; i++) {
+    block_destroy(blocks[i]);
+  }
+  section_destroy(section);
+  free(meta_location);
+  free(section_location);
+}
+
+TEST_F(TestSection, TestDefragmentAlreadyCompact) {
+  mkdir_p(section_location);
+  mkdir_p(meta_location);
+  section_t* section = section_create(section_location, meta_location, 10, 12000, mini, pool);
+
+  /* Write 3 blocks to slots 0-2 (already compact) */
+  uint8_t full;
+  block_t* blocks[3];
+  for (size_t i = 0; i < 3; i++) {
+    blocks[i] = block_create_random_block_by_type(mini);
+    size_t index;
+    int result = section_write_sync(section, blocks[i]->data, &index, &full);
+    EXPECT_EQ(result, 0);
+  }
+
+  /* Defragment — should be a no-op since blocks are already at 0-2 */
+  section_defragment_payload_t defrag_payload;
+  memset(&defrag_payload, 0, sizeof(defrag_payload));
+  defrag_payload.reply_to = NULL;
+  defrag_payload.result = -1;
+  message_t defrag_msg;
+  defrag_msg.type = SECTION_DEFRAGMENT;
+  defrag_msg.payload = &defrag_payload;
+  defrag_msg.payload_destroy = NULL;
+  section_dispatch(section, &defrag_msg);
+
+  EXPECT_EQ(defrag_payload.result, 0);
+  if (defrag_payload.defrag.relocation != NULL) {
+    free(defrag_payload.defrag.relocation);
+  }
+
+  for (size_t i = 0; i < 3; i++) {
+    block_destroy(blocks[i]);
+  }
+  section_destroy(section);
+  free(meta_location);
+  free(section_location);
+}
+
+TEST_F(TestSection, TestDefragmentEmptySection) {
+  mkdir_p(section_location);
+  mkdir_p(meta_location);
+  section_t* section = section_create(section_location, meta_location, 10, 13000, mini, pool);
+
+  /* Defragment an empty section — should be a no-op */
+  section_defragment_payload_t defrag_payload;
+  memset(&defrag_payload, 0, sizeof(defrag_payload));
+  defrag_payload.reply_to = NULL;
+  defrag_payload.result = -1;
+  message_t defrag_msg;
+  defrag_msg.type = SECTION_DEFRAGMENT;
+  defrag_msg.payload = &defrag_payload;
+  defrag_msg.payload_destroy = NULL;
+  section_dispatch(section, &defrag_msg);
+
+  EXPECT_EQ(defrag_payload.result, 0);
+
+  section_destroy(section);
+  free(meta_location);
+  free(section_location);
+}
+
+/* Verify that free_map_highest_used handles non-power-of-2 total_blocks.
+   With 5 slots and only slot 0 occupied, the section is already compact
+   (highest_used = 0 < used_count = 1), so defragmentation should be a no-op. */
+TEST_F(TestSection, TestDefragmentNonPowerOf2Compact) {
+  mkdir_p(section_location);
+  mkdir_p(meta_location);
+  /* 5 slots — non-power-of-2, triggers the padding bit bug in highest_used */
+  section_t* section = section_create(section_location, meta_location, 5, 14000, mini, pool);
+
+  /* Write 1 block to slot 0 (already compact position) */
+  block_t* block = block_create_random_block_by_type(mini);
+  size_t index;
+  uint8_t full;
+  int result = section_write_sync(section, block->data, &index, &full);
+  EXPECT_EQ(result, 0);
+  EXPECT_EQ(index, 0);
+
+  /* Defragment — should detect as already compact and do nothing */
+  section_defragment_payload_t defrag_payload;
+  memset(&defrag_payload, 0, sizeof(defrag_payload));
+  defrag_payload.reply_to = NULL;
+  defrag_payload.result = -1;
+  message_t defrag_msg;
+  defrag_msg.type = SECTION_DEFRAGMENT;
+  defrag_msg.payload = &defrag_payload;
+  defrag_msg.payload_destroy = NULL;
+  section_dispatch(section, &defrag_msg);
+
+  EXPECT_EQ(defrag_payload.result, 0);
+  EXPECT_EQ(defrag_payload.defrag.relocation, nullptr);
+
+  /* Verify the block is still readable at slot 0 */
+  buffer_t* read_data = section_read_sync(section, 0);
+  EXPECT_NE(read_data, nullptr);
+  EXPECT_EQ(read_data->size, block->data->size);
+  EXPECT_EQ(memcmp(read_data->data, block->data->data, read_data->size), 0);
+  buffer_destroy(read_data);
+
+  block_destroy(block);
   section_destroy(section);
   free(meta_location);
   free(section_location);

@@ -572,6 +572,73 @@ void block_cache_dispatch(void* state, message_t* msg) {
       }
       break;
     }
+    case CACHE_DEFRAGMENT: {
+      cache_defragment_payload_t* p = (cache_defragment_payload_t*)msg->payload;
+      p->result = -1;
+      p->sections_defragmented = 0;
+      p->blocks_relocated = 0;
+
+      /* Dispatch SECTIONS_DEFRAGMENT synchronously */
+      sections_defragment_payload_t sections_payload;
+      memset(&sections_payload, 0, sizeof(sections_payload));
+      sections_payload.occupancy_threshold = p->occupancy_threshold;
+      sections_payload.reply_to = NULL;
+      sections_payload.result = -1;
+      sections_payload.sections_defragmented = 0;
+      sections_payload.relocations = NULL;
+      sections_payload.relocation_count = 0;
+      message_t sections_msg;
+      sections_msg.type = SECTIONS_DEFRAGMENT;
+      sections_msg.payload = &sections_payload;
+      sections_msg.payload_destroy = NULL;
+      sections_dispatch(block_cache->sections, &sections_msg);
+
+      if (sections_payload.result == 0 && sections_payload.relocation_count > 0) {
+        /* Update the index: iterate all entries and apply relocations */
+        index_entry_vec_t* entries = index_to_array(block_cache->index);
+        for (size_t entry_idx = 0; entry_idx < entries->length; entry_idx++) {
+          index_entry_t* entry = entries->data[entry_idx];
+          for (size_t j = 0; j < sections_payload.relocation_count; j++) {
+            if (entry->section_id == sections_payload.relocations[j].section_id &&
+                entry->section_index == sections_payload.relocations[j].old_index) {
+              entry->section_index = sections_payload.relocations[j].new_index;
+              break;
+            }
+          }
+          index_entry_destroy(entry);
+        }
+        vec_deinit(entries);
+        free(entries);
+
+        /* Force index snapshot to persist updated section_index values */
+        index_debounce(block_cache->index);
+
+        p->blocks_relocated = sections_payload.relocation_count;
+      }
+
+      if (sections_payload.relocations != NULL) {
+        free(sections_payload.relocations);
+      }
+
+      p->result = sections_payload.result;
+      p->sections_defragmented = sections_payload.sections_defragmented;
+
+      /* Send completion message if async (reply_to is set) */
+      if (p->reply_to != NULL) {
+        cache_defragment_result_payload_t* result =
+            get_clear_memory(sizeof(cache_defragment_result_payload_t));
+        result->result = p->result;
+        result->sections_defragmented = p->sections_defragmented;
+        result->blocks_relocated = p->blocks_relocated;
+        result->reply_to = NULL;
+        message_t reply;
+        reply.type = CACHE_DEFRAGMENT_RESULT;
+        reply.payload = result;
+        reply.payload_destroy = free;
+        actor_send(p->reply_to, &reply);
+      }
+      break;
+    }
     default:
       break;
   }
@@ -605,7 +672,7 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
   block_cache->lru = block_lru_cache_create(config.lru_size);
   block_cache->sections = sections_create(folder, config.section_size, config.cache_size, config.max_tuple_size, type, timer_actor, pool, config.section_wait, config.section_max_wait);
   int error_code;
-  block_cache->index = index_create(config.index_bucket_size, folder, timer_actor, config.index_wait, config.index_max_wait, config.max_snapshots, config.max_wals, &error_code);
+  block_cache->index = index_create(config.index_bucket_size, folder, timer_actor, pool, config.index_wait, config.index_max_wait, config.max_snapshots, config.max_wals, &error_code);
   if (block_cache->index == NULL) {
     log_error("block_cache_create: index_create returned NULL (error_code=%d)", error_code);
   }
@@ -624,6 +691,12 @@ void block_cache_destroy(block_cache_t* block_cache) {
   }
   if (refcounter_dereference_is_zero((refcounter_t*) block_cache)) {
     refcounter_destroy_lock((refcounter_t*) block_cache);
+    if (block_cache->index != NULL && block_cache->index->timer_actor != NULL) {
+      timer_actor_debounce_flush(block_cache->index->timer_actor,
+                                  &block_cache->index->actor, INDEX_SAVE);
+      platform_sleep_ms(10);
+      scheduler_pool_wait_for_idle(block_cache->pool);
+    }
     index_destroy(block_cache->index);
     sections_destroy(block_cache->sections);
     block_lru_cache_destroy(block_cache->lru);
@@ -724,6 +797,22 @@ void block_cache_remove(block_cache_t* block_cache, buffer_t* hash, actor_t* rep
   msg.type = CACHE_REMOVE;
   msg.payload = payload;
   msg.payload_destroy = cache_remove_payload_destroy;
+
+  actor_send(&block_cache->actor, &msg);
+}
+
+void block_cache_defragment(block_cache_t* block_cache, float occupancy_threshold, actor_t* reply_to) {
+  cache_defragment_payload_t* payload = get_clear_memory(sizeof(cache_defragment_payload_t));
+  payload->occupancy_threshold = occupancy_threshold;
+  payload->reply_to = reply_to;
+  payload->result = -1;
+  payload->sections_defragmented = 0;
+  payload->blocks_relocated = 0;
+
+  message_t msg;
+  msg.type = CACHE_DEFRAGMENT;
+  msg.payload = payload;
+  msg.payload_destroy = free;
 
   actor_send(&block_cache->actor, &msg);
 }

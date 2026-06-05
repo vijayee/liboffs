@@ -108,7 +108,7 @@ protected:
         cache_dir = mkdtemp(dir_template);
         cache_dir = strdup(cache_dir);
 
-        timer = timer_actor_create();
+        timer = timer_actor_create(pool);
         config_t config = {
             .index_bucket_size = 10,
             .index_wait = 1000,

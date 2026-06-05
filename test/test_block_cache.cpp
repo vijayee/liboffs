@@ -195,13 +195,16 @@ public:
   block_size_e type = standard;
   char* location;
   timer_actor_t* timer_actor;
+  scheduler_pool_t* pool;
   block_cache_t* block_cache;
   block_t* blocks[BLOCK_COUNT];
   config_t config;
   void SetUp() override {
     location = path_join("/tmp", "BlockCacheTest");
     rm_rf(location);
-    timer_actor = timer_actor_create();
+    pool = scheduler_pool_create(2);
+    scheduler_pool_start(pool);
+    timer_actor = timer_actor_create(pool);
     mkdir_p(location);
     config = config_default();
     for (size_t i = 0; i < BLOCK_COUNT; i++) {
@@ -209,8 +212,11 @@ public:
     }
   }
   void TearDown() override {
-    timer_actor_destroy(timer_actor);
+    scheduler_pool_wait_for_idle(pool);
     block_cache_destroy(block_cache);
+    timer_actor_destroy(timer_actor);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
     free(location);
     for (size_t i = 0; i < BLOCK_COUNT; i++) {
       block_destroy(blocks[i]);
@@ -330,15 +336,15 @@ public:
   void SetUp() override {
     location = path_join("/tmp", "BlockCacheIntegrationTest");
     rm_rf(location);
-    timer_actor = timer_actor_create();
+    pool = scheduler_pool_create(4);
+    scheduler_pool_start(pool);
+    timer_actor = timer_actor_create(pool);
     mkdir_p(location);
     config = config_default();
     config.lru_size = 10;
     for (size_t i = 0; i < LRU_COUNT; i++) {
       blocks[i] = block_create_random_block_by_type(type);
     }
-    pool = scheduler_pool_create(4);
-    scheduler_pool_start(pool);
   }
   void TearDown() override {
     scheduler_pool_wait_for_idle(pool);

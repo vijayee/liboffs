@@ -33,7 +33,7 @@ typedef struct update_actor_t {
   char install_dir[512];
   char backup_dir[512];
   update_info_t* pending_update;
-  uint64_t check_timer_id;
+  ATOMIC(uint64_t) check_timer_id;
   uint64_t drain_start_ms;
   uint64_t drain_timeout_ms;
   uint8_t* draining_flag;

@@ -27,6 +27,7 @@ ssize_t platform_file_pread(platform_file_t* file, void* buf, size_t count, uint
 ssize_t platform_file_pwrite(platform_file_t* file, const void* buf, size_t count, uint64_t offset);
 int64_t platform_file_seek(platform_file_t* file, int64_t offset, int whence);
 int platform_file_sync(platform_file_t* file);
+int platform_file_truncate(platform_file_t* file, uint64_t length);
 
 #define PLATFORM_SEEK_SET  0
 #define PLATFORM_SEEK_CUR  1

@@ -40,7 +40,8 @@ ExternalProject_Add(libcbor
 )
 add_library(cbor STATIC IMPORTED)
 set_target_properties(cbor PROPERTIES IMPORTED_LOCATION ${LIBCBOR_BUILD_PATH}/libcbor.a
-  INTERFACE_INCLUDE_DIRECTORIES ${LIBCBOR_BUILD_PATH}/include)
+  INTERFACE_INCLUDE_DIRECTORIES "${LIBCBOR_ROOT}/src"
+  INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${LIBCBOR_BUILD_PATH}/include")
 add_dependencies(cbor libcbor)
 
 

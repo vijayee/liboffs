@@ -15,6 +15,15 @@
     return _BitScanForward(&index, x) ? (int)(index + 1) : 0;
   }
   #define PLATFORM_FFS(x) _platform_ffs_msvc((unsigned long)(x))
+  static inline int _platform_clz_msvc(unsigned long x) {
+    unsigned long index;
+    return _BitScanReverse(&index, x) ? (int)(31 - index) : 32;
+  }
+  #define PLATFORM_CLZ(x) _platform_clz_msvc((unsigned long)(x))
+  static inline int _platform_popcount_msvc(unsigned long x) {
+    return (int)__popcnt(x);
+  }
+  #define PLATFORM_POPCOUNT(x) _platform_popcount_msvc((unsigned long)(x))
 
   #define PLATFORM_DIAGNOSTIC_PUSH         __pragma(warning(push))
   #define PLATFORM_DIAGNOSTIC_POP          __pragma(warning(pop))
@@ -27,6 +36,8 @@
   #define PLATFORM_ALIGNED(n)     __attribute__((aligned(n)))
   #define PLATFORM_PRINTF(f, a)   __attribute__((format(printf, f, a)))
   #define PLATFORM_FFS(x)         __builtin_ffs(x)
+  #define PLATFORM_CLZ(x)         __builtin_clz(x)
+  #define PLATFORM_POPCOUNT(x)    __builtin_popcount(x)
 
   #define PLATFORM_DIAGNOSTIC_PUSH         _Pragma("GCC diagnostic push")
   #define PLATFORM_DIAGNOSTIC_POP          _Pragma("GCC diagnostic pop")

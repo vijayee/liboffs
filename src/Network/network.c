@@ -176,39 +176,49 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   block_cache->respiration = network->respiration;
 
   // Start gossip timer: first tick in init_interval_s, then recurring
-  network->gossip_timer_id = timer_actor_set(timer,
+  network->gossip_timer_id = 0;
+  timer_actor_set(timer,
       (uint64_t)network->gossip_init_interval_s * 1000,
       (uint64_t)network->gossip_init_interval_s * 1000,
       &network->actor,
-      NETWORK_GOSSIP_TICK);
+      NETWORK_GOSSIP_TICK,
+      &network->gossip_timer_id);
 
   // Start EABF maintenance sweep
-  network->eabf_maintenance_timer_id = timer_actor_set(timer,
+  network->eabf_maintenance_timer_id = 0;
+  timer_actor_set(timer,
       network->eabf_maintenance_ms,
       network->eabf_maintenance_ms,
       &network->actor,
-      NETWORK_EABF_EXPIRE);
+      NETWORK_EABF_EXPIRE,
+      &network->eabf_maintenance_timer_id);
 
   // Start metrics push timer: recurring 5-minute collection
-  network->metrics_push_timer_id = timer_actor_set(timer,
+  network->metrics_push_timer_id = 0;
+  timer_actor_set(timer,
       TOPOLOGY_METRICS_PUSH_INTERVAL_MS,
       TOPOLOGY_METRICS_PUSH_INTERVAL_MS,
       &network->actor,
-      NETWORK_METRICS_PUSH);
+      NETWORK_METRICS_PUSH,
+      &network->metrics_push_timer_id);
 
   // PingCapacity timer: periodic capacity exchange with all peers
-  network->ping_capacity_timer_id = timer_actor_set(timer,
+  network->ping_capacity_timer_id = 0;
+  timer_actor_set(timer,
       PING_CAPACITY_INTERVAL_MS,
       PING_CAPACITY_INTERVAL_MS,
       &network->actor,
-      NETWORK_PING_CAPACITY_TICK);
+      NETWORK_PING_CAPACITY_TICK,
+      &network->ping_capacity_timer_id);
 
   // Friend reconnect timer: attempt reconnection periodically
-  network->friend_reconnect_timer_id = timer_actor_set(timer,
+  network->friend_reconnect_timer_id = 0;
+  timer_actor_set(timer,
       FRIEND_RECONNECT_INTERVAL_MS,
       FRIEND_RECONNECT_INTERVAL_MS,
       &network->actor,
-      NETWORK_FRIEND_RECONNECT_TICK);
+      NETWORK_FRIEND_RECONNECT_TICK,
+      &network->friend_reconnect_timer_id);
 
   return network;
 }
@@ -239,11 +249,11 @@ void network_shutdown_connections(network_t* network) {
 
 void network_destroy(network_t* network) {
   if (network == NULL) return;
-  if (network->gossip_timer_id != 0) {
-    timer_actor_cancel(network->timer, network->gossip_timer_id);
+  if (atomic_load(&network->gossip_timer_id) != 0) {
+    timer_actor_cancel(network->timer, atomic_load(&network->gossip_timer_id));
   }
-  if (network->eabf_maintenance_timer_id != 0) {
-    timer_actor_cancel(network->timer, network->eabf_maintenance_timer_id);
+  if (atomic_load(&network->eabf_maintenance_timer_id) != 0) {
+    timer_actor_cancel(network->timer, atomic_load(&network->eabf_maintenance_timer_id));
   }
   gossip_handle_deinit(&network->gossip);
   ring_set_destroy(network->rings);
@@ -258,16 +268,16 @@ void network_destroy(network_t* network) {
   if (network->hebbian_decay_timer_id != 0) {
     timer_actor_cancel(network->timer, network->hebbian_decay_timer_id);
   }
-  if (network->metrics_push_timer_id != 0) {
-    timer_actor_cancel(network->timer, network->metrics_push_timer_id);
+  if (atomic_load(&network->metrics_push_timer_id) != 0) {
+    timer_actor_cancel(network->timer, atomic_load(&network->metrics_push_timer_id));
   }
-  if (network->ping_capacity_timer_id != 0) {
-    timer_actor_cancel(network->timer, network->ping_capacity_timer_id);
+  if (atomic_load(&network->ping_capacity_timer_id) != 0) {
+    timer_actor_cancel(network->timer, atomic_load(&network->ping_capacity_timer_id));
     network->ping_capacity_timer_id = 0;
   }
-  if (network->friend_reconnect_timer_id != 0) {
-    timer_actor_cancel(network->timer, network->friend_reconnect_timer_id);
-    network->friend_reconnect_timer_id = 0;
+  if (atomic_load(&network->friend_reconnect_timer_id) != 0) {
+    timer_actor_cancel(network->timer, atomic_load(&network->friend_reconnect_timer_id));
+    atomic_store(&network->friend_reconnect_timer_id, 0);
   }
   if (network->relay != NULL) {
     relay_client_destroy(network->relay);

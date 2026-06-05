@@ -201,7 +201,7 @@ void sections_dispatch(void* state, message_t* msg) {
         section_t* section = sections_lru_cache_get(sections->lru, p->section_id);
         if (section == NULL) {
           section = section_create(sections->data_path, sections->meta_path,
-                                   sections->size, p->section_id, sections->type);
+                                   sections->size, p->section_id, sections->type, sections->pool);
           section->on_dirty = section_on_dirty;
           section->on_dirty_context = sections;
           refcounter_yield((refcounter_t*) section);
@@ -251,7 +251,7 @@ void sections_dispatch(void* state, message_t* msg) {
       section_t* section = sections_lru_cache_get(sections->lru, p->section_id);
       if (section == NULL) {
         section = section_create(sections->data_path, sections->meta_path,
-                                 sections->size, p->section_id, sections->type);
+                                 sections->size, p->section_id, sections->type, sections->pool);
         section->on_dirty = section_on_dirty;
         section->on_dirty_context = sections;
         refcounter_yield((refcounter_t*) section);
@@ -290,7 +290,7 @@ void sections_dispatch(void* state, message_t* msg) {
       section_t* section = sections_lru_cache_get(sections->lru, p->section_id);
       if (section == NULL) {
         section = section_create(sections->data_path, sections->meta_path,
-                                 sections->size, p->section_id, sections->type);
+                                 sections->size, p->section_id, sections->type, sections->pool);
         section->on_dirty = section_on_dirty;
         section->on_dirty_context = sections;
         refcounter_yield((refcounter_t*) section);
@@ -353,6 +353,89 @@ void sections_dispatch(void* state, message_t* msg) {
     case SECTION_DEALLOCATE_RESULT:
       /* Reserved for fully-async block_cache flow. */
       break;
+    case SECTIONS_DEFRAGMENT: {
+      sections_defragment_payload_t* p = (sections_defragment_payload_t*)msg->payload;
+      p->result = -1;
+      p->sections_defragmented = 0;
+      p->relocations = NULL;
+      p->relocation_count = 0;
+
+      size_t capacity = 64;
+      p->relocations = get_memory(capacity * sizeof(block_relocation_t));
+
+      sections_lru_node_t* node;
+      hashmap_foreach_data(node, &sections->lru->cache) {
+        section_t* section = node->value;
+        size_t total = section->free_map.total_blocks;
+        if (total == 0) goto next_section;
+        size_t free_count = section_count_free(section);
+        float occupancy = (float)(total - free_count) / (float)total;
+
+        if (occupancy >= p->occupancy_threshold || free_count == total) goto next_section;
+        size_t used = total - free_count;
+        if (used <= 1) goto next_section;
+
+        /* Dispatch SECTION_DEFRAGMENT synchronously */
+        section_defragment_payload_t defrag_payload;
+        memset(&defrag_payload, 0, sizeof(defrag_payload));
+        defrag_payload.reply_to = NULL;
+        defrag_payload.result = -1;
+        defrag_payload.section_id = 0;
+        defrag_payload.defrag.relocation = NULL;
+        defrag_payload.defrag.new_count = 0;
+        message_t defrag_msg;
+        defrag_msg.type = SECTION_DEFRAGMENT;
+        defrag_msg.payload = &defrag_payload;
+        defrag_msg.payload_destroy = NULL;
+        section_dispatch(section, &defrag_msg);
+
+        if (defrag_payload.result == 0 && defrag_payload.defrag.relocation != NULL) {
+          /* Convert per-section relocation array to flat block_relocation_t entries */
+          for (size_t i = 0; i < total; i++) {
+            if (defrag_payload.defrag.relocation[i] != (size_t)-1 &&
+                defrag_payload.defrag.relocation[i] != i) {
+              if (p->relocation_count >= capacity) {
+                capacity *= 2;
+                p->relocations = realloc(p->relocations, capacity * sizeof(block_relocation_t));
+              }
+              p->relocations[p->relocation_count].section_id = section->id;
+              p->relocations[p->relocation_count].old_index = i;
+              p->relocations[p->relocation_count].new_index = defrag_payload.defrag.relocation[i];
+              p->relocation_count++;
+            }
+          }
+          free(defrag_payload.defrag.relocation);
+          p->sections_defragmented++;
+        }
+        next_section:;
+      }
+
+      /* Trim the relocations array to actual size */
+      if (p->relocation_count == 0) {
+        free(p->relocations);
+        p->relocations = NULL;
+      } else if (p->relocation_count < capacity) {
+        p->relocations = realloc(p->relocations, p->relocation_count * sizeof(block_relocation_t));
+      }
+
+      p->result = 0;
+
+      /* Send completion message if async (reply_to is set) */
+      if (p->reply_to != NULL) {
+        sections_defragment_result_payload_t* result =
+            get_clear_memory(sizeof(sections_defragment_result_payload_t));
+        result->result = p->result;
+        result->sections_defragmented = p->sections_defragmented;
+        result->relocation_count = p->relocation_count;
+        result->reply_to = NULL;
+        message_t reply;
+        reply.type = SECTIONS_DEFRAGMENT_RESULT;
+        reply.payload = result;
+        reply.payload_destroy = free;
+        actor_send(p->reply_to, &reply);
+      }
+      break;
+    }
     default:
       break;
   }
@@ -420,6 +503,23 @@ void sections_deallocate(sections_t* sections, size_t section_id, size_t section
   actor_send(&sections->actor, &msg);
 }
 
+void sections_defragment(sections_t* sections, float occupancy_threshold, actor_t* reply_to) {
+  sections_defragment_payload_t* payload = get_clear_memory(sizeof(sections_defragment_payload_t));
+  payload->occupancy_threshold = occupancy_threshold;
+  payload->reply_to = reply_to;
+  payload->result = -1;
+  payload->sections_defragmented = 0;
+  payload->relocations = NULL;
+  payload->relocation_count = 0;
+
+  message_t msg;
+  msg.type = SECTIONS_DEFRAGMENT;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+
+  actor_send(&sections->actor, &msg);
+}
+
 /* ---- round_robin (lock-free, only called from sections_dispatch) ---- */
 
 round_robin_t* round_robin_create(char* robin_path, timer_actor_t* timer_actor, actor_t* save_target, uint64_t wait, uint64_t max_wait) {
@@ -433,6 +533,11 @@ round_robin_t* round_robin_create(char* robin_path, timer_actor_t* timer_actor, 
 }
 
 void round_robin_destroy(round_robin_t* robin) {
+  if (robin->timer_actor != NULL && robin->save_target != NULL) {
+    timer_actor_debounce_flush(robin->timer_actor, robin->save_target, SECTION_SAVE_META);
+    platform_sleep_ms(10);
+    scheduler_pool_wait_for_idle(robin->save_target->pool);
+  }
   round_robin_save(robin);
   free(robin->path);
   round_robin_node_t* current = robin->first;
@@ -685,7 +790,7 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
     }
     for (size_t i = 0; i < robin_size; i++) {
       section_t* section = section_create(sections->data_path, sections->meta_path,
-                                          sections->size, ids[i], sections->type);
+                                          sections->size, ids[i], sections->type, sections->pool);
       section->on_dirty = section_on_dirty;
       section->on_dirty_context = sections;
       refcounter_yield((refcounter_t*) section);
@@ -697,7 +802,7 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
   }
 
   while (sections->robin->size < sections->max_tuple_size) {
-    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type);
+    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type, sections->pool);
     section->on_dirty = section_on_dirty;
     section->on_dirty_context = sections;
     refcounter_yield((refcounter_t*) section);
@@ -708,6 +813,11 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
 }
 
 void sections_destroy(sections_t* sections) {
+  if (sections->timer_actor != NULL) {
+    timer_actor_debounce_flush(sections->timer_actor, &sections->actor, SECTION_WRITE_META);
+    platform_sleep_ms(10);
+    scheduler_pool_wait_for_idle(sections->actor.pool);
+  }
   sections_lru_cache_destroy(sections->lru);
   actor_destroy(&sections->actor);
   round_robin_destroy(sections->robin);
@@ -720,7 +830,7 @@ void sections_destroy(sections_t* sections) {
 void sections_full(sections_t* sections, size_t section_id) {
   round_robin_remove(sections->robin, section_id);
   while (sections->robin->size < sections->max_tuple_size) {
-    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type);
+    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type, sections->pool);
     section->on_dirty = section_on_dirty;
     section->on_dirty_context = sections;
     refcounter_yield((refcounter_t*) section);

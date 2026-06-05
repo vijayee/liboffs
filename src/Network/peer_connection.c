@@ -136,9 +136,6 @@ void peer_connection_dispatch(void* state, message_t* msg) {
       break;
   }
 
-  if (msg->payload_destroy != NULL) {
-    msg->payload_destroy(msg->payload);
-  }
 }
 
 bool peer_eabf_subscribe(peer_connection_t* peer, const uint8_t* topic, size_t topic_len) {

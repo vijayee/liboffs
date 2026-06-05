@@ -133,6 +133,33 @@ typedef struct {
   actor_t* reply_to;
 } sections_deallocate_result_payload_t;
 
+/* A single block relocation entry from defragmentation */
+typedef struct {
+  size_t section_id;
+  size_t old_index;
+  size_t new_index;
+} block_relocation_t;
+
+/* Payload for SECTIONS_DEFRAGMENT message.
+   When reply_to is NULL (sync), result is filled by dispatch.
+   When reply_to is set (async), a SECTIONS_DEFRAGMENT_RESULT is sent back. */
+typedef struct {
+  float occupancy_threshold;
+  actor_t* reply_to;
+  int result;
+  size_t sections_defragmented;
+  block_relocation_t* relocations;
+  size_t relocation_count;
+} sections_defragment_payload_t;
+
+/* Result payload for SECTIONS_DEFRAGMENT_RESULT */
+typedef struct {
+  int result;
+  size_t sections_defragmented;
+  size_t relocation_count;
+  actor_t* reply_to;
+} sections_defragment_result_payload_t;
+
 typedef struct {
   sections_lru_cache_t* lru;
   round_robin_t* robin;
@@ -158,5 +185,6 @@ void sections_dispatch(void* state, message_t* msg);
 void sections_read(sections_t* sections, size_t section_id, size_t section_index, actor_t* reply_to);
 void sections_write(sections_t* sections, buffer_t* data, actor_t* reply_to);
 void sections_deallocate(sections_t* sections, size_t section_id, size_t section_index, actor_t* reply_to);
+void sections_defragment(sections_t* sections, float occupancy_threshold, actor_t* reply_to);
 
 #endif //OFFS_SECTIONS_H

@@ -124,7 +124,7 @@ static void _start_check(update_actor_t* ua) {
   ua->state = update_state_draining;
   _update_status_ctx(ua);
 
-  timer_actor_set(ua->timer, 1000, 0, &ua->actor, UPDATE_MSG_DRAIN_TICK);
+  timer_actor_set(ua->timer, 1000, 0, &ua->actor, UPDATE_MSG_DRAIN_TICK, NULL);
 }
 
 static void _drain_tick(update_actor_t* ua) {
@@ -148,7 +148,7 @@ static void _drain_tick(update_actor_t* ua) {
   }
 
   /* Still draining — reschedule */
-  timer_actor_set(ua->timer, 1000, 0, &ua->actor, UPDATE_MSG_DRAIN_TICK);
+  timer_actor_set(ua->timer, 1000, 0, &ua->actor, UPDATE_MSG_DRAIN_TICK, NULL);
 }
 
 static void _apply_update(update_actor_t* ua) {
@@ -190,13 +190,14 @@ update_actor_t* update_actor_create(scheduler_pool_t* pool,
   snprintf(ua->install_dir, sizeof(ua->install_dir), "%s", install_dir);
   snprintf(ua->backup_dir, sizeof(ua->backup_dir), "%s", backup_dir);
 
-  ua->check_timer_id = timer_actor_set(timer, 5000, 6 * 60 * 60 * 1000,
-                                       &ua->actor, UPDATE_MSG_CHECK);
+  ua->check_timer_id = 0;
+  timer_actor_set(timer, 5000, 6 * 60 * 60 * 1000,
+                  &ua->actor, UPDATE_MSG_CHECK, &ua->check_timer_id);
   return ua;
 }
 
 void update_actor_destroy(update_actor_t* ua) {
-  timer_actor_cancel(ua->timer, ua->check_timer_id);
+  timer_actor_cancel(ua->timer, atomic_load(&ua->check_timer_id));
   if (ua->pending_update != NULL) {
     update_info_free(ua->pending_update);
     ua->pending_update = NULL;

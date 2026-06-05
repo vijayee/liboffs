@@ -2,6 +2,16 @@ if (BUILD_TESTING)
     project(testliboffs  C CXX)
     set(CMAKE_C_STANDARD 11)
     set(CMAKE_CXX_STANDARD 17)
+
+    # Build googletest if not already found
+    if (NOT TARGET GTest::gtest_main)
+      set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+      add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../deps/googletest ${CMAKE_BINARY_DIR}/deps/googletest)
+    endif()
+
+    set(GTEST_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../deps/googletest/googletest/include)
+    set(GMOCK_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../deps/googletest/googlemock/include)
+
     message(STATUS "${C_INC}")
     add_executable(testliboffs test_main.cpp
             test_buffer.cpp
@@ -85,6 +95,8 @@ if (BUILD_TESTING)
     target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../poll-dancer/include)
     target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/http-parser)
     target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/cJSON)
+    target_include_directories(testliboffs PRIVATE ${GTEST_INCLUDE_DIR})
+    target_include_directories(testliboffs PRIVATE ${GMOCK_INCLUDE_DIR})
 
     include(GoogleTest)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
@@ -117,6 +129,8 @@ if (BUILD_TESTING)
     target_include_directories(test_file_transfer_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../poll-dancer/include)
     target_include_directories(test_file_transfer_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/http-parser)
     target_include_directories(test_file_transfer_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/cJSON)
+    target_include_directories(test_file_transfer_integration PRIVATE ${GTEST_INCLUDE_DIR})
+    target_include_directories(test_file_transfer_integration PRIVATE ${GMOCK_INCLUDE_DIR})
     target_include_directories(test_file_transfer_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/blake3)
     add_executable(test_rpc_integration test_rpc_integration.cpp test_node_main.c)
     add_dependencies(test_rpc_integration cbor)
@@ -144,6 +158,8 @@ if (BUILD_TESTING)
     target_include_directories(test_rpc_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../poll-dancer/include)
     target_include_directories(test_rpc_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/http-parser)
     target_include_directories(test_rpc_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/cJSON)
+    target_include_directories(test_rpc_integration PRIVATE ${GTEST_INCLUDE_DIR})
+    target_include_directories(test_rpc_integration PRIVATE ${GMOCK_INCLUDE_DIR})
     target_include_directories(test_rpc_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/blake3)
 
     gtest_add_tests(TARGET test_rpc_integration TEST_LIST rpc_test_list)

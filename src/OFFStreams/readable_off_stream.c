@@ -361,6 +361,13 @@ void readable_off_stream_destroy(readable_off_stream_t* stream) {
     if (stream->pending_tuple != NULL) {
       DESTROY(stream->pending_tuple, tuple);
     }
+    pending_block_fetch_t* fetch = stream->pending_fetches;
+    while (fetch != NULL) {
+      pending_block_fetch_t* next = fetch->next;
+      DESTROY(fetch->hash, buffer);
+      free(fetch);
+      fetch = next;
+    }
     stream_deinit((stream_t*)stream);
     free(stream);
   }

@@ -115,7 +115,7 @@ protected:
         port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
         pool = scheduler_pool_create(4);
         scheduler_pool_start(pool);
-        timer = timer_actor_create();
+        timer = timer_actor_create(pool);
 
         char dir_template[] = "/tmp/test_tcp_transport_XXXXXX";
         cache_dir = mkdtemp(dir_template);
