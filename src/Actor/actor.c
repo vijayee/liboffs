@@ -45,7 +45,10 @@ bool actor_send(actor_t* actor, message_t* msg) {
     scheduler_t* self = scheduler_get_current();
     if (self != NULL && self->current != NULL && self->current != actor) {
       actor_t* sender = self->current;
-      if (!(atomic_load(&sender->flags) & ACTOR_FLAG_MUTED)) {
+      /* Pony-style exemption: never mute a sender that is already muted
+         or pressured. This prevents deadlock chains where every actor in a
+         pipeline gets muted and nobody can make forward progress. */
+      if (!(atomic_load(&sender->flags) & (ACTOR_FLAG_MUTED | ACTOR_FLAG_PRESSURED))) {
         muted_sender_node_t* msn = get_clear_memory(sizeof(muted_sender_node_t));
         msn->sender = sender;
         do {

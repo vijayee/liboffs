@@ -20,6 +20,7 @@
 #include <stdio.h>
 
 #define READ_BUFFER_SIZE 4096
+#define WRITE_BUFFER_BACKPRESSURE_THRESHOLD (256 * 1024)  /* 256KB */
 
 static int _on_message_begin(http_parser* parser);
 static int _on_url(http_parser* parser, const char* at, size_t length);
@@ -31,6 +32,7 @@ static int _on_message_complete(http_parser* parser);
 
 static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                        pd_event_t events, void* user_data);
+static void _connection_do_reads(http_connection_t* connection);
 
 static http_parser_settings _parser_settings = {
   .on_message_begin = _on_message_begin,
@@ -321,7 +323,20 @@ void http_connection_dispatch(void* state, message_t* msg) {
   }
 
   switch (msg->type) {
+    case HTTP_CONNECTION_READABLE: {
+      /* ASIO-style: the I/O thread notified us that data is available.
+         Perform the actual recv() and parsing here on the scheduler worker. */
+      connection->read_pending = 0;
+      if (connection->sock == NULL) {
+        break;
+      }
+      _connection_do_reads(connection);
+      break;
+    }
+
     case HTTP_CONNECTION_DATA: {
+      /* Legacy path — kept for safety in case a test or other code sends
+         pre-read data directly. Normal I/O now goes through READABLE. */
       buffer_t* data = (buffer_t*)msg->payload;
       msg->payload = NULL; /* Take ownership — actor_run won't destroy it */
       if (connection->sock == NULL) {
@@ -405,6 +420,14 @@ void http_connection_dispatch(void* state, message_t* msg) {
       } else {
         DESTROY(buf, buffer);
       }
+      /* If the write buffer has grown large, apply backpressure so upstream
+         producers (e.g., readable streams for GET) get muted. */
+      if (connection->write_buffer != NULL &&
+          connection->write_buffer->size >= WRITE_BUFFER_BACKPRESSURE_THRESHOLD) {
+        if (!(atomic_load(&connection->actor.flags) & ACTOR_FLAG_PRESSURED)) {
+          backpressure_apply(&connection->actor);
+        }
+      }
       break;
     }
 
@@ -434,11 +457,20 @@ void http_connection_dispatch(void* state, message_t* msg) {
             break;
           }
           _connection_update_watcher(connection, PD_EVENT_READ);
+          /* Buffer fully drained — release backpressure so upstream can resume. */
+          if (atomic_load(&connection->actor.flags) & ACTOR_FLAG_PRESSURED) {
+            backpressure_release(&connection->actor);
+          }
         } else {
           size_t remaining = connection->write_buffer->size - (size_t)sent;
           memmove(connection->write_buffer->data,
                   connection->write_buffer->data + sent, remaining);
           connection->write_buffer->size = remaining;
+          /* If the buffer dropped below threshold, release backpressure. */
+          if (remaining < WRITE_BUFFER_BACKPRESSURE_THRESHOLD &&
+              (atomic_load(&connection->actor.flags) & ACTOR_FLAG_PRESSURED)) {
+            backpressure_release(&connection->actor);
+          }
         }
       } else if (sent == 0) {
         /* Peer closed read side */
@@ -479,7 +511,10 @@ void http_connection_dispatch(void* state, message_t* msg) {
   }
 }
 
-/* Thin I/O callback — only reads data and enqueues to actor. No HTTP parsing. */
+/* I/O event callback — runs on the I/O thread. Sends lightweight event
+   notifications to the connection actor; the actor performs all socket
+   I/O on scheduler worker threads. This decouples event detection from
+   data processing, giving the scheduler control over network rate. */
 static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                        pd_event_t events, void* user_data) {
   (void)loop;
@@ -487,7 +522,7 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   http_connection_t* connection = (http_connection_t*)user_data;
 
   if (events & PD_EVENT_WRITE) {
-    /* Socket is writable — flush any buffered write data */
+    /* Socket is writable — notify actor to flush buffered write data */
     message_t writable_msg;
     writable_msg.type = HTTP_CONNECTION_WRITABLE;
     writable_msg.payload = NULL;
@@ -511,11 +546,46 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   }
 
   if (events & PD_EVENT_READ) {
-    for (;;) {
-      char buffer[READ_BUFFER_SIZE];
-      ssize_t bytes_read;
+    /* ASIO-style: send a READABLE notification instead of reading data.
+       The connection actor (on a scheduler worker) will recv() and parse.
+       Only one notification is in flight at a time — if the actor hasn't
+       processed the previous one yet, we drop the duplicate. This
+       naturally backpressures via TCP window when the actor is muted or
+       backlogged. */
+    if (!connection->read_pending) {
+      connection->read_pending = 1;
+      message_t msg;
+      msg.type = HTTP_CONNECTION_READABLE;
+      msg.payload = NULL;
+      msg.payload_destroy = NULL;
+      actor_send(&connection->actor, &msg);
+    }
+  }
+}
 
-      if (connection->sock == NULL) {
+/* Perform a batch of socket reads and HTTP parsing. Called from the
+   connection actor dispatch on scheduler worker threads. */
+static void _connection_do_reads(http_connection_t* connection) {
+  for (int batch = 0; batch < 16; batch++) {
+    char buffer[READ_BUFFER_SIZE];
+    ssize_t bytes_read;
+
+    if (connection->sock == NULL) {
+      return;
+    }
+
+    if (connection->is_ssl && connection->ssl != NULL) {
+      bytes_read = SSL_read(connection->ssl, buffer, sizeof(buffer));
+      if (bytes_read <= 0) {
+        int ssl_error = SSL_get_error(connection->ssl, (int)bytes_read);
+        if (ssl_error == SSL_ERROR_WANT_READ) {
+          return;
+        }
+        message_t msg;
+        msg.type = HTTP_CONNECTION_HANGUP;
+        msg.payload = NULL;
+        msg.payload_destroy = NULL;
+        actor_send(&connection->actor, &msg);
         pd_watcher_t* claimed = ATOMIC_EXCHANGE(&connection->watcher, NULL);
         if (claimed != NULL) {
           pd_watcher_stop(claimed);
@@ -523,14 +593,10 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
         }
         return;
       }
-
-      if (connection->is_ssl && connection->ssl != NULL) {
-        bytes_read = SSL_read(connection->ssl, buffer, sizeof(buffer));
-        if (bytes_read <= 0) {
-          int ssl_error = SSL_get_error(connection->ssl, (int)bytes_read);
-          if (ssl_error == SSL_ERROR_WANT_READ) {
-            return;
-          }
+    } else {
+      bytes_read = platform_socket_recv(connection->sock, buffer, sizeof(buffer));
+      if (bytes_read <= 0) {
+        if (bytes_read == 0) {
           message_t msg;
           msg.type = HTTP_CONNECTION_HANGUP;
           msg.payload = NULL;
@@ -543,40 +609,35 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
           }
           return;
         }
-      } else {
-        bytes_read = platform_socket_recv(connection->sock, buffer, sizeof(buffer));
-        if (bytes_read <= 0) {
-          if (bytes_read == 0) {
-            message_t msg;
-            msg.type = HTTP_CONNECTION_HANGUP;
-            msg.payload = NULL;
-            msg.payload_destroy = NULL;
-            actor_send(&connection->actor, &msg);
-            pd_watcher_t* claimed = ATOMIC_EXCHANGE(&connection->watcher, NULL);
-            if (claimed != NULL) {
-              pd_watcher_stop(claimed);
-              pd_watcher_destroy(claimed);
-            }
-            return;
-          }
-          if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return;
-          }
-          message_t msg;
-          msg.type = HTTP_CONNECTION_ERROR;
-          msg.payload = NULL;
-          msg.payload_destroy = NULL;
-          actor_send(&connection->actor, &msg);
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
           return;
         }
+        message_t msg;
+        msg.type = HTTP_CONNECTION_ERROR;
+        msg.payload = NULL;
+        msg.payload_destroy = NULL;
+        actor_send(&connection->actor, &msg);
+        return;
       }
+    }
 
-      buffer_t* data = buffer_create_from_pointer_copy((uint8_t*)buffer, (size_t)bytes_read);
-      message_t msg;
-      msg.type = HTTP_CONNECTION_DATA;
-      msg.payload = data;
-      msg.payload_destroy = (void (*)(void*))buffer_destroy;
-      actor_send(&connection->actor, &msg);
+    buffer_t* data = buffer_create_from_pointer_copy((uint8_t*)buffer, (size_t)bytes_read);
+    size_t nparsed = http_parser_execute(&connection->parser, &_parser_settings,
+                                          (const char*)data->data, data->size);
+    (void)nparsed;
+    DESTROY(data, buffer);
+    if (connection->parser.http_errno != HPE_OK) {
+      /* Parse error — close the connection */
+      if (connection->piped_pending) {
+        if (connection->streaming_route != NULL && connection->request != NULL) {
+          stream_deactivate((stream_t*)connection->request,
+                            ERROR("Connection closed during streaming upload"));
+          connection->streaming_route = NULL;
+        }
+      }
+      _connection_stop_watcher(connection);
+      _connection_close_fd(connection);
+      return;
     }
   }
 }
@@ -593,6 +654,7 @@ http_connection_t* http_connection_create(http_server_t* server, platform_socket
   connection->request = NULL;
   connection->write_buffer = NULL;
   connection->write_pending = 0;
+  connection->read_pending = 0;
   connection->header_field = NULL;
   connection->header_field_len = 0;
   connection->header_field_cap = 0;
