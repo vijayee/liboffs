@@ -9,6 +9,7 @@
 #include "../../Util/allocator.h"
 #include "../../Buffer/buffer.h"
 #include "../../Streams/stream.h"
+#include "../../Util/validation.h"
 #include "../../Actor/actor.h"
 #include "../../Actor/message.h"
 #include "../../Scheduler/scheduler.h"
@@ -201,6 +202,10 @@ static int _on_body(http_parser* parser, const char* at, size_t length) {
     stream_notify((stream_t*)connection->request, data_event,
                   CONSUME(chunk, buffer_t), (void (*)(void*))buffer_destroy);
     return 0;
+  }
+
+  if (connection->request->content_length > OFFS_MAX_BUFFERED_BODY_SIZE) {
+    return 1;
   }
 
   if (connection->request->body == NULL) {
@@ -506,32 +511,11 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   }
 
   if (events & PD_EVENT_READ) {
-    char buffer[READ_BUFFER_SIZE];
-    ssize_t bytes_read;
+    for (;;) {
+      char buffer[READ_BUFFER_SIZE];
+      ssize_t bytes_read;
 
-    /* Connection is being destroyed — epoll fired after socket was freed
-       but before the deferred watcher stop was processed on this I/O thread. */
-    if (connection->sock == NULL) {
-      pd_watcher_t* claimed = ATOMIC_EXCHANGE(&connection->watcher, NULL);
-      if (claimed != NULL) {
-        pd_watcher_stop(claimed);
-        pd_watcher_destroy(claimed);
-      }
-      return;
-    }
-
-    if (connection->is_ssl && connection->ssl != NULL) {
-      bytes_read = SSL_read(connection->ssl, buffer, sizeof(buffer));
-      if (bytes_read <= 0) {
-        int ssl_error = SSL_get_error(connection->ssl, (int)bytes_read);
-        if (ssl_error == SSL_ERROR_WANT_READ) {
-          return;
-        }
-        message_t msg;
-        msg.type = HTTP_CONNECTION_HANGUP;
-        msg.payload = NULL;
-        msg.payload_destroy = NULL;
-        actor_send(&connection->actor, &msg);
+      if (connection->sock == NULL) {
         pd_watcher_t* claimed = ATOMIC_EXCHANGE(&connection->watcher, NULL);
         if (claimed != NULL) {
           pd_watcher_stop(claimed);
@@ -539,10 +523,14 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
         }
         return;
       }
-    } else {
-      bytes_read = platform_socket_recv(connection->sock, buffer, sizeof(buffer));
-      if (bytes_read <= 0) {
-        if (bytes_read == 0) {
+
+      if (connection->is_ssl && connection->ssl != NULL) {
+        bytes_read = SSL_read(connection->ssl, buffer, sizeof(buffer));
+        if (bytes_read <= 0) {
+          int ssl_error = SSL_get_error(connection->ssl, (int)bytes_read);
+          if (ssl_error == SSL_ERROR_WANT_READ) {
+            return;
+          }
           message_t msg;
           msg.type = HTTP_CONNECTION_HANGUP;
           msg.payload = NULL;
@@ -555,24 +543,41 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
           }
           return;
         }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      } else {
+        bytes_read = platform_socket_recv(connection->sock, buffer, sizeof(buffer));
+        if (bytes_read <= 0) {
+          if (bytes_read == 0) {
+            message_t msg;
+            msg.type = HTTP_CONNECTION_HANGUP;
+            msg.payload = NULL;
+            msg.payload_destroy = NULL;
+            actor_send(&connection->actor, &msg);
+            pd_watcher_t* claimed = ATOMIC_EXCHANGE(&connection->watcher, NULL);
+            if (claimed != NULL) {
+              pd_watcher_stop(claimed);
+              pd_watcher_destroy(claimed);
+            }
+            return;
+          }
+          if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return;
+          }
+          message_t msg;
+          msg.type = HTTP_CONNECTION_ERROR;
+          msg.payload = NULL;
+          msg.payload_destroy = NULL;
+          actor_send(&connection->actor, &msg);
           return;
         }
-        message_t msg;
-        msg.type = HTTP_CONNECTION_ERROR;
-        msg.payload = NULL;
-        msg.payload_destroy = NULL;
-        actor_send(&connection->actor, &msg);
-        return;
       }
-    }
 
-    buffer_t* data = buffer_create_from_pointer_copy((uint8_t*)buffer, (size_t)bytes_read);
-    message_t msg;
-    msg.type = HTTP_CONNECTION_DATA;
-    msg.payload = data;
-    msg.payload_destroy = (void (*)(void*))buffer_destroy;
-    actor_send(&connection->actor, &msg);
+      buffer_t* data = buffer_create_from_pointer_copy((uint8_t*)buffer, (size_t)bytes_read);
+      message_t msg;
+      msg.type = HTTP_CONNECTION_DATA;
+      msg.payload = data;
+      msg.payload_destroy = (void (*)(void*))buffer_destroy;
+      actor_send(&connection->actor, &msg);
+    }
   }
 }
 
