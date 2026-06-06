@@ -66,8 +66,13 @@ static int section_write_sync(section_t* section, buffer_t* data, size_t* out_in
   section_write(section, data, &comp);
 
   while (!ATOMIC_LOAD(&cs.done)) {
-    actor_run(&section->actor, ACTOR_BATCH_SIZE);
-    actor_run(&comp, ACTOR_BATCH_SIZE);
+    if (section->actor.pool == NULL) {
+      actor_run(&section->actor, ACTOR_BATCH_SIZE);
+    }
+    if (comp.pool == NULL) {
+      actor_run(&comp, ACTOR_BATCH_SIZE);
+    }
+    platform_sleep_ms(1);
   }
 
   if (out_index) *out_index = cs.write_result.index;
@@ -86,8 +91,13 @@ static buffer_t* section_read_sync(section_t* section, size_t index) {
   section_read(section, index, &comp);
 
   while (!ATOMIC_LOAD(&cs.done)) {
-    actor_run(&section->actor, ACTOR_BATCH_SIZE);
-    actor_run(&comp, ACTOR_BATCH_SIZE);
+    if (section->actor.pool == NULL) {
+      actor_run(&section->actor, ACTOR_BATCH_SIZE);
+    }
+    if (comp.pool == NULL) {
+      actor_run(&comp, ACTOR_BATCH_SIZE);
+    }
+    platform_sleep_ms(1);
   }
 
   actor_destroy(&comp);
@@ -104,8 +114,13 @@ static int section_deallocate_sync(section_t* section, size_t index) {
   section_deallocate(section, index, &comp);
 
   while (!ATOMIC_LOAD(&cs.done)) {
-    actor_run(&section->actor, ACTOR_BATCH_SIZE);
-    actor_run(&comp, ACTOR_BATCH_SIZE);
+    if (section->actor.pool == NULL) {
+      actor_run(&section->actor, ACTOR_BATCH_SIZE);
+    }
+    if (comp.pool == NULL) {
+      actor_run(&comp, ACTOR_BATCH_SIZE);
+    }
+    platform_sleep_ms(1);
   }
 
   actor_destroy(&comp);
@@ -160,8 +175,13 @@ static int sections_write_sync(sections_t* sections, buffer_t* data, size_t* out
   sections_write(sections, data, &comp);
 
   while (!ATOMIC_LOAD(&cs.done)) {
-    actor_run(&sections->actor, ACTOR_BATCH_SIZE);
-    actor_run(&comp, ACTOR_BATCH_SIZE);
+    if (sections->actor.pool == NULL) {
+      actor_run(&sections->actor, ACTOR_BATCH_SIZE);
+    }
+    if (comp.pool == NULL) {
+      actor_run(&comp, ACTOR_BATCH_SIZE);
+    }
+    platform_sleep_ms(1);
   }
 
   if (out_section_id) *out_section_id = cs.section_id;
@@ -180,9 +200,13 @@ static buffer_t* sections_read_sync(sections_t* sections, size_t section_id, siz
   sections_read(sections, section_id, section_index, &comp);
 
   while (!ATOMIC_LOAD(&cs.done)) {
-    actor_run(&sections->actor, ACTOR_BATCH_SIZE);
-    /* sections may delegate to a section actor */
-    actor_run(&comp, ACTOR_BATCH_SIZE);
+    if (sections->actor.pool == NULL) {
+      actor_run(&sections->actor, ACTOR_BATCH_SIZE);
+    }
+    if (comp.pool == NULL) {
+      actor_run(&comp, ACTOR_BATCH_SIZE);
+    }
+    platform_sleep_ms(1);
   }
 
   actor_destroy(&comp);
@@ -199,8 +223,13 @@ static int sections_deallocate_sync(sections_t* sections, size_t section_id, siz
   sections_deallocate(sections, section_id, section_index, &comp);
 
   while (!ATOMIC_LOAD(&cs.done)) {
-    actor_run(&sections->actor, ACTOR_BATCH_SIZE);
-    actor_run(&comp, ACTOR_BATCH_SIZE);
+    if (sections->actor.pool == NULL) {
+      actor_run(&sections->actor, ACTOR_BATCH_SIZE);
+    }
+    if (comp.pool == NULL) {
+      actor_run(&comp, ACTOR_BATCH_SIZE);
+    }
+    platform_sleep_ms(1);
   }
 
   actor_destroy(&comp);
@@ -364,8 +393,13 @@ TEST_F(TestSection, TestSectionAsyncWrite) {
 
   /* Process both actors until completion */
   while (!ATOMIC_LOAD(&completion_state.done)) {
-    actor_run(&section->actor, ACTOR_BATCH_SIZE);
-    actor_run(&completion_actor, ACTOR_BATCH_SIZE);
+    if (section->actor.pool == NULL) {
+      actor_run(&section->actor, ACTOR_BATCH_SIZE);
+    }
+    if (completion_actor.pool == NULL) {
+      actor_run(&completion_actor, ACTOR_BATCH_SIZE);
+    }
+    platform_sleep_ms(1);
   }
 
   EXPECT_EQ(completion_state.write_result.result, 0);
@@ -387,8 +421,13 @@ TEST_F(TestSection, TestSectionAsyncWrite) {
   actor_send(&section->actor, &read_msg);
 
   while (!ATOMIC_LOAD(&completion_state.done)) {
-    actor_run(&section->actor, ACTOR_BATCH_SIZE);
-    actor_run(&completion_actor, ACTOR_BATCH_SIZE);
+    if (section->actor.pool == NULL) {
+      actor_run(&section->actor, ACTOR_BATCH_SIZE);
+    }
+    if (completion_actor.pool == NULL) {
+      actor_run(&completion_actor, ACTOR_BATCH_SIZE);
+    }
+    platform_sleep_ms(1);
   }
 
   ASSERT_NE(completion_state.read_buffer, (buffer_t*)NULL);
@@ -408,8 +447,13 @@ TEST_F(TestSection, TestSectionAsyncWrite) {
   actor_send(&section->actor, &dealloc_msg);
 
   while (!ATOMIC_LOAD(&completion_state.done)) {
-    actor_run(&section->actor, ACTOR_BATCH_SIZE);
-    actor_run(&completion_actor, ACTOR_BATCH_SIZE);
+    if (section->actor.pool == NULL) {
+      actor_run(&section->actor, ACTOR_BATCH_SIZE);
+    }
+    if (completion_actor.pool == NULL) {
+      actor_run(&completion_actor, ACTOR_BATCH_SIZE);
+    }
+    platform_sleep_ms(1);
   }
 
   EXPECT_EQ(completion_state.deallocate_result, 0);

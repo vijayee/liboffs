@@ -277,6 +277,7 @@ void scheduler_pool_drain_pending_derefs(scheduler_pool_t* pool) {
 
 void scheduler_pool_wait_for_idle(scheduler_pool_t* pool) {
   if (pool == NULL) return;
+  if (atomic_load(&pool->terminate)) return;
   platform_mutex_lock(pool->idle_lock);
   while (atomic_load(&pool->idle_count) != pool->worker_count) {
     platform_condvar_wait(pool->idle, pool->idle_lock);

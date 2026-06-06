@@ -71,6 +71,7 @@ typedef struct {
 } timer_completion_payload_t;
 
 timer_actor_t* timer_actor_create(scheduler_pool_t* pool);
+void timer_actor_stop(timer_actor_t* timer_actor);
 void timer_actor_destroy(timer_actor_t* timer_actor);
 uint64_t timer_actor_set(timer_actor_t* timer_actor, uint64_t timeout_ms,
                          uint64_t interval_ms, actor_t* target,

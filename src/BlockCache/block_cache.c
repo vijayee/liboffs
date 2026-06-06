@@ -383,11 +383,13 @@ void block_cache_dispatch(void* state, message_t* msg) {
               (refcounter_t*)block_lru_cache_put(block_cache->lru, p->block, entry));
           if (ejection) {
             index_set_entry_ejection(block_cache->index, ejection, time(NULL));
+            timer_actor_debounce(block_cache->timer_actor, block_cache->index_wait, 0, &block_cache->actor, INDEX_SAVE);
             index_entry_destroy(ejection);
           }
           if (is_async) { block_destroy(p->block); p->block = NULL; }
           refcounter_yield((refcounter_t*) entry);
           index_add(block_cache->index, entry);
+          timer_actor_debounce(block_cache->timer_actor, block_cache->index_wait, 0, &block_cache->actor, INDEX_SAVE);
           result_fib = entry->counter.fib;
           block_cache->current_bytes += (size_t)block_cache->type;
           block_cache_update_capacity(block_cache);
@@ -468,6 +470,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
                     (refcounter_t*)block_lru_cache_put(block_cache->lru, block, entry));
                 if (ejection) {
                   index_set_entry_ejection(block_cache->index, ejection, time(NULL));
+                  timer_actor_debounce(block_cache->timer_actor, block_cache->index_wait, 0, &block_cache->actor, INDEX_SAVE);
                   index_entry_destroy(ejection);
                 }
                 p->result = block;
@@ -506,6 +509,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
       } else {
         size_t section_index = entry->section_index;
         index_remove(block_cache->index, p->hash);
+        timer_actor_debounce(block_cache->timer_actor, block_cache->index_wait, 0, &block_cache->actor, INDEX_SAVE);
         block_cache->current_bytes -= (size_t)block_cache->type;
         block_cache_update_capacity(block_cache);
         block_lru_cache_delete(block_cache->lru, p->hash);
@@ -551,6 +555,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
                 (refcounter_t*)block_lru_cache_put(block_cache->lru, block, first_pending->entry));
             if (ejection) {
               index_set_entry_ejection(block_cache->index, ejection, time(NULL));
+              timer_actor_debounce(block_cache->timer_actor, block_cache->index_wait, 0, &block_cache->actor, INDEX_SAVE);
               index_entry_destroy(ejection);
             }
           }
@@ -639,6 +644,10 @@ void block_cache_dispatch(void* state, message_t* msg) {
       }
       break;
     }
+    case INDEX_SAVE: {
+      index_debounce(block_cache->index);
+      break;
+    }
     default:
       break;
   }
@@ -651,6 +660,8 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
   refcounter_init_actor((refcounter_t*) block_cache);
   block_cache->type = type;
   block_cache->pool = pool;
+  block_cache->timer_actor = timer_actor;
+  block_cache->index_wait = config.index_wait;
   block_cache->authority = authority;
   block_cache->max_capacity_bytes = max_capacity_bytes;
   block_cache->current_bytes = 0;
@@ -669,10 +680,11 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
       folder = path_join(location, "mega");
       break;
   }
+  actor_init(&block_cache->actor, block_cache, block_cache_dispatch, pool);
   block_cache->lru = block_lru_cache_create(config.lru_size);
   block_cache->sections = sections_create(folder, config.section_size, config.cache_size, config.max_tuple_size, type, timer_actor, pool, config.section_wait, config.section_max_wait);
   int error_code;
-  block_cache->index = index_create(config.index_bucket_size, folder, timer_actor, pool, config.index_wait, config.index_max_wait, config.max_snapshots, config.max_wals, &error_code);
+  block_cache->index = index_create(config.index_bucket_size, folder, config.index_wait, config.index_max_wait, config.max_snapshots, config.max_wals, &error_code);
   if (block_cache->index == NULL) {
     log_error("block_cache_create: index_create returned NULL (error_code=%d)", error_code);
   }
@@ -680,7 +692,6 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
     block_cache->current_bytes = index_count(block_cache->index) * (size_t)type;
     block_cache_update_capacity(block_cache);
   }
-  actor_init(&block_cache->actor, block_cache, block_cache_dispatch, pool);
   free(folder);
   return block_cache;
 }
@@ -691,9 +702,10 @@ void block_cache_destroy(block_cache_t* block_cache) {
   }
   if (refcounter_dereference_is_zero((refcounter_t*) block_cache)) {
     refcounter_destroy_lock((refcounter_t*) block_cache);
-    if (block_cache->index != NULL && block_cache->index->timer_actor != NULL) {
-      timer_actor_debounce_flush(block_cache->index->timer_actor,
-                                  &block_cache->index->actor, INDEX_SAVE);
+    if (block_cache->timer_actor != NULL
+        && block_cache->pool != NULL && !atomic_load(&block_cache->pool->terminate)) {
+      timer_actor_debounce_flush(block_cache->timer_actor,
+                                  &block_cache->actor, INDEX_SAVE);
       platform_sleep_ms(10);
       scheduler_pool_wait_for_idle(block_cache->pool);
     }
@@ -821,18 +833,16 @@ void block_cache_sync(block_cache_t* block_cache) {
   if (block_cache == NULL) return;
 
   /* Flush the index debounce timer — sends INDEX_SAVE immediately
-     through the index actor's normal dispatch path. */
-  timer_actor_debounce_flush(block_cache->index->timer_actor,
-                             &block_cache->index->actor, INDEX_SAVE);
+     through the block_cache actor's dispatch path. */
+  timer_actor_debounce_flush(block_cache->timer_actor,
+                             &block_cache->actor, INDEX_SAVE);
 
   /* Wait for the timer thread to process the flush and deliver INDEX_SAVE
-     to the index actor, then wait for the scheduler to process it.
+     to the block_cache actor, then wait for the scheduler to process it.
      The timer thread polls at 100ms intervals, so 10ms is a safe minimum. */
   platform_sleep_ms(10);
   scheduler_pool_wait_for_idle(block_cache->pool);
 
   /* Sync the WAL to disk for crash durability. */
-  if (block_cache->index->wal != NULL) {
-    wal_sync(block_cache->index->wal);
-  }
+  index_sync(block_cache->index);
 }

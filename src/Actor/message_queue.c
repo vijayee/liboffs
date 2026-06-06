@@ -34,7 +34,7 @@ bool message_queue_push(message_queue_t* queue, message_node_t* first, message_n
   message_node_t* prev = atomic_exchange_explicit(&queue->head, last, memory_order_acq_rel);
   bool was_empty = _is_empty_flag_set(prev);
   prev = _clear_empty_flag(prev);
-  atomic_store_explicit(&prev->next, first, memory_order_relaxed);
+  atomic_store_explicit(&prev->next, first, memory_order_release);
   atomic_fetch_add_explicit(&queue->size, 1, memory_order_relaxed);
   return was_empty;
 }

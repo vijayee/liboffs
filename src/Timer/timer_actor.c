@@ -319,24 +319,47 @@ timer_actor_t* timer_actor_create(scheduler_pool_t* pool) {
   return timer_actor;
 }
 
+void timer_actor_stop(timer_actor_t* timer_actor) {
+  if (timer_actor == NULL) return;
+  if (!atomic_load(&timer_actor->running)) return;
+
+  /* Mark the actor as destroyed so scheduler workers drop pending messages
+     (e.g., TIMER_SET requests from network actors). Without this, processing
+     a TIMER_SET message would call pd_timer_create/pd_timer_start on a loop
+     whose thread has exited, which may hang or misbehave. */
+  uint8_t flags = atomic_load(&timer_actor->actor.flags);
+  while (!atomic_compare_exchange_strong(&timer_actor->actor.flags, &flags,
+                                           flags | ACTOR_FLAG_DESTROY)) {
+  }
+
+  atomic_store(&timer_actor->running, 0);
+  pd_loop_async_send(timer_actor->loop, NULL);
+  platform_thread_join(timer_actor->thread);
+  timer_actor->thread = NULL;
+
+  for (size_t i = 0; i < timer_actor->active_timer_count; i++) {
+    pd_timer_t* timer = timer_actor->active_timers[i];
+    if (timer != NULL) {
+      pd_timer_stop(timer);
+    }
+  }
+}
+
 void timer_actor_destroy(timer_actor_t* timer_actor) {
   if (timer_actor == NULL) {
     return;
   }
-  /* Mark the actor as destroyed so scheduler workers drop any pending messages,
-     then wait for any in-flight dispatches to finish before freeing memory. */
   scheduler_pool_t* pool = timer_actor->actor.pool;
   actor_destroy(&timer_actor->actor);
-  if (pool != NULL) {
+  if (pool != NULL && !atomic_load(&pool->terminate)) {
     scheduler_pool_wait_for_idle(pool);
   }
-  atomic_store(&timer_actor->running, 0);
-  /* Wake the loop so it notices the stop flag */
-  pd_loop_async_send(timer_actor->loop, NULL);
-  pd_loop_stop(timer_actor->loop);
-  platform_thread_join(timer_actor->thread);
-  /* Stop and destroy all active timers, freeing their completion payloads.
-     Safe to call pd_timer_destroy directly since the I/O thread has been joined. */
+  if (atomic_load(&timer_actor->running)) {
+    atomic_store(&timer_actor->running, 0);
+    pd_loop_async_send(timer_actor->loop, NULL);
+    platform_thread_join(timer_actor->thread);
+    timer_actor->thread = NULL;
+  }
   for (size_t i = 0; i < timer_actor->active_timer_count; i++) {
     pd_timer_t* timer = timer_actor->active_timers[i];
     if (timer != NULL) {
@@ -348,6 +371,7 @@ void timer_actor_destroy(timer_actor_t* timer_actor) {
   }
   free(timer_actor->active_timers);
   _destroy_stack_destroy(timer_actor);
+  pd_loop_stop(timer_actor->loop);
   pd_loop_destroy(timer_actor->loop);
   free(timer_actor);
 }
@@ -370,7 +394,9 @@ uint64_t timer_actor_set(timer_actor_t* timer_actor, uint64_t timeout_ms,
   msg.payload_destroy = free;
 
   actor_send(&timer_actor->actor, &msg);
-  pd_loop_async_send(timer_actor->loop, NULL);
+  if (atomic_load(&timer_actor->running)) {
+    pd_loop_async_send(timer_actor->loop, NULL);
+  }
 
   /* The timer_id is filled in by the dispatch on the scheduler worker.
      Since actor_send is async, the out_timer_id will be 0 until the
@@ -389,7 +415,9 @@ void timer_actor_cancel(timer_actor_t* timer_actor, uint64_t timer_id) {
   msg.payload_destroy = free;
 
   actor_send(&timer_actor->actor, &msg);
-  pd_loop_async_send(timer_actor->loop, NULL);
+  if (atomic_load(&timer_actor->running)) {
+    pd_loop_async_send(timer_actor->loop, NULL);
+  }
 }
 
 uint64_t timer_actor_debounce(timer_actor_t* timer_actor,
@@ -407,7 +435,9 @@ uint64_t timer_actor_debounce(timer_actor_t* timer_actor,
   msg.payload_destroy = free;
 
   actor_send(&timer_actor->actor, &msg);
-  pd_loop_async_send(timer_actor->loop, NULL);
+  if (atomic_load(&timer_actor->running)) {
+    pd_loop_async_send(timer_actor->loop, NULL);
+  }
 
   return 0;
 }
@@ -426,5 +456,7 @@ void timer_actor_debounce_flush(timer_actor_t* timer_actor,
   msg.payload_destroy = free;
 
   actor_send(&timer_actor->actor, &msg);
-  pd_loop_async_send(timer_actor->loop, NULL);
+  if (atomic_load(&timer_actor->running)) {
+    pd_loop_async_send(timer_actor->loop, NULL);
+  }
 }
