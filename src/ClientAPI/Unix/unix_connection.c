@@ -109,7 +109,7 @@ static void _connection_update_watcher(unix_connection_t* connection, pd_event_t
   msg.type = UNIX_SERVER_UPDATE_WATCHER;
   msg.payload = payload;
   msg.payload_destroy = free;
-  actor_send(&connection->actor, &msg);
+  actor_send(&connection->transport->actor, &msg);
 }
 
 static void _connection_stop_watcher(unix_connection_t* connection) {

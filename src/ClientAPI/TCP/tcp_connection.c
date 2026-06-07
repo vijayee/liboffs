@@ -110,7 +110,7 @@ static void _connection_update_watcher(tcp_connection_t* connection, pd_event_t 
   msg.type = TCP_SERVER_UPDATE_WATCHER;
   msg.payload = payload;
   msg.payload_destroy = free;
-  actor_send(&connection->actor, &msg);
+  actor_send(&connection->transport->actor, &msg);
 }
 
 static void _connection_stop_watcher(tcp_connection_t* connection) {
