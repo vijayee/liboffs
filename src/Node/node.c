@@ -107,6 +107,14 @@ void offs_node_stop(offs_node_t* node) {
     http_server_drain(node->http_server);
   }
 
+  /* Phase 1b: Stop timer actor so recurring timers stop firing. */
+  timer_actor_stop(node->timer);
+
+  /* Drain any in-flight timer completion messages from the scheduler. */
+  if (!_shutdown_deadline_exceeded(deadline)) {
+    scheduler_pool_wait_for_idle(node->scheduler);
+  }
+
   /* Phase 2: Notify peers — stop network event loop.
      QUIC connections will be closed with CONNECTION_CLOSE frames
      during network_destroy in offs_node_destroy(). */

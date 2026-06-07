@@ -37,6 +37,15 @@ static int _connect_to_server(uint16_t port) {
   return fd;
 }
 
+static int _connect_to_server_with_retry(uint16_t port, int max_attempts) {
+  for (int attempts = 0; attempts < max_attempts; attempts++) {
+    int fd = _connect_to_server(port);
+    if (fd >= 0) return fd;
+    platform_sleep_ms(10);
+  }
+  return -1;
+}
+
 static int _send_and_recv(int fd, const char* request, size_t req_len,
                           char* response, size_t response_size, int timeout_ms) {
   ssize_t sent = send(fd, request, req_len, 0);
@@ -101,7 +110,7 @@ TEST(HealthHTTP, GetHealthReturns200) {
   health_routes_register(server, &ctx);
   http_server_listen(server);
 
-  int fd = _connect_to_server(port);
+  int fd = _connect_to_server_with_retry(port, 50);
   ASSERT_GE(fd, 0);
 
   const char* request = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
@@ -140,7 +149,7 @@ TEST(HealthHTTP, NonHealthPathNotIntercepted) {
   health_routes_register(server, &ctx);
   http_server_listen(server);
 
-  int fd = _connect_to_server(port);
+  int fd = _connect_to_server_with_retry(port, 50);
   ASSERT_GE(fd, 0);
 
   const char* request = "GET /other HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
@@ -172,7 +181,7 @@ TEST(HealthHTTP, PostHealthNotIntercepted) {
   health_routes_register(server, &ctx);
   http_server_listen(server);
 
-  int fd = _connect_to_server(port);
+  int fd = _connect_to_server_with_retry(port, 50);
   ASSERT_GE(fd, 0);
 
   const char* request = "POST /health HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -218,7 +227,7 @@ TEST(HealthHTTP, HealthResponseContainsExpectedFields) {
   health_routes_register(server, &ctx);
   http_server_listen(server);
 
-  int fd = _connect_to_server(port);
+  int fd = _connect_to_server_with_retry(port, 50);
   ASSERT_GE(fd, 0);
 
   const char* request = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";

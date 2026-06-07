@@ -45,7 +45,10 @@ bool actor_send(actor_t* actor, message_t* msg) {
     scheduler_t* self = scheduler_get_current();
     if (self != NULL && self->current != NULL && self->current != actor) {
       actor_t* sender = self->current;
-      if (!(atomic_load(&sender->flags) & ACTOR_FLAG_MUTED)) {
+      /* Pony-style exemption: never mute a sender that is already muted
+         or pressured. This prevents deadlock chains where every actor in a
+         pipeline gets muted and nobody can make forward progress. */
+      if (!(atomic_load(&sender->flags) & (ACTOR_FLAG_MUTED | ACTOR_FLAG_PRESSURED))) {
         muted_sender_node_t* msn = get_clear_memory(sizeof(muted_sender_node_t));
         msn->sender = sender;
         do {
@@ -74,7 +77,7 @@ bool actor_send(actor_t* actor, message_t* msg) {
 
 bool actor_run(actor_t* actor, size_t batch_size) {
   for (size_t count = 0; count < batch_size; count++) {
-    if (atomic_load(&actor->flags) & (ACTOR_FLAG_DESTROY | ACTOR_FLAG_MUTED)) {
+    if (atomic_load(&actor->flags) & ACTOR_FLAG_DESTROY) {
       return false;
     }
     message_node_t* node = message_queue_pop(&actor->queue);
@@ -107,10 +110,9 @@ bool actor_run(actor_t* actor, size_t batch_size) {
     if (node->msg.payload_destroy != NULL && node->msg.payload != NULL) {
       node->msg.payload_destroy(node->msg.payload);
     }
-    /* If the actor became muted during dispatch, stop processing. */
-    if (atomic_load(&actor->flags) & ACTOR_FLAG_MUTED) {
-      return false;
-    }
+    /* Muted actors still process their mailbox — muting only prevents
+       sending to PRESSURED targets. Stopping processing would deadlock
+       the pipeline (e.g., connection actor muted mid-request). */
   }
   if (message_queue_markempty(&actor->queue)) {
     atomic_fetch_and(&actor->flags, ~ACTOR_FLAG_SCHEDULED);

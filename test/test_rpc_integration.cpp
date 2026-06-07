@@ -74,10 +74,10 @@ static std::string get_relay_path() {
     std::string sp(self_path);
     auto pos = sp.rfind('/');
     if (pos != std::string::npos) {
-      return sp.substr(0, pos) + "/../src/Network/Relay/meridian_relay";
+      return sp.substr(0, pos) + "/../src/Network/Relay/offs_relay";
     }
   }
-  return "./meridian_relay";
+  return "./offs_relay";
 }
 
 static std::atomic<uint16_t> next_base_port{25000};
@@ -208,7 +208,7 @@ protected:
     if (pid == 0) {
       std::string port_str = std::to_string(port);
       std::string relay_path = get_relay_path();
-      execl(relay_path.c_str(), "meridian_relay", "--port", port_str.c_str(),
+      execl(relay_path.c_str(), "offs_relay", "--port", port_str.c_str(),
             "--cert", cert_path.c_str(), "--key", key_path.c_str(), nullptr);
       _exit(1);
     }

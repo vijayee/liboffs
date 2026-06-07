@@ -9,8 +9,6 @@
 #include "../Util/path_join.h"
 #include "../Util/get_dir.h"
 #include "../Util/portable_endian.h"
-#include "../Actor/message.h"
-#include "../Platform/platform.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <errno.h>
@@ -29,24 +27,12 @@ index_entry_t* index_get_from_node(index_t* index, buffer_t* hash, index_node_t*
 index_entry_t* index_find_in_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current);
 void index_remove_from_node(index_t* index, buffer_t* hash, index_node_t* node, size_t current);
 void index_destroy_node(index_t* index, index_node_t* node);
-void index_debounce(void* ctx);
-void index_dispatch(void* state, message_t* msg);
+void index_debounce(index_t* index);
 static uint64_t _index_prune_old_snapshots(index_t* index);
 static void _index_prune_old_wals(index_t* index, uint64_t first_kept_id);
 size_t _index_count(index_t* index);
 void _index_increment(index_t* index, index_entry_t* entry);
 cbor_item_t* _index_to_cbor(index_t* index);
-
-void index_dispatch(void* state, message_t* msg) {
-  index_t* index = (index_t*)state;
-  switch (msg->type) {
-    case INDEX_SAVE:
-      index_debounce(index);
-      break;
-    default:
-      break;
-  }
-}
 
 uint8_t get_bit(buffer_t* buffer, size_t index) {
   size_t byte = index / 8;
@@ -164,7 +150,7 @@ void index_node_destroy(index_node_t* node) {
   }
 }
 
-index_t* _index_new_empty(size_t bucket_size, char* location, timer_actor_t* timer_actor, scheduler_pool_t* pool, uint64_t wait, uint64_t max_wait, uint64_t most_recent_id, size_t max_snapshots, size_t max_wals) {
+index_t* _index_new_empty(size_t bucket_size, char* location, uint64_t wait, uint64_t max_wait, uint64_t most_recent_id, size_t max_snapshots, size_t max_wals) {
   index_t* index = get_clear_memory(sizeof(index_t));
   index->bucket_size = bucket_size;
   index->root = index_node_create(bucket_size);
@@ -181,17 +167,15 @@ index_t* _index_new_empty(size_t bucket_size, char* location, timer_actor_t* tim
   index->wal = wal_create(index->parent_location, current_id);
   index->max_snapshots = max_snapshots;
   index->max_wals = max_wals;
-  index->timer_actor = timer_actor;
   index->wait = wait;
   index->max_wait = max_wait;
-  actor_init(&index->actor, index, index_dispatch, pool);
   hashmap_init(&index->ranks, (void*)hash_uint32, (void*)compare_uint32);
   hashmap_set_key_alloc_funcs(&index->ranks, duplicate_uint32, (void*)free);
   refcounter_init((refcounter_t*) index);
   return index;
 }
 
-index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_actor, scheduler_pool_t* pool, uint64_t wait, uint64_t max_wait, size_t max_snapshots, size_t max_wals, int* error_code) {
+index_t* index_create(size_t bucket_size, char* location, uint64_t wait, uint64_t max_wait, size_t max_snapshots, size_t max_wals, int* error_code) {
   *error_code = 0;
   index_t* index;
   char* index_location = path_join(location,"index");
@@ -266,7 +250,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
         log_error("index_create: index file %d (%s) CBOR is not an array", i, last);
         continue;
       }
-      index = cbor_to_index(cbor, location, timer_actor, pool, wait, max_wait, max_snapshots, max_wals);
+      index = cbor_to_index(cbor, location, wait, max_wait, max_snapshots, max_wals);
       cbor_decref(&cbor);
       if (index == NULL) {
         log_error("index_create: cbor_to_index returned NULL for file %d (%s)", i, last);
@@ -314,7 +298,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
                     free(index_location);
                     free(parent_location);
                     destroy_files(files);
-                    return _index_new_empty(bucket_size, location, timer_actor, pool, wait, max_wait, most_recent_id, max_snapshots, max_wals);
+                    return _index_new_empty(bucket_size, location, wait, max_wait, most_recent_id, max_snapshots, max_wals);
                   }
                   break;
                 case 'i':
@@ -334,7 +318,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
                     free(index_location);
                     free(parent_location);
                     destroy_files(files);
-                    return _index_new_empty(bucket_size, location, timer_actor, pool, wait, max_wait, most_recent_id, max_snapshots, max_wals);
+                    return _index_new_empty(bucket_size, location, wait, max_wait, most_recent_id, max_snapshots, max_wals);
                   }
                   break;
                 case 'e':
@@ -360,7 +344,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
                         free(index_location);
                         free(parent_location);
                         destroy_files(files);
-                        return _index_new_empty(bucket_size, location, timer_actor, pool, wait, max_wait, most_recent_id, max_snapshots, max_wals);
+                        return _index_new_empty(bucket_size, location, wait, max_wait, most_recent_id, max_snapshots, max_wals);
                       }
                     }
                   } else {
@@ -370,7 +354,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
                     free(index_location);
                     free(parent_location);
                     destroy_files(files);
-                    return _index_new_empty(bucket_size, location, timer_actor, pool, wait, max_wait, most_recent_id, max_snapshots, max_wals);
+                    return _index_new_empty(bucket_size, location, wait, max_wait, most_recent_id, max_snapshots, max_wals);
                   }
                   break;
                 case 'r':
@@ -387,7 +371,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
                       free(index_location);
                       free(parent_location);
                       destroy_files(files);
-                      return _index_new_empty(bucket_size, location, timer_actor, pool, wait, max_wait, most_recent_id, max_snapshots, max_wals);
+                      return _index_new_empty(bucket_size, location, wait, max_wait, most_recent_id, max_snapshots, max_wals);
                     }
                     cbor_decref(&cbor);
                   } else {
@@ -397,7 +381,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
                     free(index_location);
                     free(parent_location);
                     destroy_files(files);
-                    return _index_new_empty(bucket_size, location, timer_actor, pool, wait, max_wait, most_recent_id, max_snapshots, max_wals);
+                    return _index_new_empty(bucket_size, location, wait, max_wait, most_recent_id, max_snapshots, max_wals);
                   }
                   break;
               }
@@ -412,7 +396,7 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
               destroy_files(files);
               free(index_location);
               free(parent_location);
-              return _index_new_empty(bucket_size, location, timer_actor, pool, wait, max_wait, most_recent_id, max_snapshots, max_wals);
+              return _index_new_empty(bucket_size, location, wait, max_wait, most_recent_id, max_snapshots, max_wals);
             }
           }
 
@@ -449,14 +433,14 @@ index_t* index_create(size_t bucket_size, char* location, timer_actor_t* timer_a
     destroy_files(files);
     free(index_location);
     free(parent_location);
-    return _index_new_empty(bucket_size, location, timer_actor, pool, wait, max_wait, most_recent_id, max_snapshots, max_wals);
+    return _index_new_empty(bucket_size, location, wait, max_wait, most_recent_id, max_snapshots, max_wals);
   }
   destroy_files(files);
   free(index_location);
   free(parent_location);
-  return _index_new_empty(bucket_size, location, timer_actor, pool, wait, max_wait, most_recent_id, max_snapshots, max_wals);
+  return _index_new_empty(bucket_size, location, wait, max_wait, most_recent_id, max_snapshots, max_wals);
 }
-index_t* index_create_from(size_t bucket_size, index_node_t* root, char* location, timer_actor_t* timer_actor, scheduler_pool_t* pool, uint64_t wait, uint64_t max_wait, size_t max_snapshots, size_t max_wals) {
+index_t* index_create_from(size_t bucket_size, index_node_t* root, char* location, uint64_t wait, uint64_t max_wait, size_t max_snapshots, size_t max_wals) {
   index_t* index = get_clear_memory(sizeof(index_t));
   index->bucket_size = bucket_size;
   index->location = path_join(location,"index");
@@ -487,10 +471,8 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root, char* locatio
   index->wal = wal_create(index->parent_location, last_id + 1);
   index->max_snapshots = max_snapshots;
   index->max_wals = max_wals;
-  index->timer_actor = timer_actor;
   index->wait = wait;
   index->max_wait = max_wait;
-  actor_init(&index->actor, index, index_dispatch, pool);
   hashmap_init(&index->ranks, (void*)hash_uint32, (void*)compare_uint32);
   hashmap_set_key_alloc_funcs(&index->ranks, duplicate_uint32, (void*)free);
   refcounter_init((refcounter_t*) index);
@@ -730,9 +712,6 @@ void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node,
          cbor_decref(&cbor_entry);
        }
        vec_push(node->bucket, (index_entry_t*) refcounter_reference((refcounter_t*) entry));
-       if(!index->is_rebuilding) {
-         timer_actor_debounce(index->timer_actor, index->wait, 0, &index->actor, INDEX_SAVE);
-       }
      } else {
        index_split_node(index, node, current);
        index_add_to_node(index, entry, node, current);
@@ -778,9 +757,6 @@ void _index_increment(index_t* index, index_entry_t* entry) {
      } else {
        vec_push(rank, (index_entry_t*) refcounter_reference((refcounter_t*) entry));
      }
-    if (!index->is_rebuilding) {
-       timer_actor_debounce(index->timer_actor, index->wait, 0, &index->actor, INDEX_SAVE);
-    }
   }
 }
 
@@ -939,11 +915,6 @@ void index_destroy(index_t* index) {
     return;
   }
   if (refcounter_dereference_is_zero((refcounter_t*) index)) {
-    if (index->timer_actor != NULL) {
-      timer_actor_debounce_flush(index->timer_actor, &index->actor, INDEX_SAVE);
-      platform_sleep_ms(10);
-      scheduler_pool_wait_for_idle(index->actor.pool);
-    }
     index_debounce(index);
     refcounter_destroy_lock((refcounter_t*) index);
     index_destroy_node(index, index->root);
@@ -966,7 +937,6 @@ void index_destroy(index_t* index) {
     if (index->last_file != NULL) {
       free(index->last_file);
     }
-    actor_destroy(&index->actor);
     /* Fill freed memory with poison pattern to detect use-after-free */
     memset(index, 0xDD, sizeof(index_t));
     free(index);
@@ -1020,7 +990,7 @@ cbor_item_t* _index_to_cbor(index_t* index) {
 }
 
 
-index_t* cbor_to_index(cbor_item_t* cbor, char* location, timer_actor_t* timer_actor, scheduler_pool_t* pool, uint64_t wait, uint64_t max_wait, size_t max_snapshots, size_t max_wals) {
+index_t* cbor_to_index(cbor_item_t* cbor, char* location, uint64_t wait, uint64_t max_wait, size_t max_snapshots, size_t max_wals) {
   cbor_item_t* cbor_root = cbor_array_get(cbor, 0);
   cbor_item_t* cbor_bucket_size = cbor_array_get(cbor, 1);
   size_t bucket_size = cbor_get_int(cbor_bucket_size);
@@ -1030,7 +1000,7 @@ index_t* cbor_to_index(cbor_item_t* cbor, char* location, timer_actor_t* timer_a
   if (root == NULL) {
     return NULL;
   }
-  index_t* index= index_create_from(bucket_size, root, location, timer_actor, pool, wait, max_wait, max_snapshots, max_wals);
+  index_t* index= index_create_from(bucket_size, root, location, wait, max_wait, max_snapshots, max_wals);
   return index;
 }
 void index_set_entry_ejection(index_t* index, index_entry_t* entry, uint64_t date) {
@@ -1113,8 +1083,7 @@ static void _index_prune_old_wals(index_t* index, uint64_t first_kept_id) {
   free(wal_dir);
 }
 
-void index_debounce(void* ctx) {
-  index_t *index = (index_t *) ctx;
+void index_debounce(index_t* index) {
   cbor_item_t *cbor = _index_to_cbor(index);
   uint64_t crc = 0;
   int result = _index_to_crc(index, &crc);
@@ -1149,6 +1118,10 @@ void index_debounce(void* ctx) {
   cbor_intermediate_decref(cbor);
   uint64_t first_kept_id = _index_prune_old_snapshots(index);
   _index_prune_old_wals(index, first_kept_id);
+}
+int index_sync(index_t* index) {
+  if (index == NULL) return -1;
+  return wal_sync(index->wal);
 }
 int _index_to_crc(index_t* index, uint64_t* crc) {
   XXH64_state_t* const state = XXH64_createState();

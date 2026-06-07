@@ -348,9 +348,9 @@ public:
   }
   void TearDown() override {
     scheduler_pool_wait_for_idle(pool);
-    scheduler_pool_stop(pool);
     block_cache_destroy(block_cache);
     timer_actor_destroy(timer_actor);
+    scheduler_pool_stop(pool);
     scheduler_pool_destroy(pool);
     free(location);
     for (size_t i = 0; i < LRU_COUNT; i++) {

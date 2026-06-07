@@ -92,6 +92,8 @@ typedef struct block_cache_t {
   index_t* index;
   block_size_e type;
   struct scheduler_pool_t* pool;
+  timer_actor_t* timer_actor;
+  uint64_t index_wait;
   actor_t actor;
   pending_get_t* pending_gets;
   size_t current_bytes;
