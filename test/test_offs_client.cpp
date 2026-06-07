@@ -352,6 +352,269 @@ TEST_F(TestOffsClient, GetAfterPut) {
     offs_client_disconnect(client);
 }
 
+/* Generate deterministic pseudo-random data for upload/download tests.
+   LCG: x_{n+1} = (x_n * 1103515245 + 12345) & 0xFF  */
+static void _fill_random(uint8_t* buf, size_t len) {
+    uint32_t state = 1;
+    for (size_t i = 0; i < len; i++) {
+        state = state * 1103515245u + 12345u;
+        buf[i] = (uint8_t)(state >> 16);
+    }
+}
+
+/* Verify that upload/download round-trips with larger file sizes,
+   exercising the streaming backpressure path through the actor system. */
+TEST_F(TestOffsClient, PutAndGet_256KB) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+    const size_t size = 256 * 1024;
+    uint8_t* data = (uint8_t*)malloc(size);
+    _fill_random(data, size);
+    PutCallbackContext put_ctx = { nullptr, 0 };
+    offs_client_put(client, "application/octet-stream", "256kb.bin", size, data, size, _put_callback, &put_ctx);
+    for (int a = 0; a < 500 && !put_ctx.called; a++) usleep(10000);
+    ASSERT_EQ(put_ctx.called, 1);
+    char* ori = strdup(put_ctx.ori_string);
+    free(put_ctx.ori_string);
+    GetDataCallbackContext get_ctx; memset(&get_ctx, 0, sizeof(get_ctx));
+    offs_client_get(client, ori, _get_data_callback, _get_end_callback, _error_callback, &get_ctx);
+    for (int a = 0; a < 500 && !get_ctx.end_called && !get_ctx.error_called; a++) usleep(10000);
+    EXPECT_EQ(get_ctx.end_called, 1) << " data_len=" << get_ctx.data_len;
+    EXPECT_EQ(get_ctx.data_len, size);
+    if (get_ctx.data) { EXPECT_EQ(memcmp(get_ctx.data, data, size), 0); free(get_ctx.data); }
+    free(ori); free(data);
+    offs_client_disconnect(client);
+}
+
+TEST_F(TestOffsClient, PutAndGet_128KB) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+    const size_t size = 128 * 1024;
+    uint8_t* data = (uint8_t*)malloc(size);
+    _fill_random(data, size);
+    PutCallbackContext put_ctx = { nullptr, 0 };
+    offs_client_put(client, "application/octet-stream", "128kb.bin", size, data, size, _put_callback, &put_ctx);
+    for (int a = 0; a < 500 && !put_ctx.called; a++) usleep(10000);
+    ASSERT_EQ(put_ctx.called, 1);
+    char* ori = strdup(put_ctx.ori_string);
+    free(put_ctx.ori_string);
+    GetDataCallbackContext get_ctx; memset(&get_ctx, 0, sizeof(get_ctx));
+    offs_client_get(client, ori, _get_data_callback, _get_end_callback, _error_callback, &get_ctx);
+    for (int a = 0; a < 500 && !get_ctx.end_called && !get_ctx.error_called; a++) usleep(10000);
+    EXPECT_EQ(get_ctx.end_called, 1) << " data_len=" << get_ctx.data_len;
+    EXPECT_EQ(get_ctx.data_len, size);
+    if (get_ctx.data) { EXPECT_EQ(memcmp(get_ctx.data, data, size), 0); free(get_ctx.data); }
+    free(ori); free(data);
+    offs_client_disconnect(client);
+}
+
+TEST_F(TestOffsClient, PutAndGet_100KB) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+    const size_t size = 100 * 1024;
+    uint8_t* data = (uint8_t*)malloc(size);
+    _fill_random(data, size);
+    PutCallbackContext put_ctx = { nullptr, 0 };
+    offs_client_put(client, "application/octet-stream", "100kb.bin", size, data, size, _put_callback, &put_ctx);
+    for (int a = 0; a < 500 && !put_ctx.called; a++) usleep(10000);
+    ASSERT_EQ(put_ctx.called, 1);
+    char* ori = strdup(put_ctx.ori_string);
+    free(put_ctx.ori_string);
+    GetDataCallbackContext get_ctx; memset(&get_ctx, 0, sizeof(get_ctx));
+    offs_client_get(client, ori, _get_data_callback, _get_end_callback, _error_callback, &get_ctx);
+    for (int a = 0; a < 500 && !get_ctx.end_called && !get_ctx.error_called; a++) usleep(10000);
+    EXPECT_EQ(get_ctx.end_called, 1);
+    EXPECT_EQ(get_ctx.data_len, size);
+    if (get_ctx.data) { EXPECT_EQ(memcmp(get_ctx.data, data, size), 0); free(get_ctx.data); }
+    free(ori); free(data);
+    offs_client_disconnect(client);
+}
+
+TEST_F(TestOffsClient, PutAndGet_512KB) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+    const size_t size = 512 * 1024;
+    uint8_t* data = (uint8_t*)malloc(size);
+    _fill_random(data, size);
+    PutCallbackContext put_ctx = { nullptr, 0 };
+    offs_client_put(client, "application/octet-stream", "512kb.bin", size, data, size, _put_callback, &put_ctx);
+    for (int a = 0; a < 500 && !put_ctx.called; a++) usleep(10000);
+    ASSERT_EQ(put_ctx.called, 1);
+    char* ori = strdup(put_ctx.ori_string);
+    free(put_ctx.ori_string);
+    GetDataCallbackContext get_ctx; memset(&get_ctx, 0, sizeof(get_ctx));
+    offs_client_get(client, ori, _get_data_callback, _get_end_callback, _error_callback, &get_ctx);
+    /* 512KB / 128KB block = 4 blocks. Allow up to 20s. */
+    for (int a = 0; a < 2000 && !get_ctx.end_called && !get_ctx.error_called; a++) usleep(10000);
+    EXPECT_EQ(get_ctx.end_called, 1) << " data_len=" << get_ctx.data_len;
+    EXPECT_EQ(get_ctx.data_len, size);
+    if (get_ctx.data) { EXPECT_EQ(memcmp(get_ctx.data, data, size), 0); free(get_ctx.data); }
+    free(ori); free(data);
+    offs_client_disconnect(client);
+}
+
+TEST_F(TestOffsClient, PutAndGet_1MB) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+
+    const size_t size = 1024 * 1024;
+    uint8_t* data = (uint8_t*)malloc(size);
+    _fill_random(data, size);
+
+    PutCallbackContext put_ctx;
+    put_ctx.ori_string = nullptr;
+    put_ctx.called = 0;
+
+    int result = offs_client_put(client, "application/octet-stream", "1mb.bin",
+                                  size, data, size, _put_callback, &put_ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 500 && !put_ctx.called; attempts++) {
+        usleep(10000);
+    }
+    ASSERT_EQ(put_ctx.called, 1);
+    ASSERT_NE(put_ctx.ori_string, nullptr);
+    char* ori_string = strdup(put_ctx.ori_string);
+    free(put_ctx.ori_string);
+
+    GetDataCallbackContext get_ctx;
+    memset(&get_ctx, 0, sizeof(get_ctx));
+    result = offs_client_get(client, ori_string, _get_data_callback,
+                              _get_end_callback, _error_callback, &get_ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 500 && !get_ctx.end_called && !get_ctx.error_called; attempts++) {
+        usleep(10000);
+    }
+
+    if (get_ctx.error_called) {
+        FAIL() << "Got error response, status_code=" << (int)get_ctx.error_status;
+    }
+
+    EXPECT_EQ(get_ctx.end_called, 1);
+    EXPECT_EQ(get_ctx.data_len, size);
+    if (get_ctx.data != nullptr) {
+        EXPECT_EQ(memcmp(get_ctx.data, data, size), 0);
+        free(get_ctx.data);
+    }
+
+    free(ori_string);
+    free(data);
+    offs_client_disconnect(client);
+}
+
+TEST_F(TestOffsClient, PutAndGet_10MB) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+
+    const size_t size = 10 * 1024 * 1024;
+    uint8_t* data = (uint8_t*)malloc(size);
+    _fill_random(data, size);
+
+    PutCallbackContext put_ctx;
+    put_ctx.ori_string = nullptr;
+    put_ctx.called = 0;
+
+    int result = offs_client_put(client, "application/octet-stream", "10mb.bin",
+                                  size, data, size, _put_callback, &put_ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 1000 && !put_ctx.called; attempts++) {
+        usleep(10000);
+    }
+    ASSERT_EQ(put_ctx.called, 1);
+    ASSERT_NE(put_ctx.ori_string, nullptr);
+    char* ori_string = strdup(put_ctx.ori_string);
+    free(put_ctx.ori_string);
+
+    GetDataCallbackContext get_ctx;
+    memset(&get_ctx, 0, sizeof(get_ctx));
+    result = offs_client_get(client, ori_string, _get_data_callback,
+                              _get_end_callback, _error_callback, &get_ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 1000 && !get_ctx.end_called && !get_ctx.error_called; attempts++) {
+        usleep(10000);
+    }
+
+    if (get_ctx.error_called) {
+        FAIL() << "Got error response, status_code=" << (int)get_ctx.error_status;
+    }
+
+    EXPECT_EQ(get_ctx.end_called, 1);
+    EXPECT_EQ(get_ctx.data_len, size);
+    if (get_ctx.data != nullptr) {
+        EXPECT_EQ(memcmp(get_ctx.data, data, size), 0);
+        free(get_ctx.data);
+    }
+
+    free(ori_string);
+    free(data);
+    offs_client_disconnect(client);
+}
+
+/* Streaming upload in 64KB chunks — exercises the writeable_off_stream
+   backpressure path more aggressively than the single-shot buffered API. */
+TEST_F(TestOffsClient, PutStreaming_1MB) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+
+    const size_t total_size = 1024 * 1024;
+    const size_t chunk_size = 64 * 1024;
+    uint8_t* data = (uint8_t*)malloc(total_size);
+    _fill_random(data, total_size);
+
+    PutCallbackContext put_ctx;
+    put_ctx.ori_string = nullptr;
+    put_ctx.called = 0;
+
+    int result = offs_client_put_stream_start(client, "application/octet-stream",
+                                               "stream_1mb.bin", total_size);
+    EXPECT_EQ(result, 0);
+
+    for (size_t offset = 0; offset < total_size; offset += chunk_size) {
+        size_t len = (offset + chunk_size <= total_size) ? chunk_size : (total_size - offset);
+        result = offs_client_put_stream_data(client, data + offset, len);
+        EXPECT_EQ(result, 0);
+    }
+
+    result = offs_client_put_stream_end(client, _put_callback, &put_ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 500 && !put_ctx.called; attempts++) {
+        usleep(10000);
+    }
+    ASSERT_EQ(put_ctx.called, 1);
+    ASSERT_NE(put_ctx.ori_string, nullptr);
+    char* ori_string = strdup(put_ctx.ori_string);
+    free(put_ctx.ori_string);
+
+    GetDataCallbackContext get_ctx;
+    memset(&get_ctx, 0, sizeof(get_ctx));
+    result = offs_client_get(client, ori_string, _get_data_callback,
+                              _get_end_callback, _error_callback, &get_ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 500 && !get_ctx.end_called && !get_ctx.error_called; attempts++) {
+        usleep(10000);
+    }
+
+    if (get_ctx.error_called) {
+        FAIL() << "Got error response, status_code=" << (int)get_ctx.error_status;
+    }
+
+    EXPECT_EQ(get_ctx.end_called, 1);
+    EXPECT_EQ(get_ctx.data_len, total_size);
+    if (get_ctx.data != nullptr) {
+        EXPECT_EQ(memcmp(get_ctx.data, data, total_size), 0);
+        free(get_ctx.data);
+    }
+
+    free(ori_string);
+    free(data);
+    offs_client_disconnect(client);
+}
+
 TEST_F(TestOffsClient, GetInvalidOri) {
     offs_client_t* client = offs_client_connect(url, NULL);
     ASSERT_NE(client, nullptr);
