@@ -36,7 +36,7 @@ static void _put_callback(void* ctx, const char* ori_string) {
 
 struct GetDataCallbackContext {
     uint8_t* data;
-    size_t data_len;
+    std::atomic<size_t> data_len;
     std::atomic<int> data_called;
     std::atomic<int> end_called;
     uint8_t error_status;
@@ -45,13 +45,14 @@ struct GetDataCallbackContext {
 
 static void _get_data_callback(void* ctx, const uint8_t* data, size_t len) {
     GetDataCallbackContext* gctx = (GetDataCallbackContext*)ctx;
+    size_t old_len = gctx->data_len.load(std::memory_order_relaxed);
     if (gctx->data != NULL) {
-        gctx->data = (uint8_t*)realloc(gctx->data, gctx->data_len + len);
+        gctx->data = (uint8_t*)realloc(gctx->data, old_len + len);
     } else {
         gctx->data = (uint8_t*)malloc(len);
     }
-    memcpy(gctx->data + gctx->data_len, data, len);
-    gctx->data_len += len;
+    memcpy(gctx->data + old_len, data, len);
+    gctx->data_len.store(old_len + len, std::memory_order_release);
     gctx->data_called.store(1, std::memory_order_release);
 }
 
@@ -326,7 +327,7 @@ TEST_F(TestOffsClient, GetAfterPut) {
     GetDataCallbackContext get_ctx;
     memset(&get_ctx, 0, sizeof(get_ctx));
     get_ctx.data = nullptr;
-    get_ctx.data_len = 0;
+    get_ctx.data_len.store(0, std::memory_order_relaxed);
 
     result = offs_client_get(client, ori_string, _get_data_callback, _get_end_callback,
                               _error_callback, &get_ctx);
@@ -344,7 +345,7 @@ TEST_F(TestOffsClient, GetAfterPut) {
     EXPECT_EQ(get_ctx.data_called, 1);
     EXPECT_EQ(get_ctx.end_called, 1);
     if (get_ctx.data != nullptr) {
-        EXPECT_EQ(get_ctx.data_len, sizeof(data) - 1);
+        EXPECT_EQ(get_ctx.data_len.load(), sizeof(data) - 1);
         EXPECT_EQ(memcmp(get_ctx.data, data, sizeof(data) - 1), 0);
         free(get_ctx.data);
     }
@@ -380,8 +381,8 @@ TEST_F(TestOffsClient, PutAndGet_256KB) {
     GetDataCallbackContext get_ctx; memset(&get_ctx, 0, sizeof(get_ctx));
     offs_client_get(client, ori, _get_data_callback, _get_end_callback, _error_callback, &get_ctx);
     for (int a = 0; a < 500 && !get_ctx.end_called.load(std::memory_order_acquire) && !get_ctx.error_called.load(std::memory_order_acquire); a++) usleep(10000);
-    EXPECT_EQ(get_ctx.end_called, 1) << " data_len=" << get_ctx.data_len;
-    EXPECT_EQ(get_ctx.data_len, size);
+    EXPECT_EQ(get_ctx.end_called, 1) << " data_len=" << get_ctx.data_len.load();
+    EXPECT_EQ(get_ctx.data_len.load(), size);
     if (get_ctx.data) { EXPECT_EQ(memcmp(get_ctx.data, data, size), 0); free(get_ctx.data); }
     free(ori); free(data);
     offs_client_disconnect(client);
@@ -402,8 +403,8 @@ TEST_F(TestOffsClient, PutAndGet_128KB) {
     GetDataCallbackContext get_ctx; memset(&get_ctx, 0, sizeof(get_ctx));
     offs_client_get(client, ori, _get_data_callback, _get_end_callback, _error_callback, &get_ctx);
     for (int a = 0; a < 500 && !get_ctx.end_called.load(std::memory_order_acquire) && !get_ctx.error_called.load(std::memory_order_acquire); a++) usleep(10000);
-    EXPECT_EQ(get_ctx.end_called, 1) << " data_len=" << get_ctx.data_len;
-    EXPECT_EQ(get_ctx.data_len, size);
+    EXPECT_EQ(get_ctx.end_called, 1) << " data_len=" << get_ctx.data_len.load();
+    EXPECT_EQ(get_ctx.data_len.load(), size);
     if (get_ctx.data) { EXPECT_EQ(memcmp(get_ctx.data, data, size), 0); free(get_ctx.data); }
     free(ori); free(data);
     offs_client_disconnect(client);
@@ -425,7 +426,7 @@ TEST_F(TestOffsClient, PutAndGet_100KB) {
     offs_client_get(client, ori, _get_data_callback, _get_end_callback, _error_callback, &get_ctx);
     for (int a = 0; a < 500 && !get_ctx.end_called.load(std::memory_order_acquire) && !get_ctx.error_called.load(std::memory_order_acquire); a++) usleep(10000);
     EXPECT_EQ(get_ctx.end_called, 1);
-    EXPECT_EQ(get_ctx.data_len, size);
+    EXPECT_EQ(get_ctx.data_len.load(), size);
     if (get_ctx.data) { EXPECT_EQ(memcmp(get_ctx.data, data, size), 0); free(get_ctx.data); }
     free(ori); free(data);
     offs_client_disconnect(client);
@@ -448,8 +449,8 @@ TEST_F(TestOffsClient, PutAndGet_512KB) {
     get_ctx.data = (uint8_t*)malloc(size);
     offs_client_get(client, ori, _get_data_callback, _get_end_callback, _error_callback, &get_ctx);
     for (int a = 0; a < 2000 && !get_ctx.end_called.load(std::memory_order_acquire) && !get_ctx.error_called.load(std::memory_order_acquire); a++) usleep(10000);
-    EXPECT_EQ(get_ctx.end_called, 1) << " data_len=" << get_ctx.data_len;
-    EXPECT_EQ(get_ctx.data_len, size);
+    EXPECT_EQ(get_ctx.end_called, 1) << " data_len=" << get_ctx.data_len.load();
+    EXPECT_EQ(get_ctx.data_len.load(), size);
     if (get_ctx.data) { EXPECT_EQ(memcmp(get_ctx.data, data, size), 0); free(get_ctx.data); }
     free(ori); free(data);
     offs_client_disconnect(client);
@@ -494,7 +495,7 @@ TEST_F(TestOffsClient, PutAndGet_1MB) {
     }
 
     EXPECT_EQ(get_ctx.end_called, 1);
-    EXPECT_EQ(get_ctx.data_len, size);
+    EXPECT_EQ(get_ctx.data_len.load(), size);
     if (get_ctx.data != nullptr) {
         EXPECT_EQ(memcmp(get_ctx.data, data, size), 0);
         free(get_ctx.data);
@@ -544,7 +545,7 @@ TEST_F(TestOffsClient, PutAndGet_10MB) {
     }
 
     EXPECT_EQ(get_ctx.end_called, 1);
-    EXPECT_EQ(get_ctx.data_len, size);
+    EXPECT_EQ(get_ctx.data_len.load(), size);
     if (get_ctx.data != nullptr) {
         EXPECT_EQ(memcmp(get_ctx.data, data, size), 0);
         free(get_ctx.data);
@@ -900,7 +901,7 @@ TEST_F(TestOffsWsClient, GetAfterPut) {
     GetDataCallbackContext get_ctx;
     memset(&get_ctx, 0, sizeof(get_ctx));
     get_ctx.data = nullptr;
-    get_ctx.data_len = 0;
+    get_ctx.data_len.store(0, std::memory_order_relaxed);
 
     result = offs_client_get(client, ori_string, _get_data_callback, _get_end_callback,
                             _error_callback, &get_ctx);
@@ -917,7 +918,7 @@ TEST_F(TestOffsWsClient, GetAfterPut) {
     EXPECT_EQ(get_ctx.data_called, 1);
     EXPECT_EQ(get_ctx.end_called, 1);
     if (get_ctx.data != nullptr) {
-        EXPECT_EQ(get_ctx.data_len, sizeof(data) - 1);
+        EXPECT_EQ(get_ctx.data_len.load(), sizeof(data) - 1);
         EXPECT_EQ(memcmp(get_ctx.data, data, sizeof(data) - 1), 0);
         free(get_ctx.data);
     }
@@ -1101,7 +1102,7 @@ TEST_F(TestOffsWtClient, GetAfterPut) {
     GetDataCallbackContext get_ctx;
     memset(&get_ctx, 0, sizeof(get_ctx));
     get_ctx.data = nullptr;
-    get_ctx.data_len = 0;
+    get_ctx.data_len.store(0, std::memory_order_relaxed);
 
     result = offs_client_get(client, ori_string, _get_data_callback, _get_end_callback,
                             _error_callback, &get_ctx);
@@ -1118,7 +1119,7 @@ TEST_F(TestOffsWtClient, GetAfterPut) {
     EXPECT_EQ(get_ctx.data_called, 1);
     EXPECT_EQ(get_ctx.end_called, 1);
     if (get_ctx.data != nullptr) {
-        EXPECT_EQ(get_ctx.data_len, sizeof(data) - 1);
+        EXPECT_EQ(get_ctx.data_len.load(), sizeof(data) - 1);
         EXPECT_EQ(memcmp(get_ctx.data, data, sizeof(data) - 1), 0);
         free(get_ctx.data);
     }
