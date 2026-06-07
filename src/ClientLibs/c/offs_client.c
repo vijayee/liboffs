@@ -57,7 +57,7 @@ offs_client_config_t offs_client_config_default(void) {
   offs_client_config_t config;
   config.connect_timeout_ms = 5000;
   config.ws_upgrade_timeout_ms = 5000;
-  config.poll_timeout_ms = 100;
+  config.poll_timeout_ms = 10;  /* Short timeout for responsive recv */
   config.max_retries = 3;
   config.retry_base_delay_ms = 1000;
   return config;
@@ -475,27 +475,34 @@ static void _client_raw_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   }
 
   if (events & PD_EVENT_READ) {
-    uint8_t buf[READ_BUFFER_SIZE];
-    ssize_t bytes_read = platform_socket_recv(client->transport.raw.sock, buf, sizeof(buf));
-    if (bytes_read <= 0) {
-      client->connected = 0;
-      client->running = 0;
-      return;
-    }
-    stream_framer_feed(client->framer, buf, (size_t)bytes_read);
-    uint8_t* frame_data;
-    size_t frame_len;
-    while ((frame_data = stream_framer_next(client->framer, &frame_len)) != NULL) {
-      struct cbor_load_result load_result;
-      cbor_item_t* cbor_item = cbor_load(frame_data, frame_len, &load_result);
-      free(frame_data);
-      if (cbor_item == NULL || load_result.error.code != CBOR_ERR_NONE) {
-        if (cbor_item != NULL) cbor_decref(&cbor_item);
-        continue;
+    /* Drain all available data — level-triggered epoll still needs the loop
+       to wake between recv() calls. Reading only one buffer per callback
+       can lose data when the kernel has multiple buffers worth ready. */
+    while (1) {
+      uint8_t buf[READ_BUFFER_SIZE];
+      ssize_t bytes_read = platform_socket_recv(client->transport.raw.sock, buf, sizeof(buf));
+      if (bytes_read <= 0) {
+        if (bytes_read == 0) {
+          client->connected = 0;
+          client->running = 0;
+        }
+        break;
       }
-      uint8_t type = client_api_wire_get_type(cbor_item);
-      _handle_frame(client, type, cbor_item);
-      cbor_decref(&cbor_item);
+      stream_framer_feed(client->framer, buf, (size_t)bytes_read);
+      uint8_t* frame_data;
+      size_t frame_len;
+      while ((frame_data = stream_framer_next(client->framer, &frame_len)) != NULL) {
+        struct cbor_load_result load_result;
+        cbor_item_t* cbor_item = cbor_load(frame_data, frame_len, &load_result);
+        free(frame_data);
+        if (cbor_item == NULL || load_result.error.code != CBOR_ERR_NONE) {
+          if (cbor_item != NULL) cbor_decref(&cbor_item);
+          continue;
+        }
+        uint8_t type = client_api_wire_get_type(cbor_item);
+        _handle_frame(client, type, cbor_item);
+        cbor_decref(&cbor_item);
+      }
     }
   }
 }
