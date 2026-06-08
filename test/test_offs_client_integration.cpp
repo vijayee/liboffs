@@ -15,8 +15,6 @@
 #include <signal.h>
 #include <errno.h>
 #include <linux/limits.h>
-#include <fcntl.h>
-#include <poll.h>
 #include <cstring>
 #include <string>
 #include <atomic>
@@ -41,6 +39,8 @@ extern "C" {
 #include "../src/Timer/timer_actor.h"
 #include "../src/Util/rm_rf.h"
 }
+
+static std::atomic<uint16_t> g_next_base_port{37000};
 
 static std::string get_self_path() {
   char path[PATH_MAX];
@@ -153,15 +153,6 @@ static int run_unix_node(const char* socket_path, const char* cache_dir) {
   if (transport == NULL) return 1;
   unix_transport_start(transport);
 
-  // Signal parent we're ready
-  fd_set read_fds;
-  FD_ZERO(&read_fds);
-  int sync_pipe[2];
-  pipe(sync_pipe);
-  // Close read end in parent, write end in child to signal ready
-  // Parent will see socket_path as the ready signal; no need for pipe.
-
-  // Just wait until parent kills us
   while (running) {
     sleep(1);
   }
@@ -174,7 +165,6 @@ static int run_unix_node(const char* socket_path, const char* cache_dir) {
   block_cache_destroy(bc);
   timer_actor_destroy(timer);
   scheduler_pool_destroy(pool);
-  (void)sync_pipe;
   return 0;
 }
 
@@ -332,7 +322,7 @@ protected:
   }
 
   void start_tcp_node() {
-    node_port = 35000 + (getpid() % 1000);
+    node_port = g_next_base_port.fetch_add(1);
     node_pid = fork();
     ASSERT_GE(node_pid, 0);
     if (node_pid == 0) {
@@ -362,7 +352,7 @@ protected:
   }
 
   void start_ws_node() {
-    node_port = 36000 + (getpid() % 1000);
+    node_port = g_next_base_port.fetch_add(1);
     node_pid = fork();
     ASSERT_GE(node_pid, 0);
     if (node_pid == 0) {
@@ -374,7 +364,21 @@ protected:
             (char*)NULL);
       _exit(127);
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    /* Poll for the WS port to be ready by attempting a TCP connect. */
+    for (int i = 0; i < 100; i++) {
+      int sock = socket(AF_INET, SOCK_STREAM, 0);
+      sockaddr_in addr = {};
+      addr.sin_family = AF_INET;
+      addr.sin_port = htons(node_port);
+      inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+      if (connect(sock, (sockaddr*)&addr, sizeof(addr)) == 0) {
+        close(sock);
+        return;
+      }
+      close(sock);
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    FAIL() << "WS port not listening on " << node_port;
   }
 
   void run_round_trip(const std::string& url, size_t size) {

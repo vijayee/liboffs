@@ -23,16 +23,24 @@ extern "C" {
 
 struct PutCallbackContext {
     char* ori_string;
-    int called;
+    std::atomic<int> called;
+    sem_t sem;
+    PutCallbackContext() : ori_string(nullptr), called(0) {
+        sem_init(&sem, 0, 0);
+    }
+    ~PutCallbackContext() {
+        sem_destroy(&sem);
+    }
 };
 
 static void _put_callback(void* ctx, const char* ori_string) {
     PutCallbackContext* pctx = (PutCallbackContext*)ctx;
-    pctx->called = 1;
     if (ori_string != NULL) {
         free(pctx->ori_string);
         pctx->ori_string = strdup(ori_string);
     }
+    pctx->called.store(1, std::memory_order_release);
+    sem_post(&pctx->sem);
 }
 
 struct GetDataCallbackContext {
@@ -67,13 +75,23 @@ static int _wait_sem(sem_t* sem, int timeout_ms) {
 static void _get_data_callback(void* ctx, const uint8_t* data, size_t len) {
     GetDataCallbackContext* gctx = (GetDataCallbackContext*)ctx;
     size_t old_len = gctx->data_len.load(std::memory_order_relaxed);
+    size_t new_len = old_len + len;
+    uint8_t* new_data;
     if (gctx->data != NULL) {
-        gctx->data = (uint8_t*)realloc(gctx->data, old_len + len);
+        new_data = (uint8_t*)realloc(gctx->data, new_len);
     } else {
-        gctx->data = (uint8_t*)malloc(len);
+        new_data = (uint8_t*)malloc(new_len);
     }
-    memcpy(gctx->data + old_len, data, len);
-    gctx->data_len.store(old_len + len, std::memory_order_release);
+    if (new_data == NULL) {
+        /* realloc/malloc failure — drop the frame but don't crash the test.
+           Production code should handle this, but for tests the next
+           memcmp on a partial buffer would be a confusing failure. */
+        gctx->data_called.store(1, std::memory_order_release);
+        return;
+    }
+    memcpy(new_data + old_len, data, len);
+    gctx->data = new_data;
+    gctx->data_len.store(new_len, std::memory_order_release);
     gctx->data_called.store(1, std::memory_order_release);
 }
 
@@ -258,7 +276,7 @@ TEST_F(TestOffsClient, PutBufferedWithApiKey) {
                                   _put_callback, &ctx);
     EXPECT_EQ(result, 0);
 
-    for (int attempts = 0; attempts < 200 && !ctx.called; attempts++) {
+    for (int attempts = 0; attempts < 200 && !ctx.called.load(std::memory_order_acquire); attempts++) {
         usleep(10000);
     }
     EXPECT_EQ(ctx.called, 1);
@@ -283,7 +301,7 @@ TEST_F(TestOffsClient, PutBuffered) {
     EXPECT_EQ(result, 0);
 
     /* Wait for callback with timeout */
-    for (int attempts = 0; attempts < 200 && !ctx.called; attempts++) {
+    for (int attempts = 0; attempts < 200 && !ctx.called.load(std::memory_order_acquire); attempts++) {
         usleep(10000);
     }
     EXPECT_EQ(ctx.called, 1);
@@ -313,7 +331,7 @@ TEST_F(TestOffsClient, PutStreaming) {
     EXPECT_EQ(result, 0);
 
     /* Wait for callback with timeout */
-    for (int attempts = 0; attempts < 200 && !ctx.called; attempts++) {
+    for (int attempts = 0; attempts < 200 && !ctx.called.load(std::memory_order_acquire); attempts++) {
         usleep(10000);
     }
     EXPECT_EQ(ctx.called, 1);
@@ -338,7 +356,7 @@ TEST_F(TestOffsClient, GetAfterPut) {
     EXPECT_EQ(result, 0);
 
     /* Wait for PUT callback */
-    for (int attempts = 0; attempts < 200 && !put_ctx.called; attempts++) {
+    for (int attempts = 0; attempts < 200 && !put_ctx.called.load(std::memory_order_acquire); attempts++) {
         usleep(10000);
     }
     ASSERT_EQ(put_ctx.called, 1);
@@ -348,9 +366,7 @@ TEST_F(TestOffsClient, GetAfterPut) {
 
     /* Now GET the data back */
     GetDataCallbackContext get_ctx;
-    memset(&get_ctx, 0, sizeof(get_ctx));
-    get_ctx.data = nullptr;
-    get_ctx.data_len.store(0, std::memory_order_relaxed);
+    // get_ctx fields initialized by default constructor
 
     result = offs_client_get(client, ori_string, _get_data_callback, _get_end_callback,
                               _error_callback, &get_ctx);
@@ -395,9 +411,9 @@ TEST_F(TestOffsClient, PutAndGet_256KB) {
     const size_t size = 256 * 1024;
     uint8_t* data = (uint8_t*)malloc(size);
     _fill_random(data, size);
-    PutCallbackContext put_ctx = { nullptr, 0 };
+    PutCallbackContext put_ctx;
     offs_client_put(client, "application/octet-stream", "256kb.bin", size, data, size, _put_callback, &put_ctx);
-    for (int a = 0; a < 500 && !put_ctx.called; a++) usleep(10000);
+    for (int a = 0; a < 500 && !put_ctx.called.load(std::memory_order_acquire); a++) usleep(10000);
     ASSERT_EQ(put_ctx.called, 1);
     char* ori = strdup(put_ctx.ori_string);
     free(put_ctx.ori_string);
@@ -417,9 +433,9 @@ TEST_F(TestOffsClient, PutAndGet_128KB) {
     const size_t size = 128 * 1024;
     uint8_t* data = (uint8_t*)malloc(size);
     _fill_random(data, size);
-    PutCallbackContext put_ctx = { nullptr, 0 };
+    PutCallbackContext put_ctx;
     offs_client_put(client, "application/octet-stream", "128kb.bin", size, data, size, _put_callback, &put_ctx);
-    for (int a = 0; a < 500 && !put_ctx.called; a++) usleep(10000);
+    for (int a = 0; a < 500 && !put_ctx.called.load(std::memory_order_acquire); a++) usleep(10000);
     ASSERT_EQ(put_ctx.called, 1);
     char* ori = strdup(put_ctx.ori_string);
     free(put_ctx.ori_string);
@@ -439,9 +455,9 @@ TEST_F(TestOffsClient, PutAndGet_100KB) {
     const size_t size = 100 * 1024;
     uint8_t* data = (uint8_t*)malloc(size);
     _fill_random(data, size);
-    PutCallbackContext put_ctx = { nullptr, 0 };
+    PutCallbackContext put_ctx;
     offs_client_put(client, "application/octet-stream", "100kb.bin", size, data, size, _put_callback, &put_ctx);
-    for (int a = 0; a < 500 && !put_ctx.called; a++) usleep(10000);
+    for (int a = 0; a < 500 && !put_ctx.called.load(std::memory_order_acquire); a++) usleep(10000);
     ASSERT_EQ(put_ctx.called, 1);
     char* ori = strdup(put_ctx.ori_string);
     free(put_ctx.ori_string);
@@ -461,9 +477,9 @@ TEST_F(TestOffsClient, PutAndGet_512KB) {
     const size_t size = 512 * 1024;
     uint8_t* data = (uint8_t*)malloc(size);
     _fill_random(data, size);
-    PutCallbackContext put_ctx = { nullptr, 0 };
+    PutCallbackContext put_ctx;
     offs_client_put(client, "application/octet-stream", "512kb.bin", size, data, size, _put_callback, &put_ctx);
-    for (int a = 0; a < 500 && !put_ctx.called; a++) usleep(10000);
+    for (int a = 0; a < 500 && !put_ctx.called.load(std::memory_order_acquire); a++) usleep(10000);
     ASSERT_EQ(put_ctx.called, 1);
     char* ori = strdup(put_ctx.ori_string);
     free(put_ctx.ori_string);
@@ -495,7 +511,7 @@ TEST_F(TestOffsClient, PutAndGet_1MB) {
                                   size, data, size, _put_callback, &put_ctx);
     EXPECT_EQ(result, 0);
 
-    for (int attempts = 0; attempts < 500 && !put_ctx.called; attempts++) {
+    for (int attempts = 0; attempts < 500 && !put_ctx.called.load(std::memory_order_acquire); attempts++) {
         usleep(10000);
     }
     ASSERT_EQ(put_ctx.called, 1);
@@ -504,7 +520,6 @@ TEST_F(TestOffsClient, PutAndGet_1MB) {
     free(put_ctx.ori_string);
 
     GetDataCallbackContext get_ctx;
-    memset(&get_ctx, 0, sizeof(get_ctx));
     result = offs_client_get(client, ori_string, _get_data_callback,
                               _get_end_callback, _error_callback, &get_ctx);
     EXPECT_EQ(result, 0);
@@ -545,7 +560,7 @@ TEST_F(TestOffsClient, PutAndGet_10MB) {
                                   size, data, size, _put_callback, &put_ctx);
     EXPECT_EQ(result, 0);
 
-    for (int attempts = 0; attempts < 1000 && !put_ctx.called; attempts++) {
+    for (int attempts = 0; attempts < 1000 && !put_ctx.called.load(std::memory_order_acquire); attempts++) {
         usleep(10000);
     }
     ASSERT_EQ(put_ctx.called, 1);
@@ -554,7 +569,6 @@ TEST_F(TestOffsClient, PutAndGet_10MB) {
     free(put_ctx.ori_string);
 
     GetDataCallbackContext get_ctx;
-    memset(&get_ctx, 0, sizeof(get_ctx));
     result = offs_client_get(client, ori_string, _get_data_callback,
                               _get_end_callback, _error_callback, &get_ctx);
     EXPECT_EQ(result, 0);
@@ -607,7 +621,7 @@ TEST_F(TestOffsClient, PutStreaming_1MB) {
     result = offs_client_put_stream_end(client, _put_callback, &put_ctx);
     EXPECT_EQ(result, 0);
 
-    for (int attempts = 0; attempts < 500 && !put_ctx.called; attempts++) {
+    for (int attempts = 0; attempts < 500 && !put_ctx.called.load(std::memory_order_acquire); attempts++) {
         usleep(10000);
     }
     ASSERT_EQ(put_ctx.called, 1);
@@ -616,7 +630,6 @@ TEST_F(TestOffsClient, PutStreaming_1MB) {
     free(put_ctx.ori_string);
 
     GetDataCallbackContext get_ctx;
-    memset(&get_ctx, 0, sizeof(get_ctx));
     result = offs_client_get(client, ori_string, _get_data_callback,
                               _get_end_callback, _error_callback, &get_ctx);
     EXPECT_EQ(result, 0);
@@ -711,7 +724,6 @@ TEST_F(TestOffsClient, BlockPutGetRoundTrip) {
     ASSERT_GT(put_ctx.hash_len, 0u);
 
     BlockGetCallbackContext get_ctx;
-    memset(&get_ctx, 0, sizeof(get_ctx));
 
     result = offs_client_block_get(client, put_ctx.hash_data, put_ctx.hash_len,
                                    _block_get_callback, &get_ctx);
@@ -913,7 +925,7 @@ TEST_F(TestOffsWsClient, GetAfterPut) {
                                   _put_callback, &put_ctx);
     EXPECT_EQ(result, 0);
 
-    for (int attempts = 0; attempts < 200 && !put_ctx.called; attempts++) {
+    for (int attempts = 0; attempts < 200 && !put_ctx.called.load(std::memory_order_acquire); attempts++) {
         usleep(10000);
     }
     ASSERT_EQ(put_ctx.called, 1);
@@ -922,9 +934,7 @@ TEST_F(TestOffsWsClient, GetAfterPut) {
     free(put_ctx.ori_string);
 
     GetDataCallbackContext get_ctx;
-    memset(&get_ctx, 0, sizeof(get_ctx));
-    get_ctx.data = nullptr;
-    get_ctx.data_len.store(0, std::memory_order_relaxed);
+    // get_ctx fields initialized by default constructor
 
     result = offs_client_get(client, ori_string, _get_data_callback, _get_end_callback,
                             _error_callback, &get_ctx);
@@ -1114,7 +1124,7 @@ TEST_F(TestOffsWtClient, GetAfterPut) {
                                   _put_callback, &put_ctx);
     EXPECT_EQ(result, 0);
 
-    for (int attempts = 0; attempts < 200 && !put_ctx.called; attempts++) {
+    for (int attempts = 0; attempts < 200 && !put_ctx.called.load(std::memory_order_acquire); attempts++) {
         usleep(10000);
     }
     ASSERT_EQ(put_ctx.called, 1);
@@ -1123,9 +1133,7 @@ TEST_F(TestOffsWtClient, GetAfterPut) {
     free(put_ctx.ori_string);
 
     GetDataCallbackContext get_ctx;
-    memset(&get_ctx, 0, sizeof(get_ctx));
-    get_ctx.data = nullptr;
-    get_ctx.data_len.store(0, std::memory_order_relaxed);
+    // get_ctx fields initialized by default constructor
 
     result = offs_client_get(client, ori_string, _get_data_callback, _get_end_callback,
                             _error_callback, &get_ctx);
