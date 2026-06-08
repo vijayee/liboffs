@@ -174,21 +174,11 @@ static void _pipeline_on_desc_close(void* ctx, void* unused) {
 static void _pipeline_on_desc_error(void* ctx, void* error) {
     (void)error;
     get_pipeline_t* pipeline = (get_pipeline_t*)ctx;
-    http_response_t* response = pipeline->response;
-    http_connection_t* conn = response->connection;
-    if (!response->headers_sent) {
-        http_response_set_status(response, 404);
-        http_response_set_header(response, "Content-Length", "0");
-    }
-    http_response_end(response);
-    response->connection = NULL;
-    http_response_destroy(response);
-    if (conn) {
-        http_connection_destroy(conn);
-    }
+    /* Deactivate the readable stream — the pipe's error handler will
+       send the 404 response and clean up the connection.  Do NOT
+       end/destroy the response here; _pipe_on_error and _pipe_on_close
+       both fire on stream deactivation and would double-free. */
     stream_deactivate((stream_t*)pipeline->rs, NULL);
-    // Don't defer-deref desc here — stream_deactivate sends close_event too,
-    // and _pipeline_on_desc_close will handle the deref.
     if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
         DESTROY(pipeline->ori, ori);
         free(pipeline);
@@ -220,6 +210,9 @@ static void _setup_stream_pipeline(http_response_t* response, scheduler_pool_t* 
     pipeline->response = response;
     pipeline->ori = stream_ori;
     refcounter_init((refcounter_t*)pipeline);
+    refcounter_reference((refcounter_t*)pipeline);
+    refcounter_reference((refcounter_t*)pipeline);
+    refcounter_reference((refcounter_t*)pipeline);
     refcounter_reference((refcounter_t*)pipeline);
 
     stream_subscribe((stream_t*)desc, data_event, pipeline,
@@ -873,7 +866,7 @@ static int _off_put_headers_complete(http_connection_t* connection,
     }
 
     size_t stream_length = (size_t)atol(stream_length_str);
-    if (stream_length == 0 || stream_length > OFFS_MAX_CBOR_MESSAGE_SIZE) {
+    if (stream_length == 0) {
         return 0;
     }
 
