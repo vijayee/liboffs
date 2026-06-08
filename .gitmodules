@@ -19,3 +19,6 @@
 [submodule "deps/msquic"]
 	path = deps/msquic
 	url = https://github.com/microsoft/msquic.git
+[submodule "deps/poll-dancer"]
+	path = deps/poll-dancer
+	url = https://github.com/vijayee/poll-dancer.git
