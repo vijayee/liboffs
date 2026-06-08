@@ -32,6 +32,7 @@ build and interact with an OFFS network.
 ## Building
 
 ```bash
+git clone --recurse-submodules https://github.com/Prometheus-SCN/liboffs.git
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . -j$(nproc)
