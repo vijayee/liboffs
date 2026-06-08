@@ -29,7 +29,7 @@
 - Create: `.gitmodules` (entry for `deps/poll-dancer`)
 - Create: `deps/poll-dancer` (gitlink to `vijayee/poll-dancer`)
 
-- [ ] **Step 1: Verify the upstream commit exists and is what we expect**
+- [x] **Step 1: Verify the upstream commit exists and is what we expect**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs
@@ -40,7 +40,7 @@ git rev-parse HEAD
 # Expected: 4ae092af9bbac38bb47ab25eb9a6f88dafc5c4ec
 ```
 
-- [ ] **Step 2: Move the existing sibling poll-dancer out of the way**
+- [x] **Step 2: Move the existing sibling poll-dancer out of the way**
 
 The current build expects `../poll-dancer/build/libpoll_dancer.a`. To avoid conflict
 with the new `deps/poll-dancer` checkout, rename the sibling for the duration of
@@ -54,7 +54,7 @@ mv /home/victor/Workspace/src/github.com/vijayee/poll-dancer /home/victor/Worksp
 `-DPOLL_DANCER_ROOT=...` to override later, but moving it makes the migration
 unambiguous.)
 
-- [ ] **Step 3: Add the submodule at the pinned commit**
+- [x] **Step 3: Add the submodule at the pinned commit**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs
@@ -69,7 +69,7 @@ git status
 Expected: `deps/poll-dancer` listed as a new file in "Changes to be committed" with
 mode `160000` (gitlink).
 
-- [ ] **Step 4: Verify `.gitmodules` was updated**
+- [x] **Step 4: Verify `.gitmodules` was updated**
 
 ```bash
 cat .gitmodules
@@ -82,7 +82,7 @@ Expected: contains a new entry similar to:
 	url = https://github.com/vijayee/poll-dancer.git
 ```
 
-- [ ] **Step 5: Verify the submodule checkout is the pinned commit**
+- [x] **Step 5: Verify the submodule checkout is the pinned commit**
 
 ```bash
 cd deps/poll-dancer
@@ -90,7 +90,7 @@ git log --oneline -1
 # Expected: 4ae092a fix: destroy watcher before platform close in pd_timer_destroy
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs
@@ -106,7 +106,7 @@ git commit -m "build: add poll-dancer as deps submodule pinned to 4ae092a"
 - Modify: `CMakeLists.txt` (replace the `${POLL_DANCER_ROOT}` direct-path setup with an
   `ExternalProject_Add` + IMPORTED library)
 
-- [ ] **Step 1: Read the current CMakeLists.txt to confirm the exact lines to replace**
+- [x] **Step 1: Read the current CMakeLists.txt to confirm the exact lines to replace**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs
@@ -116,7 +116,7 @@ sed -n '1,75p' CMakeLists.txt
 Expected: confirms lines 6, 63, 64, 67 reference `${POLL_DANCER_ROOT}` and that
 `include(ExternalProject)` is already used (line 22 for libcbor).
 
-- [ ] **Step 2: Replace the POLL_DANCER_ROOT line with the new setup**
+- [x] **Step 2: Replace the POLL_DANCER_ROOT line with the new setup**
 
 Edit `CMakeLists.txt`. Replace the existing line 6:
 
@@ -147,7 +147,7 @@ set_target_properties(poll-dancer PROPERTIES
 add_dependencies(poll-dancer poll-dancer-project)
 ```
 
-- [ ] **Step 3: Remove the now-redundant include and link lines**
+- [x] **Step 3: Remove the now-redundant include and link lines**
 
 Edit `CMakeLists.txt`. Delete lines 63 and 64 (the two `target_include_directories(offs
 PRIVATE ${POLL_DANCER_ROOT}/...)` lines) and replace line 67 (`target_link_libraries(offs
@@ -170,7 +170,7 @@ target_link_libraries(offs PRIVATE cjson)
 target_link_libraries(offs PRIVATE crypt)
 ```
 
-- [ ] **Step 4: Verify the CMake configure step succeeds**
+- [x] **Step 4: Verify the CMake configure step succeeds**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs
@@ -186,7 +186,7 @@ Expected: CMake configures without error. Look for lines mentioning `poll-dancer
 -- Build files have been written to: .../build-test
 ```
 
-- [ ] **Step 5: Build and verify the new poll-dancer artifact is produced**
+- [x] **Step 5: Build and verify the new poll-dancer artifact is produced**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs/build-test
@@ -197,7 +197,7 @@ ls -la deps/poll-dancer/libpoll_dancer.a
 Expected: `libpoll_dancer.a` exists in `build-test/deps/poll-dancer/`. The `make` for
 `offs` should succeed.
 
-- [ ] **Step 6: Run the integration tests to confirm no regression**
+- [x] **Step 6: Run the integration tests to confirm no regression**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs/build-test
@@ -210,7 +210,7 @@ Expected:
 [  PASSED  ] 5 tests.
 ```
 
-- [ ] **Step 7: Run the existing testliboffs to confirm no regression**
+- [x] **Step 7: Run the existing testliboffs to confirm no regression**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs/build-test
@@ -220,14 +220,14 @@ cd /home/victor/Workspace/src/github.com/vijayee/liboffs/build-test
 Expected: most tests pass. (The pre-existing `BlockPutGetRoundTrip` failure
 unrelated to this change is acceptable — see spec.)
 
-- [ ] **Step 8: Clean up the test build dir**
+- [x] **Step 8: Clean up the test build dir**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs
 rm -rf build-test
 ```
 
-- [ ] **Step 9: Commit the CMakeLists change**
+- [x] **Step 9: Commit the CMakeLists change**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs
@@ -252,14 +252,14 @@ Resolves PRODUCTION_BLOCKERS #10 (fragile build paths)."
 **Files:**
 - Modify: `README.md` (the "Building" section)
 
-- [ ] **Step 1: Read the current Building section**
+- [x] **Step 1: Read the current Building section**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs
 sed -n '/## Building/,/## Tools/p' README.md
 ```
 
-- [ ] **Step 2: Add the clone line above the build commands**
+- [x] **Step 2: Add the clone line above the build commands**
 
 Edit `README.md`. In the `## Building` section, prepend:
 
@@ -280,7 +280,7 @@ cmake --build . -j$(nproc)
 ```
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs
@@ -295,7 +295,7 @@ git commit -m "docs: document --recurse-submodules for poll-dancer dependency"
 **Files:**
 - Modify: `docs/PRODUCTION_BLOCKERS.md`
 
-- [ ] **Step 1: Find the blocker section**
+- [x] **Step 1: Find the blocker section**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs
@@ -305,7 +305,7 @@ grep -n "10 | Fragile\|### 10\. Fragile\|### 11\.\|### 12\." docs/PRODUCTION_BLO
 Expected: shows the locations of the #10, #11, and #12 rows in both the table and
 section headers.
 
-- [ ] **Step 2: Remove the #10 row from the summary table**
+- [x] **Step 2: Remove the #10 row from the summary table**
 
 Edit `docs/PRODUCTION_BLOCKERS.md`. In the Critical (Production Blockers) table,
 delete the row:
@@ -314,7 +314,7 @@ delete the row:
 | 10 | Fragile build paths | `libpoll_dancer.a` at relative path |
 ```
 
-- [ ] **Step 3: Renumber the #11 and #12 rows**
+- [x] **Step 3: Renumber the #11 and #12 rows**
 
 Edit `docs/PRODUCTION_BLOCKERS.md`. In the same table, change:
 
@@ -330,7 +330,7 @@ to:
 | 11 | Bootstrap relies on static peer lists | No DNS seed, DHT, or mDNS discovery |
 ```
 
-- [ ] **Step 4: Remove the ### 10. Fragile Build Paths section**
+- [x] **Step 4: Remove the ### 10. Fragile Build Paths section**
 
 Edit `docs/PRODUCTION_BLOCKERS.md`. Delete the section:
 
@@ -342,13 +342,13 @@ as a relative path. This breaks if the build directory is outside the source tre
 or poll-dancer is installed elsewhere.
 ```
 
-- [ ] **Step 5: Renumber the subsequent section headers**
+- [x] **Step 5: Renumber the subsequent section headers**
 
 Edit `docs/PRODUCTION_BLOCKERS.md`. Change `### 11. No Configuration Validation` to
 `### 10. No Configuration Validation`, and `### 12. Static Peer Bootstrap Only` to
 `### 11. Static Peer Bootstrap Only`.
 
-- [ ] **Step 6: Verify the renumbering is consistent**
+- [x] **Step 6: Verify the renumbering is consistent**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs
@@ -358,7 +358,7 @@ grep -nE "^### [0-9]+\." docs/PRODUCTION_BLOCKERS.md | head -15
 
 Expected: 11 rows in the table, 11 section headers, both numbered 1-11 with no gaps.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs
@@ -375,7 +375,7 @@ git commit -m "docs: remove resolved PRODUCTION_BLOCKERS #10 (fragile build path
   references and the redundant `target_include_directories` lines with
   `target_link_libraries(... poll-dancer)`)
 
-- [ ] **Step 1: Locate all references to POLL_DANCER_ROOT in OFFS CMake**
+- [x] **Step 1: Locate all references to POLL_DANCER_ROOT in OFFS CMake**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/OFFS
@@ -385,7 +385,7 @@ grep -n "POLL_DANCER" CMakeLists.txt
 Expected: shows lines defining POLL_DANCER_ROOT, including the include paths and
 the link line.
 
-- [ ] **Step 2: Update the link line in OFFS**
+- [x] **Step 2: Update the link line in OFFS**
 
 Edit `OFFS/CMakeLists.txt`. Replace the line:
 
@@ -399,14 +399,14 @@ with:
 target_link_libraries(offsd PRIVATE poll-dancer)
 ```
 
-- [ ] **Step 3: Remove the now-redundant include directives in OFFS**
+- [x] **Step 3: Remove the now-redundant include directives in OFFS**
 
 Edit `OFFS/CMakeLists.txt`. Delete the two `target_include_directories(... ${POLL_DANCER_ROOT}/include)` and `target_include_directories(... ${POLL_DANCER_ROOT}/src)` lines wherever they appear in the OFFS-only targets (offsd and offs-metrics — NOT inside any imported liboffs target).
 
 For each occurrence in OFFS targets, delete the line. The `poll-dancer` IMPORTED
 target's `INTERFACE_INCLUDE_DIRECTORIES` will provide these to its consumers.
 
-- [ ] **Step 4: Verify the OFFS cmake configure step succeeds**
+- [x] **Step 4: Verify the OFFS cmake configure step succeeds**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/OFFS
@@ -417,21 +417,21 @@ cmake .. -DCMAKE_BUILD_TYPE=Release 2>&1 | tail -15
 
 Expected: CMake configures without error.
 
-- [ ] **Step 5: Note: the pre-existing OFFS build error**
+- [x] **Step 5: Note: the pre-existing OFFS build error**
 
 If the build hits the `OFFS_MAX_BUFFERED_BODY_SIZE` undeclared error (caused by a
 stale `deps/liboffs` submodule in OFFS, not by this change), stop here and report
 it as a separate issue. Do **not** try to fix it as part of this plan — the spec
 explicitly excludes it.
 
-- [ ] **Step 6: Clean up the test build dir**
+- [x] **Step 6: Clean up the test build dir**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/OFFS
 rm -rf build-test
 ```
 
-- [ ] **Step 7: Commit the OFFS CMakeLists change**
+- [x] **Step 7: Commit the OFFS CMakeLists change**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/OFFS
@@ -451,7 +451,7 @@ automatically."
 
 ### Task 6: Final verification
 
-- [ ] **Step 1: Run the liboffs test suite**
+- [x] **Step 1: Run the liboffs test suite**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs
@@ -463,7 +463,7 @@ make -j$(nproc) 2>&1 | tail -3
 
 Expected: all 5 integration tests pass, no build errors.
 
-- [ ] **Step 2: Run the poll-dancer tests to confirm the new build path works**
+- [x] **Step 2: Run the poll-dancer tests to confirm the new build path works**
 
 ```bash
 cd /home/victor/Workspace/src/github.com/vijayee/liboffs/deps/poll-dancer/build
@@ -472,7 +472,7 @@ ctest 2>&1 | tail -5
 
 Expected: 100% pass (31 tests).
 
-- [ ] **Step 3: Document the migration in a summary commit message (no source change)**
+- [x] **Step 3: Document the migration in a summary commit message (no source change)**
 
 The four commits from Tasks 1-5 are already the implementation. No additional
 commit needed. If any of the verifications in this task uncovered an issue, address
