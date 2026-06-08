@@ -91,9 +91,8 @@ existing clients.
 | # | Issue | Impact |
 |---|-------|--------|
 | 9 | No HTTP-level rate limiting | HTTP endpoints have no request throttling |
-| 10 | Fragile build paths | `libpoll_dancer.a` at relative path |
-| 11 | No configuration validation | Invalid config values pass silently |
-| 12 | Bootstrap relies on static peer lists | No DNS seed, DHT, or mDNS discovery |
+| 10 | No configuration validation | Invalid config values pass silently |
+| 11 | Bootstrap relies on static peer lists | No DNS seed, DHT, or mDNS discovery |
 
 ### 9. No HTTP Rate Limiting
 
@@ -101,18 +100,12 @@ Rate limiting exists at the P2P network layer (`rate_limit.h` with token buckets
 per RPC type). The HTTP server (`http_server.h`) has no per-connection or
 per-endpoint rate limiting.
 
-### 10. Fragile Build Paths
-
-`CMakeLists.txt` references `${CMAKE_CURRENT_SOURCE_DIR}/../poll-dancer/build/libpoll_dancer.a`
-as a relative path. This breaks if the build directory is outside the source tree
-or poll-dancer is installed elsewhere.
-
-### 11. No Configuration Validation
+### 10. No Configuration Validation
 
 `config_t` in `config.h` has no validation. Invalid values (zero bucket size,
 max_tuple_size < min_tuple_size) pass through silently.
 
-### 12. Static Peer Bootstrap Only
+### 11. Static Peer Bootstrap Only
 
 `authority_t` stores bootstrap peers as a static string array. No DNS seeding,
 no DHT bootstrap, no mDNS local discovery. Nodes must be manually configured

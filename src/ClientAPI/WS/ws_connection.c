@@ -246,7 +246,7 @@ static void _connection_update_watcher(ws_connection_t* connection, pd_event_t e
   msg.type = WS_SERVER_UPDATE_WATCHER;
   msg.payload = payload;
   msg.payload_destroy = free;
-  actor_send(&connection->actor, &msg);
+  actor_send(&connection->transport->actor, &msg);
 }
 
 static void _connection_stop_watcher(ws_connection_t* connection) {

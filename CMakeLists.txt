@@ -3,7 +3,28 @@ project(offs C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
-set(POLL_DANCER_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../poll-dancer CACHE PATH "Path to poll-dancer library")
+# poll-dancer — built as an external project, same pattern as libcbor above.
+# Pinned via the deps/poll-dancer git submodule (commit recorded in .gitmodules).
+set(POLL_DANCER_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/deps/poll-dancer CACHE PATH "Path to poll-dancer source")
+set(POLL_DANCER_BUILD_PATH ${CMAKE_BINARY_DIR}/deps/poll-dancer)
+set(POLL_DANCER_CONFIGURE cd ${POLL_DANCER_ROOT} && cmake -B${POLL_DANCER_BUILD_PATH} -DCMAKE_BUILD_TYPE=Release -DPOLL_DANCER_BUILD_TESTS=OFF -DPOLL_DANCER_BUILD_EXAMPLES=OFF)
+set(POLL_DANCER_MAKE cd ${POLL_DANCER_BUILD_PATH} && make poll_dancer)
+# poll-dancer's default install target writes to /usr/local — we only need the .a in BINARY_DIR, so skip install.
+set(POLL_DANCER_INSTALL echo "Skipping poll-dancer install; using ${POLL_DANCER_BUILD_PATH}/libpoll_dancer.a")
+include(ExternalProject)
+ExternalProject_Add(poll-dancer-ext
+  SOURCE_DIR ${POLL_DANCER_ROOT}
+  CONFIGURE_COMMAND ${POLL_DANCER_CONFIGURE}
+  BUILD_COMMAND ${POLL_DANCER_MAKE}
+  INSTALL_COMMAND ${POLL_DANCER_INSTALL}
+  BUILD_BYPRODUCTS ${POLL_DANCER_BUILD_PATH}/libpoll_dancer.a
+  BINARY_DIR ${POLL_DANCER_BUILD_PATH}
+)
+add_library(poll-dancer STATIC IMPORTED)
+set_target_properties(poll-dancer PROPERTIES
+  IMPORTED_LOCATION ${POLL_DANCER_BUILD_PATH}/libpoll_dancer.a
+  INTERFACE_INCLUDE_DIRECTORIES "${POLL_DANCER_ROOT}/include;${POLL_DANCER_ROOT}/src")
+add_dependencies(poll-dancer poll-dancer-ext)
 set(blake3_SOURCE_DIR deps/BLAKE3)
 set(xxHash_SOURCE_DIR deps/xxHash)
 set(hashmap_SOURCE_DIR deps/hashmap)
@@ -60,11 +81,9 @@ target_include_directories(offs PRIVATE ${blake3_SOURCE_DIR}/c)
 target_include_directories(offs PRIVATE ${C_INC})
 target_include_directories(offs PRIVATE ${xxHash_SOURCE_DIR})
 target_include_directories(offs PRIVATE ${hashmap_SOURCE_DIR}/include)
-target_include_directories(offs PRIVATE ${POLL_DANCER_ROOT}/include)
-target_include_directories(offs PRIVATE ${POLL_DANCER_ROOT}/src)
 target_include_directories(offs PUBLIC ${LIBCBOR_BUILD_PATH}/include)
 target_include_directories(offs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps/cJSON)
-target_link_libraries(offs PRIVATE ${POLL_DANCER_ROOT}/build/libpoll_dancer.a)
+target_link_libraries(offs PRIVATE poll-dancer)
 target_link_libraries(offs PRIVATE http-parser)
 target_link_libraries(offs PRIVATE cjson)
 target_link_libraries(offs PRIVATE crypt)
