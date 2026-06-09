@@ -13,6 +13,17 @@ readable_push_file_stream_t* readable_push_file_stream_create(scheduler_pool_t* 
   rs->filename = strdup(filename);
   rs->chunk_size = chunk_size;
   rs->file = platform_file_open(rs->filename, PLATFORM_O_RDONLY, 0644);
+  if (rs->file == NULL) {
+    /* File open failed (e.g., file not found, permission denied). Set the
+     * error code and return a non-NULL but unusable stream. Callers must
+     * check `error_code` before using the stream; platform_file_* on the
+     * NULL file handle will safely no-op. */
+    *error_code = -1;
+    stream_init((stream_t*) rs, push, readable_stream, 1, pool,
+                (void(*)(stream_t*))readable_push_file_stream_destroy);
+    stream_close_handler((stream_t*) rs,(void(*)(stream_t*))readable_push_file_stream_close);
+    return rs;
+  }
   int64_t file_size = platform_file_seek(rs->file, 0, PLATFORM_SEEK_END);
   rs->file_size = (int32_t)file_size;
   if (platform_file_seek(rs->file, 0, PLATFORM_SEEK_SET) < 0) {
@@ -34,7 +45,7 @@ void readable_push_file_stream_destroy(readable_push_file_stream_t* stream) {
 }
 
 void readable_push_file_stream_push(readable_push_file_stream_t* stream) {
-  if (stream->stream.is_deactivated == 1) {
+  if (stream->stream.is_deactivated == 1 || stream->file == NULL) {
     return;
   }
   int32_t diff = stream->file_size - stream->cursor;
@@ -111,6 +122,10 @@ writeable_push_file_stream_t* writeable_push_file_stream_create(scheduler_pool_t
 }
 
 void writeable_push_file_stream_write(writeable_push_file_stream_t* stream, buffer_t* data) {
+  if (stream->file == NULL) {
+    DESTROY(data, buffer);
+    return;
+  }
   platform_file_write(stream->file, data->data, data->size);
   DESTROY(data, buffer);
 }
@@ -139,6 +154,13 @@ readable_pull_file_stream_t* readable_pull_file_stream_create(scheduler_pool_t* 
   rs->filename = strdup(filename);
   rs->chunk_size = chunk_size;
   rs->file = platform_file_open(rs->filename, PLATFORM_O_RDONLY, 0644);
+  if (rs->file == NULL) {
+    *error_code = -1;
+    stream_init((stream_t*) rs, pull, readable_stream, 0, pool,
+                (void(*)(stream_t*))readable_pull_file_stream_destroy);
+    stream_close_handler((stream_t*) rs,(void(*)(stream_t*))readable_pull_file_stream_close);
+    return rs;
+  }
   int64_t file_size = platform_file_seek(rs->file, 0, PLATFORM_SEEK_END);
   rs->file_size = (int32_t)file_size;
   if (platform_file_seek(rs->file, 0, PLATFORM_SEEK_SET) < 0) {
@@ -213,6 +235,10 @@ writeable_pull_file_stream_t* writeable_pull_file_stream_create(scheduler_pool_t
 }
 
 void writeable_pull_file_stream_write(writeable_pull_file_stream_t* stream, buffer_t* data) {
+  if (stream->file == NULL) {
+    DESTROY(data, buffer);
+    return;
+  }
   platform_file_write(stream->file, data->data, data->size);
   DESTROY(data, buffer);
 }

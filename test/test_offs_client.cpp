@@ -110,7 +110,7 @@ static void _error_callback(void* ctx, uint8_t status_code, const char* message)
 }
 
 struct BlockPutCallbackContext {
-    int called;
+    std::atomic<int> called;
     uint8_t status;
     uint8_t* hash_data;
     size_t hash_len;
@@ -120,7 +120,6 @@ struct BlockPutCallbackContext {
 static void _block_put_callback(void* ctx, uint8_t status,
     const uint8_t* hash_data, size_t hash_len, uint8_t hash_is_text) {
     BlockPutCallbackContext* bctx = (BlockPutCallbackContext*)ctx;
-    bctx->called = 1;
     bctx->status = status;
     if (hash_data != NULL && hash_len > 0) {
         bctx->hash_data = (uint8_t*)malloc(hash_len);
@@ -128,10 +127,13 @@ static void _block_put_callback(void* ctx, uint8_t status,
         bctx->hash_len = hash_len;
         bctx->hash_is_text = hash_is_text;
     }
+    /* Set `called=1` LAST with release semantics so the reader sees all
+     * preceding writes. */
+    bctx->called.store(1, std::memory_order_release);
 }
 
 struct BlockGetCallbackContext {
-    int called;
+    std::atomic<int> called;
     uint8_t status;
     uint8_t* data;
     size_t data_len;
@@ -140,24 +142,28 @@ struct BlockGetCallbackContext {
 static void _block_get_callback(void* ctx, uint8_t status,
     const uint8_t* data, size_t data_len) {
     BlockGetCallbackContext* bctx = (BlockGetCallbackContext*)ctx;
-    bctx->called = 1;
     bctx->status = status;
     if (data != NULL && data_len > 0) {
         bctx->data = (uint8_t*)malloc(data_len);
         memcpy(bctx->data, data, data_len);
         bctx->data_len = data_len;
     }
+    /* Set `called=1` LAST with release semantics so the reader that polls
+     * `called` is guaranteed to see all preceding writes (status, data,
+     * data_len). Without this, the reader can observe `called=1` while
+     * the data fields are still in the writer's CPU store buffer. */
+    bctx->called.store(1, std::memory_order_release);
 }
 
 struct BlockDeleteCallbackContext {
-    int called;
+    std::atomic<int> called;
     uint8_t status;
 };
 
 static void _block_delete_callback(void* ctx, uint8_t status) {
     BlockDeleteCallbackContext* bctx = (BlockDeleteCallbackContext*)ctx;
-    bctx->called = 1;
     bctx->status = status;
+    bctx->called.store(1, std::memory_order_release);
 }
 
 struct HealthCallbackContext {
@@ -716,7 +722,9 @@ TEST_F(TestOffsClient, BlockPutGetRoundTrip) {
                                        _block_put_callback, &put_ctx);
     EXPECT_EQ(result, 0);
 
-    for (int attempts = 0; attempts < 200 && !put_ctx.called; attempts++) {
+    for (int attempts = 0; attempts < 200
+         && put_ctx.called.load(std::memory_order_acquire) == 0;
+         attempts++) {
         usleep(10000);
     }
     EXPECT_EQ(put_ctx.called, 1);
@@ -729,11 +737,20 @@ TEST_F(TestOffsClient, BlockPutGetRoundTrip) {
                                    _block_get_callback, &get_ctx);
     EXPECT_EQ(result, 0);
 
-    for (int attempts = 0; attempts < 200 && !get_ctx.called; attempts++) {
+    /* Use atomic load with acquire to synchronize with the callback's
+     * release-store on `called`. */
+    for (int attempts = 0; attempts < 200
+         && get_ctx.called.load(std::memory_order_acquire) == 0;
+         attempts++) {
         usleep(10000);
     }
     EXPECT_EQ(get_ctx.called, 1);
-    ASSERT_NE(get_ctx.data, nullptr);
+    if (get_ctx.status != 0) {
+        FAIL() << "Block GET returned status=" << (int)get_ctx.status;
+    }
+    if (get_ctx.data == nullptr) {
+        FAIL() << "Block GET returned null data (size=" << get_ctx.data_len << ")";
+    }
     EXPECT_GE(get_ctx.data_len, sizeof(data) - 1);
     EXPECT_EQ(memcmp(get_ctx.data, data, sizeof(data) - 1), 0);
 
@@ -754,7 +771,9 @@ TEST_F(TestOffsClient, BlockDelete) {
                                        _block_put_callback, &put_ctx);
     EXPECT_EQ(result, 0);
 
-    for (int attempts = 0; attempts < 200 && !put_ctx.called; attempts++) {
+    for (int attempts = 0; attempts < 200
+         && put_ctx.called.load(std::memory_order_acquire) == 0;
+         attempts++) {
         usleep(10000);
     }
     EXPECT_EQ(put_ctx.called, 1);

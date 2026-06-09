@@ -271,16 +271,19 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
     }
     case TIMER_COMPLETION: {
       timer_completion_payload_t* completion = (timer_completion_payload_t*)msg->payload;
-      /* Forward the completion to the target actor. actor_send checks
-         ACTOR_FLAG_DESTROY and drops the message if the target has been
-         destroyed, freeing the payload via payload_destroy. Callers must
-         cancel their timers before destroying their actor — this is a
-         defense-in-depth path for the case where they don't. */
+      /* Allocate a copy of the completion to forward to the target actor.
+       * The original completion IS the timer's user_data and remains
+       * owned by timer_actor_destroy. Sending the original here would
+       * cause a double-free: the target's payload_destroy (= free)
+       * would free the user_data, then timer_actor_destroy would free
+       * it again when iterating active_timers. */
+      timer_completion_payload_t* copy = get_clear_memory(sizeof(timer_completion_payload_t));
+      *copy = *completion;
       message_t target_msg = {0};
-      target_msg.type = completion->completion_type;
-      target_msg.payload = completion;
+      target_msg.type = copy->completion_type;
+      target_msg.payload = copy;
       target_msg.payload_destroy = free;
-      actor_send(completion->target, &target_msg);
+      actor_send(copy->target, &target_msg);
       msg->payload = NULL;
       msg->payload_destroy = NULL;
       break;
