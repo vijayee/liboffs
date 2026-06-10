@@ -359,6 +359,14 @@ static void* _server_thread(void* arg) {
   settings.PeerBidiStreamCount = 1;
   settings.IsSet.PeerUnidiStreamCount = TRUE;
   settings.IsSet.PeerBidiStreamCount = TRUE;
+  /* Idle timeout must be longer than the largest expected server-side
+     processing time for a streaming PUT. MsQuic's default is 30s,
+     which is too short for multi-GB uploads because the server is
+     silent (only receiving) while the client streams the body.
+     Without this, the server's QUIC stack closes the connection with
+     QUIC_STATUS_CONNECTION_IDLE before the PUT finalization completes. */
+  settings.IdleTimeoutMs = 1800000;  /* 30 minutes */
+  settings.IsSet.IdleTimeoutMs = TRUE;
 
   QUIC_BUFFER alpn = { sizeof("offs") - 1, (uint8_t*)"offs" };
 
