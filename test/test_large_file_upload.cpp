@@ -56,19 +56,13 @@ extern "C" {
 #include <openssl/x509.h>
 
 // Source file path. On machines without this file, every test in the
-// fixture is skipped via GTEST_SKIP() in SetUp(). See TEST
-// LargeFileUploadTest.LargeFileUpload_1MB for a synthetic test that
-// always runs and exercises the same streaming PUT + GET round-trip
-// with a 1 MB buffer-generated payload.
+// fixture is skipped via GTEST_SKIP() in SetUp().
 static const char* kSourceFile =
     "/home/victor/Videos/Big Hero 6 2014 1080p/Big.Hero.6.2014.1080p.BluRay.x264.YIFY.mp4";
 static const size_t kChunkSize = 64 * 1024;
-// PUT/GET timeouts. The current server-side writeable_off_stream
-// finalization is slow at multi-GB scale: in practice a 1.77 GB PUT
-// can take 10+ minutes for the server to send its response. The
-// streaming GET is bounded by the same finalization. The timeouts
-// are generous; if the server is fixed, the round-trip will be much
-// faster than the timeout.
+// PUT/GET timeouts. Generous upper bound for the slowest path
+// (server-side finalization on a multi-GB upload); in practice the
+// round-trip is well under 2 minutes per transport.
 static const int kPutTimeoutMs = 600000;
 static const int kGetTimeoutMs = 600000;
 static const size_t kCompareChunkSize = 1024 * 1024;
