@@ -600,6 +600,12 @@ protected:
     offs_client_t* client = offs_client_connect(url.c_str(), NULL);
     ASSERT_NE(client, nullptr) << "Failed to connect to " << url;
 
+    // Cleanup on any assertion failure between here and the disconnect
+    struct ClientGuard {
+      offs_client_t* c;
+      ~ClientGuard() { if (c) offs_client_disconnect(c); }
+    } guard{client};
+
     std::string source_path(kSourceFile);
     size_t slash = source_path.rfind('/');
     std::string file_name = (slash == std::string::npos)
@@ -648,14 +654,22 @@ protected:
     GetCbContext get_ctx;
     {
       std::string tmpl = test_dir + "/dl-XXXXXX.mp4";
-      std::vector<char> buf(tmpl.size() + 1);
-      strcpy(buf.data(), tmpl.c_str());
-      int fd = mkstemps(buf.data(), 4);
+      std::vector<char> tmpl_buf(tmpl.c_str(),
+                                  tmpl.c_str() + tmpl.size() + 1);
+      int fd = mkstemps(tmpl_buf.data(), 4);
       ASSERT_GE(fd, 0) << "mkstemps failed for download temp file";
       get_ctx.fp = fdopen(fd, "wb");
-      ASSERT_NE(get_ctx.fp, nullptr) << "fdopen failed";
-      get_ctx.download_path = buf.data();
+      if (get_ctx.fp == nullptr) {
+        close(fd);
+        FAIL() << "fdopen failed";
+      }
+      get_ctx.download_path = tmpl_buf.data();
     }
+
+    struct FpGuard {
+      GetCbContext* ctx;
+      ~FpGuard() { if (ctx->fp) { fclose(ctx->fp); ctx->fp = nullptr; } }
+    } fp_guard{&get_ctx};
 
     ASSERT_EQ(offs_client_get(client, ori.c_str(),
                               on_get_data_to_file, on_get_end, on_get_error,
@@ -677,7 +691,6 @@ protected:
     ASSERT_EQ(cmp, 0) << "GET byte-compare failed (cmp=" << cmp << ")";
 
     unlink(get_ctx.download_path.c_str());
-    offs_client_disconnect(client);
   }
 };
 
