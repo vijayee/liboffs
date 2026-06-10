@@ -23,6 +23,18 @@ static void _destroy_stack_push(timer_actor_t* ta, pd_timer_t* timer, void* user
   node->timer = timer;
   node->user_data = user_data;
   platform_mutex_lock(ta->destroy_lock);
+  /* Idempotency check: skip if the timer is already queued for
+     destruction. Without this, a duplicate dispatch (e.g., TIMER_CANCEL
+     for an already-cancelled timer_id) can push the same timer twice,
+     causing pd_timer_destroy to run twice and double-free the
+     timer's internal pd_watcher_t. */
+  for (timer_destroy_node_t* n = ta->destroy_stack; n != NULL; n = n->next) {
+    if (n->timer == timer) {
+      platform_mutex_unlock(ta->destroy_lock);
+      free(node);
+      return;
+    }
+  }
   node->next = ta->destroy_stack;
   ta->destroy_stack = node;
   platform_mutex_unlock(ta->destroy_lock);
