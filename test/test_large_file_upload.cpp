@@ -50,6 +50,11 @@ extern "C" {
 }
 
 #include "../deps/BLAKE3/c/blake3.h"
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/rsa.h>
+#include <openssl/x509.h>
 
 // Source file path. On machines without this file, every test in the
 // fixture is skipped via GTEST_SKIP() in SetUp(). See TEST
@@ -478,11 +483,67 @@ protected:
   void generate_test_certs() {
     cert_path = test_dir + "/test_cert.pem";
     key_path = test_dir + "/test_key.pem";
-    std::string cmd = "openssl req -x509 -newkey rsa:2048 -keyout " + key_path +
-                      " -out " + cert_path +
-                      " -days 1 -nodes -subj '/CN=liboffs-test' 2>/dev/null";
-    int rc = system(cmd.c_str());
-    if (rc != 0) {
+
+    // Generate an RSA-2048 key
+    EVP_PKEY* pkey = EVP_PKEY_new();
+    EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
+    if (pkey == NULL || pctx == NULL ||
+        EVP_PKEY_keygen_init(pctx) <= 0 ||
+        EVP_PKEY_CTX_set_rsa_keygen_bits(pctx, 2048) <= 0 ||
+        EVP_PKEY_keygen(pctx, &pkey) <= 0) {
+      EVP_PKEY_CTX_free(pctx);
+      if (pkey) EVP_PKEY_free(pkey);
+      certs_generated = false;
+      return;
+    }
+    EVP_PKEY_CTX_free(pctx);
+
+    // Build a self-signed X.509 cert valid for 1 day
+    X509* cert = X509_new();
+    if (cert == NULL) {
+      EVP_PKEY_free(pkey);
+      certs_generated = false;
+      return;
+    }
+    X509_set_version(cert, 2);  // X.509 v3
+    ASN1_INTEGER_set(X509_get_serialNumber(cert), 1);
+    X509_gmtime_adj(X509_getm_notBefore(cert), 0);
+    X509_gmtime_adj(X509_getm_notAfter(cert), 86400L);
+    X509_set_pubkey(cert, pkey);
+
+    X509_NAME* name = X509_get_subject_name(cert);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                               (const unsigned char*)"liboffs-test",
+                               -1, -1, 0);
+    X509_set_issuer_name(cert, name);
+
+    int sign_rc = X509_sign(cert, pkey, EVP_sha256());
+    if (sign_rc <= 0) {
+      X509_free(cert);
+      EVP_PKEY_free(pkey);
+      certs_generated = false;
+      return;
+    }
+
+    // Write cert and key to PEM files
+    FILE* cert_fp = fopen(cert_path.c_str(), "wb");
+    FILE* key_fp = fopen(key_path.c_str(), "wb");
+    if (cert_fp == NULL || key_fp == NULL) {
+      if (cert_fp) fclose(cert_fp);
+      if (key_fp) fclose(key_fp);
+      X509_free(cert);
+      EVP_PKEY_free(pkey);
+      certs_generated = false;
+      return;
+    }
+    int write_cert = PEM_write_X509(cert_fp, cert);
+    int write_key = PEM_write_PrivateKey(key_fp, pkey, NULL, NULL, 0, NULL, NULL);
+    fclose(cert_fp);
+    fclose(key_fp);
+    X509_free(cert);
+    EVP_PKEY_free(pkey);
+
+    if (write_cert <= 0 || write_key <= 0) {
       certs_generated = false;
       return;
     }
