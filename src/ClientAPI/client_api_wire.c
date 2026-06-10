@@ -139,7 +139,7 @@ int client_api_put_request_decode(cbor_item_t* item, client_api_put_request_t* m
     client_api_put_request_destroy(msg);
     return -1;
   }
-  if (msg->stream_length == 0 || msg->stream_length > OFFS_MAX_CBOR_MESSAGE_SIZE) {
+  if (msg->stream_length == 0) {
     client_api_put_request_destroy(msg);
     return -1;
   }

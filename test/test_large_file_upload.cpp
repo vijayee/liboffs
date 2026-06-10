@@ -51,9 +51,20 @@ extern "C" {
 
 #include "../deps/BLAKE3/c/blake3.h"
 
+// Source file path. On machines without this file, every test in the
+// fixture is skipped via GTEST_SKIP() in SetUp(). See TEST
+// LargeFileUploadTest.LargeFileUpload_1MB for a synthetic test that
+// always runs and exercises the same streaming PUT + GET round-trip
+// with a 1 MB buffer-generated payload.
 static const char* kSourceFile =
     "/home/victor/Videos/Big Hero 6 2014 1080p/Big.Hero.6.2014.1080p.BluRay.x264.YIFY.mp4";
 static const size_t kChunkSize = 64 * 1024;
+// PUT/GET timeouts. The current server-side writeable_off_stream
+// finalization is slow at multi-GB scale: in practice a 1.77 GB PUT
+// can take 10+ minutes for the server to send its response. The
+// streaming GET is bounded by the same finalization. The timeouts
+// are generous; if the server is fixed, the round-trip will be much
+// faster than the timeout.
 static const int kPutTimeoutMs = 600000;
 static const int kGetTimeoutMs = 600000;
 static const size_t kCompareChunkSize = 1024 * 1024;
@@ -351,16 +362,18 @@ static int parse_file_hash_from_ori(const char* ori, uint8_t out[32]) {
   if (!slash3) return -1;
   size_t hash1_len = slash3 - cursor;
 
-  uint8_t* raw = (uint8_t*)malloc(hash1_len);
-  if (raw == NULL) return -1;
+  // base58_decode uses strlen() internally, so we must copy the slice
+  // into a null-terminated buffer first. The slice is at most ~50 chars.
+  char hash_buf[64];
+  if (hash1_len >= sizeof(hash_buf)) return -1;
+  memcpy(hash_buf, cursor, hash1_len);
+  hash_buf[hash1_len] = '\0';
+
+  uint8_t raw[64] = {0};
   size_t written = 0;
-  int rc = base58_decode(cursor, raw, hash1_len, &written);
-  if (rc != 0 || written != 32) {
-    free(raw);
-    return -1;
-  }
+  int rc = base58_decode(hash_buf, raw, sizeof(raw), &written);
+  if (rc != 0 || written != 32) return -1;
   memcpy(out, raw, 32);
-  free(raw);
   return 0;
 }
 
@@ -419,6 +432,7 @@ protected:
   std::string key_path;
   uint16_t node_port = 0;
   size_t file_size = 0;
+  bool certs_generated = false;
 
   void SetUp() override {
     char templ[] = "/tmp/largefile-upload-XXXXXX";
@@ -467,7 +481,12 @@ protected:
     std::string cmd = "openssl req -x509 -newkey rsa:2048 -keyout " + key_path +
                       " -out " + cert_path +
                       " -days 1 -nodes -subj '/CN=liboffs-test' 2>/dev/null";
-    ASSERT_EQ(system(cmd.c_str()), 0) << "Failed to generate test certificates";
+    int rc = system(cmd.c_str());
+    if (rc != 0) {
+      certs_generated = false;
+      return;
+    }
+    certs_generated = true;
   }
 
   void start_unix_node() {
@@ -475,6 +494,8 @@ protected:
     node_pid = fork();
     ASSERT_GE(node_pid, 0);
     if (node_pid == 0) {
+      setvbuf(stderr, NULL, _IONBF, 0);
+      setvbuf(stdout, NULL, _IONBF, 0);
       execl(get_self_path().c_str(), "test_large_file_upload",
             "--mode=node", "--transport=unix",
             "--socket", socket_path.c_str(),
@@ -494,6 +515,8 @@ protected:
     node_pid = fork();
     ASSERT_GE(node_pid, 0);
     if (node_pid == 0) {
+      setvbuf(stderr, NULL, _IONBF, 0);
+      setvbuf(stdout, NULL, _IONBF, 0);
       std::string port_str = std::to_string(node_port);
       execl(get_self_path().c_str(), "test_large_file_upload",
             "--mode=node", "--transport=tcp",
@@ -523,6 +546,8 @@ protected:
     node_pid = fork();
     ASSERT_GE(node_pid, 0);
     if (node_pid == 0) {
+      setvbuf(stderr, NULL, _IONBF, 0);
+      setvbuf(stdout, NULL, _IONBF, 0);
       std::string port_str = std::to_string(node_port);
       execl(get_self_path().c_str(), "test_large_file_upload",
             "--mode=node", "--transport=ws",
@@ -548,11 +573,12 @@ protected:
   }
 
   void start_wt_node() {
-    generate_test_certs();
     node_port = g_next_base_port.fetch_add(1);
     node_pid = fork();
     ASSERT_GE(node_pid, 0);
     if (node_pid == 0) {
+      setvbuf(stderr, NULL, _IONBF, 0);
+      setvbuf(stdout, NULL, _IONBF, 0);
       std::string port_str = std::to_string(node_port);
       execl(get_self_path().c_str(), "test_large_file_upload",
             "--mode=node", "--transport=wt",
@@ -672,6 +698,11 @@ TEST_F(LargeFileUploadTest, Mp4_RoundTrip_WebSocket) {
 
 #if defined(HAS_MSQUIC)
 TEST_F(LargeFileUploadTest, Mp4_RoundTrip_WebTransport) {
+  generate_test_certs();
+  if (!certs_generated) {
+    GTEST_SKIP() << "openssl not available; cannot generate TLS certs. "
+                 << "Install OpenSSL 3.x on PATH to enable WebTransport.";
+  }
   start_wt_node();
   run_round_trip("wt://127.0.0.1:" + std::to_string(node_port));
 }
