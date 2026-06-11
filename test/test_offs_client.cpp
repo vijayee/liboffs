@@ -1,7 +1,8 @@
 #include <gtest/gtest.h>
 #include <cstring>
 #include <atomic>
-#include <semaphore.h>
+#include <future>
+#include <string>
 extern "C" {
 #include "../src/ClientLibs/c/offs_client.h"
 #include "../src/ClientAPI/health_handler.h"
@@ -23,14 +24,9 @@ extern "C" {
 
 struct PutCallbackContext {
     char* ori_string;
+    std::promise<std::string> promise;
     std::atomic<int> called;
-    sem_t sem;
-    PutCallbackContext() : ori_string(nullptr), called(0) {
-        sem_init(&sem, 0, 0);
-    }
-    ~PutCallbackContext() {
-        sem_destroy(&sem);
-    }
+    PutCallbackContext() : ori_string(nullptr), called(0) {}
 };
 
 static void _put_callback(void* ctx, const char* ori_string) {
@@ -38,38 +34,35 @@ static void _put_callback(void* ctx, const char* ori_string) {
     if (ori_string != NULL) {
         free(pctx->ori_string);
         pctx->ori_string = strdup(ori_string);
+        pctx->promise.set_value(std::string(ori_string));
+    } else {
+        pctx->promise.set_value(std::string{});
     }
     pctx->called.store(1, std::memory_order_release);
-    sem_post(&pctx->sem);
 }
 
+struct GetResult {
+    bool error = false;
+    uint8_t status_code = 0;
+    size_t bytes_written = 0;
+};
+
 struct GetDataCallbackContext {
+    std::promise<GetResult> promise;
     uint8_t* data;
     std::atomic<size_t> data_len;
     std::atomic<int> data_called;
     std::atomic<int> end_called;
     uint8_t error_status;
     std::atomic<int> error_called;
-    sem_t sem;
-    GetDataCallbackContext() : data(nullptr), data_len(0), data_called(0), end_called(0), error_status(0), error_called(0) {
-        sem_init(&sem, 0, 0);
-    }
-    ~GetDataCallbackContext() {
-        sem_destroy(&sem);
-    }
+    GetDataCallbackContext() : data(nullptr), data_len(0), data_called(0), end_called(0), error_status(0), error_called(0) {}
 };
 
-/* Wait on a semaphore with a timeout (in milliseconds). Returns 0 if signaled, -1 on timeout. */
-static int _wait_sem(sem_t* sem, int timeout_ms) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_sec += timeout_ms / 1000;
-    ts.tv_nsec += (timeout_ms % 1000) * 1000000L;
-    if (ts.tv_nsec >= 1000000000L) {
-        ts.tv_sec++;
-        ts.tv_nsec -= 1000000000L;
-    }
-    return sem_timedwait(sem, &ts);
+/* Wait on a future with a timeout (in milliseconds). Returns true if the
+ * future is ready (caller should .get() it), false on timeout. */
+template <typename T>
+static bool _wait_future(std::future<T>& fut, int timeout_ms) {
+    return fut.wait_for(std::chrono::milliseconds(timeout_ms)) == std::future_status::ready;
 }
 
 static void _get_data_callback(void* ctx, const uint8_t* data, size_t len) {
@@ -98,14 +91,22 @@ static void _get_data_callback(void* ctx, const uint8_t* data, size_t len) {
 static void _get_end_callback(void* ctx) {
     GetDataCallbackContext* gctx = (GetDataCallbackContext*)ctx;
     gctx->end_called.store(1, std::memory_order_release);
-    sem_post(&gctx->sem);
+    GetResult result;
+    result.error = false;
+    result.status_code = 0;
+    result.bytes_written = gctx->data_len.load(std::memory_order_acquire);
+    gctx->promise.set_value(result);
 }
 
 static void _error_callback(void* ctx, uint8_t status_code, const char* message) {
     GetDataCallbackContext* gctx = (GetDataCallbackContext*)ctx;
     gctx->error_status = status_code;
     gctx->error_called.store(1, std::memory_order_release);
-    sem_post(&gctx->sem);
+    GetResult result;
+    result.error = true;
+    result.status_code = status_code;
+    result.bytes_written = gctx->data_len.load(std::memory_order_acquire);
+    gctx->promise.set_value(result);
     (void)message;
 }
 
@@ -372,6 +373,7 @@ TEST_F(TestOffsClient, GetAfterPut) {
 
     /* Now GET the data back */
     GetDataCallbackContext get_ctx;
+    std::future<GetResult> get_fut = get_ctx.promise.get_future();
     // get_ctx fields initialized by default constructor
 
     result = offs_client_get(client, ori_string, _get_data_callback, _get_end_callback,
@@ -379,12 +381,13 @@ TEST_F(TestOffsClient, GetAfterPut) {
     EXPECT_EQ(result, 0);
 
     /* Wait for GET end callback with timeout */
-    _wait_sem(&get_ctx.sem, 30000); {
-        usleep(10000);
+    if (!_wait_future(get_fut, 30000)) {
+        FAIL() << "GET timed out";
     }
+    GetResult get_res = get_fut.get();
 
-    if (get_ctx.error_called) {
-        FAIL() << "Got error response, status_code=" << (int)get_ctx.error_status;
+    if (get_res.error) {
+        FAIL() << "Got error response, status_code=" << (int)get_res.status_code;
     }
 
     EXPECT_EQ(get_ctx.data_called, 1);
@@ -424,8 +427,10 @@ TEST_F(TestOffsClient, PutAndGet_256KB) {
     char* ori = strdup(put_ctx.ori_string);
     free(put_ctx.ori_string);
     GetDataCallbackContext get_ctx;
+    std::future<GetResult> get_fut = get_ctx.promise.get_future();
     offs_client_get(client, ori, _get_data_callback, _get_end_callback, _error_callback, &get_ctx);
-    _wait_sem(&get_ctx.sem, 30000);
+    if (!_wait_future(get_fut, 30000)) { FAIL() << "GET timed out"; }
+    (void)get_fut.get();
     EXPECT_EQ(get_ctx.end_called, 1) << " data_len=" << get_ctx.data_len.load();
     EXPECT_EQ(get_ctx.data_len.load(), size);
     if (get_ctx.data) { EXPECT_EQ(memcmp(get_ctx.data, data, size), 0); free(get_ctx.data); }
@@ -446,8 +451,10 @@ TEST_F(TestOffsClient, PutAndGet_128KB) {
     char* ori = strdup(put_ctx.ori_string);
     free(put_ctx.ori_string);
     GetDataCallbackContext get_ctx;
+    std::future<GetResult> get_fut = get_ctx.promise.get_future();
     offs_client_get(client, ori, _get_data_callback, _get_end_callback, _error_callback, &get_ctx);
-    _wait_sem(&get_ctx.sem, 30000);
+    if (!_wait_future(get_fut, 30000)) { FAIL() << "GET timed out"; }
+    (void)get_fut.get();
     EXPECT_EQ(get_ctx.end_called, 1) << " data_len=" << get_ctx.data_len.load();
     EXPECT_EQ(get_ctx.data_len.load(), size);
     if (get_ctx.data) { EXPECT_EQ(memcmp(get_ctx.data, data, size), 0); free(get_ctx.data); }
@@ -468,8 +475,10 @@ TEST_F(TestOffsClient, PutAndGet_100KB) {
     char* ori = strdup(put_ctx.ori_string);
     free(put_ctx.ori_string);
     GetDataCallbackContext get_ctx;
+    std::future<GetResult> get_fut = get_ctx.promise.get_future();
     offs_client_get(client, ori, _get_data_callback, _get_end_callback, _error_callback, &get_ctx);
-    _wait_sem(&get_ctx.sem, 30000);
+    if (!_wait_future(get_fut, 30000)) { FAIL() << "GET timed out"; }
+    (void)get_fut.get();
     EXPECT_EQ(get_ctx.end_called, 1);
     EXPECT_EQ(get_ctx.data_len.load(), size);
     if (get_ctx.data) { EXPECT_EQ(memcmp(get_ctx.data, data, size), 0); free(get_ctx.data); }
@@ -490,10 +499,12 @@ TEST_F(TestOffsClient, PutAndGet_512KB) {
     char* ori = strdup(put_ctx.ori_string);
     free(put_ctx.ori_string);
     GetDataCallbackContext get_ctx;
+    std::future<GetResult> get_fut = get_ctx.promise.get_future();
     get_ctx.data = (uint8_t*)malloc(size);
     offs_client_get(client, ori, _get_data_callback, _get_end_callback, _error_callback, &get_ctx);
-    /* Block on the semaphore — wakened by end_callback or error_callback. */
-    _wait_sem(&get_ctx.sem, 30000);
+    /* Block on the future — signalled by end_callback or error_callback. */
+    if (!_wait_future(get_fut, 30000)) { FAIL() << "GET timed out"; }
+    (void)get_fut.get();
     EXPECT_EQ(get_ctx.end_called.load(), 1) << " data_len=" << get_ctx.data_len.load();
     EXPECT_EQ(get_ctx.data_len.load(), size);
     if (get_ctx.data) { EXPECT_EQ(memcmp(get_ctx.data, data, size), 0); free(get_ctx.data); }
@@ -526,16 +537,18 @@ TEST_F(TestOffsClient, PutAndGet_1MB) {
     free(put_ctx.ori_string);
 
     GetDataCallbackContext get_ctx;
+    std::future<GetResult> get_fut = get_ctx.promise.get_future();
     result = offs_client_get(client, ori_string, _get_data_callback,
                               _get_end_callback, _error_callback, &get_ctx);
     EXPECT_EQ(result, 0);
 
-    _wait_sem(&get_ctx.sem, 30000); {
-        usleep(10000);
+    if (!_wait_future(get_fut, 30000)) {
+        FAIL() << "GET timed out";
     }
+    GetResult get_res = get_fut.get();
 
-    if (get_ctx.error_called) {
-        FAIL() << "Got error response, status_code=" << (int)get_ctx.error_status;
+    if (get_res.error) {
+        FAIL() << "Got error response, status_code=" << (int)get_res.status_code;
     }
 
     EXPECT_EQ(get_ctx.end_called, 1);
@@ -575,16 +588,18 @@ TEST_F(TestOffsClient, PutAndGet_10MB) {
     free(put_ctx.ori_string);
 
     GetDataCallbackContext get_ctx;
+    std::future<GetResult> get_fut = get_ctx.promise.get_future();
     result = offs_client_get(client, ori_string, _get_data_callback,
                               _get_end_callback, _error_callback, &get_ctx);
     EXPECT_EQ(result, 0);
 
-    _wait_sem(&get_ctx.sem, 60000); {
-        usleep(10000);
+    if (!_wait_future(get_fut, 60000)) {
+        FAIL() << "GET timed out";
     }
+    GetResult get_res = get_fut.get();
 
-    if (get_ctx.error_called) {
-        FAIL() << "Got error response, status_code=" << (int)get_ctx.error_status;
+    if (get_res.error) {
+        FAIL() << "Got error response, status_code=" << (int)get_res.status_code;
     }
 
     EXPECT_EQ(get_ctx.end_called, 1);
@@ -636,16 +651,18 @@ TEST_F(TestOffsClient, PutStreaming_1MB) {
     free(put_ctx.ori_string);
 
     GetDataCallbackContext get_ctx;
+    std::future<GetResult> get_fut = get_ctx.promise.get_future();
     result = offs_client_get(client, ori_string, _get_data_callback,
                               _get_end_callback, _error_callback, &get_ctx);
     EXPECT_EQ(result, 0);
 
-    _wait_sem(&get_ctx.sem, 30000); {
-        usleep(10000);
+    if (!_wait_future(get_fut, 30000)) {
+        FAIL() << "GET timed out";
     }
+    GetResult get_res = get_fut.get();
 
-    if (get_ctx.error_called) {
-        FAIL() << "Got error response, status_code=" << (int)get_ctx.error_status;
+    if (get_res.error) {
+        FAIL() << "Got error response, status_code=" << (int)get_res.status_code;
     }
 
     EXPECT_EQ(get_ctx.end_called, 1);
@@ -665,21 +682,20 @@ TEST_F(TestOffsClient, GetInvalidOri) {
     ASSERT_NE(client, nullptr);
 
     GetDataCallbackContext ctx;
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.data = nullptr;
-    ctx.data_len = 0;
+    std::future<GetResult> get_fut = ctx.promise.get_future();
 
     int result = offs_client_get(client, "invalid-ori-string", _get_data_callback,
                                  _get_end_callback, _error_callback, &ctx);
     EXPECT_EQ(result, 0);
 
     /* Wait for error callback with timeout */
-    for (int attempts = 0; attempts < 200 && !ctx.error_called && !ctx.end_called; attempts++) {
-        usleep(10000);
+    if (!_wait_future(get_fut, 30000)) {
+        FAIL() << "GET timed out";
     }
+    GetResult get_res = get_fut.get();
 
-    EXPECT_EQ(ctx.error_called, 1);
-    EXPECT_NE(ctx.error_status, CLIENT_API_STATUS_OK);
+    EXPECT_TRUE(get_res.error);
+    EXPECT_NE(get_res.status_code, CLIENT_API_STATUS_OK);
 
     if (ctx.data != nullptr) {
         free(ctx.data);
@@ -953,18 +969,20 @@ TEST_F(TestOffsWsClient, GetAfterPut) {
     free(put_ctx.ori_string);
 
     GetDataCallbackContext get_ctx;
+    std::future<GetResult> get_fut = get_ctx.promise.get_future();
     // get_ctx fields initialized by default constructor
 
     result = offs_client_get(client, ori_string, _get_data_callback, _get_end_callback,
                             _error_callback, &get_ctx);
     EXPECT_EQ(result, 0);
 
-    _wait_sem(&get_ctx.sem, 30000); {
-        usleep(10000);
+    if (!_wait_future(get_fut, 30000)) {
+        FAIL() << "GET timed out";
     }
+    GetResult get_res = get_fut.get();
 
-    if (get_ctx.error_called) {
-        FAIL() << "Got error response, status_code=" << (int)get_ctx.error_status;
+    if (get_res.error) {
+        FAIL() << "Got error response, status_code=" << (int)get_res.status_code;
     }
 
     EXPECT_EQ(get_ctx.data_called, 1);
@@ -1152,18 +1170,20 @@ TEST_F(TestOffsWtClient, GetAfterPut) {
     free(put_ctx.ori_string);
 
     GetDataCallbackContext get_ctx;
+    std::future<GetResult> get_fut = get_ctx.promise.get_future();
     // get_ctx fields initialized by default constructor
 
     result = offs_client_get(client, ori_string, _get_data_callback, _get_end_callback,
                             _error_callback, &get_ctx);
     EXPECT_EQ(result, 0);
 
-    _wait_sem(&get_ctx.sem, 30000); {
-        usleep(10000);
+    if (!_wait_future(get_fut, 30000)) {
+        FAIL() << "GET timed out";
     }
+    GetResult get_res = get_fut.get();
 
-    if (get_ctx.error_called) {
-        FAIL() << "Got error response, status_code=" << (int)get_ctx.error_status;
+    if (get_res.error) {
+        FAIL() << "Got error response, status_code=" << (int)get_res.status_code;
     }
 
     EXPECT_EQ(get_ctx.data_called, 1);
