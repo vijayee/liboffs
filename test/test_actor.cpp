@@ -254,16 +254,16 @@ TEST(TestActor, TestMutedActorSkippedByRun) {
   /* Mute the actor */
   atomic_fetch_or(&actor.flags, ACTOR_FLAG_MUTED);
 
-  /* actor_run should skip processing when muted */
+  /* actor_run must STILL process the mailbox even when muted — muting
+     only prevents the actor from SENDING to PRESSURED targets. Skipping
+     processing entirely would deadlock the pipeline (e.g., the connection
+     actor gets muted mid-request; if it stops draining its mailbox the
+     HTTP body never finishes parsing and the response is never sent).
+     See commit 1a57b23 "fix: eliminate backpressure deadlock". */
   bool has_more = actor_run(&actor, 32);
   EXPECT_FALSE(has_more);
-  /* Count should still be 0 because the actor was muted */
-  EXPECT_EQ(count, 0);
-
-  /* Unmute and run again */
-  atomic_fetch_and(&actor.flags, ~ACTOR_FLAG_MUTED);
-  has_more = actor_run(&actor, 32);
-  EXPECT_FALSE(has_more);
+  /* Count is 1 because the message was dispatched — muting does not
+     skip actor_run, it only mutes outgoing actor_send to PRESSURED targets. */
   EXPECT_EQ(count, 1);
 
   actor_destroy(&actor);

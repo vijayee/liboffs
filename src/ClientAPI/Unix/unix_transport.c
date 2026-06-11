@@ -131,6 +131,14 @@ void unix_transport_destroy(unix_transport_t* transport) {
   if (atomic_load(&transport->running)) {
     unix_transport_stop(transport);
   }
+  /* Drain the destroy stack BEFORE we tear down connection watchers. The
+   * destroy stack holds STOP_WATCHER pushes (via _connection_stop_watcher)
+   * that were enqueued to the transport's actor and may still be pending
+   * when the server thread exits. If we destroy those watchers again from
+   * the per-connection cleanup loop below, we double-free their pd_watcher_t
+   * and corrupt the heap (a real source of test flakiness — the next test's
+   * allocation hits the corrupted tcache/fastbin). */
+  _destroy_stack_drain(transport);
   if (transport->listen_sock != NULL) {
     platform_socket_destroy(transport->listen_sock);
     transport->listen_sock = NULL;

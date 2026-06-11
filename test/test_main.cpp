@@ -4,7 +4,6 @@
 
 #include <gtest/gtest.h>
 #include <string.h>
-#include <openssl/crypto.h>
 extern "C" {
 #include "../src/RefCounter/refcounter.h"
 #include "../src/Buffer/buffer.h"
@@ -19,11 +18,24 @@ extern "C" {
 }
 
 int main(int argc, char** argv) {
-  OPENSSL_init_crypto(OPENSSL_INIT_NO_LOAD_CONFIG, NULL);
+  /* Do not call OPENSSL_init_crypto / OPENSSL_cleanup here.
+   *
+   * On OpenSSL 3.0.2 the bundled quictls (transitively via msquic) registers
+   * an atexit handler for OPENSSL_cleanup the first time any OpenSSL
+   * function is called. Calling OPENSSL_cleanup() explicitly from main is
+   * not safe — the internal ex_data linked-hash table can hold a stale
+   * entry, and the cleanup aborts with "free(): invalid pointer" /
+   * "double free or corruption" (call stack: OPENSSL_LH_flush →
+   * CRYPTO_free_ex_data → OPENSSL_cleanup). Tests were flaky in roughly
+   * 1-in-5 runs.
+   *
+   * Transports that need OpenSSL (HTTP, TCP, WS, WT) call
+   * OPENSSL_init_ssl(0, NULL) themselves. The first such call registers
+   * the atexit handler, which then runs naturally after main returns —
+   * by which point every gtest TearDown has joined its worker threads, so
+   * no OpenSSL user is still active. */
   testing::InitGoogleTest(&argc, argv);
-  int result = RUN_ALL_TESTS();
-  OPENSSL_cleanup();
-  return result;
+  return RUN_ALL_TESTS();
 }
 
 TEST(TestFRand, TestFRandFunction) {

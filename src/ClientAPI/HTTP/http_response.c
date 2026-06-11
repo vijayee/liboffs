@@ -125,7 +125,6 @@ static void _pipe_on_close(void* ctx, void* unused) {
     http_response_end(response);
     response->connection = NULL;
     http_response_destroy(response);
-    /* Release the reference taken in http_response_pipe */
     if (conn) {
         if (keep_alive) {
             conn->piped_pending = 0;
@@ -137,22 +136,15 @@ static void _pipe_on_close(void* ctx, void* unused) {
 static void _pipe_on_error(void* ctx, async_error_t* error) {
     (void)error;
     http_response_t* response = (http_response_t*)ctx;
-    http_connection_t* conn = response->connection;
-    uint8_t keep_alive = response->keep_alive;
     if (!response->headers_sent) {
         http_response_set_status(response, 404);
         http_response_set_header(response, "Content-Length", "0");
-        http_response_end(response);
     }
-    response->connection = NULL;
-    http_response_destroy(response);
-    /* Release the reference taken in http_response_pipe */
-    if (conn) {
-        if (keep_alive) {
-            conn->piped_pending = 0;
-        }
-        http_connection_destroy(conn);
-    }
+    http_response_end(response);
+    /* Do NOT destroy response/connection here.  _pipe_on_close fires
+       immediately after (stream_deactivate sends error then close) and
+       owns the final cleanup.  Neither pointer is nulled so that
+       _pipe_on_close can access them safely. */
 }
 
 void http_response_pipe(http_response_t* response, stream_t* source) {

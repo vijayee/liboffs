@@ -131,9 +131,25 @@ static void _connection_stop_watcher(unix_connection_t* connection) {
 }
 
 static void _connection_close_fd(unix_connection_t* connection) {
-  if (connection->sock != NULL) {
-    platform_socket_destroy(connection->sock);
-    connection->sock = NULL;
+  /* Snapshot the socket pointer and clear the field before destroying it.
+   * This matches the snapshot/clear pattern used for connection->watcher
+   * (see _connection_stop_watcher at line 116). It prevents a race with
+   * unix_transport_destroy, which checks `conn->sock != NULL` before
+   * destroying. If the TearDown's check sees the non-NULL pointer and we
+   * have already passed `free(sock)`, the next access would be a
+   * double-free. By clearing the field first, the racing reader either
+   * sees NULL (and skips its own destroy) or has already lost the race
+   * and we are the sole owner here.
+   *
+   * Note: this relies on the test fixture's TearDown order — pool is
+   * stopped before unix_transport_destroy, so the dispatch (on workers)
+   * and the destroy (on the test thread) are not actually concurrent.
+   * The snapshot+clear is still defensive in case the destroy is
+   * called from a different context (e.g. MaxConnections test body). */
+  platform_socket_t* sock = connection->sock;
+  connection->sock = NULL;
+  if (sock != NULL) {
+    platform_socket_destroy(sock);
   }
   connection->is_closing = 1;
 }

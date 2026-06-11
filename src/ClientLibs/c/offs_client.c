@@ -1002,6 +1002,12 @@ static offs_client_t* _connect_attempt(const char* transport_url, const char* ap
     QUIC_SETTINGS settings = {0};
     settings.PeerBidiStreamCount = 1;
     settings.IsSet.PeerBidiStreamCount = TRUE;
+    /* Idle timeout must be longer than the largest expected server-side
+       processing time for a streaming PUT. MsQuic default is 30s, which
+       is too short for multi-GB uploads because the server is silent
+       while receiving. */
+    settings.IdleTimeoutMs = 1800000;  /* 30 minutes */
+    settings.IsSet.IdleTimeoutMs = TRUE;
 
     QUIC_BUFFER alpn = { sizeof("offs") - 1, (uint8_t*)"offs" };
 

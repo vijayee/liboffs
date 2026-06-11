@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
   scheduler_pool_t* pool = scheduler_pool_create(worker_count);
   scheduler_pool_start(pool);
 
-  timer_actor_t* timer = timer_actor_create();
+  timer_actor_t* timer = timer_actor_create(pool);
 
   config_t config = config_default();
   block_cache_t* bc = block_cache_create(config, (char*)cache_dir, standard, timer, pool, NULL, 0);

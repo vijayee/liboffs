@@ -326,7 +326,7 @@ void http_connection_dispatch(void* state, message_t* msg) {
     case HTTP_CONNECTION_READABLE: {
       /* ASIO-style: the I/O thread notified us that data is available.
          Perform the actual recv() and parsing here on the scheduler worker. */
-      connection->read_pending = 0;
+      atomic_store(&connection->read_pending, 0);
       if (connection->sock == NULL) {
         break;
       }
@@ -420,14 +420,6 @@ void http_connection_dispatch(void* state, message_t* msg) {
       } else {
         DESTROY(buf, buffer);
       }
-      /* If the write buffer has grown large, apply backpressure so upstream
-         producers (e.g., readable streams for GET) get muted. */
-      if (connection->write_buffer != NULL &&
-          connection->write_buffer->size >= WRITE_BUFFER_BACKPRESSURE_THRESHOLD) {
-        if (!(atomic_load(&connection->actor.flags) & ACTOR_FLAG_PRESSURED)) {
-          backpressure_apply(&connection->actor);
-        }
-      }
       break;
     }
 
@@ -457,20 +449,11 @@ void http_connection_dispatch(void* state, message_t* msg) {
             break;
           }
           _connection_update_watcher(connection, PD_EVENT_READ);
-          /* Buffer fully drained — release backpressure so upstream can resume. */
-          if (atomic_load(&connection->actor.flags) & ACTOR_FLAG_PRESSURED) {
-            backpressure_release(&connection->actor);
-          }
         } else {
           size_t remaining = connection->write_buffer->size - (size_t)sent;
           memmove(connection->write_buffer->data,
                   connection->write_buffer->data + sent, remaining);
           connection->write_buffer->size = remaining;
-          /* If the buffer dropped below threshold, release backpressure. */
-          if (remaining < WRITE_BUFFER_BACKPRESSURE_THRESHOLD &&
-              (atomic_load(&connection->actor.flags) & ACTOR_FLAG_PRESSURED)) {
-            backpressure_release(&connection->actor);
-          }
         }
       } else if (sent == 0) {
         /* Peer closed read side */
@@ -552,8 +535,8 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
        processed the previous one yet, we drop the duplicate. This
        naturally backpressures via TCP window when the actor is muted or
        backlogged. */
-    if (!connection->read_pending) {
-      connection->read_pending = 1;
+    if (atomic_load(&connection->read_pending) == 0) {
+      atomic_store(&connection->read_pending, 1);
       message_t msg;
       msg.type = HTTP_CONNECTION_READABLE;
       msg.payload = NULL;
@@ -654,7 +637,7 @@ http_connection_t* http_connection_create(http_server_t* server, platform_socket
   connection->request = NULL;
   connection->write_buffer = NULL;
   connection->write_pending = 0;
-  connection->read_pending = 0;
+  atomic_store(&connection->read_pending, 0);
   connection->header_field = NULL;
   connection->header_field_len = 0;
   connection->header_field_cap = 0;

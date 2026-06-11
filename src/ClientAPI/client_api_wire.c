@@ -29,6 +29,11 @@ static char* _decode_string(cbor_item_t* item, size_t max_len) {
   return str;
 }
 
+/* Sentinel source pointer passed to cbor_build_bytestring when the encoder
+ * needs a zero-length bytestring. The C standard treats memcpy(dst, NULL, 0)
+ * as undefined behavior, so we never pass NULL even when length is zero. */
+static const uint8_t _empty_byte_sentinel = 0;
+
 // --- Helper: safe cbor_get_int → size_t with overflow guard ---
 static size_t _decode_size(cbor_item_t* item) {
   uint64_t val = cbor_get_int(item);
@@ -53,6 +58,10 @@ static uint8_t* _decode_bytestring(cbor_item_t* item, size_t* out_len) {
 uint8_t client_api_wire_get_type(cbor_item_t* item) {
   if (!cbor_isa_array(item) || cbor_array_size(item) < 1) return 0;
   cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item)) {
+    cbor_decref(&type_item);
+    return 0;
+  }
   uint8_t type = (uint8_t)cbor_get_uint8(type_item);
   cbor_decref(&type_item);
   return type;
@@ -88,7 +97,7 @@ cbor_item_t* client_api_put_request_encode(const client_api_put_request_t* msg) 
   if (msg->data != NULL && msg->data_size > 0) {
     item = cbor_build_bytestring(msg->data, msg->data_size);
   } else {
-    item = cbor_build_bytestring(NULL, 0);
+    item = cbor_build_bytestring(&_empty_byte_sentinel, 0);
   }
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
@@ -139,7 +148,7 @@ int client_api_put_request_decode(cbor_item_t* item, client_api_put_request_t* m
     client_api_put_request_destroy(msg);
     return -1;
   }
-  if (msg->stream_length == 0 || msg->stream_length > OFFS_MAX_CBOR_MESSAGE_SIZE) {
+  if (msg->stream_length == 0) {
     client_api_put_request_destroy(msg);
     return -1;
   }
@@ -792,7 +801,7 @@ cbor_item_t* client_api_block_get_response_encode(const client_api_block_get_res
   if (msg->data != NULL && msg->data_size > 0) {
     item = cbor_build_bytestring(msg->data, msg->data_size);
   } else {
-    item = cbor_build_bytestring(NULL, 0);
+    item = cbor_build_bytestring(&_empty_byte_sentinel, 0);
   }
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
