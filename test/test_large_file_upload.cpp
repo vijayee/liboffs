@@ -40,7 +40,6 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
-#include <sstream>
 #include <vector>
 #include <future>
 #include <random>
@@ -1068,7 +1067,6 @@ protected:
   static constexpr size_t kDeclaredSize = 50u * 1024 * 1024;  // 50 MB
   static constexpr size_t kDataChunkSize = 50u * 1024;        // 50 KB
   static constexpr size_t kChunksToSend = 200;                // 200 * 50 KB = 10 MB
-  static constexpr size_t kBytesToSend = kChunksToSend * kDataChunkSize;  // 10 MB
 
   // Time we give the server to clean up after the client disconnects.
   // Tuned to be generous on slow CI but short enough to keep the test
