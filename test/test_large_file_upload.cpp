@@ -1,12 +1,24 @@
 //
 // Two-process integration test for offs_client streaming PUT + GET
-// of a large file (~1.77 GB) over each non-HTTP transport:
-// Unix socket, TCP, WebSocket, WebTransport (msquic, gated on HAS_MSQUIC).
+// across all non-HTTP transports: Unix socket, TCP, WebSocket,
+// WebTransport (msquic, gated on HAS_MSQUIC).
 //
-// For each transport: PUT is verified by comparing the BLAKE3 file_hash
-// returned in the ORI to a local BLAKE3 of the source. GET is verified
-// by streaming the download to a temp file and byte-comparing the whole
-// 1.77 GB against the source.
+// Verifies:
+//   1. PUT — server returns an ORI with a BLAKE3 file_hash that matches
+//      the local BLAKE3 of the source data.
+//   2. GET — streamed download equals the source data byte-for-byte.
+//
+// Scale coverage is provided by:
+//
+//   LargeFileUploadTest   — 1.77 GB, real .mp4 source (skipped if absent).
+//   StreamingPut_1MB      — 1 MB synthetic random data, deterministic seed.
+//   StreamingPut_10MB     — 10 MB.
+//   StreamingPut_100MB    — 100 MB.
+//   StreamingPut_500MB    — 500 MB.
+//
+// Each scale variant runs the same round-trip on all four transports.
+// The 1.77 GB case took ~5 minutes end-to-end; the synthetic sizes
+// are fast (1 MB < 1 s, 500 MB ~30 s per transport).
 //
 
 #include <gtest/gtest.h>
@@ -31,6 +43,8 @@
 #include <sstream>
 #include <vector>
 #include <future>
+#include <random>
+#include <array>
 
 extern "C" {
 #include "../src/ClientLibs/c/offs_client.h"
@@ -55,10 +69,11 @@ extern "C" {
 #include <openssl/rsa.h>
 #include <openssl/x509.h>
 
-// Source file path. On machines without this file, every test in the
-// fixture is skipped via GTEST_SKIP() in SetUp().
+// Source file path for the 1.77 GB real-file case. On machines without
+// this file the fixture is skipped via GTEST_SKIP() in SetUp().
 static const char* kSourceFile =
     "/home/victor/Videos/Big Hero 6 2014 1080p/Big.Hero.6.2014.1080p.BluRay.x264.YIFY.mp4";
+
 static const size_t kChunkSize = 64 * 1024;
 // PUT/GET timeouts. Generous upper bound for the slowest path
 // (server-side finalization on a multi-GB upload); in practice the
@@ -306,31 +321,19 @@ static int run_wt_node(uint16_t port, const char* cache_dir,
   return 0;
 }
 
-static int compute_local_blake3(const char* path, uint8_t out[32]) {
-  FILE* fp = fopen(path, "rb");
-  if (fp == NULL) return -1;
-
+/* Hash a buffer in-memory. */
+static void compute_local_blake3_buffer(const uint8_t* data, size_t len, uint8_t out[32]) {
   blake3_hasher hasher;
   blake3_hasher_init(&hasher);
-
-  std::vector<uint8_t> buf(kChunkSize);
-  while (true) {
-    size_t n = fread(buf.data(), 1, kChunkSize, fp);
-    if (n > 0) {
-      blake3_hasher_update(&hasher, buf.data(), n);
-    }
-    if (n < kChunkSize) {
-      if (ferror(fp)) {
-        fclose(fp);
-        return -1;
-      }
-      break;
-    }
+  // Hash in kChunkSize-sized pieces so very large buffers don't
+  // blow the stack and we keep memory access patterns predictable.
+  size_t offset = 0;
+  while (offset < len) {
+    size_t n = (len - offset < kChunkSize) ? (len - offset) : kChunkSize;
+    blake3_hasher_update(&hasher, data + offset, n);
+    offset += n;
   }
-  fclose(fp);
-
   blake3_hasher_finalize(&hasher, out, 32);
-  return 0;
 }
 
 static int parse_file_hash_from_ori(const char* ori, uint8_t out[32]) {
@@ -381,37 +384,42 @@ static int parse_file_hash_from_ori(const char* ori, uint8_t out[32]) {
   return 0;
 }
 
-static int byte_compare_files(const char* path_a, const char* path_b) {
-  FILE* a = fopen(path_a, "rb");
-  if (a == NULL) return -1;
-  FILE* b = fopen(path_b, "rb");
-  if (b == NULL) { fclose(a); return -1; }
+/* Byte-compare an in-memory buffer against a file on disk. Returns 0
+ * on match, -2 on length mismatch, -3 on first byte mismatch (with a
+ * diagnostic print). */
+static int byte_compare_buffer_to_file(const uint8_t* buffer, size_t buffer_len,
+                                       const char* path) {
+  FILE* fp = fopen(path, "rb");
+  if (fp == NULL) return -1;
 
-  std::vector<uint8_t> buf_a(kCompareChunkSize);
-  std::vector<uint8_t> buf_b(kCompareChunkSize);
+  std::vector<uint8_t> buf(kCompareChunkSize);
   size_t offset = 0;
+  size_t file_total = 0;
   int result = 0;
   while (true) {
-    size_t na = fread(buf_a.data(), 1, kCompareChunkSize, a);
-    size_t nb = fread(buf_b.data(), 1, kCompareChunkSize, b);
-    if (na != nb) { result = -2; break; }
-    if (na == 0) break;
-    if (memcmp(buf_a.data(), buf_b.data(), na) != 0) {
-      for (size_t i = 0; i < na; i++) {
-        if (buf_a[i] != buf_b[i]) {
+    size_t n = fread(buf.data(), 1, kCompareChunkSize, fp);
+    if (n == 0) break;
+    file_total += n;
+    if (offset + n > buffer_len) {
+      result = -2;
+      break;
+    }
+    if (memcmp(buf.data(), buffer + offset, n) != 0) {
+      for (size_t i = 0; i < n; i++) {
+        if (buf[i] != buffer[offset + i]) {
           fprintf(stderr,
                   "byte mismatch at offset %zu: source=0x%02x downloaded=0x%02x\n",
-                  offset + i, buf_a[i], buf_b[i]);
+                  offset + i, buffer[offset + i], buf[i]);
           result = -3;
           break;
         }
       }
       break;
     }
-    offset += na;
+    offset += n;
   }
-  fclose(a);
-  fclose(b);
+  if (result == 0 && file_total != buffer_len) result = -2;
+  fclose(fp);
   return result;
 }
 
@@ -426,7 +434,31 @@ static std::string hex_encode(const uint8_t* data, size_t len) {
   return out;
 }
 
-class LargeFileUploadTest : public ::testing::Test {
+/* Fill `out` with `n` bytes of random data drawn from a std::mt19937
+ * seeded with a constant. Deterministic per-size: callers pass a size-
+ * derived seed so two tests for the same size produce identical data
+ * (and the same BLAKE3). */
+static void fill_random_deterministic(std::vector<uint8_t>& out, size_t n, uint32_t seed) {
+  out.assign(n, 0);
+  std::mt19937 rng(seed);
+  // Generate 8 bytes at a time when n is a multiple of 8 for speed.
+  if ((n % 8) == 0) {
+    uint64_t* as_u64 = reinterpret_cast<uint64_t*>(out.data());
+    size_t count_u64 = n / 8;
+    for (size_t i = 0; i < count_u64; i++) {
+      as_u64[i] = (static_cast<uint64_t>(rng()) << 32) ^ rng();
+    }
+  } else {
+    for (size_t i = 0; i < n; i++) {
+      out[i] = static_cast<uint8_t>(rng() & 0xff);
+    }
+  }
+}
+
+/* Shared base for all two-process upload fixtures: provides fork-self
+ * node startup, cert generation, common fixture state, and the
+ * buffer-based round-trip driver used by every scale variant. */
+class FileUploadTestBase : public ::testing::Test {
 protected:
   pid_t node_pid = 0;
   std::string test_dir;
@@ -435,7 +467,6 @@ protected:
   std::string cert_path;
   std::string key_path;
   uint16_t node_port = 0;
-  size_t file_size = 0;
   bool certs_generated = false;
 
   void SetUp() override {
@@ -445,16 +476,6 @@ protected:
     test_dir = mkdtemp_result;
     cache_dir = test_dir + "/cache";
     mkdir(cache_dir.c_str(), 0700);
-
-    struct stat st;
-    if (stat(kSourceFile, &st) != 0) {
-      GTEST_SKIP() << "Source file not present at " << kSourceFile
-                   << " (errno=" << errno << ")";
-    }
-    if (st.st_size == 0) {
-      FAIL() << "Source file is empty: " << kSourceFile;
-    }
-    file_size = (size_t)st.st_size;
   }
 
   void TearDown() override {
@@ -640,10 +661,29 @@ cleanup:
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
 
-  void run_round_trip(const std::string& url) {
-    uint8_t expected_hash[32];
-    ASSERT_EQ(compute_local_blake3(kSourceFile, expected_hash), 0)
-        << "Failed to compute local BLAKE3 of " << kSourceFile;
+  /* Buffer-based round-trip:
+   *   1. Sanity-check that `expected_hash` matches the BLAKE3 of
+   *      `source_data` (catches seed / data corruption before round-trip).
+   *   2. Connect to `url`, stream `source_data` in kChunkSize pieces.
+   *   3. Verify server-returned BLAKE3 (from ORI) matches `expected_hash`.
+   *   4. GET the data, write to a temp file, byte-compare against `source_data`.
+   *
+   * `file_name` is the name sent in the PUT envelope (so the ORI is
+   * somewhat human-readable). `expected_hash` is the 32-byte BLAKE3
+   * of `source_data`, already computed by the caller. */
+  void run_round_trip_buffer(const std::string& url,
+                             const std::vector<uint8_t>& source_data,
+                             const std::array<uint8_t, 32>& expected_hash,
+                             const std::string& file_name) {
+    // Sanity check: re-compute the local BLAKE3 of the buffer to make
+    // sure the test data is what we think it is. If the caller passed
+    // a stale hash we want to know up front.
+    uint8_t sanity_hash[32];
+    compute_local_blake3_buffer(source_data.data(), source_data.size(), sanity_hash);
+    ASSERT_EQ(memcmp(sanity_hash, expected_hash.data(), 32), 0)
+        << "Sanity check failed: caller-supplied expected_hash does not match "
+        << "the BLAKE3 of source_data. The test data is corrupt; the seed "
+        << "or fill routine is wrong.";
 
     offs_client_t* client = offs_client_connect(url.c_str(), NULL);
     ASSERT_NE(client, nullptr) << "Failed to connect to " << url;
@@ -654,36 +694,20 @@ cleanup:
       ~ClientGuard() { if (c) offs_client_disconnect(c); }
     } guard{client};
 
-    std::string source_path(kSourceFile);
-    size_t slash = source_path.rfind('/');
-    std::string file_name = (slash == std::string::npos)
-                                ? source_path
-                                : source_path.substr(slash + 1);
-
     PutCbContext put_ctx;
     std::future<std::string> put_fut = put_ctx.promise.get_future();
-    ASSERT_EQ(offs_client_put_stream_start(client, "video/mp4",
-                                            file_name.c_str(), file_size), 0);
+    ASSERT_EQ(offs_client_put_stream_start(client, "application/octet-stream",
+                                            file_name.c_str(), source_data.size()), 0);
 
     {
-      FILE* fp = fopen(kSourceFile, "rb");
-      ASSERT_NE(fp, nullptr) << "Failed to reopen source for PUT";
-
-      std::vector<uint8_t> buf(kChunkSize);
-      while (true) {
-        size_t n = fread(buf.data(), 1, kChunkSize, fp);
-        if (n > 0) {
-          ASSERT_EQ(offs_client_put_stream_data(client, buf.data(), n), 0);
-        }
-        if (n < kChunkSize) {
-          if (ferror(fp)) {
-            fclose(fp);
-            FAIL() << "fread error on " << kSourceFile;
-          }
-          break;
-        }
+      size_t offset = 0;
+      while (offset < source_data.size()) {
+        size_t n = (source_data.size() - offset < kChunkSize)
+                       ? (source_data.size() - offset)
+                       : kChunkSize;
+        ASSERT_EQ(offs_client_put_stream_data(client, source_data.data() + offset, n), 0);
+        offset += n;
       }
-      fclose(fp);
     }
 
     ASSERT_EQ(offs_client_put_stream_end(client, on_put, &put_ctx), 0);
@@ -696,15 +720,15 @@ cleanup:
     uint8_t server_hash[32];
     ASSERT_EQ(parse_file_hash_from_ori(ori.c_str(), server_hash), 0)
         << "Failed to parse BLAKE3 file_hash from ORI: " << ori;
-    EXPECT_EQ(memcmp(expected_hash, server_hash, 32), 0)
+    EXPECT_EQ(memcmp(expected_hash.data(), server_hash, 32), 0)
         << "BLAKE3 file_hash mismatch between local computation and server ORI. "
-        << "expected=" << hex_encode(expected_hash, 32)
+        << "expected=" << hex_encode(expected_hash.data(), 32)
         << " actual=" << hex_encode(server_hash, 32);
 
     GetCbContext get_ctx;
     std::future<GetResult> get_fut = get_ctx.promise.get_future();
     {
-      std::string tmpl = test_dir + "/dl-XXXXXX.mp4";
+      std::string tmpl = test_dir + "/dl-XXXXXX.bin";
       std::vector<char> tmpl_buf(tmpl.c_str(),
                                   tmpl.c_str() + tmpl.size() + 1);
       int fd = mkstemps(tmpl_buf.data(), 4);
@@ -731,34 +755,84 @@ cleanup:
       FAIL() << "GET error status=" << (int)get_res.status_code;
     }
     EXPECT_EQ(get_ctx.end_called.load(), 1);
-    EXPECT_EQ(get_ctx.bytes_written.load(), file_size)
+    EXPECT_EQ(get_ctx.bytes_written.load(), source_data.size())
         << "Downloaded byte count " << get_ctx.bytes_written.load()
-        << " != source size " << file_size;
+        << " != source size " << source_data.size();
 
     fflush(get_ctx.fp);
     fclose(get_ctx.fp);
     get_ctx.fp = nullptr;
 
-    int cmp = byte_compare_files(kSourceFile, get_ctx.download_path.c_str());
+    int cmp = byte_compare_buffer_to_file(source_data.data(), source_data.size(),
+                                          get_ctx.download_path.c_str());
     ASSERT_EQ(cmp, 0) << "GET byte-compare failed (cmp=" << cmp << ")";
 
     unlink(get_ctx.download_path.c_str());
   }
 };
 
+/* Real-file 1.77 GB round-trip. Skipped when the .mp4 is not present. */
+class LargeFileUploadTest : public FileUploadTestBase {
+protected:
+  size_t file_size = 0;
+  std::vector<uint8_t> source_buffer;
+  std::array<uint8_t, 32> expected_hash{};
+
+  void SetUp() override {
+    FileUploadTestBase::SetUp();
+
+    struct stat st;
+    if (stat(kSourceFile, &st) != 0) {
+      GTEST_SKIP() << "Source file not present at " << kSourceFile
+                   << " (errno=" << errno << ")";
+    }
+    if (st.st_size == 0) {
+      FAIL() << "Source file is empty: " << kSourceFile;
+    }
+    file_size = (size_t)st.st_size;
+
+    // Read the .mp4 into a buffer so the round-trip can be buffer-driven
+    // (same code path as the synthetic-size variants). This is the only
+    // difference from the pre-refactor version.
+    source_buffer.resize(file_size);
+    FILE* fp = fopen(kSourceFile, "rb");
+    ASSERT_NE(fp, nullptr) << "Failed to open " << kSourceFile;
+    size_t read_total = 0;
+    while (read_total < file_size) {
+      size_t n = fread(source_buffer.data() + read_total, 1,
+                       file_size - read_total, fp);
+      if (n == 0) {
+        fclose(fp);
+        FAIL() << "Short read on " << kSourceFile;
+      }
+      read_total += n;
+    }
+    fclose(fp);
+
+    compute_local_blake3_buffer(source_buffer.data(), source_buffer.size(),
+                                expected_hash.data());
+  }
+};
+
 TEST_F(LargeFileUploadTest, Mp4_RoundTrip_UnixSocket) {
   start_unix_node();
-  run_round_trip("unix://" + socket_path);
+  run_round_trip_buffer("unix://" + socket_path,
+                        source_buffer, expected_hash,
+                        "Big.Hero.6.2014.1080p.BluRay.x264.YIFY.mp4");
 }
 
 TEST_F(LargeFileUploadTest, Mp4_RoundTrip_Tcp) {
   start_tcp_node();
-  run_round_trip("tcp://127.0.0.1:" + std::to_string(node_port));
+  run_round_trip_buffer("tcp://127.0.0.1:" + std::to_string(node_port),
+                        source_buffer, expected_hash,
+                        "Big.Hero.6.2014.1080p.BluRay.x264.YIFY.mp4");
 }
 
 TEST_F(LargeFileUploadTest, Mp4_RoundTrip_WebSocket) {
   start_ws_node();
-  run_round_trip("ws://127.0.0.1:" + std::to_string(node_port));
+  run_round_trip_buffer("ws://127.0.0.1:" + std::to_string(node_port),
+                        source_buffer, expected_hash,
+                        "Big.Hero.6.2014.1080p.BluRay.x264.YIFY.mp4");
 }
 
 #if defined(HAS_MSQUIC)
@@ -769,7 +843,148 @@ TEST_F(LargeFileUploadTest, Mp4_RoundTrip_WebTransport) {
                  << "cannot generate TLS certs for WebTransport.";
   }
   start_wt_node();
-  run_round_trip("wt://127.0.0.1:" + std::to_string(node_port));
+  run_round_trip_buffer("wt://127.0.0.1:" + std::to_string(node_port),
+                        source_buffer, expected_hash,
+                        "Big.Hero.6.2014.1080p.BluRay.x264.YIFY.mp4");
+}
+#endif
+
+/* ----- Synthetic-data scale variants --------------------------------- */
+
+template <size_t kSizeBytes>
+class StreamingPut_SizedTest : public FileUploadTestBase {
+protected:
+  static constexpr size_t kBufferSize = kSizeBytes;
+  // Per-size deterministic seed: scale * constant, well-separated so
+  // sizes can't accidentally collide.
+  static constexpr uint32_t kSeed = (uint32_t)(0xC0FFEE00u ^ (kSizeBytes & 0xffffffffu));
+
+  std::vector<uint8_t> source_buffer;
+  std::array<uint8_t, 32> expected_hash{};
+
+  void SetUp() override {
+    FileUploadTestBase::SetUp();
+
+    fill_random_deterministic(source_buffer, kBufferSize, kSeed);
+    compute_local_blake3_buffer(source_buffer.data(), source_buffer.size(),
+                                expected_hash.data());
+  }
+};
+
+using StreamingPut_1MB   = StreamingPut_SizedTest<1u   * 1024 * 1024>;
+using StreamingPut_10MB  = StreamingPut_SizedTest<10u  * 1024 * 1024>;
+using StreamingPut_100MB = StreamingPut_SizedTest<100u * 1024 * 1024>;
+using StreamingPut_500MB = StreamingPut_SizedTest<500u * 1024 * 1024>;
+
+TEST_F(StreamingPut_1MB, UnixSocket) {
+  start_unix_node();
+  run_round_trip_buffer("unix://" + socket_path, source_buffer, expected_hash,
+                        "synthetic-1mb.bin");
+}
+
+TEST_F(StreamingPut_1MB, Tcp) {
+  start_tcp_node();
+  run_round_trip_buffer("tcp://127.0.0.1:" + std::to_string(node_port),
+                        source_buffer, expected_hash, "synthetic-1mb.bin");
+}
+
+TEST_F(StreamingPut_1MB, WebSocket) {
+  start_ws_node();
+  run_round_trip_buffer("ws://127.0.0.1:" + std::to_string(node_port),
+                        source_buffer, expected_hash, "synthetic-1mb.bin");
+}
+
+#if defined(HAS_MSQUIC)
+TEST_F(StreamingPut_1MB, WebTransport) {
+  generate_test_certs();
+  ASSERT_TRUE(certs_generated) << "Failed to generate TLS certs for WebTransport";
+  start_wt_node();
+  run_round_trip_buffer("wt://127.0.0.1:" + std::to_string(node_port),
+                        source_buffer, expected_hash, "synthetic-1mb.bin");
+}
+#endif
+
+TEST_F(StreamingPut_10MB, UnixSocket) {
+  start_unix_node();
+  run_round_trip_buffer("unix://" + socket_path, source_buffer, expected_hash,
+                        "synthetic-10mb.bin");
+}
+
+TEST_F(StreamingPut_10MB, Tcp) {
+  start_tcp_node();
+  run_round_trip_buffer("tcp://127.0.0.1:" + std::to_string(node_port),
+                        source_buffer, expected_hash, "synthetic-10mb.bin");
+}
+
+TEST_F(StreamingPut_10MB, WebSocket) {
+  start_ws_node();
+  run_round_trip_buffer("ws://127.0.0.1:" + std::to_string(node_port),
+                        source_buffer, expected_hash, "synthetic-10mb.bin");
+}
+
+#if defined(HAS_MSQUIC)
+TEST_F(StreamingPut_10MB, WebTransport) {
+  generate_test_certs();
+  ASSERT_TRUE(certs_generated) << "Failed to generate TLS certs for WebTransport";
+  start_wt_node();
+  run_round_trip_buffer("wt://127.0.0.1:" + std::to_string(node_port),
+                        source_buffer, expected_hash, "synthetic-10mb.bin");
+}
+#endif
+
+TEST_F(StreamingPut_100MB, UnixSocket) {
+  start_unix_node();
+  run_round_trip_buffer("unix://" + socket_path, source_buffer, expected_hash,
+                        "synthetic-100mb.bin");
+}
+
+TEST_F(StreamingPut_100MB, Tcp) {
+  start_tcp_node();
+  run_round_trip_buffer("tcp://127.0.0.1:" + std::to_string(node_port),
+                        source_buffer, expected_hash, "synthetic-100mb.bin");
+}
+
+TEST_F(StreamingPut_100MB, WebSocket) {
+  start_ws_node();
+  run_round_trip_buffer("ws://127.0.0.1:" + std::to_string(node_port),
+                        source_buffer, expected_hash, "synthetic-100mb.bin");
+}
+
+#if defined(HAS_MSQUIC)
+TEST_F(StreamingPut_100MB, WebTransport) {
+  generate_test_certs();
+  ASSERT_TRUE(certs_generated) << "Failed to generate TLS certs for WebTransport";
+  start_wt_node();
+  run_round_trip_buffer("wt://127.0.0.1:" + std::to_string(node_port),
+                        source_buffer, expected_hash, "synthetic-100mb.bin");
+}
+#endif
+
+TEST_F(StreamingPut_500MB, UnixSocket) {
+  start_unix_node();
+  run_round_trip_buffer("unix://" + socket_path, source_buffer, expected_hash,
+                        "synthetic-500mb.bin");
+}
+
+TEST_F(StreamingPut_500MB, Tcp) {
+  start_tcp_node();
+  run_round_trip_buffer("tcp://127.0.0.1:" + std::to_string(node_port),
+                        source_buffer, expected_hash, "synthetic-500mb.bin");
+}
+
+TEST_F(StreamingPut_500MB, WebSocket) {
+  start_ws_node();
+  run_round_trip_buffer("ws://127.0.0.1:" + std::to_string(node_port),
+                        source_buffer, expected_hash, "synthetic-500mb.bin");
+}
+
+#if defined(HAS_MSQUIC)
+TEST_F(StreamingPut_500MB, WebTransport) {
+  generate_test_certs();
+  ASSERT_TRUE(certs_generated) << "Failed to generate TLS certs for WebTransport";
+  start_wt_node();
+  run_round_trip_buffer("wt://127.0.0.1:" + std::to_string(node_port),
+                        source_buffer, expected_hash, "synthetic-500mb.bin");
 }
 #endif
 
