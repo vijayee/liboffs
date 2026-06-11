@@ -30,7 +30,7 @@
 #include <thread>
 #include <sstream>
 #include <vector>
-#include <semaphore.h>
+#include <future>
 
 extern "C" {
 #include "../src/ClientLibs/c/offs_client.h"
@@ -82,28 +82,33 @@ static std::string get_self_path() {
 struct PutCbContext {
   std::atomic<int> called{0};
   std::string ori_string;
-  sem_t sem;
-  PutCbContext() { sem_init(&sem, 0, 0); }
-  ~PutCbContext() { sem_destroy(&sem); }
+  std::promise<std::string> promise;
 };
 
 static void on_put(void* ctx, const char* ori_string) {
   auto* c = (PutCbContext*)ctx;
-  if (ori_string != NULL) c->ori_string = ori_string;
+  if (ori_string != NULL) {
+    c->ori_string = ori_string;
+    c->promise.set_value(std::string(ori_string));
+  } else {
+    c->promise.set_value(std::string{});
+  }
   c->called.store(1, std::memory_order_release);
-  sem_post(&c->sem);
 }
 
+struct GetResult {
+  bool error = false;
+  uint8_t status_code = 0;
+};
+
 struct GetCbContext {
+  std::promise<GetResult> promise;
   std::atomic<int> end_called{0};
   std::atomic<int> error_called{0};
   std::atomic<size_t> bytes_written{0};
   uint8_t error_status{0};
   FILE* fp = nullptr;
   std::string download_path;
-  sem_t sem;
-  GetCbContext() { sem_init(&sem, 0, 0); }
-  ~GetCbContext() { sem_destroy(&sem); }
 };
 
 static void on_get_data_to_file(void* ctx, const uint8_t* data, size_t len) {
@@ -116,27 +121,28 @@ static void on_get_data_to_file(void* ctx, const uint8_t* data, size_t len) {
 static void on_get_end(void* ctx) {
   auto* c = (GetCbContext*)ctx;
   c->end_called.store(1, std::memory_order_release);
-  sem_post(&c->sem);
+  GetResult res;
+  res.error = false;
+  res.status_code = 0;
+  c->promise.set_value(res);
 }
 
 static void on_get_error(void* ctx, uint8_t status_code, const char* message) {
   auto* c = (GetCbContext*)ctx;
   c->error_status = status_code;
   c->error_called.store(1, std::memory_order_release);
-  sem_post(&c->sem);
+  GetResult res;
+  res.error = true;
+  res.status_code = status_code;
+  c->promise.set_value(res);
   (void)message;
 }
 
-static int wait_sem(sem_t* sem, int timeout_ms) {
-  struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
-  ts.tv_sec += timeout_ms / 1000;
-  ts.tv_nsec += (timeout_ms % 1000) * 1000000L;
-  if (ts.tv_nsec >= 1000000000L) {
-    ts.tv_sec++;
-    ts.tv_nsec -= 1000000000L;
-  }
-  return sem_timedwait(sem, &ts);
+/* Wait on a future with a timeout (in milliseconds). Returns true if the
+ * future is ready (caller should .get() it), false on timeout. */
+template <typename T>
+static bool wait_for_future(std::future<T>& fut, int timeout_ms) {
+  return fut.wait_for(std::chrono::milliseconds(timeout_ms)) == std::future_status::ready;
 }
 
 static config_t make_test_config(void) {
@@ -655,6 +661,7 @@ cleanup:
                                 : source_path.substr(slash + 1);
 
     PutCbContext put_ctx;
+    std::future<std::string> put_fut = put_ctx.promise.get_future();
     ASSERT_EQ(offs_client_put_stream_start(client, "video/mp4",
                                             file_name.c_str(), file_size), 0);
 
@@ -680,7 +687,8 @@ cleanup:
     }
 
     ASSERT_EQ(offs_client_put_stream_end(client, on_put, &put_ctx), 0);
-    ASSERT_EQ(wait_sem(&put_ctx.sem, kPutTimeoutMs), 0) << "PUT timed out";
+    if (!wait_for_future(put_fut, kPutTimeoutMs)) { FAIL() << "PUT timed out"; }
+    (void)put_fut.get();
     ASSERT_EQ(put_ctx.called.load(), 1);
     ASSERT_FALSE(put_ctx.ori_string.empty());
     std::string ori = put_ctx.ori_string;
@@ -694,6 +702,7 @@ cleanup:
         << " actual=" << hex_encode(server_hash, 32);
 
     GetCbContext get_ctx;
+    std::future<GetResult> get_fut = get_ctx.promise.get_future();
     {
       std::string tmpl = test_dir + "/dl-XXXXXX.mp4";
       std::vector<char> tmpl_buf(tmpl.c_str(),
@@ -716,9 +725,10 @@ cleanup:
     ASSERT_EQ(offs_client_get(client, ori.c_str(),
                               on_get_data_to_file, on_get_end, on_get_error,
                               &get_ctx), 0);
-    ASSERT_EQ(wait_sem(&get_ctx.sem, kGetTimeoutMs), 0) << "GET timed out";
-    if (get_ctx.error_called) {
-      FAIL() << "GET error status=" << (int)get_ctx.error_status;
+    if (!wait_for_future(get_fut, kGetTimeoutMs)) { FAIL() << "GET timed out"; }
+    GetResult get_res = get_fut.get();
+    if (get_res.error) {
+      FAIL() << "GET error status=" << (int)get_res.status_code;
     }
     EXPECT_EQ(get_ctx.end_called.load(), 1);
     EXPECT_EQ(get_ctx.bytes_written.load(), file_size)
