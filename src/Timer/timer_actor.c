@@ -283,12 +283,14 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
     }
     case TIMER_COMPLETION: {
       timer_completion_payload_t* completion = (timer_completion_payload_t*)msg->payload;
-      /* Allocate a copy of the completion to forward to the target actor.
-       * The original completion IS the timer's user_data and remains
-       * owned by timer_actor_destroy. Sending the original here would
-       * cause a double-free: the target's payload_destroy (= free)
-       * would free the user_data, then timer_actor_destroy would free
-       * it again when iterating active_timers. */
+      /* Allocate a fresh copy of the completion to forward to the target
+       * actor. The `msg->payload` we received is itself a copy allocated
+       * by either _timer_completion_callback (when a timer fires) or
+       * the TIMER_DEBOUNCE_FLUSH case (when a debounce is flushed);
+       * in both paths it was sent via actor_send with payload_destroy
+       * = free, so this dispatch owns it. We must free the original
+       * before clearing payload, otherwise the post-dispatch cleanup
+       * sees NULL and skips the free — leaking 32 bytes per dispatch. */
       timer_completion_payload_t* copy = get_clear_memory(sizeof(timer_completion_payload_t));
       *copy = *completion;
       message_t target_msg = {0};
@@ -296,6 +298,7 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
       target_msg.payload = copy;
       target_msg.payload_destroy = free;
       actor_send(copy->target, &target_msg);
+      free(msg->payload);
       msg->payload = NULL;
       msg->payload_destroy = NULL;
       break;
