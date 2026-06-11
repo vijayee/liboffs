@@ -175,8 +175,33 @@ static config_t make_test_config(void) {
   return config;
 }
 
+static volatile sig_atomic_t g_node_shutdown_request = 0;
+
+static void node_signal_handler(int signo) {
+  (void)signo;
+  g_node_shutdown_request = 1;
+}
+
+static void install_node_signal_handlers(void) {
+  struct sigaction sa = {};
+  sa.sa_handler = node_signal_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+  sigaction(SIGTERM, &sa, NULL);
+  sigaction(SIGINT, &sa, NULL);
+}
+
 static void node_event_loop(uint8_t* running) {
-  while (*running) { sleep(1); }
+  // Use a shorter sleep and check both the running flag and the signal flag
+  // so a SIGTERM (test fixture's clean-shutdown signal) can interrupt the
+  // sleep and let the destroy path run. Without this, the test fixture's
+  // SIGKILL kills the node before destroy() functions are reached, which
+  // makes "still reachable" memory look like a leak under valgrind.
+  while (*running && !g_node_shutdown_request) {
+    struct timespec ts = {0, 100 * 1000 * 1000};  // 100 ms
+    nanosleep(&ts, NULL);
+  }
+  *running = 0;
 }
 
 static int run_unix_node(const char* socket_path, const char* cache_dir) {
@@ -201,6 +226,7 @@ static int run_unix_node(const char* socket_path, const char* cache_dir) {
   if (transport == NULL) return 1;
   unix_transport_start(transport);
 
+  install_node_signal_handlers();
   node_event_loop(&running);
   unix_transport_stop(transport);
   unix_transport_destroy(transport);
@@ -236,6 +262,7 @@ static int run_tcp_node(uint16_t port, const char* cache_dir) {
   if (transport == NULL) return 1;
   tcp_transport_start(transport);
 
+  install_node_signal_handlers();
   node_event_loop(&running);
   tcp_transport_stop(transport);
   tcp_transport_destroy(transport);
@@ -271,6 +298,7 @@ static int run_ws_node(uint16_t port, const char* cache_dir) {
   if (transport == NULL) return 1;
   ws_transport_start(transport);
 
+  install_node_signal_handlers();
   node_event_loop(&running);
   ws_transport_stop(transport);
   ws_transport_destroy(transport);
@@ -308,6 +336,7 @@ static int run_wt_node(uint16_t port, const char* cache_dir,
   if (transport == NULL) return 1;
   wt_transport_start(transport);
 
+  install_node_signal_handlers();
   node_event_loop(&running);
   wt_transport_stop(transport);
   wt_transport_destroy(transport);
