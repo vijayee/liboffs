@@ -34,14 +34,15 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> {
   int _selectedIndex = 0;
+
   final OffApi _api = OffApi();
-  late final List<Widget> _screens = [
-    ImportScreen(api: _api),
-    // ignore: prefer_const_constructors
-    ExportScreen(),
-    ConnectScreen(api: _api),
-    ConfigurationScreen(api: _api),
-  ];
+
+  List<Widget> get _screens => [
+        const ImportScreen(),
+        const ExportScreen(),
+        ConnectScreen(api: _api),
+        const ConfigurationScreen(api: _api),
+      ];
 
   @override
   Widget build(BuildContext context) {
@@ -57,27 +58,27 @@ class _AppShellState extends State<AppShell> {
           setState(() => _selectedIndex = index);
           Navigator.pop(context);
         },
-        children: const [
-          Padding(
+        children: [
+          const Padding(
             padding: EdgeInsets.symmetric(vertical: 16),
             child: Image(
               image: AssetImage('assets/images/off-logo-lettered.svg'),
               height: 80,
             ),
           ),
-          NavigationDrawerDestination(
+          const NavigationDrawerDestination(
             icon: Icon(Icons.upload),
             label: Text('Import'),
           ),
-          NavigationDrawerDestination(
+          const NavigationDrawerDestination(
             icon: Icon(Icons.download),
             label: Text('Export'),
           ),
-          NavigationDrawerDestination(
+          const NavigationDrawerDestination(
             icon: Icon(Icons.link),
             label: Text('Connect'),
           ),
-          NavigationDrawerDestination(
+          const NavigationDrawerDestination(
             icon: Icon(Icons.settings),
             label: Text('Configuration'),
           ),
