@@ -12,6 +12,11 @@
 #include <hashmap.h>
 #include <string.h>
 
+/* MSVC's <string.h> provides strtok_s instead of strtok_r; map the name. */
+#ifdef _WIN32
+  #define strtok_r(str, delim, saveptr) strtok_s((str), (delim), (saveptr))
+#endif
+
 static uint64_t _now_ms(void) {
     return platform_monotonic_ns() / UINT64_C(1000000);
 }

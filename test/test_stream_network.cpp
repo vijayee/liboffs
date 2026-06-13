@@ -33,7 +33,6 @@ static buffer_t* make_hash(const uint8_t* data, size_t len) {
 }
 
 // Error event handler that just absorbs the error without crashing
-__attribute__((unused))
 static void on_error_silence(void* ctx, void* data) {
   (void)ctx;
   if (data != nullptr) {
@@ -42,7 +41,6 @@ static void on_error_silence(void* ctx, void* data) {
   }
 }
 
-__attribute__((unused))
 static void on_close_silence(void* ctx, void* data) {
   (void)ctx;
   (void)data;
@@ -114,13 +112,13 @@ protected:
     // to avoid race conditions with async actor messages
     pool = scheduler_pool_create(2);
 
-    path = (char*)"/tmp/test_stream_network_rstream";
+    path = (char*)"test_stream_network_rstream";
     rm_rf(path);
     mkdir_p(path);
 
     timer = timer_actor_create(pool);
     bc = block_cache_create(
-        (config_t){.index_bucket_size = 10, .index_wait = 1000,
+        config_t{.index_bucket_size = 10, .index_wait = 1000,
                    .index_max_wait = 5000, .section_size = 128000,
                    .section_wait = 1000, .section_max_wait = 5000,
                    .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
@@ -365,13 +363,13 @@ protected:
     // Create pool but do NOT start — we dispatch directly without worker threads
     pool = scheduler_pool_create(2);
 
-    path = (char*)"/tmp/test_stream_network_wstream";
+    path = (char*)"test_stream_network_wstream";
     rm_rf(path);
     mkdir_p(path);
 
     timer = timer_actor_create(pool);
     bc = block_cache_create(
-        (config_t){.index_bucket_size = 10, .index_wait = 1000,
+        config_t{.index_bucket_size = 10, .index_wait = 1000,
                    .index_max_wait = 5000, .section_size = 128000,
                    .section_wait = 1000, .section_max_wait = 5000,
                    .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},

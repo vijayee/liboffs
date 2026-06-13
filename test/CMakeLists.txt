@@ -3,6 +3,9 @@ if (BUILD_TESTING)
     set(CMAKE_C_STANDARD 11)
     set(CMAKE_CXX_STANDARD 17)
 
+    # The /experimental:c11atomics flag is set globally at the top-level
+    # CMakeLists.txt and propagates here through add_compile_options.
+
     # Build googletest if not already found
     if (NOT TARGET GTest::gtest_main)
       set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
@@ -11,7 +14,6 @@ if (BUILD_TESTING)
 
     set(GTEST_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../deps/googletest/googletest/include)
     set(GMOCK_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../deps/googletest/googlemock/include)
-
     message(STATUS "${C_INC}")
     add_executable(testliboffs test_main.cpp
             test_buffer.cpp
@@ -36,22 +38,15 @@ if (BUILD_TESTING)
             test_writeable_descriptor.cpp
             test_off_stream_integration.cpp
             test_block_recipe.cpp
-            test_http_server.cpp
             test_off_url.cpp
             test_ofd.cpp
             test_ofd_cache.cpp
-            test_off_routes.cpp
-            test_network.cpp
             test_wanted_list.cpp
             test_stream_network.cpp
             test_stream_framer.cpp
             test_nat_detect.cpp
             test_conn_state.cpp
             test_quic_integration.cpp
-            test_unix_transport.cpp
-            test_tcp_transport.cpp
-            test_ws_transport.cpp
-            test_offs_client.cpp
             test_peer_verify.cpp
             test_platform.cpp
             test_platform_socket.cpp
@@ -68,14 +63,37 @@ if (BUILD_TESTING)
             test_block_cache_api.cpp
             test_health_handler.cpp
             test_health_wire.cpp
-            test_health_http.cpp
             )
+    # The following tests use raw POSIX sockets, getpid, and pthread directly,
+    # which are not available under MSVC. Add them to the build only on POSIX.
+    if(NOT WIN32)
+      target_sources(testliboffs PRIVATE
+            test_http_server.cpp
+            test_off_routes.cpp
+            test_network.cpp
+            test_unix_transport.cpp
+            test_tcp_transport.cpp
+            test_ws_transport.cpp
+            test_health_http.cpp
+            test_offs_client.cpp
+            )
+    endif()
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
     add_dependencies(testliboffs http-parser)
-    target_link_libraries(testliboffs PRIVATE -Wl,--whole-archive offs -Wl,--no-whole-archive)
-    target_link_libraries(testliboffs PRIVATE ssl crypto)
+    # GNU ld: --whole-archive forces every object inside the static lib to be
+    # linked, including the gtest test fixtures that reference internal
+    # symbols. MSVC's link.exe already pulls in every object referenced from
+    # a translation unit passed on the command line, so this is the default
+    # behavior and the GNU-only flag has no MSVC equivalent — guarded by
+    # NOT MSVC to keep the build green on both toolchains.
+    if(NOT MSVC)
+      target_link_libraries(testliboffs PRIVATE -Wl,--whole-archive offs -Wl,--no-whole-archive)
+    else()
+      target_link_libraries(testliboffs PRIVATE offs)
+    endif()
+    target_link_libraries(testliboffs PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     target_link_libraries(testliboffs PRIVATE blake3)
     target_link_libraries(testliboffs PRIVATE hashmap)
     target_link_libraries(testliboffs PRIVATE http-parser)
@@ -108,16 +126,21 @@ if (BUILD_TESTING)
     add_dependencies(test_file_transfer_integration offs)
     add_dependencies(test_file_transfer_integration blake3)
     add_dependencies(test_file_transfer_integration http-parser)
-    target_link_libraries(test_file_transfer_integration PRIVATE -Wl,--whole-archive offs -Wl,--no-whole-archive)
-    target_link_libraries(test_file_transfer_integration PRIVATE ssl crypto)
-    target_link_libraries(test_file_transfer_integration PRIVATE blake3)
+    if(NOT MSVC)
+      target_link_libraries(test_file_transfer_integration PRIVATE -Wl,--whole-archive offs -Wl,--no-whole-archive)
+    else()
+      target_link_libraries(test_file_transfer_integration PRIVATE offs)
+    endif()
+    target_link_libraries(test_file_transfer_integration PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     target_link_libraries(test_file_transfer_integration PRIVATE hashmap)
     target_link_libraries(test_file_transfer_integration PRIVATE http-parser)
     target_link_libraries(test_file_transfer_integration PUBLIC cbor)
     target_link_libraries(test_file_transfer_integration PRIVATE poll-dancer)
     target_link_libraries(test_file_transfer_integration PRIVATE GTest::gtest_main)
     target_link_libraries(test_file_transfer_integration PRIVATE GTest::gmock)
-    target_link_libraries(test_file_transfer_integration PRIVATE pthread)
+    if(NOT WIN32)
+      target_link_libraries(test_file_transfer_integration PRIVATE pthread)
+    endif()
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/CMakeLists.txt)
       target_compile_definitions(test_file_transfer_integration PRIVATE HAS_MSQUIC)
       target_include_directories(test_file_transfer_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/src/inc)
@@ -135,8 +158,12 @@ if (BUILD_TESTING)
     add_dependencies(test_offs_client_integration offs)
     add_dependencies(test_offs_client_integration blake3)
     add_dependencies(test_offs_client_integration http-parser)
-    target_link_libraries(test_offs_client_integration PRIVATE -Wl,--whole-archive offs -Wl,--no-whole-archive)
-    target_link_libraries(test_offs_client_integration PRIVATE ssl crypto)
+    if(NOT MSVC)
+      target_link_libraries(test_offs_client_integration PRIVATE -Wl,--whole-archive offs -Wl,--no-whole-archive)
+    else()
+      target_link_libraries(test_offs_client_integration PRIVATE offs)
+    endif()
+    target_link_libraries(test_offs_client_integration PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     target_link_libraries(test_offs_client_integration PRIVATE blake3)
     target_link_libraries(test_offs_client_integration PRIVATE hashmap)
     target_link_libraries(test_offs_client_integration PRIVATE http-parser)
@@ -144,7 +171,9 @@ if (BUILD_TESTING)
     target_link_libraries(test_offs_client_integration PRIVATE poll-dancer)
     target_link_libraries(test_offs_client_integration PRIVATE GTest::gtest_main)
     target_link_libraries(test_offs_client_integration PRIVATE GTest::gmock)
-    target_link_libraries(test_offs_client_integration PRIVATE pthread)
+    if(NOT WIN32)
+      target_link_libraries(test_offs_client_integration PRIVATE pthread)
+    endif()
     target_include_directories(test_offs_client_integration PUBLIC ${C_INC})
     target_include_directories(test_offs_client_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
     target_include_directories(test_offs_client_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/http-parser)
@@ -160,8 +189,12 @@ if (BUILD_TESTING)
     add_dependencies(test_rpc_integration blake3)
     add_dependencies(test_rpc_integration http-parser)
     target_compile_definitions(test_rpc_integration PRIVATE OFFS_TEST)
-    target_link_libraries(test_rpc_integration PRIVATE -Wl,--whole-archive offs -Wl,--no-whole-archive)
-    target_link_libraries(test_rpc_integration PRIVATE ssl crypto)
+    if(NOT MSVC)
+      target_link_libraries(test_rpc_integration PRIVATE -Wl,--whole-archive offs -Wl,--no-whole-archive)
+    else()
+      target_link_libraries(test_rpc_integration PRIVATE offs)
+    endif()
+    target_link_libraries(test_rpc_integration PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     target_link_libraries(test_rpc_integration PRIVATE blake3)
     target_link_libraries(test_rpc_integration PRIVATE hashmap)
     target_link_libraries(test_rpc_integration PRIVATE http-parser)
@@ -169,7 +202,9 @@ if (BUILD_TESTING)
     target_link_libraries(test_rpc_integration PRIVATE poll-dancer)
     target_link_libraries(test_rpc_integration PRIVATE GTest::gtest_main)
     target_link_libraries(test_rpc_integration PRIVATE GTest::gmock)
-    target_link_libraries(test_rpc_integration PRIVATE pthread)
+    if(NOT WIN32)
+      target_link_libraries(test_rpc_integration PRIVATE pthread)
+    endif()
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/CMakeLists.txt)
       target_compile_definitions(test_rpc_integration PRIVATE HAS_MSQUIC)
       target_include_directories(test_rpc_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/src/inc)
@@ -194,8 +229,14 @@ if (BUILD_TESTING)
       test_offs_ca.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/../tools/offs-ca/ca_ops.c
     )
+    add_dependencies(test_offs_ca offs)
+    target_link_libraries(test_offs_ca PRIVATE offs)
     target_include_directories(test_offs_ca PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../tools/offs-ca)
-    target_link_libraries(test_offs_ca PRIVATE ssl crypto)
+    target_include_directories(test_offs_ca PRIVATE ${OPENSSL_INCLUDE_DIR})
+    # The vcpkg OpenSSL libraries are named libssl.lib / libcrypto.lib on Windows;
+    # use the explicit ${OPENSSL_LIBRARIES} from find_package(OpenSSL) rather than
+    # the bare "ssl" / "crypto" names that fail to resolve on Windows.
+    target_link_libraries(test_offs_ca PRIVATE ${OPENSSL_LIBRARIES} ws2_32 crypt32)
     target_link_libraries(test_offs_ca PRIVATE GTest::gtest_main)
     gtest_add_tests(TARGET test_offs_ca TEST_LIST ca_test_list)
 
@@ -211,8 +252,12 @@ if (BUILD_TESTING)
     add_dependencies(test_large_file_upload offs)
     add_dependencies(test_large_file_upload blake3)
     add_dependencies(test_large_file_upload http-parser)
-    target_link_libraries(test_large_file_upload PRIVATE -Wl,--whole-archive offs -Wl,--no-whole-archive)
-    target_link_libraries(test_large_file_upload PRIVATE ssl crypto)
+    if(NOT MSVC)
+      target_link_libraries(test_large_file_upload PRIVATE -Wl,--whole-archive offs -Wl,--no-whole-archive)
+    else()
+      target_link_libraries(test_large_file_upload PRIVATE offs)
+    endif()
+    target_link_libraries(test_large_file_upload PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     target_link_libraries(test_large_file_upload PRIVATE blake3)
     target_link_libraries(test_large_file_upload PRIVATE hashmap)
     target_link_libraries(test_large_file_upload PRIVATE http-parser)
@@ -220,7 +265,9 @@ if (BUILD_TESTING)
     target_link_libraries(test_large_file_upload PRIVATE poll-dancer)
     target_link_libraries(test_large_file_upload PRIVATE GTest::gtest_main)
     target_link_libraries(test_large_file_upload PRIVATE GTest::gmock)
-    target_link_libraries(test_large_file_upload PRIVATE pthread)
+    if(NOT WIN32)
+      target_link_libraries(test_large_file_upload PRIVATE pthread)
+    endif()
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/CMakeLists.txt)
       target_compile_definitions(test_large_file_upload PRIVATE HAS_MSQUIC)
       target_include_directories(test_large_file_upload PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/src/inc)

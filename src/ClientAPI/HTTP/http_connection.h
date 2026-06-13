@@ -38,7 +38,7 @@ typedef struct http_connection_t {
   http_request_t* request;
   buffer_t* write_buffer;
   uint8_t write_pending;
-  _Atomic uint8_t read_pending;      /* I/O thread has sent READABLE; actor hasn't processed it yet */
+  ATOMIC(uint8_t) read_pending;      /* I/O thread has sent READABLE; actor hasn't processed it yet */
   char* header_field;
   size_t header_field_len;
   size_t header_field_cap;

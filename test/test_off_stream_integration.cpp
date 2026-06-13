@@ -21,12 +21,6 @@ extern "C" {
 #include "../src/Util/rm_rf.h"
 }
 
-__attribute__((unused))
-static void on_close_set_promise(void* ctx, void*) {
-  auto* prom = static_cast<std::promise<void>*>(ctx);
-  prom->set_value();
-}
-
 struct TupleCollector {
   std::vector<tuple_t*> tuples;
   buffer_t* file_hash;
@@ -71,13 +65,13 @@ TEST(OffStreamIntegration, WriteableOffStreamEncodesData) {
   scheduler_pool_t* pool = scheduler_pool_create(2);
   scheduler_pool_start(pool);
 
-  char* wstream_path = (char*)"/tmp/test_integration_wstream";
+  char* wstream_path = (char*)"test_integration_wstream";
   rm_rf(wstream_path);
   mkdir_p(wstream_path);
 
   timer_actor_t* timer = timer_actor_create(pool);
   block_cache_t* bc = block_cache_create(
-      (config_t){.index_bucket_size = 10, .index_wait = 1000, .index_max_wait = 5000, .section_size = 128000, .section_wait = 1000, .section_max_wait = 5000, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
+      config_t{.index_bucket_size = 10, .index_wait = 1000, .index_max_wait = 5000, .section_size = 128000, .section_wait = 1000, .section_max_wait = 5000, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
       wstream_path, standard, timer, pool, NULL, 0);
   tuple_cache_t* tc = tuple_cache_create(100, pool);
 
@@ -131,13 +125,13 @@ TEST(OffStreamIntegration, ReadableOffStreamDecodesBlock) {
   scheduler_pool_t* pool = scheduler_pool_create(2);
   scheduler_pool_start(pool);
 
-  char* rstream_path = (char*)"/tmp/test_integration_rstream";
+  char* rstream_path = (char*)"test_integration_rstream";
   rm_rf(rstream_path);
   mkdir_p(rstream_path);
 
   timer_actor_t* timer = timer_actor_create(pool);
   block_cache_t* bc = block_cache_create(
-      (config_t){.index_bucket_size = 10, .index_wait = 1000, .index_max_wait = 5000, .section_size = 128000, .section_wait = 1000, .section_max_wait = 5000, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
+      config_t{.index_bucket_size = 10, .index_wait = 1000, .index_max_wait = 5000, .section_size = 128000, .section_wait = 1000, .section_max_wait = 5000, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
       rstream_path, standard, timer, pool, NULL, 0);
   tuple_cache_t* tc = tuple_cache_create(100, pool);
 
