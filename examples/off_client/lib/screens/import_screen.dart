@@ -1,6 +1,4 @@
-import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
@@ -10,14 +8,14 @@ import '../services/base58.dart';
 import '../services/recycler_resolver.dart';
 
 class ImportScreen extends StatefulWidget {
-  const ImportScreen({super.key});
+  final OffApi api;
+  const ImportScreen({super.key, required this.api});
 
   @override
   State<ImportScreen> createState() => _ImportScreenState();
 }
 
 class _ImportScreenState extends State<ImportScreen> {
-  final OffApi _api = OffApi();
   String? _selectedFilePath;
   String? _selectedFileName;
   bool _isUploading = false;
@@ -53,7 +51,7 @@ class _ImportScreenState extends State<ImportScreen> {
       final file = File(_selectedFilePath!);
       final length = await file.length();
 
-      final url = await _api.uploadFile(
+      final url = await widget.api.uploadFile(
         fileName: _selectedFileName!,
         streamLength: length,
         filePath: _selectedFilePath!,
@@ -109,7 +107,7 @@ class _ImportScreenState extends State<ImportScreen> {
     String? recyclerServerBase = parentServerBase;
 
     if (_recyclerUrls != null) {
-      final resolver = RecyclerResolver(_api);
+      final resolver = RecyclerResolver(widget.api);
       for (final url in _recyclerUrls!) {
         if (_isOfdUrl(url) && _ofdMatchesDir(url, dirName)) {
           try {
@@ -157,7 +155,7 @@ class _ImportScreenState extends State<ImportScreen> {
         serverBase: recyclerServerBase ?? '',
       );
 
-      final url = await _api.uploadFile(
+      final url = await widget.api.uploadFile(
         fileName: fileName,
         streamLength: length,
         filePath: file.path,
@@ -187,7 +185,7 @@ class _ImportScreenState extends State<ImportScreen> {
 
     // Build and upload this directory's OFD
     final ofdBytes = buildOfdCbor(entries);
-    return _api.uploadFileBuffered(
+    return widget.api.uploadFileBuffered(
       fileName: '$dirName.ofd',
       streamLength: ofdBytes.length,
       contentType: 'offsystem/directory',
