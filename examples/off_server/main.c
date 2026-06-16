@@ -6,7 +6,9 @@
 #include "ClientAPI/HTTP/off_routes.h"
 #include "ClientAPI/HTTP/block_routes.h"
 #include "ClientAPI/HTTP/cors.h"
-#include "ClientAPI/Unix/unix_transport.h"
+#ifndef _WIN32
+  #include "ClientAPI/Unix/unix_transport.h"
+#endif
 #include "ClientAPI/HTTP/health_routes.h"
 #include "ClientAPI/health_handler.h"
 #include "../../src/ClientAPI/HTTP/peer_routes.h"
@@ -25,9 +27,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
-#include <time.h>
-#include <unistd.h>
-#include <execinfo.h>
 
 static volatile sig_atomic_t g_stop = 0;
 
@@ -110,9 +109,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  struct timespec now;
-  clock_gettime(CLOCK_MONOTONIC, &now);
-  uint64_t server_start_ms = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+  uint64_t server_start_ms = platform_monotonic_ns() / 1000000ULL;
   uint8_t running_val = 1;
   uint8_t draining_val = 0;
 
@@ -156,6 +153,7 @@ int main(int argc, char** argv) {
   peer_routes_register(server, &node_obj, &config, NULL);
   config_routes_register(server, &node_obj, &config, ".");
 
+#ifndef _WIN32
   unix_transport_t* unix_transport = NULL;
   if (unix_path != NULL) {
     unix_transport = unix_transport_create(pool, bc, ofd_cache, tc, unix_path, NULL, &health_ctx);
@@ -174,15 +172,30 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
+#else
+  if (unix_path != NULL) {
+    fprintf(stderr, "Warning: --unix is not supported on Windows, ignoring %s\n", unix_path);
+  }
+#endif
 
+#ifndef _WIN32
+  struct sigaction signal_action;
+  memset(&signal_action, 0, sizeof(signal_action));
+  signal_action.sa_handler = _signal_handler;
+  sigaction(SIGINT, &signal_action, NULL);
+  sigaction(SIGTERM, &signal_action, NULL);
+#else
   signal(SIGINT, _signal_handler);
   signal(SIGTERM, _signal_handler);
+#endif
 
   http_server_listen(server);
+#ifndef _WIN32
   if (unix_transport != NULL) {
     unix_transport_start(unix_transport);
     printf("Listening on unix://%s\n", unix_path);
   }
+#endif
 
   authority_load_peers(authority, network);
   network_start_connections(network);
@@ -191,13 +204,15 @@ int main(int argc, char** argv) {
   printf("Press Ctrl+C to stop\n");
 
   while (!g_stop) {
-    pause();
+    platform_sleep_ms(200);
   }
 
+#ifndef _WIN32
   if (unix_transport != NULL) {
     unix_transport_stop(unix_transport);
     unix_transport_destroy(unix_transport);
   }
+#endif
   ATOMIC_STORE(&network->running, 0);
   network_shutdown_connections(network);
   http_server_stop(server);
