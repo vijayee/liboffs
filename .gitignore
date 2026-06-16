@@ -13,7 +13,7 @@ DartConfiguration.tcl
 Makefile
 _deps/
 cmake_install.cmake
-lib/
+/lib/
 msquic-config.cmake
 test/CMakeFiles/
 test/CTestTestfile.cmake
