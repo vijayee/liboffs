@@ -38,10 +38,10 @@ class _AppShellState extends State<AppShell> {
   final OffApi _api = OffApi();
 
   List<Widget> get _screens => [
-        const ImportScreen(),
+        ImportScreen(api: _api),
         const ExportScreen(),
         ConnectScreen(api: _api),
-        const ConfigurationScreen(api: _api),
+        ConfigurationScreen(api: _api),
       ];
 
   @override
