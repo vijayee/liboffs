@@ -129,7 +129,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.blue.shade900.withOpacity(0.3),
+                color: Colors.blue.shade900.withValues(alpha: 0.3),
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(color: Colors.blue),
               ),
@@ -142,7 +142,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
               width: double.infinity,
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.grey.shade900.withOpacity(0.3),
+                color: Colors.grey.shade900.withValues(alpha: 0.3),
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(color: Colors.grey),
               ),
