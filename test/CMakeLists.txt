@@ -133,6 +133,7 @@ if (BUILD_TESTING)
         target_link_libraries(test_file_transfer_integration PRIVATE offs)
       endif()
       target_link_libraries(test_file_transfer_integration PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+      target_link_libraries(test_file_transfer_integration PRIVATE blake3)
       target_link_libraries(test_file_transfer_integration PRIVATE hashmap)
       target_link_libraries(test_file_transfer_integration PRIVATE http-parser)
       target_link_libraries(test_file_transfer_integration PUBLIC cbor)
@@ -242,7 +243,10 @@ if (BUILD_TESTING)
     # The vcpkg OpenSSL libraries are named libssl.lib / libcrypto.lib on Windows;
     # use the explicit ${OPENSSL_LIBRARIES} from find_package(OpenSSL) rather than
     # the bare "ssl" / "crypto" names that fail to resolve on Windows.
-    target_link_libraries(test_offs_ca PRIVATE ${OPENSSL_LIBRARIES} ws2_32 crypt32)
+    target_link_libraries(test_offs_ca PRIVATE ${OPENSSL_LIBRARIES})
+    if(WIN32)
+      target_link_libraries(test_offs_ca PRIVATE ws2_32 crypt32)
+    endif()
     target_link_libraries(test_offs_ca PRIVATE GTest::gtest_main)
     gtest_add_tests(TARGET test_offs_ca TEST_LIST ca_test_list)
 

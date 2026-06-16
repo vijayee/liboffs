@@ -9,6 +9,8 @@
 #if defined(_MSC_VER)
 #include <BaseTsd.h>
 typedef SSIZE_T ssize_t;
+#else
+#include <unistd.h>
 #endif
 
 #define WS_MAX_PAYLOAD_SIZE (16 * 1024 * 1024) /* 16 MB — reject frames larger than this */
