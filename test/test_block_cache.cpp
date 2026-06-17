@@ -13,6 +13,7 @@ extern "C" {
 #include "../src/Actor/message.h"
 #include "../src/Scheduler/scheduler.h"
 #include "../src/Util/atomic_compat.h"
+#include "../src/Platform/platform_time.h"
 #include <cbor.h>
 #include "../src/Util/allocator.h"
 }
@@ -67,7 +68,7 @@ static int bc_put_sync(block_cache_t* bc, block_t* block, scheduler_pool_t* pool
 
   if (pool) {
     scheduler_inject(pool, &comp);
-    while (!ATOMIC_LOAD(&cs.done)) { usleep(1000); }
+    while (!ATOMIC_LOAD(&cs.done)) { platform_sleep_ms(1); }
   } else {
     while (!ATOMIC_LOAD(&cs.done)) {
       actor_run(&bc->actor, ACTOR_BATCH_SIZE);
@@ -90,7 +91,7 @@ static block_t* bc_get_sync(block_cache_t* bc, buffer_t* hash, scheduler_pool_t*
 
   if (pool) {
     scheduler_inject(pool, &comp);
-    while (!ATOMIC_LOAD(&cs.done)) { usleep(1000); }
+    while (!ATOMIC_LOAD(&cs.done)) { platform_sleep_ms(1); }
   } else {
     while (!ATOMIC_LOAD(&cs.done)) {
       actor_run(&bc->actor, ACTOR_BATCH_SIZE);
@@ -117,7 +118,7 @@ static int bc_remove_sync(block_cache_t* bc, buffer_t* hash, scheduler_pool_t* p
 
   if (pool) {
     scheduler_inject(pool, &comp);
-    while (!ATOMIC_LOAD(&cs.done)) { usleep(1000); }
+    while (!ATOMIC_LOAD(&cs.done)) { platform_sleep_ms(1); }
   } else {
     while (!ATOMIC_LOAD(&cs.done)) {
       actor_run(&bc->actor, ACTOR_BATCH_SIZE);
@@ -202,17 +203,24 @@ public:
   void SetUp() override {
     location = path_join("/tmp", "BlockCacheTest");
     rm_rf(location);
-    pool = scheduler_pool_create(2);
+    pool = scheduler_pool_create(4);
     scheduler_pool_start(pool);
     timer_actor = timer_actor_create(pool);
     mkdir_p(location);
     config = config_default();
+    /* Use a long debounce window so the 5ms timer cannot fire mid-test.
+       The TearDown's explicit flush + sync handles persistence. */
+    config.index_wait = 60000;
+    config.index_max_wait = 60000;
     for (size_t i = 0; i < BLOCK_COUNT; i++) {
       blocks[i] = block_create_random_block_by_type(type);
     }
   }
   void TearDown() override {
     scheduler_pool_wait_for_idle(pool);
+    if (block_cache != NULL) {
+      block_cache_sync(block_cache);
+    }
     block_cache_destroy(block_cache);
     timer_actor_destroy(timer_actor);
     scheduler_pool_stop(pool);
@@ -225,11 +233,11 @@ public:
 };
 
 TEST_F(TestBlockCache, TestBlockCache) {
-  block_cache = block_cache_create(config, location, type, timer_actor, NULL, NULL, 0);
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
 
   /* Put all blocks */
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    int result = bc_put_sync(block_cache, blocks[i], NULL);
+    int result = bc_put_sync(block_cache, blocks[i], pool);
     EXPECT_EQ(result, CACHE_PUT_NEW) << "Failed to store block " << i;
   }
 
@@ -241,7 +249,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
 
   /* Re-put same blocks (should return CACHE_PUT_EXISTS, no duplicate) */
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    int result = bc_put_sync(block_cache, blocks[i], NULL);
+    int result = bc_put_sync(block_cache, blocks[i], pool);
     EXPECT_EQ(result, CACHE_PUT_EXISTS) << "Re-put should return CACHE_PUT_EXISTS for block " << i;
   }
 
@@ -253,7 +261,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
 
   /* Get all blocks */
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    block_t* block = bc_get_sync(block_cache, blocks[i]->hash, NULL);
+    block_t* block = bc_get_sync(block_cache, blocks[i]->hash, pool);
     EXPECT_NE(block, nullptr) << "Failed to retrieve block " << i;
     if (block != NULL) {
       EXPECT_EQ(buffer_compare(block->hash, blocks[i]->hash), 0);
@@ -268,7 +276,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
 
   /* Remove all blocks */
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    int result = bc_remove_sync(block_cache, blocks[i]->hash, NULL);
+    int result = bc_remove_sync(block_cache, blocks[i]->hash, pool);
     EXPECT_EQ(result, 0) << "Failed to remove block " << i;
   }
 
@@ -276,7 +284,7 @@ TEST_F(TestBlockCache, TestBlockCache) {
 
   /* Get removed blocks (should return NULL) */
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    block_t* block = bc_get_sync(block_cache, blocks[i]->hash, NULL);
+    block_t* block = bc_get_sync(block_cache, blocks[i]->hash, pool);
     EXPECT_EQ(block, nullptr) << "Retrieved removed block " << i;
     if (block != NULL) {
       block_destroy(block);
@@ -285,22 +293,22 @@ TEST_F(TestBlockCache, TestBlockCache) {
 }
 
 TEST_F(TestBlockCache, TestBlockCachePutOnly) {
-  block_cache = block_cache_create(config, location, type, timer_actor, NULL, NULL, 0);
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    int result = bc_put_sync(block_cache, blocks[i], NULL);
+    int result = bc_put_sync(block_cache, blocks[i], pool);
     EXPECT_EQ(result, CACHE_PUT_NEW);
   }
   EXPECT_EQ(block_cache_count(block_cache), BLOCK_COUNT);
 }
 
 TEST_F(TestBlockCache, TestBlockCachePutGetOnly) {
-  block_cache = block_cache_create(config, location, type, timer_actor, NULL, NULL, 0);
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    int result = bc_put_sync(block_cache, blocks[i], NULL);
+    int result = bc_put_sync(block_cache, blocks[i], pool);
     EXPECT_EQ(result, CACHE_PUT_NEW);
   }
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    block_t* block = bc_get_sync(block_cache, blocks[i]->hash, NULL);
+    block_t* block = bc_get_sync(block_cache, blocks[i]->hash, pool);
     EXPECT_NE(block, nullptr);
     if (block) block_destroy(block);
   }
@@ -308,13 +316,13 @@ TEST_F(TestBlockCache, TestBlockCachePutGetOnly) {
 }
 
 TEST_F(TestBlockCache, TestBlockCachePutRemoveOnly) {
-  block_cache = block_cache_create(config, location, type, timer_actor, NULL, NULL, 0);
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    int result = bc_put_sync(block_cache, blocks[i], NULL);
+    int result = bc_put_sync(block_cache, blocks[i], pool);
     EXPECT_EQ(result, CACHE_PUT_NEW);
   }
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
-    int result = bc_remove_sync(block_cache, blocks[i]->hash, NULL);
+    int result = bc_remove_sync(block_cache, blocks[i]->hash, pool);
     EXPECT_EQ(result, 0);
   }
   EXPECT_EQ(block_cache_count(block_cache), 0u);
@@ -342,12 +350,18 @@ public:
     mkdir_p(location);
     config = config_default();
     config.lru_size = 10;
+    /* Use a long debounce window so the 5ms timer cannot fire mid-test. */
+    config.index_wait = 60000;
+    config.index_max_wait = 60000;
     for (size_t i = 0; i < LRU_COUNT; i++) {
       blocks[i] = block_create_random_block_by_type(type);
     }
   }
   void TearDown() override {
     scheduler_pool_wait_for_idle(pool);
+    if (block_cache != NULL) {
+      block_cache_sync(block_cache);
+    }
     block_cache_destroy(block_cache);
     timer_actor_destroy(timer_actor);
     scheduler_pool_stop(pool);

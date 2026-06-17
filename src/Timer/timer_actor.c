@@ -161,9 +161,6 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
         atomic_store(payload->out_timer_id,
                      completion != NULL ? completion->timer_id : 0);
       }
-      if (msg->payload_destroy != NULL) {
-        msg->payload_destroy(msg->payload);
-      }
       msg->payload_destroy = NULL;
       msg->payload = NULL;
       break;
@@ -179,9 +176,6 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
         void* user_data = timer->user_data;
         _timer_actor_untrack(timer_actor, timer);
         _destroy_stack_push(timer_actor, timer, user_data);
-      }
-      if (msg->payload_destroy != NULL) {
-        msg->payload_destroy(msg->payload);
       }
       msg->payload_destroy = NULL;
       msg->payload = NULL;
@@ -239,9 +233,6 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
           free(completion);
         }
       }
-      if (msg->payload_destroy != NULL) {
-        msg->payload_destroy(msg->payload);
-      }
       msg->payload_destroy = NULL;
       msg->payload = NULL;
       break;
@@ -274,9 +265,6 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
         entry->timer = NULL;
         entry->completion_payload = NULL;
       }
-      if (msg->payload_destroy != NULL) {
-        msg->payload_destroy(msg->payload);
-      }
       msg->payload_destroy = NULL;
       msg->payload = NULL;
       break;
@@ -284,13 +272,10 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
     case TIMER_COMPLETION: {
       timer_completion_payload_t* completion = (timer_completion_payload_t*)msg->payload;
       /* Allocate a fresh copy of the completion to forward to the target
-       * actor. The `msg->payload` we received is itself a copy allocated
-       * by either _timer_completion_callback (when a timer fires) or
-       * the TIMER_DEBOUNCE_FLUSH case (when a debounce is flushed);
-       * in both paths it was sent via actor_send with payload_destroy
-       * = free, so this dispatch owns it. We must free the original
-       * before clearing payload, otherwise the post-dispatch cleanup
-       * sees NULL and skips the free — leaking 32 bytes per dispatch. */
+       * actor. The original payload is owned by the dispatch and will be
+       * freed by actor_run's normal post-dispatch cleanup; we simply
+       * consume (set msg->payload = NULL) to indicate ownership transfer
+       * of the original to the runner. */
       timer_completion_payload_t* copy = get_clear_memory(sizeof(timer_completion_payload_t));
       *copy = *completion;
       message_t target_msg = {0};
@@ -298,7 +283,6 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
       target_msg.payload = copy;
       target_msg.payload_destroy = free;
       actor_send(copy->target, &target_msg);
-      free(msg->payload);
       msg->payload = NULL;
       msg->payload_destroy = NULL;
       break;

@@ -704,6 +704,13 @@ void block_cache_destroy(block_cache_t* block_cache) {
     refcounter_destroy_lock((refcounter_t*) block_cache);
     if (block_cache->timer_actor != NULL
         && block_cache->pool != NULL && !atomic_load(&block_cache->pool->terminate)) {
+      /* Mark the actor destroyed BEFORE flushing debounces — any subsequent
+         TIMER_COMPLETION forwarded from the timer_actor will be dropped
+         at actor_send (ACTOR_FLAG_DESTROY check) rather than racing with
+         index/sections teardown. The flush still cancels the pd_timer
+         and frees the completion payload, but no new work reaches the
+         actor. */
+      atomic_fetch_or(&block_cache->actor.flags, ACTOR_FLAG_DESTROY);
       timer_actor_debounce_flush(block_cache->timer_actor,
                                   &block_cache->actor, INDEX_SAVE);
       platform_sleep_ms(10);

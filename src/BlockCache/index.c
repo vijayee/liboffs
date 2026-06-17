@@ -1087,9 +1087,14 @@ void index_debounce(index_t* index) {
   cbor_item_t *cbor = _index_to_cbor(index);
   uint64_t crc = 0;
   int result = _index_to_crc(index, &crc);
-  char file[strlen(index->current_file) + 22];
+  char* file = malloc(strlen(index->current_file) + 22);
+  if (file == NULL) {
+    log_error("index_debounce: out of memory allocating snapshot filename");
+    cbor_intermediate_decref(cbor);
+    return;
+  }
   if (result == 0) {
-    sprintf(file, "%s-%lu", index->current_file, crc);
+    sprintf(file, "%s-%llu", index->current_file, (unsigned long long)crc);
   } else {
     log_error("Could not store index with correct crc");
     sprintf(file, "%s-crc_error", index->current_file);
@@ -1114,6 +1119,7 @@ void index_debounce(index_t* index) {
   platform_file_write(index_file, cbor_data, cbor_size);
   platform_file_close(index_file);
   free(cbor_data);
+  free(file);
   wal_destroy(wal);
   cbor_intermediate_decref(cbor);
   uint64_t first_kept_id = _index_prune_old_snapshots(index);
