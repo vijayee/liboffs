@@ -1,6 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 String mimeFromExtension(String filename) {
@@ -64,12 +64,34 @@ String mimeFromExtension(String filename) {
   return map[ext] ?? 'application/octet-stream';
 }
 
-class OffApi {
-  final String baseUrl;
-  final String? _apiKey;
+class OffApi extends ChangeNotifier {
+  String _baseUrl;
+  String? _apiKey;
 
-  OffApi({this.baseUrl = 'http://localhost:23402', String? apiKey})
-      : _apiKey = apiKey;
+  OffApi({String baseUrl = 'http://localhost:23402', String? apiKey})
+      : _baseUrl = baseUrl,
+        _apiKey = apiKey;
+
+  String get baseUrl => _baseUrl;
+  bool get hasApiKey => _apiKey != null && _apiKey!.isNotEmpty;
+
+  /// Update the base URL used for subsequent HTTP requests. Listeners are
+  /// notified only when the value actually changes.
+  void setBaseUrl(String value) {
+    if (_baseUrl == value) return;
+    _baseUrl = value;
+    notifyListeners();
+  }
+
+  /// Update the API key used for the Authorization header on subsequent
+  /// requests. Passing an empty string or null clears the key. Listeners are
+  /// notified only when the value actually changes.
+  void setApiKey(String? value) {
+    final normalized = (value == null || value.isEmpty) ? null : value;
+    if (_apiKey == normalized) return;
+    _apiKey = normalized;
+    notifyListeners();
+  }
 
   /// Stream a file upload without loading the entire file into memory.
   /// The server processes data as it arrives via the streaming PUT pipeline.

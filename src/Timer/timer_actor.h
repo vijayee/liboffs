@@ -41,6 +41,15 @@ typedef struct timer_actor_t {
   debounce_entry_t debounce_map[MAX_DEBOUNCE_KEYS];
   platform_mutex_t* destroy_lock;
   struct timer_destroy_node_t* destroy_stack;
+  /* Serializes pd_timer_create/destroy against the timer thread's
+     destroy_stack_drain. Pool workers run _timer_actor_dispatch on
+     parallel threads, and pd_timer_create/destroy mutates the loop's
+     watcher list. The timer thread also mutates the watcher list when
+     it drains the destroy stack. Without this lock, two threads can
+     race on pd_loop_add_watcher / pd_loop_remove_watcher — the
+     watcher array's watcher_count is left inconsistent, and the loop
+     later iterates a stale (already-freed) pointer. */
+  platform_mutex_t* loop_lock;
 } timer_actor_t;
 
 typedef struct {

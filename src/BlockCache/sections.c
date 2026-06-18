@@ -783,23 +783,28 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
   /* Replace any full sections in the robin with fresh ones.
      Stale sections from a previous run may have all blocks occupied. */
   {
-    size_t ids[sections->robin->size];
-    size_t robin_size = 0;
-    round_robin_node_t* node = sections->robin->first;
-    while (node != NULL) {
-      ids[robin_size++] = node->id;
-      node = node->next;
-    }
-    for (size_t i = 0; i < robin_size; i++) {
-      section_t* section = section_create(sections->data_path, sections->meta_path,
-                                          sections->size, ids[i], sections->type, sections->pool);
-      section->on_dirty = section_on_dirty;
-      section->on_dirty_context = sections;
-      refcounter_yield((refcounter_t*) section);
-      sections_lru_cache_put(sections->lru, section);
-      if (section_full(section) != 0) {
-        sections_full(sections, ids[i]);
+    size_t* ids = malloc(sizeof(size_t) * sections->robin->size);
+    if (ids != NULL) {
+      size_t robin_size = 0;
+      round_robin_node_t* node = sections->robin->first;
+      while (node != NULL) {
+        ids[robin_size++] = node->id;
+        node = node->next;
       }
+      for (size_t i = 0; i < robin_size; i++) {
+        section_t* section = section_create(sections->data_path, sections->meta_path,
+                                            sections->size, ids[i], sections->type, sections->pool);
+        section->on_dirty = section_on_dirty;
+        section->on_dirty_context = sections;
+        refcounter_yield((refcounter_t*) section);
+        sections_lru_cache_put(sections->lru, section);
+        if (section_full(section) != 0) {
+          sections_full(sections, ids[i]);
+        }
+      }
+      free(ids);
+    } else {
+      log_error("sections_create: out of memory allocating id snapshot; skipping robin refresh");
     }
   }
 
@@ -817,6 +822,12 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
 void sections_destroy(sections_t* sections) {
   if (sections->timer_actor != NULL && sections->actor.pool != NULL
       && !atomic_load(&sections->actor.pool->terminate)) {
+    /* Mark the actor destroyed BEFORE flushing debounces — any subsequent
+       TIMER_COMPLETION forwarded from the timer_actor will be dropped
+       at actor_send (ACTOR_FLAG_DESTROY check) rather than racing with
+       lru teardown. The flush still cancels the pd_timer and frees
+       the completion payload, but no new work reaches the actor. */
+    atomic_fetch_or(&sections->actor.flags, ACTOR_FLAG_DESTROY);
     timer_actor_debounce_flush(sections->timer_actor, &sections->actor, SECTION_WRITE_META);
     platform_sleep_ms(10);
     scheduler_pool_wait_for_idle(sections->actor.pool);

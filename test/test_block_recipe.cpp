@@ -64,13 +64,13 @@ TEST(NewBlocksRecipe, PullCreatesBlock) {
   scheduler_pool_t* pool = scheduler_pool_create(2);
   scheduler_pool_start(pool);
 
-  char* path = (char*)"/tmp/test_newblocksrecipe_pull";
+  char* path = (char*)"test_newblocksrecipe_pull";
   rm_rf(path);
   mkdir_p(path);
 
   timer_actor_t* timer = timer_actor_create(pool);
   block_cache_t* bc = block_cache_create(
-      (config_t){.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0, .section_size = 128000, .section_wait = 0, .section_max_wait = 0, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
+      config_t{.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0, .section_size = 128000, .section_wait = 0, .section_max_wait = 0, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
       path, standard, timer, pool, NULL, 0);
 
   new_blocks_recipe_t* recipe = new_blocks_recipe_create(pool, bc, standard);
@@ -116,13 +116,13 @@ TEST(NewBlocksRecipe, PullMultipleBlocks) {
   scheduler_pool_t* pool = scheduler_pool_create(2);
   scheduler_pool_start(pool);
 
-  char* path = (char*)"/tmp/test_newblocksrecipe_multi";
+  char* path = (char*)"test_newblocksrecipe_multi";
   rm_rf(path);
   mkdir_p(path);
 
   timer_actor_t* timer = timer_actor_create(pool);
   block_cache_t* bc = block_cache_create(
-      (config_t){.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0, .section_size = 128000, .section_wait = 0, .section_max_wait = 0, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
+      config_t{.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0, .section_size = 128000, .section_wait = 0, .section_max_wait = 0, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
       path, standard, timer, pool, NULL, 0);
 
   new_blocks_recipe_t* recipe = new_blocks_recipe_create(pool, bc, standard);
@@ -186,13 +186,13 @@ TEST(RecyclerRecipe, PullFromDescriptor) {
   scheduler_pool_t* pool = scheduler_pool_create(2);
   scheduler_pool_start(pool);
 
-  char* path = (char*)"/tmp/test_recyclerrecipe_pull";
+  char* path = (char*)"test_recyclerrecipe_pull";
   rm_rf(path);
   mkdir_p(path);
 
   timer_actor_t* timer = timer_actor_create(pool);
   block_cache_t* bc = block_cache_create(
-      (config_t){.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0, .section_size = 128000, .section_wait = 0, .section_max_wait = 0, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
+      config_t{.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0, .section_size = 128000, .section_wait = 0, .section_max_wait = 0, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
       path, standard, timer, pool, NULL, 0);
 
   // Create random blocks and put them in the cache
@@ -330,13 +330,13 @@ TEST(BlockRecipeIntegration, WriteableOffStreamWithNewBlocksRecipe) {
   scheduler_pool_t* pool = scheduler_pool_create(2);
   scheduler_pool_start(pool);
 
-  char* wstream_path = (char*)"/tmp/test_recipe_integration_wstream";
+  char* wstream_path = (char*)"test_recipe_integration_wstream";
   rm_rf(wstream_path);
   mkdir_p(wstream_path);
 
   timer_actor_t* timer = timer_actor_create(pool);
   block_cache_t* bc = block_cache_create(
-      (config_t){.index_bucket_size = 10, .index_wait = 1000, .index_max_wait = 5000, .section_size = 128000, .section_wait = 1000, .section_max_wait = 5000, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
+      config_t{.index_bucket_size = 10, .index_wait = 1000, .index_max_wait = 5000, .section_size = 128000, .section_wait = 1000, .section_max_wait = 5000, .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
       wstream_path, standard, timer, pool, NULL, 0);
   tuple_cache_t* tc = tuple_cache_create(100, pool);
 

@@ -32,20 +32,25 @@ static buffer_t* make_hash(const uint8_t* data, size_t len) {
   return buffer_create_from_pointer_copy((uint8_t*)data, len);
 }
 
-// Error event handler that just absorbs the error without crashing
-__attribute__((unused))
-static void on_error_silence(void* ctx, void* data) {
-  (void)ctx;
-  if (data != nullptr) {
-    async_error_t* error = (async_error_t*)data;
-    error_destroy(error);
-  }
-}
+/* No-op actor dispatch for the test's stub network_t. The previous
+   SetUp() used `nullptr` as the dispatch function, which is fine when
+   the scheduler pool is never started (no worker ever runs the
+   network actor). Now that the pool is started, a worker that picks
+   up the network actor — injected via actor_send on the
+   CACHE_PUT_RESULT and NETWORK_FIND_BLOCK_RESULT paths — would call
+   through the nullptr and SEGV. Use a no-op dispatch so the worker
+   pulls messages off the queue and frees them without side effects.
 
-__attribute__((unused))
-static void on_close_silence(void* ctx, void* data) {
-  (void)ctx;
-  (void)data;
+   IMPORTANT: this dispatch must NOT call msg->payload_destroy on the
+   payload. actor_run frees the payload itself after the dispatch
+   returns (see actor.c lines 110-112), and the dispatch is expected
+   to CONSUME the payload (set msg->payload = NULL) when it takes
+   ownership. An earlier version of this function called
+   msg->payload_destroy(msg->payload) and then left msg->payload
+   non-NULL, causing actor_run to double-free and crash the worker. */
+static void test_network_noop_dispatch(void* state, message_t* msg) {
+  (void)state;
+  (void)msg;
 }
 
 // ========================================================================
@@ -110,17 +115,24 @@ protected:
   char* path;
 
   void SetUp() override {
-    // Create pool but do NOT start — we dispatch directly without worker threads
-    // to avoid race conditions with async actor messages
+    // Pool must be started: the cache/timer/network actors rely on worker
+    // threads to drain their mailboxes. The previous "create-but-do-not-start"
+    // pattern deadlocked in block_cache_destroy because
+    // scheduler_pool_wait_for_idle waits for idle_count == worker_count, but
+    // an unstarted pool never marks any worker as idle. Tests that dispatch
+    // messages into the cache mailbox (e.g. FindBlockResultFoundReissuesCacheGet
+    // calls block_cache_get on the network-result path) need real workers to
+    // drain the queue, or wait_for_idle will block forever in TearDown.
     pool = scheduler_pool_create(2);
+    scheduler_pool_start(pool);
 
-    path = (char*)"/tmp/test_stream_network_rstream";
+    path = (char*)"test_stream_network_rstream";
     rm_rf(path);
     mkdir_p(path);
 
     timer = timer_actor_create(pool);
     bc = block_cache_create(
-        (config_t){.index_bucket_size = 10, .index_wait = 1000,
+        config_t{.index_bucket_size = 10, .index_wait = 1000,
                    .index_max_wait = 5000, .section_size = 128000,
                    .section_wait = 1000, .section_max_wait = 5000,
                    .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
@@ -129,8 +141,11 @@ protected:
 
     // Create a minimal network_t for testing (only the actor field matters for dispatch)
     network = (network_t*)get_clear_memory(sizeof(network_t));
-    // Initialize actor so actor_send works (queue needs to be initialized)
-    actor_init(&network->actor, network, nullptr, pool);
+    // Initialize actor so actor_send works (queue needs to be initialized).
+    // Use a no-op dispatch: tests bypass the network entirely, but with the
+    // pool started, a worker that picks up the network actor (injected by
+    // actor_send) must have a valid dispatch function to call.
+    actor_init(&network->actor, network, test_network_noop_dispatch, pool);
     network->wanted_list = wanted_list_create();
 
     uint8_t hash_data[] = {0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
@@ -157,6 +172,14 @@ protected:
     tuple_cache_destroy(tc);
     block_cache_destroy(bc);
     timer_actor_destroy(timer);
+    /* Drain any messages the test body enqueued (e.g. block_cache_get
+       called by NETWORK_FIND_BLOCK_RESULT in
+       FindBlockResultFoundReissuesCacheGet) and stop the workers before
+       destroying the pool. Without stop(), scheduler_pool_destroy would
+       leak the worker thread field; without wait_for_idle(), the cache
+       destroy above may have raced the worker dispatch. */
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
     scheduler_pool_destroy(pool);
     rm_rf(path);
   }
@@ -362,25 +385,30 @@ protected:
   new_blocks_recipe_t* recipe;
 
   void SetUp() override {
-    // Create pool but do NOT start — we dispatch directly without worker threads
+    // See ReadableOffStreamNetworkTest::SetUp for why the pool must be
+    // started (block_cache_destroy calls scheduler_pool_wait_for_idle,
+    // which deadlocks if no workers exist).
     pool = scheduler_pool_create(2);
+    scheduler_pool_start(pool);
 
-    path = (char*)"/tmp/test_stream_network_wstream";
+    path = (char*)"test_stream_network_wstream";
     rm_rf(path);
     mkdir_p(path);
 
     timer = timer_actor_create(pool);
     bc = block_cache_create(
-        (config_t){.index_bucket_size = 10, .index_wait = 1000,
+        config_t{.index_bucket_size = 10, .index_wait = 1000,
                    .index_max_wait = 5000, .section_size = 128000,
                    .section_wait = 1000, .section_max_wait = 5000,
                    .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
         path, standard, timer, pool, NULL, 0);
     tc = tuple_cache_create(100, pool);
 
-    // Create a minimal network_t for testing
+    // Create a minimal network_t for testing. See
+    // ReadableOffStreamNetworkTest::SetUp for why we need a no-op
+    // dispatch instead of nullptr.
     network = (network_t*)get_clear_memory(sizeof(network_t));
-    actor_init(&network->actor, network, nullptr, pool);
+    actor_init(&network->actor, network, test_network_noop_dispatch, pool);
     network->wanted_list = wanted_list_create();
 
     // Create a minimal block recipe
@@ -401,6 +429,12 @@ protected:
     tuple_cache_destroy(tc);
     block_cache_destroy(bc);
     timer_actor_destroy(timer);
+    /* Drain any messages the test body enqueued (e.g. CACHE_PUT_RESULT
+       in CachePutNewWithNetworkDoesNotCrash sends
+       NETWORK_LOCAL_STORE_BLOCK to the network actor) and stop the
+       workers before destroying the pool. */
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
     scheduler_pool_destroy(pool);
     rm_rf(path);
   }

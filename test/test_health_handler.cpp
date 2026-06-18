@@ -8,7 +8,7 @@ extern "C" {
 #include "../src/Configuration/config.h"
 #include "../src/Timer/timer_actor.h"
 #include "../src/Network/topology_metrics.h"
-#include <time.h>
+#include "../src/Platform/platform_time.h"
 }
 
 TEST(HealthHandler, CollectNullContext) {
@@ -65,9 +65,8 @@ TEST(HealthHandler, CollectStoppedStatus) {
 }
 
 TEST(HealthHandler, CollectUptime) {
-  struct timespec now;
-  clock_gettime(CLOCK_MONOTONIC, &now);
-  uint64_t past_ms = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000 - 5000;
+  uint64_t now_ns = platform_monotonic_ns();
+  uint64_t past_ms = (uint64_t)(now_ns / 1000000ULL) - 5000;
 
   health_context_t ctx;
   memset(&ctx, 0, sizeof(ctx));
@@ -131,7 +130,7 @@ TEST(HealthHandler, CollectBlockCacheStats) {
   ASSERT_NE(timer, nullptr);
 
   config_t config = config_default();
-  block_cache_t* bc = block_cache_create(config, (char*)"/tmp/test_health_bc",
+  block_cache_t* bc = block_cache_create(config, (char*)"test_health_bc",
       standard, timer, pool, NULL, 1024 * 1024);
   ASSERT_NE(bc, nullptr);
 

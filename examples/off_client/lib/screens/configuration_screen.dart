@@ -1,13 +1,18 @@
 import 'package:flutter/material.dart';
 
+import '../services/off_api.dart';
+
 class ConfigurationScreen extends StatefulWidget {
-  const ConfigurationScreen({super.key});
+  final OffApi api;
+  const ConfigurationScreen({super.key, required this.api});
 
   @override
   State<ConfigurationScreen> createState() => _ConfigurationScreenState();
 }
 
 class _ConfigurationScreenState extends State<ConfigurationScreen> {
+  final _baseUrlController = TextEditingController();
+  final _apiKeyController = TextEditingController();
   final _startPortController = TextEditingController(text: '8200');
   final _portRetriesController = TextEditingController(text: '2');
   final _httpPortController = TextEditingController(text: '23402');
@@ -19,7 +24,15 @@ class _ConfigurationScreenState extends State<ConfigurationScreen> {
   final List<_PeerEntry> _peers = [];
 
   @override
+  void initState() {
+    super.initState();
+    _baseUrlController.text = widget.api.baseUrl;
+  }
+
+  @override
   void dispose() {
+    _baseUrlController.dispose();
+    _apiKeyController.dispose();
     _startPortController.dispose();
     _portRetriesController.dispose();
     _httpPortController.dispose();
@@ -122,6 +135,10 @@ class _ConfigurationScreenState extends State<ConfigurationScreen> {
   Widget _buildNetworkTab() {
     return ListView(
       children: [
+        TextFormField(controller: _baseUrlController, decoration: const InputDecoration(labelText: 'Base URL', border: OutlineInputBorder())),
+        const SizedBox(height: 16),
+        TextFormField(controller: _apiKeyController, decoration: const InputDecoration(labelText: 'API Key', border: OutlineInputBorder()), obscureText: true),
+        const SizedBox(height: 16),
         TextFormField(controller: _startPortController, decoration: const InputDecoration(labelText: 'Start Port (1024-65535)'), keyboardType: TextInputType.number),
         const SizedBox(height: 16),
         TextFormField(controller: _portRetriesController, decoration: const InputDecoration(labelText: 'Port Retries'), keyboardType: TextInputType.number),
@@ -132,6 +149,16 @@ class _ConfigurationScreenState extends State<ConfigurationScreen> {
         const SizedBox(height: 24),
         ElevatedButton(
           onPressed: () {
+            final baseUrl = _baseUrlController.text.trim();
+            final apiKey = _apiKeyController.text.trim();
+            if (baseUrl.isEmpty) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Base URL cannot be empty')),
+              );
+              return;
+            }
+            widget.api.setBaseUrl(baseUrl);
+            widget.api.setApiKey(apiKey.isEmpty ? null : apiKey);
             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Network settings saved')));
           },
           style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF313181), foregroundColor: Colors.white),

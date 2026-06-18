@@ -1,8 +1,8 @@
 // Web implementation: trigger a browser-native download via anchor tag.
 //
-import 'dart:html';
-import 'dart:typed_data';
+import 'dart:js_interop';
 import 'package:http/http.dart' as http;
+import 'package:web/web.dart' as web;
 
 Future<String> downloadToDisk(String url, String? saveDirectory, String fileName) async {
   final response = await http.get(Uri.parse(url));
@@ -10,12 +10,19 @@ Future<String> downloadToDisk(String url, String? saveDirectory, String fileName
     throw Exception('Download failed: ${response.statusCode}');
   }
 
-  final blob = Blob([Uint8List.fromList(response.bodyBytes)]);
-  final objectUrl = Url.createObjectUrlFromBlob(blob);
-  AnchorElement(href: objectUrl)
-    ..setAttribute('download', fileName)
-    ..click();
-  Url.revokeObjectUrl(objectUrl);
+  final bytes = response.bodyBytes.toJS;
+  final blob = web.Blob(
+    [bytes].toJS,
+    web.BlobPropertyBag(type: 'application/octet-stream'),
+  );
+  final objectUrl = web.URL.createObjectURL(blob);
+
+  final anchor = web.HTMLAnchorElement()
+    ..href = objectUrl
+    ..download = fileName;
+  anchor.click();
+
+  web.URL.revokeObjectURL(objectUrl);
 
   return fileName;
 }

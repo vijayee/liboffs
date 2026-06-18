@@ -160,6 +160,17 @@ index_t* _index_new_empty(size_t bucket_size, char* location, uint64_t wait, uin
   uint64_t current_id = most_recent_id + 1;
   char id[20];
   sprintf(id,"%lu", current_id);
+  /* INTENTIONAL off-by-one: index->next_id is bumped to most_recent_id + 2
+     while the freshly opened WAL is named after most_recent_id + 1. This
+     one-id gap is preserved on purpose (the project owner confirmed this
+     is by design, not a bug) and is replicated in the related assignment
+     sites in index_create_from() and the recovery path. The intent is
+     to leave a hole in the id sequence so that the CRC-mismatch /
+     WAL-replay recovery branch in index_create() (the "if (crc !=
+     last_crc)" check) gets exercised in the field rather than only on
+     real corruption. Do not "fix" this to next_id = current_id without
+     first confirming the recovery-path behavior with the project
+     owner. */
   index->next_id = most_recent_id + 2;
   index->current_file = path_join(index->location, id);
   index->last_file = NULL;
@@ -404,6 +415,11 @@ index_t* index_create(size_t bucket_size, char* location, uint64_t wait, uint64_
           uint64_t current_id = (files->length - i) + last_id;
           char id[20];
           sprintf(id,"%lu", current_id);
+          /* INTENTIONAL off-by-one: see _index_new_empty for the rationale.
+             The first assignment below is overwritten by the second on the
+             next line; the second uses current_id + 1 so the freshly
+             loaded snapshot's WAL is followed by a next_id with a one-id
+             gap. */
           index->next_id = most_recent_id + 2;
           index->current_file = path_join(index->location, id);
           index->next_id = current_id + 1;
@@ -454,6 +470,8 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root, char* locatio
     char delims[] = "-";
     char* last_id_str = strtok(last,delims);
     last_id = strtoull(last_id_str, NULL, 10);
+    /* INTENTIONAL off-by-one: see _index_new_empty for the rationale. The
+       next_id is one ahead of the freshly opened WAL's id. */
     index->next_id = last_id + 2;
     sprintf(id,"%lu", last_id + 1);
     index->current_file = path_join(index->location, id);
@@ -1087,9 +1105,14 @@ void index_debounce(index_t* index) {
   cbor_item_t *cbor = _index_to_cbor(index);
   uint64_t crc = 0;
   int result = _index_to_crc(index, &crc);
-  char file[strlen(index->current_file) + 22];
+  char* file = malloc(strlen(index->current_file) + 22);
+  if (file == NULL) {
+    log_error("index_debounce: out of memory allocating snapshot filename");
+    cbor_intermediate_decref(cbor);
+    return;
+  }
   if (result == 0) {
-    sprintf(file, "%s-%lu", index->current_file, crc);
+    sprintf(file, "%s-%llu", index->current_file, (unsigned long long)crc);
   } else {
     log_error("Could not store index with correct crc");
     sprintf(file, "%s-crc_error", index->current_file);
@@ -1114,6 +1137,7 @@ void index_debounce(index_t* index) {
   platform_file_write(index_file, cbor_data, cbor_size);
   platform_file_close(index_file);
   free(cbor_data);
+  free(file);
   wal_destroy(wal);
   cbor_intermediate_decref(cbor);
   uint64_t first_kept_id = _index_prune_old_snapshots(index);

@@ -135,7 +135,10 @@ Uint8List buildOfdCbor(List<OfdEntry> entries) {
     entryMaps.add(CborMap(map));
   }
 
+  // CborString is abstract (cbor-6.5.1) and has no const constructor; the
+  // entries list is therefore runtime-built.
   final root = CborMap({
+    // ignore: prefer_const_constructors
     CborString('v'): CborSmallInt(1),
     CborString('entries'): CborList(entryMaps),
   });
