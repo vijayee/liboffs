@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <future>
 #include <chrono>
+#include "../src/Platform/platform_time.h"
 extern "C" {
 #include "../src/OFFStreams/tuple_cache.h"
 #include "../src/OFFStreams/tuple.h"
@@ -216,7 +217,7 @@ TEST(TupleCacheActor, TestApplyAndUpdate) {
 
   /* Wait for put to complete */
   while (!tuple_cache_lru_contains(tc->lru, key)) {
-    usleep(1000);
+    platform_sleep_ms(1);
   }
 
   /* Get value via async API with completion actor */
@@ -228,7 +229,7 @@ TEST(TupleCacheActor, TestApplyAndUpdate) {
   tuple_cache_get(tc, key, &comp);
 
   auto future = std::async(std::launch::async, [&cs]() {
-    while (!ATOMIC_LOAD(&cs.done)) { usleep(1000); }
+    while (!ATOMIC_LOAD(&cs.done)) { platform_sleep_ms(1); }
   });
   EXPECT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
 

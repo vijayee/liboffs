@@ -19,8 +19,15 @@ extern "C" {
 
 namespace indexTest {
   TEST(TestPath, TestPathJoin) {
+    // path_join inserts the platform's path separator ("/" on POSIX, "\\" on
+    // Windows) between dir and file, so assert against the platform-specific
+    // expected result rather than a hard-coded POSIX literal.
     char *location = path_join(".", "wal");
+#ifdef _WIN32
+    EXPECT_EQ(strcmp(location, ".\\wal"), 0);
+#else
     EXPECT_EQ(strcmp(location, "./wal"), 0);
+#endif
     free(location);
   }
 

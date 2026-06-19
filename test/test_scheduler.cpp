@@ -7,7 +7,7 @@
 #include <thread>
 #include <vector>
 #include <cstdint>
-#include <unistd.h>
+#include "../src/Platform/platform_time.h"
 
 extern "C" {
 #include "../src/Scheduler/scheduler.h"
@@ -39,7 +39,7 @@ TEST(TestScheduler, TestPoolStartStop) {
   ASSERT_NE(pool, nullptr);
 
   scheduler_pool_start(pool);
-  usleep(50000); // 50ms — let workers settle
+  platform_sleep_ms(50); // 50ms — let workers settle
   scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
 
@@ -62,7 +62,7 @@ TEST(TestScheduler, TestActorScheduling) {
   // Poll until the actor is dispatched or timeout
   for (int i = 0; i < 200; i++) {
     if (counter.load() >= 1) break;
-    usleep(1000);
+    platform_sleep_ms(1);
   }
   EXPECT_GE(counter.load(), 1);
 
@@ -91,7 +91,7 @@ TEST(TestScheduler, TestActorBatchProcessing) {
   // Wait for all messages to be dispatched
   for (int i = 0; i < 200; i++) {
     if (counter.load() >= 5) break;
-    usleep(1000);
+    platform_sleep_ms(1);
   }
   EXPECT_GE(counter.load(), 5);
 
@@ -147,7 +147,7 @@ TEST(TestScheduler, TestActorReschedulingViaPool) {
   // Wait for all messages to be dispatched
   for (int i = 0; i < 5000; i++) {
     if (counter.load() >= total_messages) break;
-    usleep(1000);
+    platform_sleep_ms(1);
   }
 
   EXPECT_GE(counter.load(), total_messages) << "Expected at least " << total_messages
@@ -190,7 +190,7 @@ TEST(TestScheduler, TestMultipleActors) {
       }
     }
     if (all_done) break;
-    usleep(1000);
+    platform_sleep_ms(1);
   }
 
   for (int i = 0; i < NUM_ACTORS; i++) {
@@ -226,7 +226,7 @@ TEST(TestScheduler, TestWorkStealing) {
   // Wait for all messages to be processed
   for (int i = 0; i < 3000; i++) {
     if (counter.load() >= total_messages) break;
-    usleep(1000);
+    platform_sleep_ms(1);
   }
   EXPECT_GE(counter.load(), total_messages);
 
@@ -257,7 +257,7 @@ TEST(TestScheduler, TestInjectFromExternalThread) {
   // Wait for the actor to be dispatched
   for (int i = 0; i < 200; i++) {
     if (counter.load() >= 1) break;
-    usleep(1000);
+    platform_sleep_ms(1);
   }
   EXPECT_GE(counter.load(), 1);
 

@@ -6,6 +6,7 @@
 
 extern "C" {
 #include "../../tools/offs-ca/ca_ops.h"
+#include "../../src/Platform/platform_posix_compat.h"
 
 #include <openssl/x509.h>
 #include <openssl/pem.h>

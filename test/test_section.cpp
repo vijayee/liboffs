@@ -2,6 +2,7 @@
 // Created by victor on 7/28/25.
 //
 #include <gtest/gtest.h>
+#include <vector>
 extern "C" {
 #include "../src/Buffer/buffer.h"
 #include "../src/BlockCache/block.h"
@@ -259,8 +260,11 @@ public:
 
 TEST_F(TestSection, TestSectionFunction) {
   size_t block_count = 20;
-  block_t* blocks[block_count];
-  index_entry_t* entries[block_count];
+  /* std::vector instead of C99 VLA — MSVC's C++ parser does not accept
+     variable-length arrays. Use std::vector<block_t*>/<index_entry_t*>
+     which supports identical indexing/iteration syntax. */
+  std::vector<block_t*> blocks(block_count);
+  std::vector<index_entry_t*> entries(block_count);
   uint8_t full;
   for (size_t i = 0; i < block_count; i++) {
     blocks[i] = block_create_random_block_by_type(mini);

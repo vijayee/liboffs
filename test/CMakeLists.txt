@@ -64,6 +64,7 @@ if (BUILD_TESTING)
             test_health_handler.cpp
             test_health_wire.cpp
             test_unix_transport.cpp
+            test_regex_shim.cpp
             )
     # The following tests use raw POSIX sockets, getpid, and pthread directly,
     # which are not available under MSVC. Add them to the build only on POSIX.
