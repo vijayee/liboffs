@@ -4,6 +4,7 @@
 
 #include "topology_report.h"
 #include "../Util/log.h"
+#include "../Platform/platform_posix_compat.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>

@@ -15,7 +15,11 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <sys/socket.h>
+#endif
 
 #define PEER_RPC_TYPE_COUNT 20
 

@@ -8,6 +8,28 @@ extern "C" {
 #include "../src/Util/error.h"
 }
 
+//
+// Same idempotent promise wrapper as test_file_stream.cpp. close_event and
+// error_event may both fire on the same stream; the second set_value /
+// set_exception would otherwise throw `promise_already_satisfied`.
+//
+struct PromiseOnce {
+  std::promise<void> promise;
+  std::atomic<bool> done{false};
+  void set_value() {
+    bool expected = false;
+    if (done.compare_exchange_strong(expected, true)) {
+      promise.set_value();
+    }
+  }
+  void set_exception(std::exception_ptr e) {
+    bool expected = false;
+    if (done.compare_exchange_strong(expected, true)) {
+      promise.set_exception(e);
+    }
+  }
+};
+
 namespace StreamActorTests {
 
 class TestStreamActor : public testing::Test {
@@ -30,12 +52,12 @@ static void on_data_count(void* ctx, void*) {
 }
 
 static void on_close_set_promise(void* ctx, void*) {
-  auto* prom = static_cast<std::promise<void>*>(ctx);
+  auto* prom = static_cast<PromiseOnce*>(ctx);
   prom->set_value();
 }
 
 static void on_error_set_promise(void* ctx, async_error_t* error) {
-  auto* prom = static_cast<std::promise<void>*>(ctx);
+  auto* prom = static_cast<PromiseOnce*>(ctx);
   try {
     throw std::runtime_error((const char*)error->message);
   } catch (...) {
@@ -51,7 +73,7 @@ TEST_F(TestStreamActor, TestPushFileStreamActorDispatch) {
   ASSERT_EQ(error_code, 0);
 
   std::atomic<int> data_count{0};
-  std::promise<void> close_promise;
+  PromiseOnce close_promise;
 
   stream_subscribe((stream_t*)rs, data_event, &data_count,
                    (void(*)(void*, void*))on_data_count, NULL);
@@ -60,7 +82,7 @@ TEST_F(TestStreamActor, TestPushFileStreamActorDispatch) {
   stream_subscribe((stream_t*)rs, error_event, &close_promise,
                    (void(*)(void*, void*))on_error_set_promise, NULL);
 
-  auto close_future = close_promise.get_future();
+  auto close_future = close_promise.promise.get_future();
   close_future.wait();
 
   scheduler_pool_wait_for_idle(pool);
@@ -82,7 +104,7 @@ TEST_F(TestStreamActor, TestPullFileStreamActorDispatch) {
       pool, (char*)out_filename.c_str());
 
   std::atomic<int> data_count{0};
-  std::promise<void> w_close_promise;
+  PromiseOnce w_close_promise;
 
   stream_subscribe((stream_t*)rs, data_event, &data_count,
                    (void(*)(void*, void*))on_data_count, NULL);
@@ -93,7 +115,7 @@ TEST_F(TestStreamActor, TestPullFileStreamActorDispatch) {
 
   writeable_pull_stream_pipe((stream_t*)ws, (stream_t*)rs);
 
-  auto w_close_future = w_close_promise.get_future();
+  auto w_close_future = w_close_promise.promise.get_future();
   w_close_future.wait();
 
   scheduler_pool_wait_for_idle(pool);
@@ -121,13 +143,13 @@ TEST_F(TestStreamActor, TestStreamNotifyManyHandlers) {
                      (void(*)(void*, void*))on_data_count, NULL);
   }
 
-  std::promise<void> close_promise;
+  PromiseOnce close_promise;
   stream_subscribe((stream_t*)rs, close_event, &close_promise,
                    on_close_set_promise, NULL);
   stream_subscribe((stream_t*)rs, error_event, &close_promise,
                    (void(*)(void*, void*))on_error_set_promise, NULL);
 
-  auto close_future = close_promise.get_future();
+  auto close_future = close_promise.promise.get_future();
   close_future.wait();
 
   scheduler_pool_wait_for_idle(pool);
@@ -145,7 +167,7 @@ TEST_F(TestStreamActor, TestIdleSignalWaitsForCompletion) {
   ASSERT_EQ(error_code, 0);
 
   std::atomic<int> data_count{0};
-  std::promise<void> close_promise;
+  PromiseOnce close_promise;
   stream_subscribe((stream_t*)rs, data_event, &data_count,
                    (void(*)(void*, void*))on_data_count, NULL);
   stream_subscribe((stream_t*)rs, close_event, &close_promise,
@@ -153,7 +175,7 @@ TEST_F(TestStreamActor, TestIdleSignalWaitsForCompletion) {
   stream_subscribe((stream_t*)rs, error_event, &close_promise,
                    (void(*)(void*, void*))on_error_set_promise, NULL);
 
-  auto close_future = close_promise.get_future();
+  auto close_future = close_promise.promise.get_future();
   close_future.wait();
 
   scheduler_pool_wait_for_idle(pool);
@@ -173,7 +195,7 @@ TEST_F(TestStreamActor, TestPushPipeEndToEnd) {
   writeable_push_file_stream_t* ws = writeable_push_file_stream_create(
       pool, (char*)out_filename.c_str());
 
-  std::promise<void> w_close_promise;
+  PromiseOnce w_close_promise;
   stream_subscribe((stream_t*)ws, close_event, &w_close_promise,
                    on_close_set_promise, NULL);
   stream_subscribe((stream_t*)ws, error_event, &w_close_promise,
@@ -181,7 +203,7 @@ TEST_F(TestStreamActor, TestPushPipeEndToEnd) {
 
   readable_push_stream_pipe((stream_t*)rs, (stream_t*)ws);
 
-  auto w_close_future = w_close_promise.get_future();
+  auto w_close_future = w_close_promise.promise.get_future();
   w_close_future.wait();
 
   scheduler_pool_wait_for_idle(pool);

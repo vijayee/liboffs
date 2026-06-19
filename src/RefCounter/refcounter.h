@@ -7,17 +7,44 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "../Platform/platform.h"
+#if defined(_MSC_VER) && !defined(__cplusplus)
+  #include <stdatomic.h>
+#endif
 #define REFERENCE(N,T) (T*) refcounter_reference((refcounter_t*) N)
 #define YIELD(N) refcounter_yield((refcounter_t*) N)
 #define DEREFERENCE(N) refcounter_dereference((refcounter_t*) N); N = NULL
 #define DESTROY(N,T)  T##_destroy(N); N = NULL
 #define CONSUME(N, T) (T*) refcounter_consume((refcounter_t**) &N)
 #define OFFS_ATOMIC
+/* Atomic refcounter fields: C11 _Atomic under C, plain uint under C++. C++
+   single-threaded accessors are non-atomic because the existing C
+   implementation already serializes the actor path with `is_actor`; C++ callers
+   only touch the struct from a single test thread. For the multi-threaded path
+   the C11 atomics on the C side ensure the operation is well-defined. */
+#if defined(__cplusplus)
+  /* In C++ the C11 atomics are translated by wrapping the same offsets in
+     a separate atomic type. We use uint16_t/uint8_t for layout compatibility
+     with the C definition; std::atomic<uint16_t> has the same size and
+     alignment as uint16_t on MSVC, GCC, and Clang. */
+  #define OFFS_ATOMIC_FIELD_U16 uint16_t count;
+  #define OFFS_ATOMIC_FIELD_U8  uint8_t  yield;
+  #define OFFS_ATOMIC_FIELD_U8B uint8_t  pending_deref;
+#else
+  #if defined(_MSC_VER)
+    #define OFFS_ATOMIC_FIELD_U16 _Atomic(uint16_t) count;
+    #define OFFS_ATOMIC_FIELD_U8  _Atomic(uint8_t)  yield;
+    #define OFFS_ATOMIC_FIELD_U8B _Atomic(uint8_t)  pending_deref;
+  #else
+    #define OFFS_ATOMIC_FIELD_U16 uint16_t count;
+    #define OFFS_ATOMIC_FIELD_U8  uint8_t  yield;
+    #define OFFS_ATOMIC_FIELD_U8B uint8_t  pending_deref;
+  #endif
+#endif
 typedef struct refcounter_t {
 #ifdef OFFS_ATOMIC
-  uint16_t count;
-  uint8_t yield;
-  uint8_t pending_deref;
+  OFFS_ATOMIC_FIELD_U16
+  OFFS_ATOMIC_FIELD_U8
+  OFFS_ATOMIC_FIELD_U8B
   uint8_t is_actor;
 #else
   uint16_t count;

@@ -3,6 +3,7 @@
 //
 
 #include "node.h"
+#include "../Platform/platform_time.h"
 #include <time.h>
 #include "../BlockCache/block_cache.h"
 #include "../ClientAPI/HTTP/http_server.h"
@@ -44,9 +45,8 @@ int offs_node_start(offs_node_t* node) {
 
   log_info("offs_node_start: node starting");
 
-  struct timespec now;
-  clock_gettime(CLOCK_MONOTONIC, &now);
-  node->start_time_ms = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+  uint64_t now_ns = platform_monotonic_ns();
+  node->start_time_ms = now_ns / 1000000;
 
   if (node->config == NULL || config_validate(node->config) != 0) {
     log_error("offs_node_start: invalid configuration");

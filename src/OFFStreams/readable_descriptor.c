@@ -247,7 +247,7 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
             DESTROY(result->hash, buffer);
             result->hash = NULL;
           }
-          stream_deactivate((stream_t*)desc, ERROR("Descriptor block not found"));
+          stream_deactivate((stream_t*)desc, OFFS_ERROR("Descriptor block not found"));
           desc->stream.is_deactivated = 1;
         }
         break;
@@ -281,7 +281,7 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
         desc->state = DESCRIPTOR_FETCHING_BLOCK;
       } else {
         /* Block not found on network — deactivate */
-        stream_deactivate((stream_t*)desc, ERROR("Descriptor block not found on network"));
+        stream_deactivate((stream_t*)desc, OFFS_ERROR("Descriptor block not found on network"));
         desc->stream.is_deactivated = 1;
       }
       break;

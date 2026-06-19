@@ -5,7 +5,7 @@
 #include <gtest/gtest.h>
 #include <atomic>
 #include <cstdint>
-#include <unistd.h>
+#include "../src/Platform/platform_time.h"
 
 extern "C" {
 #include "../src/Timer/timer_actor.h"
@@ -75,7 +75,7 @@ TEST(TestTimerActor, TestOneShotTimer) {
   for (int i = 0; i < 500; i++) {
     scheduler_pool_wait_for_idle(pool);
     if (state.fire_count.load() >= 1) break;
-    usleep(1000);
+    platform_sleep_ms(1);
   }
 
   EXPECT_GE(state.fire_count.load(), 1);
@@ -109,7 +109,7 @@ TEST(TestTimerActor, TestRepeatingTimer) {
   for (int i = 0; i < 1000; i++) {
     scheduler_pool_wait_for_idle(pool);
     if (state.fire_count.load() >= 3) break;
-    usleep(1000);
+    platform_sleep_ms(1);
   }
 
   EXPECT_GE(state.fire_count.load(), 3);
@@ -152,7 +152,7 @@ TEST(TestTimerActor, TestCancelTimer) {
   for (int i = 0; i < 200; i++) {
     scheduler_pool_wait_for_idle(pool);
     if (state.fire_count.load() >= 1) break;
-    usleep(1000);
+    platform_sleep_ms(1);
   }
   EXPECT_GE(state.fire_count.load(), 1);
 
@@ -165,7 +165,7 @@ TEST(TestTimerActor, TestCancelTimer) {
   int count_at_cancel = state.fire_count.load();
 
   /* Wait 200ms -- no more firings should occur */
-  usleep(200000);
+  platform_sleep_ms(200);
   scheduler_pool_wait_for_idle(pool);
 
   /* The count should not have increased significantly after cancel */
@@ -202,7 +202,7 @@ TEST(TestTimerActor, TestDebounceResetsTimer) {
   for (int i = 0; i < 300; i++) {
     scheduler_pool_wait_for_idle(pool);
     if (state.fire_count.load() >= 1) break;
-    usleep(1000);
+    platform_sleep_ms(1);
   }
   EXPECT_GE(state.fire_count.load(), 1);
 
@@ -215,7 +215,7 @@ TEST(TestTimerActor, TestDebounceResetsTimer) {
   for (int i = 0; i < 300; i++) {
     scheduler_pool_wait_for_idle(pool);
     if (state.fire_count.load() > count_before) break;
-    usleep(1000);
+    platform_sleep_ms(1);
   }
   EXPECT_GT(state.fire_count.load(), count_before);
 
@@ -250,7 +250,7 @@ TEST(TestTimerActor, TestMultipleConcurrentTimers) {
   for (int i = 0; i < 500; i++) {
     scheduler_pool_wait_for_idle(pool);
     if (state.fire_count.load() >= 3) break;
-    usleep(1000);
+    platform_sleep_ms(1);
   }
 
   EXPECT_GE(state.fire_count.load(), 3);
@@ -333,7 +333,7 @@ TEST(TestTimerActor, TestDebounceWithZeroExistingId) {
   for (int i = 0; i < 300; i++) {
     scheduler_pool_wait_for_idle(pool);
     if (state.fire_count.load() >= 1) break;
-    usleep(1000);
+    platform_sleep_ms(1);
   }
 
   EXPECT_GE(state.fire_count.load(), 1);
@@ -368,7 +368,7 @@ TEST(TestTimerActor, TestOutTimerId) {
   for (int i = 0; i < 100; i++) {
     scheduler_pool_wait_for_idle(pool);
     if (atomic_load(&timer_id) != 0) break;
-    usleep(1000);
+    platform_sleep_ms(1);
   }
 
   /* The timer_id should be >0 after dispatch runs */

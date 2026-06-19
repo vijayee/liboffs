@@ -15,7 +15,11 @@
 #include <poll-dancer/poll-dancer.h>
 #include <stdint.h>
 #include <stddef.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <sys/socket.h>
+#endif
 
 #ifdef HAS_MSQUIC
 #include <msquic.h>

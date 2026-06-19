@@ -8,7 +8,6 @@
 #include <vector>
 #include <set>
 #include <cstdint>
-#include <unistd.h>
 
 extern "C" {
 #include "../src/Scheduler/deque.h"

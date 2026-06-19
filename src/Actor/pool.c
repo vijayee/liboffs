@@ -3,13 +3,16 @@
 //
 
 #include "pool.h"
+#include "../Platform/platform.h"
 #include "../Util/allocator.h"
-#include <pthread.h>
+#include "../Util/atomic_compat.h"
 #include <stdlib.h>
 #include <string.h>
 
 static pool_global_t _pool_global[POOL_COUNT];
 static _Thread_local pool_local_t _pool_local[POOL_COUNT];
+static ATOMIC(int) _pool_init_done = 0;
+static _Atomic(platform_mutex_t*) _pool_init_mutex = NULL;
 
 static void _pool_global_init(void) {
   for (size_t index = 0; index < POOL_COUNT; index++) {
@@ -27,10 +30,33 @@ static void _pool_global_init(void) {
   }
 }
 
-static pthread_once_t _pool_init_once = PTHREAD_ONCE_INIT;
-
 static void _pool_global_init_once(void) {
-  pthread_once(&_pool_init_once, _pool_global_init);
+  if (ATOMIC_LOAD(&_pool_init_done)) {
+    return;
+  }
+  /* Create the init mutex with a benign race: any of the racing mutexes is
+   * fine to use for serializing the actual init. If our local allocation
+   * fails, fall back to whatever was previously installed (or just retry
+   * the initialization with no guard — the worst case is double-init which
+   * is idempotent because we re-check _pool_init_done under the guard). */
+  platform_mutex_t* m = platform_mutex_create();
+  platform_mutex_t* expected = NULL;
+  if (!atomic_compare_exchange_strong(&_pool_init_mutex, &expected, m)) {
+    /* Lost the race: another thread installed a mutex. Use it. If our
+     * local allocation is non-NULL, the loser's mutex is leaked — that
+     * is acceptable on this path (one mutex per process on first init). */
+  }
+  platform_mutex_t* guard = atomic_load(&_pool_init_mutex);
+  if (guard != NULL) {
+    platform_mutex_lock(guard);
+  }
+  if (!ATOMIC_LOAD(&_pool_init_done)) {
+    _pool_global_init();
+    ATOMIC_STORE(&_pool_init_done, 1);
+  }
+  if (guard != NULL) {
+    platform_mutex_unlock(guard);
+  }
 }
 
 static void _pool_push_global(size_t index, pool_item_t* list_head) {
@@ -64,9 +90,16 @@ static void* _pool_alloc_block(size_t index) {
     return pointer;
   }
   void* pointer = NULL;
+#if defined(_MSC_VER)
+  pointer = _aligned_malloc(used_size, POOL_ALIGN);
+  if (pointer == NULL) {
+    abort();
+  }
+#else
   if (posix_memalign(&pointer, POOL_ALIGN, used_size) != 0) {
     abort();
   }
+#endif
   memset(pointer, 0, used_size);
   return pointer;
 }

@@ -1,6 +1,7 @@
 #ifndef OFFS_PLATFORM_H
 #define OFFS_PLATFORM_H
 
+#include "platform_posix_compat.h"
 #include "platform_compiler.h"
 #include "platform_time.h"
 #include "platform_random.h"

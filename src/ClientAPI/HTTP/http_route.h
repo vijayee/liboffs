@@ -4,7 +4,13 @@
 #ifndef OFFS_HTTP_ROUTE_H
 #define OFFS_HTTP_ROUTE_H
 
-#include <regex.h>
+#ifdef _WIN32
+  /* POSIX <regex.h> has no equivalent in the Windows SDK. The
+   * platform_regex_compat shim provides a minimal literal-match API. */
+  #include "../../Platform/platform_regex_compat.h"
+#else
+  #include <regex.h>
+#endif
 #include "../../Util/vec.h"
 
 typedef struct http_request_t http_request_t;

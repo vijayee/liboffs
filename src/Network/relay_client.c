@@ -15,8 +15,12 @@
 #include <msquic.h>
 #include <string.h>
 #include <poll-dancer/poll-dancer.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <arpa/inet.h>
 #include <unistd.h>
+#endif
 
 // --- Send context: wraps framed data for QUIC StreamSend completion ---
 

@@ -14,6 +14,7 @@ extern "C" {
 #include "../src/Actor/message.h"
 #include "../src/Util/atomic_compat.h"
 #include "../src/Platform/platform_time.h"
+#include "../src/Util/rm_rf.h"
 }
 
 /* Completion actor state for async ofd_cache_resolve */
@@ -69,8 +70,15 @@ protected:
     scheduler_pool_t* pool;
     block_cache_t* bc;
     timer_actor_t* timer;
+    char* bc_location;
 
     void SetUp() override {
+        /* Wipe any stale index/section files left over from previous test
+         * runs. Without this, `index_create` walks every leftover file
+         * looking for one with a valid CRC and spams tens of thousands of
+         * "CRC mismatch" log lines on Windows before the test body runs. */
+        bc_location = strdup("/tmp/test_ofd_cache_basic");
+        rm_rf(bc_location);
         config_t config = {
             .index_bucket_size = 10,
             .index_wait = 0,
@@ -85,7 +93,7 @@ protected:
         pool = scheduler_pool_create(4);
         scheduler_pool_start(pool);
         timer = timer_actor_create(pool);
-        bc = block_cache_create(config, (char*)"/tmp/test_ofd_cache_basic", standard, timer, pool, NULL, 0);
+        bc = block_cache_create(config, bc_location, standard, timer, pool, NULL, 0);
         cache = ofd_cache_create(pool, bc, 300000);
     }
 
@@ -96,6 +104,7 @@ protected:
         block_cache_destroy(bc);
         timer_actor_destroy(timer);
         scheduler_pool_destroy(pool);
+        free(bc_location);
     }
 };
 

@@ -15,6 +15,7 @@
 #include <openssl/rand.h>
 #include <openssl/rsa.h>
 #include <openssl/ec.h>
+#include "../../src/Platform/platform_posix_compat.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>

@@ -1,6 +1,7 @@
 #define _DEFAULT_SOURCE
 
 #include "platform_socket.h"
+#include "platform_socket_internal.h"
 
 #ifndef _WIN32
   #include <stdlib.h>
@@ -13,11 +14,6 @@
   #include <arpa/inet.h>
   #include <fcntl.h>
   #include <errno.h>
-
-  struct platform_socket_t {
-    int fd;
-    int family; /* platform_address_family_e */
-  };
 
   static int _family_to_native(platform_address_family_e family) {
     switch (family) {
@@ -58,6 +54,20 @@
 
   int platform_socket_fd(platform_socket_t* sock) {
     return sock != NULL ? sock->fd : -1;
+  }
+
+  int platform_socket_is_pipe(platform_socket_t* sock) {
+    if (sock == NULL) return -1;
+    /* POSIX builds never have a pipe-backed platform_socket_t; the
+     * Windows-specific is_pipe field is always zero. */
+    return 0;
+  }
+
+  void* platform_socket_handle(platform_socket_t* sock) {
+    (void)sock;
+    /* POSIX sockets are accessed via platform_socket_fd; this accessor
+     * only matters on Windows. */
+    return NULL;
   }
 
   static int _address_to_native(const platform_address_t* addr,
@@ -214,19 +224,15 @@
   }
 #else
   /* Windows implementation — Winsock2 */
-  #define WIN32_LEAN_AND_MEAN
-  #include <windows.h>
   #include <winsock2.h>
+  #include <windows.h>
   #include <ws2tcpip.h>
+  #include <afunix.h>
   #include <stdlib.h>
   #include <string.h>
+  #include <errno.h>
 
   #include "platform_internal.h"
-
-  struct platform_socket_t {
-    SOCKET fd;
-    int family; /* platform_address_family_e */
-  };
 
   static int _family_to_native(platform_address_family_e family) {
     switch (family) {
@@ -256,7 +262,10 @@
       return NULL;
     }
     sock->fd = fd;
+    sock->handle = NULL;
     sock->family = family;
+    sock->is_pipe = 0;
+    sock->owns_handle = 0;
     return sock;
   }
 
@@ -264,13 +273,50 @@
     if (sock == NULL) {
       return;
     }
-    closesocket(sock->fd);
+    if (sock->is_pipe) {
+      /* For pipe-backed sockets, only close the handle if we own it.
+       * The accept path returns a wrapper around the listener's
+       * HANDLE; the listener keeps the HANDLE alive. */
+      if (sock->owns_handle &&
+          sock->handle != NULL &&
+          sock->handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(sock->handle);
+      }
+    } else {
+      closesocket(sock->fd);
+    }
+    if (sock->pipe_name != NULL) {
+      free(sock->pipe_name);
+    }
     free(sock);
   }
 
   int platform_socket_fd(platform_socket_t* sock) {
     if (sock == NULL) return -1;
+    /* For pipe-backed sockets, return an opaque non-negative tag derived
+     * from the handle pointer. The value is meaningful only to callers
+     * that pair it with platform_socket_is_pipe to choose the right
+     * watcher API (pd_watcher_create vs pd_watcher_create_for_handle). */
+    if (sock->is_pipe) {
+      return (int)(intptr_t)sock->handle;
+    }
     return (int)(intptr_t)sock->fd;
+  }
+
+  int platform_socket_is_pipe(platform_socket_t* sock) {
+    if (sock == NULL) return -1;
+    return sock->is_pipe ? 1 : 0;
+  }
+
+  void* platform_socket_handle(platform_socket_t* sock) {
+    if (sock == NULL) return NULL;
+    /* Return the HANDLE for pipe-backed sockets. For non-pipe sockets
+     * this returns INVALID_HANDLE_VALUE so callers can detect the
+     * mismatch; they should use platform_socket_fd for non-pipe paths. */
+    if (!sock->is_pipe) {
+      return (void*)INVALID_HANDLE_VALUE;
+    }
+    return (void*)sock->handle;
   }
 
   static int _address_to_native(const platform_address_t* addr,
@@ -353,27 +399,114 @@
   }
 
   int platform_socket_set_nonblocking(platform_socket_t* sock) {
+    /* For Winsock SOCKETs, switch to non-blocking so recv() returns
+     * WSAEWOULDBLOCK instead of blocking. For named pipes, the pipe is
+     * already driven by IOCP from the loop thread, so this call is a
+     * no-op for that path. */
+    if (sock == NULL) return -1;
+    if (sock->is_pipe) {
+      return 0;
+    }
     unsigned long mode = 1;
     return ioctlsocket(sock->fd, FIONBIO, &mode) == 0 ? 0 : -1;
   }
 
   int platform_socket_set_reuseaddr(platform_socket_t* sock) {
+    if (sock == NULL || sock->is_pipe) return -1;
     int opt = 1;
     return setsockopt(sock->fd, SOL_SOCKET, SO_REUSEADDR,
                       (const char*)&opt, sizeof(opt)) == 0 ? 0 : -1;
   }
 
+  /* Map a small set of common Windows error codes to POSIX errno values.
+   * The full mapping would be a 100+ entry table; this covers the errors
+   * we actually surface from WriteFile/ReadFile/CreateNamedPipe paths. */
+  static int _winerr_to_errno(DWORD err) {
+    switch (err) {
+      case ERROR_BROKEN_PIPE:        return EPIPE;
+      case ERROR_PIPE_NOT_CONNECTED: return EPIPE;
+      case ERROR_NO_DATA:            return EAGAIN;
+      case ERROR_PIPE_BUSY:          return EAGAIN;
+      case ERROR_INVALID_HANDLE:     return EBADF;
+      case ERROR_NOT_ENOUGH_MEMORY:  return ENOMEM;
+      case ERROR_ACCESS_DENIED:      return EACCES;
+      case ERROR_INVALID_PARAMETER:  return EINVAL;
+      case ERROR_HANDLE_EOF:         return 0;
+      case ERROR_IO_INCOMPLETE:      return EIO;
+      case ERROR_IO_PENDING:         return EAGAIN;
+      default:                       return EIO;
+    }
+  }
+
   ssize_t platform_socket_send(platform_socket_t* sock, const void* buf, size_t len) {
+    if (sock == NULL) return -1;
+    if (sock->is_pipe) {
+      DWORD written = 0;
+      BOOL ok = WriteFile(sock->handle, buf, (DWORD)len, &written, NULL);
+      if (!ok) {
+        DWORD err = GetLastError();
+        if (err == ERROR_NO_DATA || err == ERROR_PIPE_BUSY) {
+          errno = EAGAIN;
+          return -1;
+        }
+        if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_CONNECTED) {
+          /* Graceful close from peer; treat as zero bytes sent. */
+          return 0;
+        }
+        errno = _winerr_to_errno(err);
+        return -1;
+      }
+      return (ssize_t)written;
+    }
     int result = send(sock->fd, (const char*)buf, (int)len, 0);
     return (ssize_t)result;
   }
 
   ssize_t platform_socket_recv(platform_socket_t* sock, void* buf, size_t len) {
+    if (sock == NULL) return -1;
+    if (sock->is_pipe) {
+      DWORD read_bytes = 0;
+      BOOL ok = ReadFile(sock->handle, buf, (DWORD)len, &read_bytes, NULL);
+      if (!ok) {
+        DWORD err = GetLastError();
+        if (err == ERROR_NO_DATA || err == ERROR_PIPE_BUSY) {
+          errno = EAGAIN;
+          return -1;
+        }
+        if (err == ERROR_BROKEN_PIPE) {
+          /* Graceful close from peer. */
+          return 0;
+        }
+        errno = _winerr_to_errno(err);
+        return -1;
+      }
+      if (read_bytes == 0) {
+        /* Zero-byte read on a connected pipe: peer closed cleanly. */
+        return 0;
+      }
+      return (ssize_t)read_bytes;
+    }
     int result = recv(sock->fd, (char*)buf, (int)len, 0);
     return (ssize_t)result;
   }
 
   int platform_socket_shutdown(platform_socket_t* sock, int how) {
+    if (sock == NULL) return -1;
+    if (sock->is_pipe) {
+      /* Named pipes have no real half-close: the kernel only signals
+       * EOF on the server side when the client HANDLE is closed. To
+       * honour the caller's intent ("I'm done writing; the peer
+       * should see EOF on the next recv") we close the client end
+       * entirely. Callers that need full-duplex use must call
+       * shutdown only at end-of-life. */
+      if (sock->handle != NULL && sock->handle != INVALID_HANDLE_VALUE) {
+        if (sock->owns_handle) {
+          CloseHandle(sock->handle);
+          sock->handle = INVALID_HANDLE_VALUE;
+        }
+      }
+      return 0;
+    }
     int native_how;
     switch (how) {
       case PLATFORM_SHUT_RD:   native_how = SD_RECEIVE; break;

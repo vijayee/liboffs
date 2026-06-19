@@ -32,7 +32,8 @@ void new_blocks_recipe_dispatch(void* state, message_t* msg) {
       }
       block_t* block = block_create_random_block_by_type(recipe->recipe.block_type);
       if (block == NULL) {
-        stream_deactivate((stream_t*)recipe, ERROR("Block creation failed"));
+        async_error_t* err = OFFS_ERROR("Block creation failed");
+        stream_deactivate((stream_t*)recipe, err);
         recipe->recipe.stream.is_deactivated = 1;
         break;
       }
@@ -373,7 +374,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
           if (result->hash != NULL) {
             DESTROY(result->hash, buffer);
           }
-          stream_deactivate((stream_t*)recipe, ERROR("Block not found"));
+          stream_deactivate((stream_t*)recipe, OFFS_ERROR("Block not found"));
           recipe->recipe.stream.is_deactivated = 1;
         }
         break;
@@ -415,7 +416,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
           _start_descriptor_load(recipe);
         } else {
           /* Data block not found on network — deactivate */
-          stream_deactivate((stream_t*)recipe, ERROR("Block not found on network"));
+          stream_deactivate((stream_t*)recipe, OFFS_ERROR("Block not found on network"));
           recipe->recipe.stream.is_deactivated = 1;
         }
       }

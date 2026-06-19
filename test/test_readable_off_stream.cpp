@@ -13,7 +13,7 @@ TEST(ReadableOffStream, TestCreateDestroy) {
   scheduler_pool_t* pool = scheduler_pool_create(2);
   scheduler_pool_start(pool);
 
-  block_cache_t* bc = block_cache_create((config_t){.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0, .section_size = 128000, .section_wait = 0, .section_max_wait = 0, .cache_size = 10, .max_tuple_size = 30, .lru_size = 10}, (char*)"/tmp/test_offs_stream_bc", standard, NULL, NULL, NULL, 0);
+  block_cache_t* bc = block_cache_create(config_t{.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0, .section_size = 128000, .section_wait = 0, .section_max_wait = 0, .cache_size = 10, .max_tuple_size = 30, .lru_size = 10}, (char*)"/tmp/test_offs_stream_bc", standard, NULL, NULL, NULL, 0);
   tuple_cache_t* tc = tuple_cache_create(100, pool);
 
   uint8_t hash_data[] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,

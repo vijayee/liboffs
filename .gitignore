@@ -1,4 +1,5 @@
 /cmake-build-debug
+/cmake-build-msvc
 /.idea
 /build*
 .env
@@ -37,6 +38,10 @@ certs/
 # Test outputs
 browser_video_*.png
 test_*.pdf
+test_*.sock
+test_*/
+test_run.log
+
 
 # Tool artifacts
 .playwright-mcp/

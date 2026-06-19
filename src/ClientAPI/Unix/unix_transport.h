@@ -26,8 +26,10 @@ typedef struct unix_transport_destroy_node_t {
 typedef struct unix_transport_t {
   actor_t actor;
   pd_loop_t* loop;
-  platform_thread_t* thread;
+  platform_thread_t* thread;          /* accept thread (pipe) or run thread (AF_UNIX) */
+  platform_thread_t* loop_thread;     /* loop thread (pipe only); NULL on AF_UNIX */
   ATOMIC(uint8_t) running;
+  ATOMIC(uint8_t) loop_running;
   platform_socket_t* listen_sock;
   pd_watcher_t* listen_watcher;
   vec_unix_connection_t connections;

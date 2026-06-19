@@ -26,6 +26,9 @@
 #include "log.h"
 #include <string.h>
 #include <stdlib.h>
+#ifdef _WIN32
+  #include "../Platform/platform_posix_compat.h"
+#endif
 
 #define MAX_CALLBACKS 32
 

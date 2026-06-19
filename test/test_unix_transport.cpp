@@ -12,40 +12,37 @@ extern "C" {
 #include "../src/Configuration/config.h"
 #include "../src/Timer/timer_actor.h"
 #include "../src/Util/rm_rf.h"
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
+#include "../src/Platform/platform.h"
+#include "../src/Platform/platform_posix_compat.h"
 #include <string.h>
 #include <stdlib.h>
-#include <poll.h>
+#include <stdio.h>
 }
 
 namespace unix_transport_test {
 
-static int _connect_unix(const char* path) {
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
-    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(fd);
-        return -1;
-    }
-    return fd;
+/* A small monotonically-increasing suffix makes per-test socket paths
+ * unique without pulling in getpid() (which isn't portable to MSVC). */
+static int g_socket_seq = 0;
+
+static void _make_socket_path(char* out, size_t out_len, const char* tag) {
+    snprintf(out, out_len, "/tmp/test_unix_%s_%d", tag, ++g_socket_seq);
 }
 
-static int _connect_with_retry(const char* path, int max_attempts = 50) {
+static platform_socket_t* _connect_local(const char* path) {
+    return platform_local_connect(path);
+}
+
+static platform_socket_t* _connect_with_retry(const char* path, int max_attempts = 50) {
     for (int attempts = 0; attempts < max_attempts; attempts++) {
-        usleep(10000);
-        int fd = _connect_unix(path);
-        if (fd >= 0) return fd;
+        platform_sleep_ms(10);
+        platform_socket_t* sock = _connect_local(path);
+        if (sock != NULL) return sock;
     }
-    return -1;
+    return NULL;
 }
 
-static int _send_frame(int fd, cbor_item_t* frame) {
+static int _send_frame(platform_socket_t* sock, cbor_item_t* frame) {
     unsigned char* cbor_buf = NULL;
     size_t cbor_len = 0;
     cbor_len = cbor_serialize_alloc(frame, &cbor_buf, &cbor_len);
@@ -57,15 +54,14 @@ static int _send_frame(int fd, cbor_item_t* frame) {
     free(cbor_buf);
     if (framed == NULL) return -1;
 
-    ssize_t sent = send(fd, framed, framed_len, MSG_NOSIGNAL);
+    ssize_t sent = platform_socket_send(sock, framed, framed_len);
     free(framed);
     return (sent == (ssize_t)framed_len) ? 0 : -1;
 }
 
-static cbor_item_t* _recv_frame(int fd, stream_framer_t* framer, int timeout_ms = 10000) {
+static cbor_item_t* _recv_frame(platform_socket_t* sock, stream_framer_t* framer, int timeout_ms = 10000) {
     uint8_t buf[65536];
     for (int attempts = 0; attempts < timeout_ms / 10; attempts++) {
-        /* Check framer for buffered frames before polling the socket */
         size_t frame_len;
         uint8_t* frame_data = stream_framer_next(framer, &frame_len);
         if (frame_data != NULL) {
@@ -75,18 +71,20 @@ static cbor_item_t* _recv_frame(int fd, stream_framer_t* framer, int timeout_ms 
             if (item != NULL && load_result.error.code == CBOR_ERR_NONE) {
                 return item;
             }
-            if (item != NULL) cbor_decref(&item);
+            if (item != NULL) {
+                cbor_decref(&item);
+            }
         }
 
-        struct pollfd poll_fd;
-        poll_fd.fd = fd;
-        poll_fd.events = POLLIN;
-        poll_fd.revents = 0;
-        int poll_result = poll(&poll_fd, 1, 10);
-        if (poll_result > 0 && (poll_fd.revents & POLLIN)) {
-            ssize_t received = recv(fd, buf, sizeof(buf), 0);
-            if (received <= 0) return nullptr;
+        ssize_t received = platform_socket_recv(sock, buf, sizeof(buf));
+        if (received > 0) {
             stream_framer_feed(framer, buf, (size_t)received);
+        } else if (received == 0) {
+            /* Peer closed. */
+            return nullptr;
+        } else {
+            /* EAGAIN: nothing to read right now; back off briefly. */
+            platform_sleep_ms(10);
         }
     }
     return nullptr;
@@ -127,8 +125,8 @@ protected:
         ofd_cache = ofd_cache_create(pool, bc, 300000);
         tc = tuple_cache_create(100, pool);
 
-        snprintf(socket_path, sizeof(socket_path), "/tmp/test_unix_sock_%d", getpid());
-        unlink(socket_path);
+        _make_socket_path(socket_path, sizeof(socket_path), "sock");
+        platform_local_cleanup(socket_path);
 
         transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path, NULL, NULL);
         ASSERT_NE(transport, nullptr);
@@ -149,20 +147,21 @@ protected:
             unix_transport_destroy(transport);
         }
         scheduler_pool_destroy(pool);
+        platform_local_cleanup(socket_path);
         rm_rf(cache_dir);
         free(cache_dir);
     }
 };
 
 TEST_F(TestUnixTransport, ConnectAndClose) {
-    int fd = _connect_with_retry(socket_path);
-    ASSERT_GE(fd, 0);
-    close(fd);
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
+    platform_socket_destroy(sock);
 }
 
 TEST_F(TestUnixTransport, PutSmallData) {
-    int fd = _connect_with_retry(socket_path);
-    ASSERT_GE(fd, 0);
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
 
     const char* content_type = "application/octet-stream";
     const char* file_name = "test_file.bin";
@@ -179,10 +178,10 @@ TEST_F(TestUnixTransport, PutSmallData) {
 
     cbor_item_t* frame = client_api_put_request_encode(&msg);
     ASSERT_NE(frame, nullptr);
-    ASSERT_EQ(_send_frame(fd, frame), 0);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
 
     stream_framer_t* framer = stream_framer_create();
-    cbor_item_t* response = _recv_frame(fd, framer);
+    cbor_item_t* response = _recv_frame(sock, framer);
     ASSERT_NE(response, nullptr);
 
     uint8_t type = client_api_wire_get_type(response);
@@ -200,12 +199,12 @@ TEST_F(TestUnixTransport, PutSmallData) {
     }
     cbor_decref(&response);
     stream_framer_destroy(framer);
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 TEST_F(TestUnixTransport, GetInvalidOri) {
-    int fd = _connect_with_retry(socket_path);
-    ASSERT_GE(fd, 0);
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
 
     client_api_get_request_t msg;
     memset(&msg, 0, sizeof(msg));
@@ -214,10 +213,10 @@ TEST_F(TestUnixTransport, GetInvalidOri) {
 
     cbor_item_t* frame = client_api_get_request_encode(&msg);
     ASSERT_NE(frame, nullptr);
-    ASSERT_EQ(_send_frame(fd, frame), 0);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
 
     stream_framer_t* framer = stream_framer_create();
-    cbor_item_t* response = _recv_frame(fd, framer);
+    cbor_item_t* response = _recv_frame(sock, framer);
     ASSERT_NE(response, nullptr);
 
     uint8_t type = client_api_wire_get_type(response);
@@ -235,18 +234,17 @@ TEST_F(TestUnixTransport, GetInvalidOri) {
     }
     cbor_decref(&response);
     stream_framer_destroy(framer);
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 TEST_F(TestUnixTransport, StreamingPut) {
-    int fd = _connect_with_retry(socket_path);
-    ASSERT_GE(fd, 0);
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
 
     const char* content_type = "application/octet-stream";
     const char* file_name = "stream_test.bin";
     const uint8_t data[] = "streaming data chunk";
 
-    /* Send PUT_REQUEST with no data (streaming mode) */
     client_api_put_request_t put_req;
     memset(&put_req, 0, sizeof(put_req));
     put_req.content_type = (char*)content_type;
@@ -258,9 +256,8 @@ TEST_F(TestUnixTransport, StreamingPut) {
 
     cbor_item_t* frame = client_api_put_request_encode(&put_req);
     ASSERT_NE(frame, nullptr);
-    ASSERT_EQ(_send_frame(fd, frame), 0);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
 
-    /* Send PUT_DATA with the chunk */
     client_api_put_data_t data_msg;
     memset(&data_msg, 0, sizeof(data_msg));
     data_msg.data = (uint8_t*)data;
@@ -268,16 +265,14 @@ TEST_F(TestUnixTransport, StreamingPut) {
 
     frame = client_api_put_data_encode(&data_msg);
     ASSERT_NE(frame, nullptr);
-    ASSERT_EQ(_send_frame(fd, frame), 0);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
 
-    /* Send PUT_END */
     frame = client_api_put_end_encode();
     ASSERT_NE(frame, nullptr);
-    ASSERT_EQ(_send_frame(fd, frame), 0);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
 
-    /* Receive PUT_RESPONSE */
     stream_framer_t* framer = stream_framer_create();
-    cbor_item_t* response = _recv_frame(fd, framer);
+    cbor_item_t* response = _recv_frame(sock, framer);
     ASSERT_NE(response, nullptr);
 
     uint8_t type = client_api_wire_get_type(response);
@@ -295,18 +290,17 @@ TEST_F(TestUnixTransport, StreamingPut) {
     }
     cbor_decref(&response);
     stream_framer_destroy(framer);
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 TEST_F(TestUnixTransport, PutAndGetRoundTrip) {
-    int fd = _connect_with_retry(socket_path);
-    ASSERT_GE(fd, 0);
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
 
     const char* content_type = "application/octet-stream";
     const char* file_name = "roundtrip.bin";
     const uint8_t data[] = "round trip test data";
 
-    /* PUT */
     client_api_put_request_t put_req;
     memset(&put_req, 0, sizeof(put_req));
     put_req.content_type = (char*)content_type;
@@ -318,10 +312,10 @@ TEST_F(TestUnixTransport, PutAndGetRoundTrip) {
 
     cbor_item_t* frame = client_api_put_request_encode(&put_req);
     ASSERT_NE(frame, nullptr);
-    ASSERT_EQ(_send_frame(fd, frame), 0);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
 
     stream_framer_t* framer = stream_framer_create();
-    cbor_item_t* response = _recv_frame(fd, framer);
+    cbor_item_t* response = _recv_frame(sock, framer);
     ASSERT_NE(response, nullptr);
 
     uint8_t type = client_api_wire_get_type(response);
@@ -335,7 +329,6 @@ TEST_F(TestUnixTransport, PutAndGetRoundTrip) {
     client_api_put_response_destroy(&put_resp);
     cbor_decref(&response);
 
-    /* GET */
     client_api_get_request_t get_req;
     memset(&get_req, 0, sizeof(get_req));
     get_req.ori_string = ori_string;
@@ -343,18 +336,16 @@ TEST_F(TestUnixTransport, PutAndGetRoundTrip) {
 
     frame = client_api_get_request_encode(&get_req);
     ASSERT_NE(frame, nullptr);
-    ASSERT_EQ(_send_frame(fd, frame), 0);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
     free(ori_string);
 
-    /* Expect GET_RESPONSE_START */
-    response = _recv_frame(fd, framer);
+    response = _recv_frame(sock, framer);
     ASSERT_NE(response, nullptr);
     type = client_api_wire_get_type(response);
     EXPECT_EQ(type, CLIENT_API_GET_RESPONSE_START);
     cbor_decref(&response);
 
-    /* Expect GET_DATA */
-    response = _recv_frame(fd, framer);
+    response = _recv_frame(sock, framer);
     ASSERT_NE(response, nullptr);
     type = client_api_wire_get_type(response);
     if (type == CLIENT_API_GET_DATA) {
@@ -370,69 +361,67 @@ TEST_F(TestUnixTransport, PutAndGetRoundTrip) {
     }
     cbor_decref(&response);
 
-    /* Expect GET_END */
-    response = _recv_frame(fd, framer);
+    response = _recv_frame(sock, framer);
     ASSERT_NE(response, nullptr);
     type = client_api_wire_get_type(response);
     EXPECT_EQ(type, CLIENT_API_GET_END);
     cbor_decref(&response);
 
     stream_framer_destroy(framer);
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 TEST_F(TestUnixTransport, MaxConnections) {
-    /* Create a new transport with max_connections = 1 */
     char limited_path[128];
-    snprintf(limited_path, sizeof(limited_path), "/tmp/test_unix_limited_%d", getpid());
-    unlink(limited_path);
+    _make_socket_path(limited_path, sizeof(limited_path), "limited");
+    platform_local_cleanup(limited_path);
 
     unix_transport_t* limited = unix_transport_create(pool, bc, ofd_cache, tc, limited_path, NULL, NULL);
     ASSERT_NE(limited, nullptr);
     unix_transport_set_max_connections(limited, 1);
     unix_transport_start(limited);
 
-    /* First connection should succeed */
-    int fd1 = _connect_with_retry(limited_path);
-    ASSERT_GE(fd1, 0);
+    platform_socket_t* sock1 = _connect_with_retry(limited_path);
+    ASSERT_NE(sock1, (platform_socket_t*)NULL);
 
-    /* Give server time to accept the connection */
-    usleep(50000);
+    /* Give server time to accept the connection. */
+    platform_sleep_ms(50);
 
-    /* Second connection should be rejected (server closes it) */
-    int fd2 = _connect_unix(limited_path);
-    if (fd2 >= 0) {
-        /* Connection was made, but server should close it quickly.
-         * Attempting to send should fail or receive EOF. */
+    /* Second connection: the server should accept and then immediately
+     * close it because max_connections=1. We expect the socket to be
+     * open on the client side; reading from it should yield EOF. */
+    platform_socket_t* sock2 = _connect_with_retry(limited_path, 20);
+    if (sock2 != NULL) {
+        platform_socket_set_nonblocking(sock2);
         uint8_t buf[1];
-        ssize_t result = recv(fd2, buf, 1, MSG_DONTWAIT);
-        /* Server closes connection, so recv should return 0 or -1 */
+        ssize_t result = platform_socket_recv(sock2, buf, 1);
+        /* Server closes the connection; recv returns 0 (EOF) or
+         * -1 (EAGAIN / EOF). */
         EXPECT_LE(result, 0);
-        close(fd2);
+        platform_socket_destroy(sock2);
     }
 
-    close(fd1);
+    platform_socket_destroy(sock1);
     unix_transport_stop(limited);
     unix_transport_destroy(limited);
-    unlink(limited_path);
+    platform_local_cleanup(limited_path);
 }
 
 TEST_F(TestUnixTransport, MultipleClients) {
     const int num_clients = 3;
-    int fds[num_clients];
+    platform_socket_t* socks[num_clients];
     stream_framer_t* framers[num_clients];
     char* ori_strings[num_clients];
 
     for (int i = 0; i < num_clients; i++) {
-        fds[i] = _connect_with_retry(socket_path);
-        ASSERT_GE(fds[i], 0);
+        socks[i] = _connect_with_retry(socket_path);
+        ASSERT_NE(socks[i], (platform_socket_t*)NULL);
         framers[i] = stream_framer_create();
         ori_strings[i] = nullptr;
     }
 
     const uint8_t data[] = "multi client data";
 
-    /* Each client sends a PUT */
     for (int i = 0; i < num_clients; i++) {
         client_api_put_request_t put_req;
         memset(&put_req, 0, sizeof(put_req));
@@ -445,12 +434,11 @@ TEST_F(TestUnixTransport, MultipleClients) {
 
         cbor_item_t* frame = client_api_put_request_encode(&put_req);
         ASSERT_NE(frame, nullptr);
-        ASSERT_EQ(_send_frame(fds[i], frame), 0);
+        ASSERT_EQ(_send_frame(socks[i], frame), 0);
     }
 
-    /* Each client receives PUT_RESPONSE */
     for (int i = 0; i < num_clients; i++) {
-        cbor_item_t* response = _recv_frame(fds[i], framers[i]);
+        cbor_item_t* response = _recv_frame(socks[i], framers[i]);
         ASSERT_NE(response, nullptr);
         uint8_t type = client_api_wire_get_type(response);
         EXPECT_EQ(type, CLIENT_API_PUT_RESPONSE);
@@ -466,7 +454,6 @@ TEST_F(TestUnixTransport, MultipleClients) {
         cbor_decref(&response);
     }
 
-    /* Verify all ORI strings are valid */
     for (int i = 0; i < num_clients; i++) {
         EXPECT_NE(ori_strings[i], nullptr);
         free(ori_strings[i]);
@@ -474,7 +461,7 @@ TEST_F(TestUnixTransport, MultipleClients) {
 
     for (int i = 0; i < num_clients; i++) {
         stream_framer_destroy(framers[i]);
-        close(fds[i]);
+        platform_socket_destroy(socks[i]);
     }
 }
 

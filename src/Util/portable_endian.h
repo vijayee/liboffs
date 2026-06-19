@@ -61,7 +61,8 @@
 #elif defined(__WINDOWS__)
 
 #	include <winsock2.h>
-#	include <sys/param.h>
+/* BYTE_ORDER / LITTLE_ENDIAN / BIG_ENDIAN are provided by <winsock2.h>
+ * on MSVC; sys/param.h is not available. */
 
 #	if BYTE_ORDER == LITTLE_ENDIAN
 

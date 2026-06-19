@@ -237,6 +237,34 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/CMakeLists.txt)
   target_link_libraries(offs PRIVATE msquic::msquic msquic::platform)
 endif()
 
+# pcre2 — POSIX regex compatibility wrapper, used on Windows to back the
+# http_route pattern compiler. Linux uses the system <regex.h> and does not
+# need this. Pinned via deps/pcre2 git submodule (commit recorded in
+# .gitmodules). The 8-bit code unit is enough for POSIX byte/UTF-8 patterns;
+# the 16/32-bit variants, JIT, and CLI tools are disabled to keep the build
+# minimal. The pcre2-posix static library provides regcomp/regexec/regfree
+# symbols that match the POSIX <regex.h> API, so http_route.c is unchanged.
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/pcre2/CMakeLists.txt)
+  set(PCRE2_BUILD_PCRE2_8   ON  CACHE BOOL "" FORCE)
+  set(PCRE2_BUILD_PCRE2_16  OFF CACHE BOOL "" FORCE)
+  set(PCRE2_BUILD_PCRE2_32  OFF CACHE BOOL "" FORCE)
+  set(PCRE2_BUILD_PCRE2GREP OFF CACHE BOOL "" FORCE)
+  set(PCRE2_BUILD_TESTS     OFF CACHE BOOL "" FORCE)
+  set(BUILD_SHARED_LIBS     OFF CACHE BOOL "" FORCE)
+  set(PCRE2_SUPPORT_JIT     OFF CACHE BOOL "" FORCE)
+  add_subdirectory(deps/pcre2)
+  if(WIN32)
+    # The pcre2-8-static and pcre2-posix-static targets' INTERFACE_INCLUDE_DIRECTORIES
+    # include deps/pcre2/src, but only when they are imported/linked via the
+    # add_subdirectory above. The pcre2posix.h header is consumed by
+    # src/Platform/platform_regex_compat.h, which is a public header (included
+    # from src/ClientAPI/HTTP/http_route.h) — so any target that includes
+    # http_route.h transitively needs the include path. Add it as PUBLIC.
+    target_link_libraries(offs PRIVATE pcre2-8-static pcre2-posix-static)
+    target_include_directories(offs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/deps/pcre2/src)
+  endif()
+endif()
+
 find_package(OpenSSL REQUIRED)
 if(OPENSSL_FOUND)
     include_directories(${OPENSSL_INCLUDE_DIR})

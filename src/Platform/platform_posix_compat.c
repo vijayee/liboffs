@@ -31,15 +31,33 @@ char* strndup(const char* s, size_t n) {
 
 /* mkdtemp replacement: create a uniquely-named directory. */
 #include <direct.h>
+#include <process.h>
+#include <time.h>
+#include <windows.h>
 char* mkdtemp(char* tmpl) {
   if (!tmpl) return NULL;
   size_t len = strlen(tmpl);
   if (len < 6 || strcmp(tmpl + len - 6, "XXXXXX") != 0) {
     return NULL;
   }
+  /* Mix several entropy sources so back-to-back calls in the same
+   * process produce different names. rand() is per-process state and
+   * is not thread-safe; we also pull in the current PID, a high-
+   * resolution counter, and the wall clock. */
+  static int seed_initialized = 0;
+  if (!seed_initialized) {
+    srand((unsigned)(time(NULL) ^ (intptr_t)GetCurrentProcessId()));
+    seed_initialized = 1;
+  }
+  LARGE_INTEGER qpc;
+  QueryPerformanceCounter(&qpc);
   for (int attempt = 0; attempt < 100; attempt++) {
-    unsigned int r = (unsigned int)rand();
-    snprintf(tmpl + len - 6, 7, "%06x", r & 0xffffff);
+    unsigned int r = (unsigned)rand();
+    unsigned int mix = (unsigned)qpc.LowPart ^ (unsigned)(qpc.LowPart >> 16);
+    unsigned int id = (unsigned)(intptr_t)GetCurrentProcessId();
+    unsigned int combined = r ^ (mix + attempt * 2654435761u) ^ (id * 0x9E3779B1u);
+    snprintf(tmpl + len - 6, 7, "%06x", combined & 0xffffff);
+    QueryPerformanceCounter(&qpc);
     if (_mkdir(tmpl) == 0) {
       return tmpl;
     }

@@ -12,6 +12,10 @@ platform_socket_t* platform_local_accept(platform_socket_t* listener);
 platform_socket_t* platform_local_connect(const char* path);
 void platform_local_cleanup(const char* path);
 
+/* Re-arm a Windows named-pipe listener after an accept so it can accept
+ * the next connection. No-op on POSIX. Returns 0 on success, -1 on error. */
+int platform_local_rearm(platform_socket_t* listener);
+
 #ifdef __cplusplus
 }
 #endif

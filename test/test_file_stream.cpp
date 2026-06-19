@@ -2,6 +2,7 @@
 #include <functional>
 #include <gmock/gmock.h>
 #include <future>
+#include <atomic>
 extern "C" {
 #include "../src/Streams/file-stream.h"
 #include "../src/Streams/stream.h"
@@ -13,6 +14,34 @@ extern "C" {
 #include "../src/Util/allocator.h"
 }
 
+//
+// Wrapper around std::promise<void> that makes set_value / set_exception
+// idempotent. Both `close_event` and `error_event` may fire on the same
+// stream under various lifecycle orderings (notably on Windows where the
+// file-close path emits both a close and an error if the close happens
+// while a write is in flight). Subscribing both events to a single
+// promise is convenient but the second set_* call would throw
+// `future_error(promise_already_satisfied)` from inside the stream's
+// actor thread. The compare_exchange guard here turns the second call
+// into a silent no-op so either ordering produces the same test outcome.
+//
+struct PromiseOnce {
+  std::promise<void> promise;
+  std::atomic<bool> done{false};
+  void set_value() {
+    bool expected = false;
+    if (done.compare_exchange_strong(expected, true)) {
+      promise.set_value();
+    }
+  }
+  void set_exception(std::exception_ptr e) {
+    bool expected = false;
+    if (done.compare_exchange_strong(expected, true)) {
+      promise.set_exception(e);
+    }
+  }
+};
+
 using ::testing::_;
 using ::testing::MockFunction;
 using ::testing::AtLeast;
@@ -20,10 +49,10 @@ namespace PushFileStream {
   class TestPushFileStream : public testing::Test {
   public:
     scheduler_pool_t* pool;
-    std::promise<void> r_close_promise;
+    PromiseOnce r_close_promise;
     std::promise<void> r_complete_promise;
-    std::promise<void> w_close_promise;
-    MockFunction<void((void*, void*))> mock_data_callback;
+    PromiseOnce w_close_promise;
+    MockFunction<void(void*, void*)> mock_data_callback;
     void SetUp() override {
       pool = scheduler_pool_create(4);
       scheduler_pool_start(pool);
@@ -88,8 +117,8 @@ namespace PushFileStream {
     stream_subscribe((stream_t*) ws, close_event, this, (void(*)(void*, void*)) on_close_w, NULL);
     readable_push_stream_pipe((stream_t*) rs, (stream_t*) ws);
 
-    std::future<void> r_close_future = r_close_promise.get_future();
-    std::future<void> w_close_future = w_close_promise.get_future();
+    std::future<void> r_close_future = r_close_promise.promise.get_future();
+    std::future<void> w_close_future = w_close_promise.promise.get_future();
     try {
       w_close_future.get();
     } catch (const std::exception& e) {
@@ -105,10 +134,10 @@ namespace PullFileStream {
   class TestPullFileStream : public testing::Test {
   public:
     scheduler_pool_t* pool;
-    std::promise<void> r_close_promise;
+    PromiseOnce r_close_promise;
     std::promise<void> r_complete_promise;
-    std::promise<void> w_close_promise;
-    MockFunction<void((void*, void*))> mock_data_callback;
+    PromiseOnce w_close_promise;
+    MockFunction<void(void*, void*)> mock_data_callback;
     void SetUp() override {
       pool = scheduler_pool_create(4);
       scheduler_pool_start(pool);
@@ -174,7 +203,7 @@ namespace PullFileStream {
     stream_subscribe((stream_t*) ws, close_event, this, (void(*)(void*, void*)) on_close_w, NULL);
     writeable_pull_stream_pipe((stream_t*) ws, (stream_t*) rs);
 
-    std::future<void> w_close_future = w_close_promise.get_future();
+    std::future<void> w_close_future = w_close_promise.promise.get_future();
     try {
       w_close_future.get();
     } catch (const std::exception& e) {
