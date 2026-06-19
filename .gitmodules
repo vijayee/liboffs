@@ -6,7 +6,7 @@
 	url = https://github.com/BLAKE3-team/BLAKE3.git
 [submodule "deps/hashmap"]
 	path = deps/hashmap
-	url = https://github.com/DavidLeeds/hashmap
+	url = https://github.com/vijayee/hashmap
 [submodule "deps/libcbor"]
 	path = deps/libcbor
 	url = https://github.com/PJK/libcbor
@@ -22,3 +22,6 @@
 [submodule "deps/poll-dancer"]
 	path = deps/poll-dancer
 	url = https://github.com/vijayee/poll-dancer.git
+[submodule "deps/pcre2"]
+	path = deps/pcre2
+	url = https://github.com/PCRE2Project/pcre2.git
