@@ -4,6 +4,7 @@
 #if defined(_MSC_VER)
   /* MSVC */
   #define PLATFORM_NORETURN       __declspec(noreturn)
+  #define PLATFORM_THREAD_LOCAL   __declspec(thread)
   #define PLATFORM_UNUSED         /* MSVC: suppress C4100 via /wd4100, no per-symbol equivalent */
   #define PLATFORM_STRUCT_PACKED  __declspec(align(1))
   #define PLATFORM_ALIGNED(n)     __declspec(align(n))
@@ -31,6 +32,7 @@
 #else
   /* GCC / Clang */
   #define PLATFORM_NORETURN       __attribute__((noreturn))
+  #define PLATFORM_THREAD_LOCAL   __thread
   #define PLATFORM_UNUSED         __attribute__((unused))
   #define PLATFORM_STRUCT_PACKED  __attribute__((packed))
   #define PLATFORM_ALIGNED(n)     __attribute__((aligned(n)))

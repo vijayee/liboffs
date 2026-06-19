@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <sys/types.h>
+#include "platform_posix_compat.h"
 
 #ifdef __cplusplus
 extern "C" {
