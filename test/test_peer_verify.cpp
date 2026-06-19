@@ -2,10 +2,14 @@
 #include <fstream>
 #include <vector>
 #include <cstdio>
+#include <string>
+#include <filesystem>
 
 extern "C" {
 #include "../src/Network/peer_verify.h"
 #include "../src/Util/allocator.h"
+#include "../src/Platform/platform_posix_compat.h"
+#include "../../tools/offs-ca/ca_ops.h"
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 }
@@ -33,9 +37,35 @@ static bool file_exists(const char* path) {
 class PeerVerifyTest : public ::testing::Test {
 protected:
   std::vector<uint8_t> ca_der;
+  std::string tmp_dir;
+  std::string ca_cert_path;
 
   void SetUp() override {
-    ca_der = pem_to_der("certs/ca_cert.pem");
+    // The suite needs a CA certificate in DER form. certs/ca_cert.pem is a
+    // gitignored developer artifact that does not exist on a fresh clone, so
+    // generate one into a throwaway temp dir via the same ca_generate routine
+    // the offs-ca tool exposes. This keeps the test self-contained on every
+    // platform instead of depending on a stale file left on disk.
+    char tmpl[] = "/tmp/offs-peer-verify-test.XXXXXX";
+    const char* dir = mkdtemp(tmpl);
+    ASSERT_NE(dir, nullptr);
+    tmp_dir = dir;
+    ca_cert_path = tmp_dir + "/ca_cert.pem";
+    std::string ca_key_path = tmp_dir + "/ca_key.pem";
+    ASSERT_EQ(ca_generate("/CN=TestCA", 3650, NULL,
+                          ca_cert_path.c_str(), ca_key_path.c_str()), 0);
+    ca_der = pem_to_der(ca_cert_path.c_str());
+    ASSERT_FALSE(ca_der.empty());
+  }
+
+  void TearDown() override {
+    // std::filesystem::remove_all works on every platform; the previous
+    // system("rm -rf ...") was a silent no-op on Windows (rm is not a
+    // command there) and leaked the generated cert temp dir.
+    if (!tmp_dir.empty()) {
+      std::error_code ec;
+      std::filesystem::remove_all(tmp_dir, ec);
+    }
   }
 };
 
