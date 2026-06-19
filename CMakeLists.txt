@@ -141,6 +141,29 @@ target_include_directories(http-parser PUBLIC deps/http-parser)
 add_library(cjson STATIC deps/cJSON/cJSON.c)
 target_include_directories(cjson PUBLIC deps/cJSON)
 
+# Vendored Solar Designer crypt_blowfish (deps/bcrypt submodule) — the bcrypt
+# verify primitive, used by src/Util/bcrypt.c on every platform. The former
+# glibc crypt_r path is gone, so bcrypt is a hard dependency on all platforms
+# (including Linux); the if(EXISTS) guard gives a clear error when the submodule
+# is not initialized instead of a cryptic link failure. Only crypt_blowfish.c is
+# compiled — rg3's bcrypt.c (whose bcrypt_gensalt pulls in /dev/urandom +
+# <unistd.h>/<fcntl.h>) is deliberately not built, since hash generation stays
+# an external operator-side operation.
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/bcrypt/crypt_blowfish/crypt_blowfish.c)
+  add_library(bcrypt_os STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/bcrypt/crypt_blowfish/crypt_blowfish.c)
+  target_include_directories(bcrypt_os PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/bcrypt/crypt_blowfish)
+  if(MSVC)
+    # Silence harmless size-conversion warnings (C4244/C4267) in the vendored
+    # OpenBSD/Solar-Designer code. Scoped to this target so liboffs warnings
+    # stay at their normal level.
+    target_compile_options(bcrypt_os PRIVATE /W0)
+  endif()
+else()
+  message(FATAL_ERROR "deps/bcrypt submodule missing. Run: git submodule update --init --recursive")
+endif()
+
 add_library(offs STATIC ${C_SRC})
 add_dependencies(offs cbor)
 add_dependencies(offs http-parser)
@@ -153,13 +176,12 @@ target_include_directories(offs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps/cJSON)
 target_link_libraries(offs PUBLIC poll-dancer)
 target_link_libraries(offs PRIVATE http-parser)
 target_link_libraries(offs PRIVATE cjson)
-# libcrypt is the POSIX crypt(3) helper. It is provided by glibc on Linux
-# and by libxcrypt on some BSDs; MSVC has no equivalent (cryptographic
-# primitives use bcrypt/CNG). Exclude it on Windows so the link line stays
-# valid.
-if(NOT WIN32)
-  target_link_libraries(offs PRIVATE crypt)
-endif()
+# bcrypt_os (vendored Solar Designer crypt_blowfish) backs bcrypt_check on
+# every platform. The former glibc crypt_r/crypt dependency is removed —
+# crypt_blowfish is the same implementation family glibc's crypt() delegates to
+# for $2b$, so this unifies verify behavior across Linux/Windows/macOS with no
+# behavior change on Linux.
+target_link_libraries(offs PRIVATE bcrypt_os)
 # MSVC does not enable C11 <stdatomic.h> by default — the atomic_compat.h header
 # in this project includes it unconditionally, so the /experimental:c11atomics
 # flag is required on MSVC builds. Other compilers ship <stdatomic.h> by default.
