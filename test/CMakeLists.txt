@@ -65,6 +65,11 @@ if (BUILD_TESTING)
             test_health_wire.cpp
             test_unix_transport.cpp
             test_regex_shim.cpp
+            # test_peer_verify generates its own CA certificate in SetUp via
+            # ca_generate (same routine the offs-ca tool exposes), so the suite
+            # is self-contained and no longer depends on a stale gitignored
+            # certs/ca_cert.pem left on disk from a manual run.
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tools/offs-ca/ca_ops.c
             )
     # The following tests use raw POSIX sockets, getpid, and pthread directly,
     # which are not available under MSVC. Add them to the build only on POSIX.
@@ -115,6 +120,8 @@ if (BUILD_TESTING)
     target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/cJSON)
     target_include_directories(testliboffs PRIVATE ${GTEST_INCLUDE_DIR})
     target_include_directories(testliboffs PRIVATE ${GMOCK_INCLUDE_DIR})
+    # ca_ops.h for test_peer_verify's in-suite CA certificate generation.
+    target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../tools/offs-ca)
 
     include(GoogleTest)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
@@ -122,6 +129,12 @@ if (BUILD_TESTING)
     # errors at runtime cause discover_tests to fail during build.
     gtest_add_tests(TARGET testliboffs TEST_LIST test_list)
     set_tests_properties(${test_list} PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+    # testliboffs (built on every platform) reads ./test.pdf from its working
+    # directory in TestStreamActor / TestPushFileStream / TestPullFileStream.
+    # The copy below was previously nested inside the if(NOT WIN32)
+    # test_rpc_integration block, so it never ran on Windows and those stream
+    # suites failed to open ./test.pdf. Stage it unconditionally here instead.
+    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/test.pdf DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
     if(NOT WIN32)
       add_executable(test_file_transfer_integration test_file_transfer_integration.cpp test_node_main.c)
       add_dependencies(test_file_transfer_integration cbor)
@@ -227,7 +240,6 @@ if (BUILD_TESTING)
 
       gtest_add_tests(TARGET test_rpc_integration TEST_LIST rpc_test_list)
 
-      file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/test.pdf DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
       file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/certs DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
       file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/certs DESTINATION ${CMAKE_BINARY_DIR})
     endif()
