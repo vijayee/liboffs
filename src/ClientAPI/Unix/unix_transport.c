@@ -15,6 +15,7 @@
 static void* _server_thread(void* arg);
 static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                pd_event_t events, void* user_data);
+static void* _pipe_loop_thread(void* arg);
 
 static void _destroy_stack_init(unix_transport_t* transport) {
   transport->destroy_lock = platform_mutex_create();
@@ -91,8 +92,10 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
   transport->running = 0;
   transport->listen_sock = NULL;
   transport->listen_watcher = NULL;
+  transport->loop_thread = NULL;
   transport->max_connections = 0;
   atomic_store(&transport->active_connections, 0);
+  atomic_store(&transport->loop_running, 0);
   _destroy_stack_init(transport);
 
   transport->socket_path = get_memory(strlen(socket_path) + 1);
@@ -130,6 +133,16 @@ void unix_transport_destroy(unix_transport_t* transport) {
   }
   if (atomic_load(&transport->running)) {
     unix_transport_stop(transport);
+  }
+  /* The pipe path runs a separate _pipe_loop_thread; it should already
+   * have been joined inside unix_transport_stop. If unix_transport_stop
+   * was never called (running was never set), we still need to make
+   * sure the loop thread isn't running. */
+  atomic_store(&transport->loop_running, 0);
+  if (transport->loop_thread != NULL) {
+    pd_loop_async_send(transport->loop, transport);
+    platform_thread_join(transport->loop_thread);
+    transport->loop_thread = NULL;
   }
   /* Drain the destroy stack BEFORE we tear down connection watchers. The
    * destroy stack holds STOP_WATCHER pushes (via _connection_stop_watcher)
@@ -235,14 +248,94 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
     }
     vec_push(&transport->connections, connection);
     atomic_fetch_add(&transport->active_connections, 1);
+
+    /* For pipe-backed listeners the rearm happens on the accept thread
+     * (see _server_thread); on the AF_UNIX path the listener is a
+     * regular socket and rearm is a no-op. */
+    platform_local_rearm(transport->listen_sock);
   }
+}
+
+/* The pipe loop thread: services the transport's loop (IOCP) so that
+ * per-connection read/watch completions get processed. This is a
+ * separate thread from the accept thread because the accept path
+ * blocks in GetOverlappedResult; on the same thread the loop would
+ * never get a chance to dispatch connection I/O. */
+static void* _pipe_loop_thread(void* arg) {
+  unix_transport_t* transport = (unix_transport_t*)arg;
+  platform_thread_setup_stack();
+  while (atomic_load(&transport->loop_running)) {
+    int rc = pd_loop_run_once(transport->loop, 50);
+    (void)rc;
+  }
+  return NULL;
 }
 
 static void* _server_thread(void* arg) {
   unix_transport_t* transport = (unix_transport_t*)arg;
   platform_thread_setup_stack();
 
-  transport->listen_watcher = pd_watcher_create(transport->loop, platform_socket_fd(transport->listen_sock),
+  /* For a Windows named-pipe listener, a ReadFile on the listener handle
+   * never completes (a client connecting only signals via ConnectNamedPipe).
+   * Run a blocking accept loop on this thread; a separate
+   * _pipe_loop_thread services the IOCP for per-connection watchers.
+   * For AF_UNIX listeners, use the standard poll-dancer watcher — its
+   * ReadFile-on-socket semantics match the AF_UNIX readiness model. */
+  if (platform_socket_is_pipe(transport->listen_sock)) {
+    /* Spawn the loop thread. It services transport->loop in the
+     * background so connection I/O is not starved by the blocking
+     * accept on this thread. */
+    atomic_store(&transport->loop_running, 1);
+    transport->loop_thread = platform_thread_create(_pipe_loop_thread, transport);
+
+    while (atomic_load(&transport->running)) {
+      platform_socket_t* client_sock = platform_local_accept(transport->listen_sock);
+      if (client_sock == NULL) {
+        /* platform_local_accept is blocking; a NULL return means
+         * ConnectNamedPipe/GetOverlappedResult failed terminally OR
+         * the pending I/O was cancelled by unix_transport_stop's
+         * CancelIoEx. Re-check running — if we're shutting down,
+         * exit the accept loop cleanly without an error log. */
+        if (!atomic_load(&transport->running)) {
+          break;
+        }
+        log_error("unix_transport: pipe accept failed; stopping server thread");
+        break;
+      }
+
+      if (transport->max_connections > 0 &&
+          atomic_load(&transport->active_connections) >= transport->max_connections) {
+        platform_socket_destroy(client_sock);
+        platform_local_rearm(transport->listen_sock);
+        continue;
+      }
+
+      unix_connection_t* connection = unix_connection_create(transport, client_sock);
+      if (connection == NULL) {
+        platform_socket_destroy(client_sock);
+        platform_local_rearm(transport->listen_sock);
+        continue;
+      }
+      vec_push(&transport->connections, connection);
+      atomic_fetch_add(&transport->active_connections, 1);
+
+      /* Rearm: DisconnectNamedPipe + new overlapped ConnectNamedPipe
+       * inside platform_local_rearm. The listener HANDLE remains
+       * valid; the same wrapper socket is reused for the next accept. */
+      platform_local_rearm(transport->listen_sock);
+    }
+
+    /* Tell the loop thread to exit and join it. */
+    atomic_store(&transport->loop_running, 0);
+    pd_loop_async_send(transport->loop, transport);
+    if (transport->loop_thread != NULL) {
+      platform_thread_join(transport->loop_thread);
+      transport->loop_thread = NULL;
+    }
+    return NULL;
+  }
+
+  transport->listen_watcher = platform_socket_watcher_create(transport->loop, transport->listen_sock,
     PD_EVENT_READ, _accept_callback, transport);
   if (transport->listen_watcher != NULL) {
     pd_watcher_start(transport->listen_watcher);
@@ -270,6 +363,16 @@ void unix_transport_start(unix_transport_t* transport) {
 
 void unix_transport_stop(unix_transport_t* transport) {
   atomic_store(&transport->running, 0);
+  /* For pipe-backed listeners, the server thread is blocked in
+   * _pipe_accept's GetOverlappedResult. Cancel the pending I/O so the
+   * blocking call returns NULL and the thread can exit its accept
+   * loop. For AF_UNIX listeners, async_send wakes the event loop. */
+  if (transport->listen_sock != NULL && platform_socket_is_pipe(transport->listen_sock)) {
+    HANDLE h = (HANDLE)platform_socket_handle(transport->listen_sock);
+    if (h != NULL && h != INVALID_HANDLE_VALUE) {
+      CancelIoEx(h, NULL);
+    }
+  }
   pd_loop_async_send(transport->loop, transport);
   platform_thread_join(transport->thread);
 }

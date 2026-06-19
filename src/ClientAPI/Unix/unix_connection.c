@@ -31,7 +31,9 @@
 #include <cbor.h>
 #include <string.h>
 #include <stdlib.h>
-#include <unistd.h>
+#ifndef _WIN32
+  #include <unistd.h>
+#endif
 #include <errno.h>
 #include <stdio.h>
 #include "../../Util/bcrypt.h"
@@ -942,29 +944,48 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   }
 
   if (events & PD_EVENT_READ) {
+    /* On Windows IOCP, the bytes that triggered this completion are
+     * sitting in the watcher's internal buffer. Drain them into a
+     * local buffer; if more than one buffer's worth is pending (rare
+     * for a small request frame) we loop until the buffer is empty.
+     * On POSIX backends pd_watcher_drain_read returns 0 and we fall
+     * back to the synchronous platform_socket_recv. */
     uint8_t buffer[READ_BUFFER_SIZE];
-    ssize_t bytes_read = platform_socket_recv(connection->sock, buffer, sizeof(buffer));
-    if (bytes_read <= 0) {
-      if (bytes_read == 0) {
+    size_t total_read = 0;
+    size_t n = pd_watcher_drain_read(watcher, buffer, sizeof(buffer));
+    while (n > 0) {
+      total_read += n;
+      if (n < sizeof(buffer)) break; /* buffer fully drained */
+      /* Buffer was exactly full: try once more in case more bytes are
+       * already pending in a follow-up completion we haven't seen yet. */
+      n = pd_watcher_drain_read(watcher, buffer, sizeof(buffer));
+    }
+    if (total_read == 0) {
+      /* POSIX path: synchronous read. */
+      ssize_t bytes_read = platform_socket_recv(connection->sock, buffer, sizeof(buffer));
+      if (bytes_read <= 0) {
+        if (bytes_read == 0) {
+          message_t msg;
+          msg.type = UNIX_CONNECTION_HANGUP;
+          msg.payload = NULL;
+          msg.payload_destroy = NULL;
+          actor_send(&connection->actor, &msg);
+          return;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          return;
+        }
         message_t msg;
-        msg.type = UNIX_CONNECTION_HANGUP;
+        msg.type = UNIX_CONNECTION_ERROR;
         msg.payload = NULL;
         msg.payload_destroy = NULL;
         actor_send(&connection->actor, &msg);
         return;
       }
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        return;
-      }
-      message_t msg;
-      msg.type = UNIX_CONNECTION_ERROR;
-      msg.payload = NULL;
-      msg.payload_destroy = NULL;
-      actor_send(&connection->actor, &msg);
-      return;
+      total_read = (size_t)bytes_read;
     }
 
-    buffer_t* data = buffer_create_from_pointer_copy(buffer, (size_t)bytes_read);
+    buffer_t* data = buffer_create_from_pointer_copy(buffer, total_read);
     message_t msg;
     msg.type = UNIX_CONNECTION_DATA;
     msg.payload = data;
@@ -1015,7 +1036,7 @@ unix_connection_t* unix_connection_create(unix_transport_t* transport, platform_
 
   platform_socket_set_nonblocking(sock);
 
-  ATOMIC_STORE(&connection->watcher, pd_watcher_create(transport->loop, platform_socket_fd(sock),
+  ATOMIC_STORE(&connection->watcher, platform_socket_watcher_create(transport->loop, sock,
     PD_EVENT_READ, _connection_read_callback, connection));
   if (ATOMIC_LOAD(&connection->watcher) != NULL) {
     pd_watcher_start(ATOMIC_LOAD(&connection->watcher));

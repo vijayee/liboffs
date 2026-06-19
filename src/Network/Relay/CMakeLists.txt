@@ -19,3 +19,6 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../../../deps/msquic/CMakeLists.txt)
   target_include_directories(offs_relay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../../deps/msquic/src/inc)
   target_link_libraries(offs_relay PRIVATE msquic::msquic msquic::platform)
 endif()
+
+# The /experimental:c11atomics flag is set globally at the top-level
+# CMakeLists.txt and propagates here through add_compile_options.

@@ -9,8 +9,13 @@
 #include <poll-dancer/poll-dancer.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
+#ifdef _WIN32
+  #include "../../Platform/platform_posix_compat.h"
+  #include <winsock2.h>
+#else
+  #include <unistd.h>
+  #include <sys/socket.h>
+#endif
 
 void _http_response_dispatch(void* state, message_t* msg);
 

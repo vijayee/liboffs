@@ -289,7 +289,7 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
       }
       stream->current_recipe_index++;
       if (stream->current_recipe_index >= stream->recipes.length) {
-        stream_deactivate((stream_t*)stream, ERROR("Write error"));
+        stream_deactivate((stream_t*)stream, OFFS_ERROR("Write error"));
         stream->stream.is_deactivated = 1;
         break;
       }

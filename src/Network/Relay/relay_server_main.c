@@ -11,6 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+  #include <windows.h>
+#endif
 
 static volatile sig_atomic_t _relay_running = 1;
 
@@ -18,6 +21,14 @@ static void _relay_signal_handler(int signum) {
   (void)signum;
   _relay_running = 0;
 }
+
+#ifdef _WIN32
+static BOOL WINAPI _relay_ctrl_handler(DWORD type) {
+  (void)type;
+  _relay_running = 0;
+  return TRUE;
+}
+#endif
 
 int main(int argc, char* argv[]) {
   uint16_t port = 14000;
@@ -80,17 +91,33 @@ int main(int argc, char* argv[]) {
 
   printf("offs_relay: started on port %u\n", port);
 
+#ifndef _WIN32
   struct sigaction signal_action;
   memset(&signal_action, 0, sizeof(signal_action));
   signal_action.sa_handler = _relay_signal_handler;
   sigaction(SIGINT, &signal_action, NULL);
   sigaction(SIGTERM, &signal_action, NULL);
+#else
+  /* On Windows, the only reliable way to receive Ctrl+C / console close
+   * is SetConsoleCtrlHandler. The signal() function is a thin wrapper
+   * that only works in the parent console and is subject to races with
+   * Microsoft's CRT signal-init. */
+  SetConsoleCtrlHandler(_relay_ctrl_handler, TRUE);
+  /* signal() is kept as a fallback in case the process is launched
+   * without a console (e.g. from a service or a non-console parent). */
+  signal(SIGINT, _relay_signal_handler);
+  signal(SIGTERM, _relay_signal_handler);
+#endif
 
   while (_relay_running) {
+#ifdef _WIN32
+    Sleep(1000);
+#else
     struct timespec timeout;
     timeout.tv_sec = 1;
     timeout.tv_nsec = 0;
     nanosleep(&timeout, NULL);
+#endif
   }
 
   printf("offs_relay: shutting down...\n");

@@ -4,7 +4,11 @@
 #include "../Util/path_join.h"
 #include <stdio.h>
 #include <xxh3.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <arpa/inet.h>
+#endif
 #include "../Util/get_dir.h"
 #include "../Util/vec.h"
 #include <stdlib.h>

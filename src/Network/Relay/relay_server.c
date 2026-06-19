@@ -9,13 +9,18 @@
 #include "../../Util/allocator.h"
 #include "../../Util/log.h"
 #include "../peer_verify.h"
+#include "../../Util/atomic_compat.h"
 
 #ifdef HAS_MSQUIC
 
 #include <msquic.h>
 #include <string.h>
 #include <poll-dancer/poll-dancer.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <arpa/inet.h>
+#endif
 
 // --- Stream context: wraps server + client pointers for QUIC callbacks ---
 

@@ -14,7 +14,7 @@
 
 #define STEAL_THRESHOLD 10
 
-static __thread scheduler_t* current_scheduler = NULL;
+static PLATFORM_THREAD_LOCAL scheduler_t* current_scheduler = NULL;
 
 static void _inject_queue_init(inject_queue_t* queue) {
   queue->lock = platform_mutex_create();

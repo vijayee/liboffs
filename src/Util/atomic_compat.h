@@ -19,6 +19,13 @@
 #define ATOMIC_LOAD(ptr) atomic_load(ptr)
 #define ATOMIC_EXCHANGE(ptr, val) atomic_exchange(ptr, val)
 #define ATOMIC_FETCH_ADD(ptr, val) atomic_fetch_add(ptr, val)
+/* ATOMIC_VAR_INIT was deprecated in C11 and is not provided by MSVC's
+   <stdatomic.h>. GCC's <stdatomic.h> expands it to a plain expression in
+   parens, which makes `x = ATOMIC_VAR_INIT(0);` a valid assignment.
+   Emulate that behavior for MSVC so existing call sites compile. */
+#if defined(_MSC_VER)
+  #define ATOMIC_VAR_INIT(value) (value)
+#endif
 #endif
 
 #endif //OFFS_ATOMIC_COMPAT_H

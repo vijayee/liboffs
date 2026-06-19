@@ -222,7 +222,7 @@ void stream_dispatch(void* state, message_t* msg) {
       if (stream->on_push != NULL) {
         stream->on_push(stream);
       } else {
-        stream_notify(stream, error_event, ERROR("No Push Handler Defined"), (void (*)(void*))error_destroy);
+        stream_notify(stream, error_event, OFFS_ERROR("No Push Handler Defined"), (void (*)(void*))error_destroy);
       }
       break;
     case READABLE_READ: {
@@ -230,7 +230,7 @@ void stream_dispatch(void* state, message_t* msg) {
       if (stream->on_read != NULL) {
         stream->on_read(stream, p->size, p->ctx, p->cb);
       } else {
-        stream_notify(stream, error_event, ERROR("No Read Handler Defined"), (void (*)(void*))error_destroy);
+        stream_notify(stream, error_event, OFFS_ERROR("No Read Handler Defined"), (void (*)(void*))error_destroy);
       }
       break;
     }
@@ -239,7 +239,7 @@ void stream_dispatch(void* state, message_t* msg) {
       if (stream->on_write != NULL) {
         stream->on_write(stream, p->data);
       } else {
-        stream_notify(stream, error_event, ERROR("No Write Handler Defined"), (void (*)(void*))error_destroy);
+        stream_notify(stream, error_event, OFFS_ERROR("No Write Handler Defined"), (void (*)(void*))error_destroy);
       }
       if (stream->is_pulling && stream->pullable_stream != NULL) {
         readable_pull_stream_pull(stream->pullable_stream);
@@ -250,14 +250,14 @@ void stream_dispatch(void* state, message_t* msg) {
       if (stream->on_close != NULL) {
         stream->on_close(stream);
       } else {
-        stream_notify(stream, error_event, ERROR("No Close Handler Defined"), (void (*)(void*))error_destroy);
+        stream_notify(stream, error_event, OFFS_ERROR("No Close Handler Defined"), (void (*)(void*))error_destroy);
       }
       break;
     case READABLE_PULL:
       if (stream->on_pull != NULL) {
         stream->on_pull(stream);
       } else {
-        stream_notify(stream, error_event, ERROR("No Readable Pull Handler Defined"), (void (*)(void*))error_destroy);
+        stream_notify(stream, error_event, OFFS_ERROR("No Readable Pull Handler Defined"), (void (*)(void*))error_destroy);
       }
       break;
     case DEFERRED_DEREF:
@@ -446,7 +446,7 @@ void readable_stream_pull_handler(stream_t* stream, void (*on_pull)(stream_t*)) 
 
 void writeable_stream_write_handler(stream_t* stream, void (*handler)(stream_t*, void*)) {
   if (stream->type == readable_stream) {
-    stream_notify(stream, error_event, ERROR("Read Stream cannot set write handlers"), (void (*)(void*))error_destroy);
+    stream_notify(stream, error_event, OFFS_ERROR("Read Stream cannot set write handlers"), (void (*)(void*))error_destroy);
   } else {
     stream->on_write = handler;
   }
@@ -503,7 +503,7 @@ void writeable_stream_write(stream_t* stream, void* data) {
 
 void readable_pull_stream_pull(stream_t* stream) {
   if (stream->type == writeable_stream || stream->force == push) {
-    stream_notify(stream, error_event, ERROR("Invalid Readable Pull Stream"), (void (*)(void*))error_destroy);
+    stream_notify(stream, error_event, OFFS_ERROR("Invalid Readable Pull Stream"), (void (*)(void*))error_destroy);
     return;
   }
 
@@ -579,9 +579,9 @@ void stream_subscribe_internal(stream_t* stream, stream_event_e event, size_t id
 
 void readable_push_stream_pipe(stream_t* rs, stream_t* ws) {
   if (rs->type == writeable_stream || rs->force == pull) {
-    stream_notify(rs, error_event, ERROR("Invalid read stream being piped"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR("Invalid read stream being piped"), (void (*)(void*))error_destroy);
   } else if (ws->type == readable_stream || ws->force == pull) {
-    stream_notify(rs, error_event, ERROR("Invalid write stream being piped to"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR("Invalid write stream being piped to"), (void (*)(void*))error_destroy);
   } else {
     rs->on_pipe(rs, ws);
   }
@@ -589,7 +589,7 @@ void readable_push_stream_pipe(stream_t* rs, stream_t* ws) {
 
 void _readable_push_stream_on_pipe(stream_t* rs, stream_t* ws) {
   if (rs->is_deactivated == 1) {
-    stream_notify(rs, error_event, ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (rs->pipe_notifiers == NULL) {
       size_t size = 0;
@@ -643,7 +643,7 @@ void _writeable_push_stream_on_piped(stream_t* ws, stream_t* rs) {
     abort();
   }
   if (ws->is_deactivated == 1) {
-    stream_notify(ws, error_event, ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
+    stream_notify(ws, error_event, OFFS_ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (ws->pipe_notifiers == NULL) {
       size_t size = 0;
@@ -716,9 +716,9 @@ void _writeable_push_stream_complete_notify(stream_t* stream, void* payload) {
 
 void writeable_pull_stream_pipe(stream_t* ws, stream_t* rs) {
   if (rs->type == writeable_stream || rs->force == push) {
-    stream_notify(rs, error_event, ERROR("Invalid write stream being piped"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR("Invalid write stream being piped"), (void (*)(void*))error_destroy);
   } else if (ws->type == readable_stream || ws->force == push) {
-    stream_notify(rs, error_event, ERROR("Invalid read stream being piped to"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR("Invalid read stream being piped to"), (void (*)(void*))error_destroy);
   } else {
     ws->on_pipe(ws, rs);
   }
@@ -730,7 +730,7 @@ void _writeable_pull_stream_on_pipe(stream_t* ws, stream_t* rs) {
     abort();
   }
   if (ws->is_deactivated == 1) {
-    stream_notify(ws, error_event, ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
+    stream_notify(ws, error_event, OFFS_ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (ws->pipe_notifiers == NULL) {
       size_t size = 0;
@@ -775,7 +775,7 @@ void _readable_pull_stream_on_piped(stream_t* rs, stream_t* ws) {
     abort();
   }
   if (rs->is_deactivated == 1) {
-    stream_notify(rs, error_event, ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (rs->pipe_notifiers == NULL) {
       size_t size = 0;

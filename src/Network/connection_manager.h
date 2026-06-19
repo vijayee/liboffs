@@ -11,7 +11,11 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <sys/socket.h>
+#endif
 
 typedef struct connection_manager_t {
   peer_connection_t** peers;

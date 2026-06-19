@@ -51,8 +51,13 @@ static int _draining_middleware(http_request_t* request, http_response_t* respon
 #include <stdio.h>
 #include <stdint.h>
 #include <limits.h>
-#include <unistd.h>
-#include <sys/socket.h>
+#ifdef _WIN32
+  #include "../../Platform/platform_posix_compat.h"
+  #include <winsock2.h>
+#else
+  #include <unistd.h>
+  #include <sys/socket.h>
+#endif
 #include <poll-dancer/poll-dancer.h>
 
 // OFF URL regex matching /offsystem/v3/{type}/{length}/{hash1}/{hash2}/{name}

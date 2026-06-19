@@ -3,7 +3,11 @@
 //
 #include "http_headers.h"
 #include <string.h>
-#include <strings.h>
+#ifdef _WIN32
+  #include "../../Platform/platform_posix_compat.h"
+#else
+  #include <strings.h>
+#endif
 
 void http_headers_init(http_headers_t* headers) {
   vec_init(&headers->headers);

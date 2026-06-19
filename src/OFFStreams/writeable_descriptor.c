@@ -92,7 +92,7 @@ static void _build_descriptor_blocks(writeable_descriptor_t* desc) {
       if (prior_hash != NULL) {
         DESTROY(prior_hash, buffer);
       }
-      stream_deactivate((stream_t*)desc, ERROR("Write descriptor error"));
+      stream_deactivate((stream_t*)desc, OFFS_ERROR("Write descriptor error"));
       desc->stream.is_deactivated = 1;
       return;
     }

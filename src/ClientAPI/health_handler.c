@@ -3,6 +3,7 @@
 //
 
 #include "health_handler.h"
+#include "../Platform/platform_time.h"
 #include <cJSON.h>
 #include <string.h>
 #include <time.h>
@@ -46,9 +47,8 @@ health_data_t health_data_collect(const health_context_t* ctx) {
 
   /* Compute uptime from start_time_ms if available */
   if (ctx != NULL && ctx->start_time_ms != NULL) {
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    uint64_t now_ms = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+    uint64_t now_ns = platform_monotonic_ns();
+    uint64_t now_ms = now_ns / 1000000;
     uint64_t elapsed = now_ms - *ctx->start_time_ms;
     data.uptime_seconds = elapsed / 1000;
   }

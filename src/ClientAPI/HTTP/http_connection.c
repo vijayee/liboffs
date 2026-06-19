@@ -14,7 +14,11 @@
 #include "../../Actor/message.h"
 #include "../../Scheduler/scheduler.h"
 #include <string.h>
-#include <unistd.h>
+#ifdef _WIN32
+  #include "../../Platform/platform_posix_compat.h"
+#else
+  #include <unistd.h>
+#endif
 #include <errno.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -352,7 +356,7 @@ void http_connection_dispatch(void* state, message_t* msg) {
         if (connection->piped_pending) {
           if (connection->streaming_route != NULL && connection->request != NULL) {
             stream_deactivate((stream_t*)connection->request,
-                              ERROR("Connection closed during streaming upload"));
+                              OFFS_ERROR("Connection closed during streaming upload"));
             connection->streaming_route = NULL;
           }
         }
@@ -367,7 +371,7 @@ void http_connection_dispatch(void* state, message_t* msg) {
       if (connection->piped_pending) {
         if (connection->streaming_route != NULL && connection->request != NULL) {
           stream_deactivate((stream_t*)connection->request,
-                            ERROR("Connection closed during streaming upload"));
+                            OFFS_ERROR("Connection closed during streaming upload"));
           connection->streaming_route = NULL;
         }
       }
@@ -614,7 +618,7 @@ static void _connection_do_reads(http_connection_t* connection) {
       if (connection->piped_pending) {
         if (connection->streaming_route != NULL && connection->request != NULL) {
           stream_deactivate((stream_t*)connection->request,
-                            ERROR("Connection closed during streaming upload"));
+                            OFFS_ERROR("Connection closed during streaming upload"));
           connection->streaming_route = NULL;
         }
       }
