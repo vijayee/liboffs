@@ -65,6 +65,7 @@ if (BUILD_TESTING)
             test_health_handler.cpp
             test_health_wire.cpp
             test_unix_transport.cpp
+            test_health_http.cpp
             test_regex_shim.cpp
             # test_peer_verify generates its own CA certificate in SetUp via
             # ca_generate (same routine the offs-ca tool exposes), so the suite
@@ -81,7 +82,6 @@ if (BUILD_TESTING)
             test_network.cpp
             test_tcp_transport.cpp
             test_ws_transport.cpp
-            test_health_http.cpp
             test_offs_client.cpp
             )
     endif()
