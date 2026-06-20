@@ -4,6 +4,7 @@
 
 #include "bcrypt.h"
 #include <string.h>
+#include "../Platform/platform_random.h"
 
 /* Vendored Solar Designer crypt_blowfish (deps/bcrypt submodule, built as the
    bcrypt_os CMake target). _crypt_blowfish_rn parses the $2b$cost$salt prefix
@@ -16,6 +17,13 @@
 #define OFFS_BCRYPT_HASHSIZE 64
 extern char* _crypt_blowfish_rn(const char* key, const char* setting,
                                 char* output, int size);
+/* _crypt_gensalt_blowfish_rn builds a "$2b$cost$salt" setting string from a
+   caller-supplied 16-byte random salt (we draw it from platform_random_bytes
+   so there is no dependency on /dev/urandom or getentropy). count is the log2
+   work factor. */
+extern char* _crypt_gensalt_blowfish_rn(const char* prefix, unsigned long count,
+                                        const char* input, int size,
+                                        char* output, int output_size);
 
 int bcrypt_check(const char* key, const char* hash) {
   if (key == NULL || hash == NULL) return -1;
@@ -30,4 +38,32 @@ int bcrypt_check(const char* key, const char* hash) {
   char out[OFFS_BCRYPT_HASHSIZE];
   if (_crypt_blowfish_rn(key, hash, out, (int)sizeof(out)) == NULL) return -1;
   return (strcmp(out, hash) == 0) ? 0 : -1;
+}
+
+int bcrypt_generate(const char* key, int cost, char* out, size_t out_size) {
+  if (key == NULL || out == NULL) return -1;
+  /* bcrypt cost is the log2 work factor; the spec-valid range is 4..31. Values
+     below 4 are insecurely fast, above 31 overflow the two-digit field. */
+  if (cost < 4 || cost > 31) return -1;
+  /* The full $2b$ hash (setting + digest) is 60 chars + NUL; require the
+     OpenBSD-standard 64-byte buffer for both the setting and the final hash. */
+  if (out_size < (size_t)OFFS_BCRYPT_HASHSIZE) return -1;
+
+  /* 128-bit salt drawn from the platform CSPRNG. */
+  uint8_t salt[16];
+  if (platform_random_bytes(salt, sizeof(salt)) != 0) return -1;
+
+  char setting[OFFS_BCRYPT_HASHSIZE];
+  if (_crypt_gensalt_blowfish_rn("$2b$", (unsigned long)cost,
+                                 (const char*)salt, (int)sizeof(salt),
+                                 setting, (int)sizeof(setting)) == NULL) {
+    return -1;
+  }
+
+  /* _crypt_blowfish_rn writes the full "$2b$cost$salt<digest>" hash into out. */
+  if (_crypt_blowfish_rn(key, setting, out, (int)out_size) == NULL) return -1;
+
+  /* Defensive: crypt_blowfish always NUL-terminates, but make it explicit. */
+  out[out_size - 1] = '\0';
+  return 0;
 }

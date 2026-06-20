@@ -6,6 +6,7 @@
 #include "http_request.h"
 #include "http_headers.h"
 #include "../../Configuration/config_pending.h"
+#include "../../Configuration/config_json.h"
 #include "../../Node/node.h"
 #include "../../Util/allocator.h"
 #include "../../Util/log.h"
@@ -33,73 +34,9 @@ static int _config_check_auth(http_request_t* request, http_response_t* response
   return 0;
 }
 
-/* Known config field names for validation */
-static bool _is_known_field(const char* name) {
-  static const char* known[] = {
-    "api_key_hash",
-    "cache_size", "max_snapshots", "max_wals", "max_capacity_bytes",
-    "scheduler_thread_count",
-    "http_enabled", "http_port", "https_enabled", "https_port",
-    "https_cert_path", "https_key_path", "unix_enabled",
-    "tcp_enabled", "tcp_port", "ws_enabled", "ws_port",
-    "wt_enabled", "wt_port",
-    "tcp_tls_enabled", "tcp_tls_cert_path", "tcp_tls_key_path",
-    NULL
-  };
-  for (size_t i = 0; known[i] != NULL; i++) {
-    if (strcmp(name, known[i]) == 0) return true;
-  }
-  return false;
-}
-
-/* Serialize current config_t to cJSON */
-static cJSON* _config_to_json(const config_t* config) {
-  cJSON* root = cJSON_CreateObject();
-
-  cJSON_AddNumberToObject(root, "cache_size", (double)config->cache_size);
-  cJSON_AddNumberToObject(root, "max_snapshots", (double)config->max_snapshots);
-  cJSON_AddNumberToObject(root, "max_wals", (double)config->max_wals);
-  cJSON_AddNumberToObject(root, "max_capacity_bytes", (double)config->max_capacity_bytes);
-  cJSON_AddNumberToObject(root, "scheduler_thread_count", (double)config->scheduler_thread_count);
-
-  cJSON_AddBoolToObject(root, "http_enabled", config->http_enabled);
-  cJSON_AddNumberToObject(root, "http_port", (double)config->http_port);
-  cJSON_AddBoolToObject(root, "https_enabled", config->https_enabled);
-  cJSON_AddNumberToObject(root, "https_port", (double)config->https_port);
-  if (config->https_cert_path)
-    cJSON_AddStringToObject(root, "https_cert_path", config->https_cert_path);
-  else
-    cJSON_AddNullToObject(root, "https_cert_path");
-  if (config->https_key_path)
-    cJSON_AddStringToObject(root, "https_key_path", config->https_key_path);
-  else
-    cJSON_AddNullToObject(root, "https_key_path");
-
-  cJSON_AddBoolToObject(root, "unix_enabled", config->unix_enabled);
-  cJSON_AddBoolToObject(root, "tcp_enabled", config->tcp_enabled);
-  cJSON_AddNumberToObject(root, "tcp_port", (double)config->tcp_port);
-  cJSON_AddBoolToObject(root, "ws_enabled", config->ws_enabled);
-  cJSON_AddNumberToObject(root, "ws_port", (double)config->ws_port);
-  cJSON_AddBoolToObject(root, "wt_enabled", config->wt_enabled);
-  cJSON_AddNumberToObject(root, "wt_port", (double)config->wt_port);
-
-  cJSON_AddBoolToObject(root, "tcp_tls_enabled", config->tcp_tls_enabled);
-  if (config->tcp_tls_cert_path)
-    cJSON_AddStringToObject(root, "tcp_tls_cert_path", config->tcp_tls_cert_path);
-  else
-    cJSON_AddNullToObject(root, "tcp_tls_cert_path");
-  if (config->tcp_tls_key_path)
-    cJSON_AddStringToObject(root, "tcp_tls_key_path", config->tcp_tls_key_path);
-  else
-    cJSON_AddNullToObject(root, "tcp_tls_key_path");
-
-  if (config->api_key_hash)
-    cJSON_AddStringToObject(root, "api_key_hash", config->api_key_hash);
-  else
-    cJSON_AddNullToObject(root, "api_key_hash");
-
-  return root;
-}
+/* Known-field validation and config serialization are shared with the Unix
+   config handlers via src/Configuration/config_json.{h,c}, so the two paths
+   cannot drift. */
 
 static void _config_get_handler(http_request_t* request, http_response_t* response,
                                  void* user_data) {
@@ -107,7 +44,7 @@ static void _config_get_handler(http_request_t* request, http_response_t* respon
 
   if (_config_check_auth(request, response, ctx->node->http_server) != 0) return;
 
-  cJSON* json = _config_to_json(ctx->node->config);
+  cJSON* json = config_to_json(ctx->node->config);
   char* json_str = cJSON_Print(json);
   cJSON_Delete(json);
 
@@ -160,7 +97,7 @@ static void _config_put_handler(http_request_t* request, http_response_t* respon
 
   cJSON* item = incoming->child;
   while (item != NULL) {
-    if (!_is_known_field(item->string)) {
+    if (!config_is_known_field(item->string)) {
       cJSON* entry = cJSON_CreateObject();
       cJSON_AddStringToObject(entry, "field", item->string);
       cJSON_AddStringToObject(entry, "reason", "unknown field");
@@ -169,14 +106,11 @@ static void _config_put_handler(http_request_t* request, http_response_t* respon
       continue;
     }
 
-    /* Type check: strings for paths and api_key_hash */
-    bool is_string_field = (strcmp(item->string, "api_key_hash") == 0 ||
-                            strcmp(item->string, "https_cert_path") == 0 ||
-                            strcmp(item->string, "https_key_path") == 0 ||
-                            strcmp(item->string, "tcp_tls_cert_path") == 0 ||
-                            strcmp(item->string, "tcp_tls_key_path") == 0);
-    /* Accept null for string fields (means revert to default) */
-    if (is_string_field && !cJSON_IsString(item) && !cJSON_IsNull(item)) {
+    /* Type check driven by the shared field-type classifier so HTTP and Unix
+       agree on what each field accepts. String fields also accept null
+       (revert to default). */
+    config_field_type_t ftype = config_field_type(item->string);
+    if (ftype == CONFIG_FIELD_STRING && !cJSON_IsString(item) && !cJSON_IsNull(item)) {
       cJSON* entry = cJSON_CreateObject();
       cJSON_AddStringToObject(entry, "field", item->string);
       cJSON_AddStringToObject(entry, "reason", "expected string or null");
@@ -184,15 +118,7 @@ static void _config_put_handler(http_request_t* request, http_response_t* respon
       item = item->next;
       continue;
     }
-
-    bool is_bool_field = (strcmp(item->string, "http_enabled") == 0 ||
-                          strcmp(item->string, "https_enabled") == 0 ||
-                          strcmp(item->string, "unix_enabled") == 0 ||
-                          strcmp(item->string, "tcp_enabled") == 0 ||
-                          strcmp(item->string, "ws_enabled") == 0 ||
-                          strcmp(item->string, "wt_enabled") == 0 ||
-                          strcmp(item->string, "tcp_tls_enabled") == 0);
-    if (is_bool_field && !cJSON_IsBool(item)) {
+    if (ftype == CONFIG_FIELD_BOOL && !cJSON_IsBool(item)) {
       cJSON* entry = cJSON_CreateObject();
       cJSON_AddStringToObject(entry, "field", item->string);
       cJSON_AddStringToObject(entry, "reason", "expected boolean");
@@ -200,9 +126,7 @@ static void _config_put_handler(http_request_t* request, http_response_t* respon
       item = item->next;
       continue;
     }
-
-    bool is_number_field = (!is_string_field && !is_bool_field);
-    if (is_number_field && !cJSON_IsNumber(item)) {
+    if (ftype == CONFIG_FIELD_NUMBER && !cJSON_IsNumber(item)) {
       cJSON* entry = cJSON_CreateObject();
       cJSON_AddStringToObject(entry, "field", item->string);
       cJSON_AddStringToObject(entry, "reason", "expected number");

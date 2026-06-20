@@ -54,6 +54,7 @@ if (BUILD_TESTING)
             test_timer_debounce.cpp
             test_shutdown.cpp
             test_config_validate.cpp
+            test_config_json.cpp
             test_validation.cpp
             test_wire_validation.cpp
             test_bcrypt.cpp

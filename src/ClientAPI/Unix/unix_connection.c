@@ -614,6 +614,15 @@ static void _unix_dispatch_frame(unix_connection_t* conn, uint8_t type, cbor_ite
     case CLIENT_API_BLOCK_DELETE_REQUEST:
       block_handle_delete_request(&conn->block_ctx, frame);
       break;
+    case CLIENT_API_CONFIG_SHOW_REQUEST:
+      config_handle_show_request(&conn->config_ctx, frame);
+      break;
+    case CLIENT_API_CONFIG_SET_REQUEST:
+      config_handle_set_request(&conn->config_ctx, frame);
+      break;
+    case CLIENT_API_CONFIG_RELOAD_REQUEST:
+      config_handle_reload_request(&conn->config_ctx, frame);
+      break;
     case CLIENT_API_HEALTH_REQUEST: {
       health_data_t data = health_data_collect(conn->transport->health_ctx);
       cJSON* json_obj = health_data_to_json(&data);
@@ -1031,6 +1040,13 @@ unix_connection_t* unix_connection_create(unix_transport_t* transport, platform_
   connection->block_ctx.send_frame = (block_send_frame_fn)_unix_connection_send_frame;
   connection->block_ctx.send_error = (block_send_error_fn)_unix_connection_send_error;
   connection->block_ctx.pending_op = BLOCK_OP_NONE;
+
+  connection->config_ctx.conn = (config_connection_t*)connection;
+  connection->config_ctx.node = transport->config_node;
+  connection->config_ctx.data_dir = transport->config_data_dir;
+  connection->config_ctx.is_authenticated = connection->is_authenticated;
+  connection->config_ctx.send_frame = (config_send_frame_fn)_unix_connection_send_frame;
+  connection->config_ctx.send_error = (config_send_error_fn)_unix_connection_send_error;
 
   actor_init(&connection->actor, connection, unix_connection_dispatch, transport->pool);
 
