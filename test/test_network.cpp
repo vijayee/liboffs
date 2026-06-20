@@ -1041,21 +1041,42 @@ TEST(StoreBlockShouldAcceptTest, LowCapacityAlwaysAccepts) {
   // At capacity=0, accept probability = 1.0 - 0/0.80 = 1.0
   uint8_t hash[32] = {};
   memset(hash, 0xAA, 32);
-  EXPECT_TRUE(store_block_should_accept(0.0f, NODE_PHASE_INHALE, hash, 1024));
+  EXPECT_TRUE(store_block_should_accept(0.0f, NODE_PHASE_INHALE, hash, 1024, 0));
 }
 
 TEST(StoreBlockShouldAcceptTest, ExhalePhaseDeclines) {
   uint8_t hash[32] = {};
   memset(hash, 0xAA, 32);
-  EXPECT_FALSE(store_block_should_accept(0.3f, NODE_PHASE_EXHALE, hash, 1024));
+  EXPECT_FALSE(store_block_should_accept(0.3f, NODE_PHASE_EXHALE, hash, 1024, 0));
 }
 
 TEST(StoreBlockShouldAcceptTest, HighCapacityDeclines) {
   uint8_t hash[32] = {};
   memset(hash, 0xAA, 32);
   // At capacity >= 0.80, probability = 0 → always decline
-  EXPECT_FALSE(store_block_should_accept(0.85f, NODE_PHASE_NEUTRAL, hash, 1024));
-  EXPECT_FALSE(store_block_should_accept(1.0f, NODE_PHASE_NEUTRAL, hash, 1024));
+  EXPECT_FALSE(store_block_should_accept(0.85f, NODE_PHASE_NEUTRAL, hash, 1024, 0));
+  EXPECT_FALSE(store_block_should_accept(1.0f, NODE_PHASE_NEUTRAL, hash, 1024, 0));
+}
+
+TEST(StoreBlockShouldAcceptTest, HighFibBoostsAcceptance) {
+  // The FIB boost is statistical: at capacity 0.5 the baseline accept
+  // probability is ~0.5, and a max-FIB block (fib >= FIB_BOOST_CAP) gets the
+  // +50% boost factor → ~0.75. Over many trials a high-FIB block must be
+  // accepted more often than a zero-FIB one. The expected gap (~500 of 2000
+  // trials) is far larger than rand() noise, so this is effectively non-flaky.
+  uint8_t hash[32] = {};
+  memset(hash, 0xAA, 32);
+  int baseline_accepts = 0;
+  int high_fib_accepts = 0;
+  for (int i = 0; i < 2000; i++) {
+    if (store_block_should_accept(0.5f, NODE_PHASE_INHALE, hash, 1024, 0)) {
+      baseline_accepts++;
+    }
+    if (store_block_should_accept(0.5f, NODE_PHASE_INHALE, hash, 1024, 10)) {
+      high_fib_accepts++;
+    }
+  }
+  EXPECT_GT(high_fib_accepts, baseline_accepts);
 }
 
 TEST_F(StoreBlockTest, NullStateReturnsDeclined) {

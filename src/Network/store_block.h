@@ -45,9 +45,11 @@ typedef struct store_block_state_t {
 } store_block_state_t;
 
 // Compute SHOULD-ACCEPT for a StoreBlock request
-// Returns true if we should accept the block
+// Returns true if we should accept the block. block_fib is the block's
+// popularity counter; higher-FIB blocks get a bounded accept-probability boost.
 bool store_block_should_accept(float local_capacity, node_phase_e local_phase,
-                                const uint8_t* block_hash, uint32_t block_size);
+                                const uint8_t* block_hash, uint32_t block_size,
+                                uint32_t block_fib);
 
 // Execute StoreBlock handler logic
 // Returns result code and populates next_hops for FORWARDING result
