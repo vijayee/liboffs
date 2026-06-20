@@ -38,11 +38,37 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . -j$(nproc)
 ```
 
+### Windows (MSVC)
+
+Helper scripts in `scripts/` drive an MSVC + vcpkg + Ninja build into
+`cmake-build-msvc/`. They auto-locate `vcvars64.bat`, `VCPKG_ROOT`, and the
+vcpkg toolchain (override via `VCVARS_ALL`, `VCPKG_ROOT`, `BUILD_DIR`, etc.).
+
+```bat
+:: One-time: install the OpenSSL 3.x dependency into vcpkg
+scripts\vcpkg_install_openssl.bat
+
+:: Configure (vcvars64 + vcpkg x64-windows-static-md toolchain, Ninja generator)
+scripts\msvc_configure.bat
+
+:: Build everything
+scripts\msvc_build.bat
+```
+
+Per-target build scripts are also provided (`scripts\msvc_build_offs.bat`,
+`msvc_build_offs_ca.bat`, `msvc_build_offs_relay.bat`,
+`msvc_build_testliboffs.bat`, and per-test scripts).
+
+QUIC/WebTransport is gated by the `OFFS_ENABLE_QUIC` CMake option (default
+`ON`): with it on, a missing `deps/msquic` submodule is a configure-time error
+rather than a silent degrade to stub networking; pass
+`-DOFFS_ENABLE_QUIC=OFF` for an explicit client-only / no-P2P build.
+
 Requires:
 - CMake 3.16+
 - C11/C++17 compiler
 - OpenSSL 3.x
-- MsQuic (optional, for QUIC/WebTransport)
+- MsQuic (optional, for QUIC/WebTransport; gated by `OFFS_ENABLE_QUIC`)
 
 ## Tools
 
@@ -66,6 +92,13 @@ See `examples/` for a Flutter client app and server example.
 
 ```bash
 cd build && cmake --build . --target testliboffs && ./test/testliboffs
+```
+
+On the MSVC build, the test binary is `cmake-build-msvc\testliboffs.exe`:
+
+```bat
+scripts\msvc_build_testliboffs.bat
+cmake-build-msvc\testliboffs.exe
 ```
 
 ## License

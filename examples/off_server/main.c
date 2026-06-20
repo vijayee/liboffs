@@ -171,6 +171,9 @@ int main(int argc, char** argv) {
       authority_destroy(authority);
       return 1;
     }
+    /* Wire config management (show/set/reload) onto the Unix transport so
+       offs config * over the local socket mirrors the HTTP /config routes. */
+    unix_transport_set_config_ctx(unix_transport, &node_obj, ".");
   }
 #else
   if (unix_path != NULL) {

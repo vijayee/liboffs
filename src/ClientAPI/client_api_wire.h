@@ -40,6 +40,12 @@
 #define CLIENT_API_FRIEND_LIST_RESPONSE   30
 #define CLIENT_API_UPDATE_STATUS_REQUEST  31
 #define CLIENT_API_UPDATE_STATUS_RESPONSE 32
+#define CLIENT_API_CONFIG_SHOW_REQUEST    33
+#define CLIENT_API_CONFIG_SHOW_RESPONSE   34
+#define CLIENT_API_CONFIG_SET_REQUEST     35
+#define CLIENT_API_CONFIG_SET_RESPONSE    36
+#define CLIENT_API_CONFIG_RELOAD_REQUEST  37
+#define CLIENT_API_CONFIG_RELOAD_RESPONSE 38
 
 // Status codes for responses
 #define CLIENT_API_STATUS_OK                0
@@ -190,6 +196,44 @@ typedef struct {
   char* json_data;  // caller must free
 } client_api_update_status_response_t;
 
+// --- Config Show Request ---
+// [type] — no payload (returns the full current config as JSON)
+
+// --- Config Show Response ---
+// [type, json_string: tstr] — the config (or a single field) as JSON
+typedef struct {
+  char* json_data;  // caller must free
+} client_api_config_show_response_t;
+
+// --- Config Set Request ---
+// [type, field: tstr, value: tstr]
+// value is always sent as a string; the daemon parses it to the field's type.
+// Used by set/add/remove/set-auth/generate-auth (the latter pre-hashes client-side).
+typedef struct {
+  char* field;
+  char* value;
+} client_api_config_set_request_t;
+
+// --- Config Set Response ---
+// [type, status: uint, restart_required: uint, message: tstr]
+// status: 0 = staged (pending config written, restart to apply), 1 = rejected
+typedef struct {
+  uint8_t status;
+  uint8_t restart_required;  // 0 or 1
+  char* message;             // caller must free
+} client_api_config_set_response_t;
+
+// --- Config Reload Request ---
+// [type] — no payload (apply pending config by restarting the node)
+
+// --- Config Reload Response ---
+// [type, status: uint, message: tstr]
+// status: 0 = restart triggered, 1 = no pending config / error
+typedef struct {
+  uint8_t status;
+  char* message;  // caller must free
+} client_api_config_reload_response_t;
+
 // --- Peer Info Request ---
 // [type] — no payload
 
@@ -308,6 +352,24 @@ cbor_item_t* client_api_update_status_request_encode(void);
 cbor_item_t* client_api_update_status_response_encode(const client_api_update_status_response_t* msg);
 int client_api_update_status_response_decode(cbor_item_t* item, client_api_update_status_response_t* msg);
 void client_api_update_status_response_destroy(client_api_update_status_response_t* msg);
+
+cbor_item_t* client_api_config_show_request_encode(void);
+cbor_item_t* client_api_config_show_response_encode(const client_api_config_show_response_t* msg);
+int client_api_config_show_response_decode(cbor_item_t* item, client_api_config_show_response_t* msg);
+void client_api_config_show_response_destroy(client_api_config_show_response_t* msg);
+
+cbor_item_t* client_api_config_set_request_encode(const client_api_config_set_request_t* msg);
+int client_api_config_set_request_decode(cbor_item_t* item, client_api_config_set_request_t* msg);
+void client_api_config_set_request_destroy(client_api_config_set_request_t* msg);
+
+cbor_item_t* client_api_config_set_response_encode(const client_api_config_set_response_t* msg);
+int client_api_config_set_response_decode(cbor_item_t* item, client_api_config_set_response_t* msg);
+void client_api_config_set_response_destroy(client_api_config_set_response_t* msg);
+
+cbor_item_t* client_api_config_reload_request_encode(void);
+cbor_item_t* client_api_config_reload_response_encode(const client_api_config_reload_response_t* msg);
+int client_api_config_reload_response_decode(cbor_item_t* item, client_api_config_reload_response_t* msg);
+void client_api_config_reload_response_destroy(client_api_config_reload_response_t* msg);
 
 cbor_item_t* client_api_peer_info_request_encode(void);
 

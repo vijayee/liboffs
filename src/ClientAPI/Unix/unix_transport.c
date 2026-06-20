@@ -118,6 +118,7 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
     actor_destroy(&transport->actor);
     free(transport->socket_path);
     free(transport->api_key_hash);
+    free(transport->config_data_dir);
     free(transport);
     return NULL;
   }
@@ -212,6 +213,7 @@ void unix_transport_destroy(unix_transport_t* transport) {
     free(transport->socket_path);
   }
   free(transport->api_key_hash);
+  free(transport->config_data_dir);
   actor_destroy(&transport->actor);
   _destroy_stack_destroy(transport);
   pd_loop_destroy(transport->loop);
@@ -384,4 +386,17 @@ void unix_transport_set_max_connections(unix_transport_t* transport, size_t max_
 void unix_transport_set_update_status_ctx(unix_transport_t* transport,
                                            update_status_context_t* ctx) {
   transport->update_status_ctx = ctx;
+}
+
+void unix_transport_set_config_ctx(unix_transport_t* transport,
+                                    offs_node_t* node, const char* data_dir) {
+  transport->config_node = node;
+  if (transport->config_data_dir != NULL) {
+    free(transport->config_data_dir);
+    transport->config_data_dir = NULL;
+  }
+  if (data_dir != NULL) {
+    transport->config_data_dir = get_memory(strlen(data_dir) + 1);
+    memcpy(transport->config_data_dir, data_dir, strlen(data_dir) + 1);
+  }
 }

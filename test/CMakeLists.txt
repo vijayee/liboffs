@@ -54,6 +54,7 @@ if (BUILD_TESTING)
             test_timer_debounce.cpp
             test_shutdown.cpp
             test_config_validate.cpp
+            test_config_json.cpp
             test_validation.cpp
             test_wire_validation.cpp
             test_bcrypt.cpp
@@ -109,7 +110,7 @@ if (BUILD_TESTING)
     target_link_libraries(testliboffs PRIVATE GTest::gmock)
     # Must match HAS_MSQUIC definition from parent CMakeLists.txt so
     # struct layouts (peer_connection_t etc.) are consistent with the library.
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/CMakeLists.txt)
+    if(OFFS_ENABLE_QUIC AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/CMakeLists.txt)
       target_compile_definitions(testliboffs PRIVATE HAS_MSQUIC)
       target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/src/inc)
       target_link_libraries(testliboffs PRIVATE msquic::msquic msquic::platform)
@@ -157,7 +158,7 @@ if (BUILD_TESTING)
       if(NOT WIN32)
         target_link_libraries(test_file_transfer_integration PRIVATE pthread)
       endif()
-      if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/CMakeLists.txt)
+      if(OFFS_ENABLE_QUIC AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/CMakeLists.txt)
         target_compile_definitions(test_file_transfer_integration PRIVATE HAS_MSQUIC)
         target_include_directories(test_file_transfer_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/src/inc)
         target_link_libraries(test_file_transfer_integration PRIVATE msquic::msquic msquic::platform)
@@ -225,7 +226,7 @@ if (BUILD_TESTING)
       if(NOT WIN32)
         target_link_libraries(test_rpc_integration PRIVATE pthread)
       endif()
-      if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/CMakeLists.txt)
+      if(OFFS_ENABLE_QUIC AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/CMakeLists.txt)
         target_compile_definitions(test_rpc_integration PRIVATE HAS_MSQUIC)
         target_include_directories(test_rpc_integration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/src/inc)
         target_link_libraries(test_rpc_integration PRIVATE msquic::msquic msquic::platform)
@@ -292,7 +293,7 @@ if (BUILD_TESTING)
       if(NOT WIN32)
         target_link_libraries(test_large_file_upload PRIVATE pthread)
       endif()
-      if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/CMakeLists.txt)
+      if(OFFS_ENABLE_QUIC AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/CMakeLists.txt)
         target_compile_definitions(test_large_file_upload PRIVATE HAS_MSQUIC)
         target_include_directories(test_large_file_upload PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/src/inc)
         target_link_libraries(test_large_file_upload PRIVATE msquic::msquic msquic::platform)

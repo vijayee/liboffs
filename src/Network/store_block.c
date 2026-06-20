@@ -17,8 +17,18 @@
 // Accept with probability = 1.0 - capacity/0.80 when capacity < 0.80
 // Reject if already stored, no room, or in exhale phase (capacity >= 0.80)
 
+// FIB (Fibonacci block-popularity) accept-probability boost. A block's FIB
+// counter is how often the network has seen it; higher-FIB blocks are more
+// popular and get a higher accept probability so the network preferentially
+// retains hot blocks. The boost is linear per FIB level up to FIB_BOOST_CAP, so
+// a maximally popular block (fib >= FIB_BOOST_CAP) gets at most +50% accept
+// probability (0.05 * 10) added before the [0, 1] clamp below.
+#define FIB_BOOST_PER_LEVEL 0.05f
+#define FIB_BOOST_CAP 10u
+
 bool store_block_should_accept(float local_capacity, node_phase_e local_phase,
-                                const uint8_t* block_hash, uint32_t block_size) {
+                                const uint8_t* block_hash, uint32_t block_size,
+                                uint32_t block_fib) {
   // In exhale phase (capacity >= 0.80), decline
   if (local_phase == NODE_PHASE_EXHALE) return false;
 
@@ -38,9 +48,13 @@ bool store_block_should_accept(float local_capacity, node_phase_e local_phase,
     accept_probability *= size_factor;
   }
 
-  if (block_hash != NULL) {
-    // Higher FIB blocks get a slight priority boost
-    // This is a placeholder until block_cache lookup is wired up
+  if (block_hash != NULL && block_fib > 0) {
+    // Higher-FIB (more popular) blocks get a slight accept-probability boost.
+    // The boost is linear in FIB level up to FIB_BOOST_CAP and applied before
+    // the clamp below, so a popular block is more likely to be retained while
+    // a cold block (fib == 0) is unaffected.
+    uint32_t fib_level = block_fib < FIB_BOOST_CAP ? block_fib : FIB_BOOST_CAP;
+    accept_probability *= (1.0f + FIB_BOOST_PER_LEVEL * (float)fib_level);
   }
 
   if (accept_probability < 0.0f) accept_probability = 0.0f;
@@ -88,7 +102,8 @@ store_block_result_e store_block_execute(
   *next_hop_count = 0;
 
   // Step 1: Check SHOULD-ACCEPT
-  if (store_block_should_accept(local_capacity, local_phase, state->block_hash, state->block_size)) {
+  if (store_block_should_accept(local_capacity, local_phase, state->block_hash,
+                                state->block_size, state->block_fib)) {
     return STORE_BLOCK_ACCEPTED;
   }
 

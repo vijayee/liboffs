@@ -1448,3 +1448,286 @@ int client_api_friend_list_response_decode(cbor_item_t* item, client_api_friend_
   msg->friends = cbor_array_get(item, 1);
   return 0;
 }
+
+// --- Config Show Request ---
+// [type] — no payload
+
+cbor_item_t* client_api_config_show_request_encode(void) {
+  cbor_item_t* array = cbor_new_definite_array(1);
+  cbor_item_t* item = cbor_build_uint8(CLIENT_API_CONFIG_SHOW_REQUEST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+  return array;
+}
+
+// --- Config Show Response ---
+// [type, json_string: tstr]
+
+cbor_item_t* client_api_config_show_response_encode(const client_api_config_show_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_CONFIG_SHOW_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  if (msg->json_data != NULL) {
+    item = cbor_build_string(msg->json_data);
+  } else {
+    item = cbor_build_string("");
+  }
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_config_show_response_decode(cbor_item_t* item, client_api_config_show_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_CONFIG_SHOW_RESPONSE) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* json_item = cbor_array_get(item, 1);
+  if (cbor_isa_string(json_item)) {
+    size_t len = cbor_string_length(json_item);
+    msg->json_data = get_memory(len + 1);
+    memcpy(msg->json_data, cbor_string_handle(json_item), len);
+    msg->json_data[len] = '\0';
+  } else {
+    msg->json_data = get_memory(1);
+    msg->json_data[0] = '\0';
+  }
+  cbor_decref(&json_item);
+
+  return 0;
+}
+
+void client_api_config_show_response_destroy(client_api_config_show_response_t* msg) {
+  if (msg != NULL && msg->json_data != NULL) {
+    free(msg->json_data);
+    msg->json_data = NULL;
+  }
+}
+
+// --- Config Set Request ---
+// [type, field: tstr, value: tstr]
+
+cbor_item_t* client_api_config_set_request_encode(const client_api_config_set_request_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(3);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_CONFIG_SET_REQUEST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_string(msg->field != NULL ? msg->field : "");
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_string(msg->value != NULL ? msg->value : "");
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_config_set_request_decode(cbor_item_t* item, client_api_config_set_request_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 3) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_CONFIG_SET_REQUEST) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* field_item = cbor_array_get(item, 1);
+  if (cbor_isa_string(field_item)) {
+    size_t len = cbor_string_length(field_item);
+    msg->field = get_memory(len + 1);
+    memcpy(msg->field, cbor_string_handle(field_item), len);
+    msg->field[len] = '\0';
+  } else {
+    msg->field = get_memory(1);
+    msg->field[0] = '\0';
+  }
+  cbor_decref(&field_item);
+
+  cbor_item_t* value_item = cbor_array_get(item, 2);
+  if (cbor_isa_string(value_item)) {
+    size_t len = cbor_string_length(value_item);
+    msg->value = get_memory(len + 1);
+    memcpy(msg->value, cbor_string_handle(value_item), len);
+    msg->value[len] = '\0';
+  } else {
+    msg->value = get_memory(1);
+    msg->value[0] = '\0';
+  }
+  cbor_decref(&value_item);
+
+  return 0;
+}
+
+void client_api_config_set_request_destroy(client_api_config_set_request_t* msg) {
+  if (msg == NULL) return;
+  if (msg->field != NULL) {
+    free(msg->field);
+    msg->field = NULL;
+  }
+  if (msg->value != NULL) {
+    free(msg->value);
+    msg->value = NULL;
+  }
+}
+
+// --- Config Set Response ---
+// [type, status: uint, restart_required: uint, message: tstr]
+
+cbor_item_t* client_api_config_set_response_encode(const client_api_config_set_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(4);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_CONFIG_SET_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->status);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->restart_required ? 1 : 0);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_string(msg->message != NULL ? msg->message : "");
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_config_set_response_decode(cbor_item_t* item, client_api_config_set_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 4) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_CONFIG_SET_RESPONSE) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* status_item = cbor_array_get(item, 1);
+  if (cbor_isa_uint(status_item)) {
+    msg->status = cbor_get_uint8(status_item);
+  }
+  cbor_decref(&status_item);
+
+  cbor_item_t* restart_item = cbor_array_get(item, 2);
+  if (cbor_isa_uint(restart_item)) {
+    msg->restart_required = cbor_get_uint8(restart_item) ? 1 : 0;
+  }
+  cbor_decref(&restart_item);
+
+  cbor_item_t* msg_item = cbor_array_get(item, 3);
+  if (cbor_isa_string(msg_item)) {
+    size_t len = cbor_string_length(msg_item);
+    msg->message = get_memory(len + 1);
+    memcpy(msg->message, cbor_string_handle(msg_item), len);
+    msg->message[len] = '\0';
+  } else {
+    msg->message = get_memory(1);
+    msg->message[0] = '\0';
+  }
+  cbor_decref(&msg_item);
+
+  return 0;
+}
+
+void client_api_config_set_response_destroy(client_api_config_set_response_t* msg) {
+  if (msg == NULL) return;
+  if (msg->message != NULL) {
+    free(msg->message);
+    msg->message = NULL;
+  }
+}
+
+// --- Config Reload Request ---
+// [type] — no payload
+
+cbor_item_t* client_api_config_reload_request_encode(void) {
+  cbor_item_t* array = cbor_new_definite_array(1);
+  cbor_item_t* item = cbor_build_uint8(CLIENT_API_CONFIG_RELOAD_REQUEST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+  return array;
+}
+
+// --- Config Reload Response ---
+// [type, status: uint, message: tstr]
+
+cbor_item_t* client_api_config_reload_response_encode(const client_api_config_reload_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(3);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_CONFIG_RELOAD_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->status);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_string(msg->message != NULL ? msg->message : "");
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_config_reload_response_decode(cbor_item_t* item, client_api_config_reload_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 3) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_CONFIG_RELOAD_RESPONSE) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* status_item = cbor_array_get(item, 1);
+  if (cbor_isa_uint(status_item)) {
+    msg->status = cbor_get_uint8(status_item);
+  }
+  cbor_decref(&status_item);
+
+  cbor_item_t* msg_item = cbor_array_get(item, 2);
+  if (cbor_isa_string(msg_item)) {
+    size_t len = cbor_string_length(msg_item);
+    msg->message = get_memory(len + 1);
+    memcpy(msg->message, cbor_string_handle(msg_item), len);
+    msg->message[len] = '\0';
+  } else {
+    msg->message = get_memory(1);
+    msg->message[0] = '\0';
+  }
+  cbor_decref(&msg_item);
+
+  return 0;
+}
+
+void client_api_config_reload_response_destroy(client_api_config_reload_response_t* msg) {
+  if (msg == NULL) return;
+  if (msg->message != NULL) {
+    free(msg->message);
+    msg->message = NULL;
+  }
+}
