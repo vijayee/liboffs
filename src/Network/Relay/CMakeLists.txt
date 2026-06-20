@@ -14,7 +14,7 @@ target_link_libraries(offs_relay PRIVATE
   poll-dancer
   ${OPENSSL_LIBRARIES}
 )
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../../../deps/msquic/CMakeLists.txt)
+if(OFFS_ENABLE_QUIC AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../../../deps/msquic/CMakeLists.txt)
   target_compile_definitions(offs_relay PRIVATE HAS_MSQUIC)
   target_include_directories(offs_relay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../../deps/msquic/src/inc)
   target_link_libraries(offs_relay PRIVATE msquic::msquic msquic::platform)
