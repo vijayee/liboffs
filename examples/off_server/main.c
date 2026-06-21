@@ -6,9 +6,7 @@
 #include "ClientAPI/HTTP/off_routes.h"
 #include "ClientAPI/HTTP/block_routes.h"
 #include "ClientAPI/HTTP/cors.h"
-#ifndef _WIN32
-  #include "ClientAPI/Unix/unix_transport.h"
-#endif
+#include "ClientAPI/Unix/unix_transport.h"
 #include "ClientAPI/HTTP/health_routes.h"
 #include "ClientAPI/health_handler.h"
 #include "../../src/ClientAPI/HTTP/peer_routes.h"
@@ -153,7 +151,6 @@ int main(int argc, char** argv) {
   peer_routes_register(server, &node_obj, &config, NULL);
   config_routes_register(server, &node_obj, &config, ".");
 
-#ifndef _WIN32
   unix_transport_t* unix_transport = NULL;
   if (unix_path != NULL) {
     unix_transport = unix_transport_create(pool, bc, ofd_cache, tc, unix_path, NULL, &health_ctx);
@@ -172,14 +169,11 @@ int main(int argc, char** argv) {
       return 1;
     }
     /* Wire config management (show/set/reload) onto the Unix transport so
-       offs config * over the local socket mirrors the HTTP /config routes. */
+       offs config * over the local socket mirrors the HTTP /config routes.
+       The peer/friend handlers are wired via the same config_node borrow
+       (unix_connection_create initializes peer_ctx from config_node). */
     unix_transport_set_config_ctx(unix_transport, &node_obj, ".");
   }
-#else
-  if (unix_path != NULL) {
-    fprintf(stderr, "Warning: --unix is not supported on Windows, ignoring %s\n", unix_path);
-  }
-#endif
 
 #ifndef _WIN32
   struct sigaction signal_action;
@@ -193,12 +187,10 @@ int main(int argc, char** argv) {
 #endif
 
   http_server_listen(server);
-#ifndef _WIN32
   if (unix_transport != NULL) {
     unix_transport_start(unix_transport);
     printf("Listening on unix://%s\n", unix_path);
   }
-#endif
 
   authority_load_peers(authority, network);
   network_start_connections(network);
@@ -210,12 +202,10 @@ int main(int argc, char** argv) {
     platform_sleep_ms(200);
   }
 
-#ifndef _WIN32
   if (unix_transport != NULL) {
     unix_transport_stop(unix_transport);
     unix_transport_destroy(unix_transport);
   }
-#endif
   ATOMIC_STORE(&network->running, 0);
   network_shutdown_connections(network);
   http_server_stop(server);
