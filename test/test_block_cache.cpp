@@ -67,8 +67,17 @@ static int bc_put_sync(block_cache_t* bc, block_t* block, scheduler_pool_t* pool
   block_cache_put(bc, ref_block, 0, &comp);
 
   if (pool) {
-    scheduler_inject(pool, &comp);
+    /* comp is scheduled by actor_send when bc->actor delivers the result —
+       do NOT pre-inject it with an empty queue (that spawns a spurious no-op
+       run and a double-injection that races actor_destroy). */
     while (!ATOMIC_LOAD(&cs.done)) { platform_sleep_ms(1); }
+    /* Wait for every pool worker to be idle before destroying the actor: a
+       worker may still be in the tail of actor_run(&comp) (between setting
+       cs.done and clearing ACTOR_FLAG_RUNNING), and actor_destroy must not
+       free the queue out from under it. This mirrors block_cache_destroy /
+       sections_destroy, which barrier on wait_for_idle before destroying their
+       pool-backed actors. */
+    scheduler_pool_wait_for_idle(pool);
   } else {
     while (!ATOMIC_LOAD(&cs.done)) {
       actor_run(&bc->actor, ACTOR_BATCH_SIZE);
@@ -90,8 +99,17 @@ static block_t* bc_get_sync(block_cache_t* bc, buffer_t* hash, scheduler_pool_t*
   block_cache_get(bc, hash, &comp);
 
   if (pool) {
-    scheduler_inject(pool, &comp);
+    /* comp is scheduled by actor_send when bc->actor delivers the result —
+       do NOT pre-inject it with an empty queue (that spawns a spurious no-op
+       run and a double-injection that races actor_destroy). */
     while (!ATOMIC_LOAD(&cs.done)) { platform_sleep_ms(1); }
+    /* Wait for every pool worker to be idle before destroying the actor: a
+       worker may still be in the tail of actor_run(&comp) (between setting
+       cs.done and clearing ACTOR_FLAG_RUNNING), and actor_destroy must not
+       free the queue out from under it. This mirrors block_cache_destroy /
+       sections_destroy, which barrier on wait_for_idle before destroying their
+       pool-backed actors. */
+    scheduler_pool_wait_for_idle(pool);
   } else {
     while (!ATOMIC_LOAD(&cs.done)) {
       actor_run(&bc->actor, ACTOR_BATCH_SIZE);
@@ -117,8 +135,17 @@ static int bc_remove_sync(block_cache_t* bc, buffer_t* hash, scheduler_pool_t* p
   block_cache_remove(bc, hash, &comp);
 
   if (pool) {
-    scheduler_inject(pool, &comp);
+    /* comp is scheduled by actor_send when bc->actor delivers the result —
+       do NOT pre-inject it with an empty queue (that spawns a spurious no-op
+       run and a double-injection that races actor_destroy). */
     while (!ATOMIC_LOAD(&cs.done)) { platform_sleep_ms(1); }
+    /* Wait for every pool worker to be idle before destroying the actor: a
+       worker may still be in the tail of actor_run(&comp) (between setting
+       cs.done and clearing ACTOR_FLAG_RUNNING), and actor_destroy must not
+       free the queue out from under it. This mirrors block_cache_destroy /
+       sections_destroy, which barrier on wait_for_idle before destroying their
+       pool-backed actors. */
+    scheduler_pool_wait_for_idle(pool);
   } else {
     while (!ATOMIC_LOAD(&cs.done)) {
       actor_run(&bc->actor, ACTOR_BATCH_SIZE);
