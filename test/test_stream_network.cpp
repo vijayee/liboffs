@@ -194,6 +194,29 @@ TEST_F(ReadableOffStreamNetworkTest, FindBlockResultFoundReissuesCacheGet) {
                           0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99};
   buffer_t* hash = make_hash(hash_data, 32);
 
+  // The found=1 contract requires the block to already be in the cache: the
+  // dispatch re-issues block_cache_get, and a cache HIT leaves state at
+  // FETCHING_BLOCKS, while a cache MISS reverts it to AWAITING_NETWORK
+  // (readable_off_stream.c CACHE_GET_RESULT null-block path). Without a
+  // populated cache the async miss races the test thread and the assertion
+  // observes AWAITING_NETWORK instead of FETCHING_BLOCKS. Put a block keyed
+  // by `hash` first so the re-issue hits.
+  buffer_t* block_data = buffer_create(standard);
+  block_t* block = block_create_existing_data_hash_by_type(block_data, hash, standard);
+  ASSERT_NE(block, nullptr);
+  // block references block_data; releasing our block_data ref here is safe
+  // because the block (and the cache once put completes) keeps its own ref.
+  DESTROY(block_data, buffer);
+  block_cache_put(stream->bc, block, 0, NULL);
+  // block_cache_put references the block; releasing our ref is safe — the
+  // cache keeps its own ref once the async CACHE_PUT completes.
+  DESTROY(block, block);
+  scheduler_pool_wait_for_idle(pool);
+
+  // Keep the stream from finishing on the single cache hit: the hit path
+  // calls _finish_decode_and_render once blocks_received >= blocks_expected.
+  stream->blocks_expected = 2;
+
   // Simulate the stream being in AWAITING_NETWORK state
   stream->state = OFF_STREAM_AWAITING_NETWORK;
 
@@ -209,10 +232,20 @@ TEST_F(ReadableOffStreamNetworkTest, FindBlockResultFoundReissuesCacheGet) {
 
   readable_off_stream_dispatch(stream, &msg);
 
+  // Let the re-issued cache_get round-trip on the workers so the assertion
+  // is deterministic rather than racing the async CACHE_GET_RESULT.
+  scheduler_pool_wait_for_idle(pool);
+
   // Verify: state should transition back to FETCHING_BLOCKS
   EXPECT_EQ(stream->state, OFF_STREAM_FETCHING_BLOCKS);
 
-  // Verify: pending_fetch_hash no longer used (hash comes from result payload)
+  // The cache-hit path allocated xor_accumulator (a copy of the block data);
+  // readable_off_stream_destroy does not free it, so clean it up here to
+  // avoid leaking across the test.
+  if (stream->xor_accumulator != NULL) {
+    DESTROY(stream->xor_accumulator, buffer);
+    stream->xor_accumulator = NULL;
+  }
 
   // Clean up our references (result.hash holds a reference we need to release)
   DESTROY(result.hash, buffer);
