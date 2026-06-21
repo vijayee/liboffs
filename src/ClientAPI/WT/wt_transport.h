@@ -53,11 +53,13 @@ typedef struct wt_transport_t {
   /* Windows/Schannel only: the msquic Schannel backend cannot load a server
    * cert from PEM files, so wt_transport_create imports the PEM pair into a
    * transient cert store and hands the resulting PCCERT_CONTEXT to msquic.
-   * The store and context are kept alive for the transport's lifetime
-   * (Schannel holds the context for as long as the credential handle is
-   * open) and released in wt_transport_destroy after ConfigurationClose.
-   * Stored as opaque void* so the header does not pull in wincrypt.h.
-   * NULL on POSIX and on the no-cert (insecure) path. */
+   * PFXImportCertStore persists the private key into a CNG key container
+   * (Schannel's TLS 1.3 requirement); the store, the context, and the key
+   * container are kept alive for the transport's lifetime (Schannel holds the
+   * context for as long as the credential handle is open) and released /
+   * deleted in wt_transport_destroy after ConfigurationClose. Stored as
+   * opaque void* so the header does not pull in wincrypt.h. NULL on POSIX
+   * and on the no-cert (insecure) path. */
   void* win_cert_store;
   void* win_cert_context;
   size_t max_connections;

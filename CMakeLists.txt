@@ -292,11 +292,14 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/pcre2/CMakeLists.txt)
   if(WIN32)
     # wt_transport's Windows/Schannel server-credential path imports the PEM
     # cert + key into a transient cert store (PFXImportCertStore /
-    # CertEnumCertificatesInStore / CertFreeCertificateContext / CertCloseStore),
-    # all of which live in crypt32.dll. offs is a static archive, so CMake
-    # propagates this PRIVATE dependency to every executable that links offs
-    # (testliboffs, the integration tests, offsd).
-    target_link_libraries(offs PRIVATE crypt32)
+    # CertEnumCertificatesInStore / CertFreeCertificateContext / CertCloseStore,
+    # all in crypt32.dll) and, on shutdown, deletes the auto-named CNG key
+    # container PFXImportCertStore created (NCryptOpenStorageProvider /
+    # NCryptOpenKey / NCryptDeleteKey / NCryptFreeObject, in ncrypt.dll). offs
+    # is a static archive, so CMake propagates these PRIVATE dependencies to
+    # every executable that links offs (testliboffs, the integration tests,
+    # offsd).
+    target_link_libraries(offs PRIVATE crypt32 ncrypt)
   endif()
 endif()
 
