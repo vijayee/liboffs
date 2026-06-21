@@ -709,6 +709,55 @@ static void _tcp_handle_ofd_resolve_result(tcp_connection_t* conn, message_t* ms
 
 /* --- Connection dispatch (runs on scheduler worker threads) --- */
 
+#ifdef _WIN32
+/* poll-dancer's IOCP backend never delivers PD_EVENT_WRITE (only READ is
+ * driven through overlapped I/O), so the buffer-then-arm-WRITE strategy used
+ * on POSIX can't flush a partial send on Windows — a large frame stalls once
+ * the kernel send buffer fills. On loopback the peer drains continuously, so a
+ * bounded synchronous retry completes the send without blocking the connection
+ * actor for long. Handles both plain and TLS connections: SSL_write is retried
+ * with the same buffer on SSL_ERROR_WANT_WRITE/WANT_READ (the OpenSSL
+ * nonblocking contract). Returns 0 = fully sent, 1 = partial (cap exhausted,
+ * caller buffers the remainder), -1 = peer closed, -2 = hard error.
+ * *out_sent receives the bytes accepted (0 on full send is impossible here
+ * since the caller only invokes this for a non-empty buffer). */
+static int _connection_send_all_blocking(tcp_connection_t* connection,
+                                         buffer_t* combined, size_t* out_sent) {
+  size_t sent_total = 0;
+  for (int attempts = 0; attempts < 2000 && sent_total < combined->size; attempts++) {
+    ssize_t sent;
+    if (connection->is_ssl && connection->ssl != NULL) {
+      sent = SSL_write(connection->ssl, combined->data + sent_total,
+                       (int)(combined->size - sent_total));
+    } else {
+      sent = platform_socket_send(connection->sock, combined->data + sent_total,
+                                   combined->size - sent_total);
+    }
+    if (sent > 0) {
+      sent_total += (size_t)sent;
+    } else if (sent == 0) {
+      *out_sent = sent_total;
+      return -1;  /* peer closed */
+    } else {
+      int retry;
+      if (connection->is_ssl && connection->ssl != NULL) {
+        int ssl_err = SSL_get_error(connection->ssl, (int)sent);
+        retry = (ssl_err == SSL_ERROR_WANT_WRITE || ssl_err == SSL_ERROR_WANT_READ);
+      } else {
+        retry = (errno == EAGAIN || errno == EWOULDBLOCK);
+      }
+      if (!retry) {
+        *out_sent = sent_total;
+        return -2;  /* hard error */
+      }
+      platform_sleep_ms(1);  /* EAGAIN/WANT_WRITE: back off and retry */
+    }
+  }
+  *out_sent = sent_total;
+  return (sent_total == combined->size) ? 0 : 1;
+}
+#endif
+
 void tcp_connection_dispatch(void* state, message_t* msg) {
   tcp_connection_t* connection = (tcp_connection_t*)state;
 
@@ -776,6 +825,44 @@ void tcp_connection_dispatch(void* state, message_t* msg) {
         DESTROY(buf, buffer);
         break;
       }
+#ifdef _WIN32
+      /* IOCP never delivers PD_EVENT_WRITE, so flush the full frame with a
+       * bounded blocking retry instead of buffering + arming WRITE. See
+       * _connection_send_all_blocking above. The POSIX event-driven path is
+       * preserved in the #else branch. */
+      {
+        buffer_t* combined = buf;
+        if (connection->write_buffer != NULL && connection->write_buffer->size > 0) {
+          size_t total = connection->write_buffer->size + buf->size;
+          combined = buffer_create(total);
+          memcpy(combined->data, connection->write_buffer->data,
+                 connection->write_buffer->size);
+          memcpy(combined->data + connection->write_buffer->size,
+                 buf->data, buf->size);
+          combined->size = total;
+          DESTROY(connection->write_buffer, buffer);
+          connection->write_buffer = NULL;
+          DESTROY(buf, buffer);
+        }
+        size_t sent_total = 0;
+        int rc = _connection_send_all_blocking(connection, combined, &sent_total);
+        if (rc == 0) {
+          DESTROY(combined, buffer);
+        } else if (rc < 0) {
+          DESTROY(combined, buffer);
+          _connection_stop_watcher(connection);
+          _connection_close_fd(connection);
+        } else {
+          size_t remaining = combined->size - sent_total;
+          memmove(combined->data, combined->data + sent_total, remaining);
+          combined->size = remaining;
+          connection->write_buffer = combined;
+          connection->write_pending = 1;
+          _connection_update_watcher(connection, PD_EVENT_READ | PD_EVENT_WRITE);
+        }
+        break;
+      }
+#else
       if (connection->write_buffer != NULL && connection->write_buffer->size > 0) {
         buffer_ensure_capacity(connection->write_buffer, connection->write_buffer->size + buf->size);
         memcpy(connection->write_buffer->data + connection->write_buffer->size,
@@ -829,6 +916,7 @@ void tcp_connection_dispatch(void* state, message_t* msg) {
         DESTROY(buf, buffer);
       }
       break;
+#endif
     }
 
     case TCP_CONNECTION_WRITABLE: {

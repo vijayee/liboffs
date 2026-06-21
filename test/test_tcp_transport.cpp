@@ -400,6 +400,111 @@ TEST_F(TestTcpTransport, PutAndGetRoundTrip) {
     platform_socket_destroy(sock);
 }
 
+/* Large TCP round trip: exercises the server tcp_connection send path for a
+ * frame that does not fit in one send. On Windows IOCP, PD_EVENT_WRITE is
+ * never delivered, so the server must flush partial sends via a bounded
+ * blocking retry (see tcp_connection.c) — without it the GET_DATA frame
+ * stalls and this test times out. */
+TEST_F(TestTcpTransport, PutAndGetLargeData) {
+    platform_socket_t* sock = _connect_with_retry("127.0.0.1", port);
+    ASSERT_NE(sock, nullptr);
+
+    const char* content_type = "application/octet-stream";
+    const char* file_name = "large_tcp.bin";
+    const size_t size = 1024 * 1024;  /* 1 MB — exceeds one send on loopback */
+    uint8_t* data = (uint8_t*)malloc(size);
+    ASSERT_NE(data, nullptr);
+    for (size_t i = 0; i < size; i++) data[i] = (uint8_t)(i * 7 + 3);
+
+    client_api_put_request_t put_req;
+    memset(&put_req, 0, sizeof(put_req));
+    put_req.content_type = (char*)content_type;
+    put_req.file_name = (char*)file_name;
+    put_req.stream_length = size;
+    put_req.server_address = NULL;
+    put_req.data = data;
+    put_req.data_size = size;
+
+    cbor_item_t* frame = client_api_put_request_encode(&put_req);
+    ASSERT_NE(frame, nullptr);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
+
+    stream_framer_t* framer = stream_framer_create();
+    cbor_item_t* response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+
+    uint8_t type = client_api_wire_get_type(response);
+    ASSERT_EQ(type, CLIENT_API_PUT_RESPONSE);
+
+    client_api_put_response_t put_resp;
+    memset(&put_resp, 0, sizeof(put_resp));
+    ASSERT_EQ(client_api_put_response_decode(response, &put_resp), 0);
+    ASSERT_NE(put_resp.ori_string, nullptr);
+    char* ori_string = strdup(put_resp.ori_string);
+    client_api_put_response_destroy(&put_resp);
+    cbor_decref(&response);
+
+    /* GET */
+    client_api_get_request_t get_req;
+    memset(&get_req, 0, sizeof(get_req));
+    get_req.ori_string = ori_string;
+    get_req.has_range = 0;
+
+    frame = client_api_get_request_encode(&get_req);
+    ASSERT_NE(frame, nullptr);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
+    free(ori_string);
+
+    /* Expect GET_RESPONSE_START */
+    response = _recv_frame(sock, framer, 30000);
+    ASSERT_NE(response, nullptr);
+    type = client_api_wire_get_type(response);
+    EXPECT_EQ(type, CLIENT_API_GET_RESPONSE_START);
+    cbor_decref(&response);
+
+    /* Accumulate GET_DATA frames until GET_END. The server streams large
+     * payloads in block-sized chunks (multiple GET_DATA frames), not one
+     * frame — each chunk must be fully flushed by the server's send path
+     * (the partial-send retry on Windows IOCP) for the round trip to
+     * complete. */
+    uint8_t* received = (uint8_t*)malloc(size);
+    ASSERT_NE(received, nullptr);
+    size_t received_total = 0;
+    int saw_end = 0;
+    for (int chunks = 0; chunks < 256; chunks++) {
+        response = _recv_frame(sock, framer, 30000);
+        ASSERT_NE(response, nullptr);
+        type = client_api_wire_get_type(response);
+        if (type == CLIENT_API_GET_END) {
+            saw_end = 1;
+            cbor_decref(&response);
+            break;
+        }
+        ASSERT_EQ(type, CLIENT_API_GET_DATA);
+        client_api_get_data_t get_data;
+        memset(&get_data, 0, sizeof(get_data));
+        int decode_result = client_api_get_data_decode(response, &get_data);
+        EXPECT_EQ(decode_result, 0);
+        cbor_decref(&response);
+        if (decode_result == 0) {
+            ASSERT_LE(received_total + get_data.data_size, size);
+            if (get_data.data != nullptr && get_data.data_size > 0) {
+                memcpy(received + received_total, get_data.data, get_data.data_size);
+            }
+            received_total += get_data.data_size;
+            client_api_get_data_destroy(&get_data);
+        }
+    }
+    EXPECT_TRUE(saw_end);
+    EXPECT_EQ(received_total, size);
+    EXPECT_EQ(memcmp(received, data, size), 0);
+
+    stream_framer_destroy(framer);
+    platform_socket_destroy(sock);
+    free(received);
+    free(data);
+}
+
 TEST_F(TestTcpTransport, HealthRequest) {
     uint8_t running = 1;
     uint8_t draining = 0;

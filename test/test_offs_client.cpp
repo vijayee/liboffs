@@ -1001,6 +1001,67 @@ TEST_F(TestOffsWsClient, GetAfterPut) {
     offs_client_disconnect(client);
 }
 
+/* Large WS round trip: exercises the server ws_connection send path for a frame
+ * that does not fit in one send. On Windows IOCP, PD_EVENT_WRITE is never
+ * delivered, so the server must flush partial sends via a bounded blocking
+ * retry (see ws_connection.c) — without it this test times out at GET. */
+TEST_F(TestOffsWsClient, PutAndGet_1MB) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+
+    const size_t size = 1024 * 1024;
+    uint8_t* data = (uint8_t*)malloc(size);
+    /* LCG fill (same generator as _fill_random in the offs_client_test
+     * namespace) — inlined here because _fill_random is not visible across
+     * namespaces. */
+    {
+        uint32_t st = 1;
+        for (size_t i = 0; i < size; i++) { st = st * 1103515245u + 12345u; data[i] = (uint8_t)(st >> 16); }
+    }
+
+    PutCallbackContext put_ctx;
+    put_ctx.ori_string = nullptr;
+    put_ctx.called = 0;
+
+    int result = offs_client_put(client, "application/octet-stream", "1mb_ws.bin",
+                                  size, data, size, _put_callback, &put_ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 500 && !put_ctx.called.load(std::memory_order_acquire); attempts++) {
+        platform_usleep(10000);
+    }
+    ASSERT_EQ(put_ctx.called, 1);
+    ASSERT_NE(put_ctx.ori_string, nullptr);
+    char* ori_string = strdup(put_ctx.ori_string);
+    free(put_ctx.ori_string);
+
+    GetDataCallbackContext get_ctx;
+    std::future<GetResult> get_fut = get_ctx.promise.get_future();
+    result = offs_client_get(client, ori_string, _get_data_callback,
+                              _get_end_callback, _error_callback, &get_ctx);
+    EXPECT_EQ(result, 0);
+
+    if (!_wait_future(get_fut, 30000)) {
+        FAIL() << "GET timed out";
+    }
+    GetResult get_res = get_fut.get();
+
+    if (get_res.error) {
+        FAIL() << "Got error response, status_code=" << (int)get_res.status_code;
+    }
+
+    EXPECT_EQ(get_ctx.end_called, 1);
+    EXPECT_EQ(get_ctx.data_len.load(), size);
+    if (get_ctx.data != nullptr) {
+        EXPECT_EQ(memcmp(get_ctx.data, data, size), 0);
+        free(get_ctx.data);
+    }
+
+    free(ori_string);
+    free(data);
+    offs_client_disconnect(client);
+}
+
 } // namespace offs_ws_client_test
 
 /* --- WebTransport client tests (requires MsQuic) --- */
