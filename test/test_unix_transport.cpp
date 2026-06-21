@@ -465,4 +465,125 @@ TEST_F(TestUnixTransport, MultipleClients) {
     }
 }
 
+/* Verify that peer/friend frames are routed to peer_handlers (which gate on
+   is_authenticated) instead of falling through to the dispatch default
+   ("Unknown message type" -> CLIENT_API_STATUS_BAD_REQUEST). With a non-NULL
+   api_key_hash the connection starts unauthenticated (is_authenticated=0 at
+   unix_connection init), so each peer/friend handler replies UNAUTHORIZED
+   before touching its network/authority borrowed pointers. UNAUTHORIZED is a
+   status the default arm can never produce, so observing it proves the
+   dispatch arms wired into _unix_dispatch_frame are reached. */
+static void _assert_peer_frame_unauthorized(platform_socket_t* sock, cbor_item_t* frame) {
+    ASSERT_NE(frame, nullptr);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
+
+    stream_framer_t* framer = stream_framer_create();
+    cbor_item_t* response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+
+    uint8_t type = client_api_wire_get_type(response);
+    EXPECT_EQ(type, CLIENT_API_ERROR);
+    if (type == CLIENT_API_ERROR) {
+        client_api_error_t err;
+        memset(&err, 0, sizeof(err));
+        int decode_result = client_api_error_decode(response, &err);
+        EXPECT_EQ(decode_result, 0);
+        if (decode_result == 0) {
+            EXPECT_EQ(err.status_code, CLIENT_API_STATUS_UNAUTHORIZED);
+            client_api_error_destroy(&err);
+        }
+    }
+    cbor_decref(&response);
+    stream_framer_destroy(framer);
+}
+
+class TestUnixTransportPeerRouting : public testing::Test {
+protected:
+    scheduler_pool_t* pool;
+    timer_actor_t* timer;
+    block_cache_t* bc;
+    ofd_cache_t* ofd_cache;
+    tuple_cache_t* tc;
+    unix_transport_t* transport;
+    char* cache_dir;
+    char socket_path[128];
+
+    void SetUp() override {
+        pool = scheduler_pool_create(4);
+        scheduler_pool_start(pool);
+        timer = timer_actor_create(pool);
+
+        char dir_template[] = "/tmp/test_unix_peer_XXXXXX";
+        cache_dir = mkdtemp(dir_template);
+        cache_dir = strdup(cache_dir);
+
+        config_t config = {
+            .index_bucket_size = 10,
+            .index_wait = 1000,
+            .index_max_wait = 5000,
+            .section_size = 128000,
+            .section_wait = 1000,
+            .section_max_wait = 5000,
+            .cache_size = 50,
+            .max_tuple_size = 30,
+            .lru_size = 50
+        };
+        bc = block_cache_create(config, cache_dir, standard, timer, pool, NULL, 0);
+        ofd_cache = ofd_cache_create(pool, bc, 300000);
+        tc = tuple_cache_create(100, pool);
+
+        _make_socket_path(socket_path, sizeof(socket_path), "peer");
+        platform_local_cleanup(socket_path);
+
+        /* A non-NULL api_key_hash enables auth: the connection starts with
+           is_authenticated=0, so peer/friend handlers reply UNAUTHORIZED
+           without needing a network/authority (they return at the auth check
+           before dereferencing those borrowed pointers). */
+        transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path,
+                                          "peer_routing_auth_hash", NULL);
+        ASSERT_NE(transport, nullptr);
+        unix_transport_start(transport);
+    }
+
+    void TearDown() override {
+        if (transport != nullptr) {
+            unix_transport_stop(transport);
+        }
+        scheduler_pool_wait_for_idle(pool);
+        scheduler_pool_stop(pool);
+        ofd_cache_destroy(ofd_cache);
+        tuple_cache_destroy(tc);
+        block_cache_destroy(bc);
+        timer_actor_destroy(timer);
+        if (transport != nullptr) {
+            unix_transport_destroy(transport);
+        }
+        scheduler_pool_destroy(pool);
+        platform_local_cleanup(socket_path);
+        rm_rf(cache_dir);
+        free(cache_dir);
+    }
+};
+
+TEST_F(TestUnixTransportPeerRouting, PeerInfoRequestRoutedToHandler) {
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
+    _assert_peer_frame_unauthorized(sock, client_api_peer_info_request_encode());
+    platform_socket_destroy(sock);
+}
+
+TEST_F(TestUnixTransportPeerRouting, PeerListRequestRoutedToHandler) {
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
+    _assert_peer_frame_unauthorized(sock, client_api_peer_list_request_encode());
+    platform_socket_destroy(sock);
+}
+
+TEST_F(TestUnixTransportPeerRouting, FriendListRequestRoutedToHandler) {
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
+    _assert_peer_frame_unauthorized(sock, client_api_friend_list_request_encode());
+    platform_socket_destroy(sock);
+}
+
 } // namespace unix_transport_test

@@ -320,7 +320,6 @@ static void _connection_close_fd(http_connection_t* connection) {
 /* Connection actor dispatch — runs on scheduler worker threads. */
 void http_connection_dispatch(void* state, message_t* msg) {
   http_connection_t* connection = (http_connection_t*)state;
-
   if (connection->is_closing) {
     /* Connection is shutting down — discard all messages. */
     return;
@@ -498,14 +497,21 @@ void http_connection_dispatch(void* state, message_t* msg) {
   }
 }
 
-/* I/O event callback — runs on the I/O thread. Sends lightweight event
-   notifications to the connection actor; the actor performs all socket
-   I/O on scheduler worker threads. This decouples event detection from
-   data processing, giving the scheduler control over network rate. */
+/* I/O event callback — runs on the I/O thread. For plain HTTP it drains the
+   bytes that completed the read directly here and ships them to the
+   connection actor as a DATA message for parsing. For SSL it can't — the
+   ciphertext has to be decrypted via SSL_read on the worker — so it sends a
+   READABLE notification and the actor recvs/decrypts. The split exists because
+   of Windows IOCP: a completion-based backend places the read bytes in the
+   watcher's overlapped buffer, which is only valid until this callback
+   returns (the loop re-arms a fresh WSARecv into the same buffer afterward),
+   so the worker can't recv() them later — it would see an empty socket
+   (EAGAIN) and never parse anything. Draining here and sending DATA mirrors
+   unix_connection and works on every backend (on POSIX
+   pd_watcher_drain_read returns 0 and we fall back to a synchronous recv). */
 static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                        pd_event_t events, void* user_data) {
   (void)loop;
-  (void)watcher;
   http_connection_t* connection = (http_connection_t*)user_data;
 
   if (events & PD_EVENT_WRITE) {
@@ -523,65 +529,49 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
     msg.payload = NULL;
     msg.payload_destroy = NULL;
     actor_send(&connection->actor, &msg);
-    /* Already on the I/O thread — stop and destroy the watcher directly. */
-    pd_watcher_t* claimed = ATOMIC_EXCHANGE(&connection->watcher, NULL);
-    if (claimed != NULL) {
-      pd_watcher_stop(claimed);
-      pd_watcher_destroy(claimed);
-    }
+    /* Stop the watcher via the server actor's deferred destroy path. A
+       completion-based backend (Windows IOCP) may still have an in-flight
+       overlapped on this watcher; freeing it here would race that
+       completion (use-after-free). _connection_stop_watcher claims the
+       watcher atomically and defers pd_watcher_destroy to the I/O-thread
+       destroy stack, so the pending completion is drained before the free. */
+    _connection_stop_watcher(connection);
     return;
   }
 
   if (events & PD_EVENT_READ) {
-    /* ASIO-style: send a READABLE notification instead of reading data.
-       The connection actor (on a scheduler worker) will recv() and parse.
-       Only one notification is in flight at a time — if the actor hasn't
-       processed the previous one yet, we drop the duplicate. This
-       naturally backpressures via TCP window when the actor is muted or
-       backlogged. */
-    if (atomic_load(&connection->read_pending) == 0) {
-      atomic_store(&connection->read_pending, 1);
-      message_t msg;
-      msg.type = HTTP_CONNECTION_READABLE;
-      msg.payload = NULL;
-      msg.payload_destroy = NULL;
-      actor_send(&connection->actor, &msg);
-    }
-  }
-}
-
-/* Perform a batch of socket reads and HTTP parsing. Called from the
-   connection actor dispatch on scheduler worker threads. */
-static void _connection_do_reads(http_connection_t* connection) {
-  for (int batch = 0; batch < 16; batch++) {
-    char buffer[READ_BUFFER_SIZE];
-    ssize_t bytes_read;
-
-    if (connection->sock == NULL) {
-      return;
-    }
-
     if (connection->is_ssl && connection->ssl != NULL) {
-      bytes_read = SSL_read(connection->ssl, buffer, sizeof(buffer));
-      if (bytes_read <= 0) {
-        int ssl_error = SSL_get_error(connection->ssl, (int)bytes_read);
-        if (ssl_error == SSL_ERROR_WANT_READ) {
-          return;
-        }
+      /* SSL: decryption must happen on the worker via SSL_read, so just
+         notify. One READABLE in flight at a time backpressures via the TCP
+         window. (SSL over Windows IOCP is a pre-existing gap: SSL_read on
+         the worker hits the same empty-socket EAGAIN as a plain recv would.
+         Wiring it up needs a memory BIO fed from the watcher drain — tracked
+         as a follow-up, not handled here.) */
+      if (atomic_load(&connection->read_pending) == 0) {
+        atomic_store(&connection->read_pending, 1);
         message_t msg;
-        msg.type = HTTP_CONNECTION_HANGUP;
+        msg.type = HTTP_CONNECTION_READABLE;
         msg.payload = NULL;
         msg.payload_destroy = NULL;
         actor_send(&connection->actor, &msg);
-        pd_watcher_t* claimed = ATOMIC_EXCHANGE(&connection->watcher, NULL);
-        if (claimed != NULL) {
-          pd_watcher_stop(claimed);
-          pd_watcher_destroy(claimed);
-        }
-        return;
       }
-    } else {
-      bytes_read = platform_socket_recv(connection->sock, buffer, sizeof(buffer));
+      return;
+    }
+
+    /* Plain HTTP: drain the watcher's completed read buffer here, then send
+       the bytes to the actor as DATA. Loop in case more than one buffer's
+       worth completed. */
+    uint8_t buffer[READ_BUFFER_SIZE];
+    size_t total_read = 0;
+    size_t n = pd_watcher_drain_read(watcher, buffer, sizeof(buffer));
+    while (n > 0) {
+      total_read += n;
+      if (n < sizeof(buffer)) break; /* buffer fully drained */
+      n = pd_watcher_drain_read(watcher, buffer, sizeof(buffer));
+    }
+    if (total_read == 0) {
+      /* POSIX path: synchronous recv. */
+      ssize_t bytes_read = platform_socket_recv(connection->sock, buffer, sizeof(buffer));
       if (bytes_read <= 0) {
         if (bytes_read == 0) {
           message_t msg;
@@ -589,11 +579,6 @@ static void _connection_do_reads(http_connection_t* connection) {
           msg.payload = NULL;
           msg.payload_destroy = NULL;
           actor_send(&connection->actor, &msg);
-          pd_watcher_t* claimed = ATOMIC_EXCHANGE(&connection->watcher, NULL);
-          if (claimed != NULL) {
-            pd_watcher_stop(claimed);
-            pd_watcher_destroy(claimed);
-          }
           return;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -606,6 +591,52 @@ static void _connection_do_reads(http_connection_t* connection) {
         actor_send(&connection->actor, &msg);
         return;
       }
+      total_read = (size_t)bytes_read;
+    }
+
+    buffer_t* data = buffer_create_from_pointer_copy(buffer, total_read);
+    message_t msg;
+    msg.type = HTTP_CONNECTION_DATA;
+    msg.payload = data;
+    msg.payload_destroy = (void (*)(void*))buffer_destroy;
+    actor_send(&connection->actor, &msg);
+  }
+}
+
+/* Perform a batch of SSL reads and HTTP parsing. Called from the connection
+   actor dispatch (HTTP_CONNECTION_READABLE) on scheduler worker threads. The
+   I/O-thread read callback sends READABLE only for SSL connections — plain HTTP
+   is drained in the callback and shipped as a DATA message — so this path is
+   SSL-only: SSL_read must run on the worker to decrypt the ciphertext. (SSL
+   over Windows IOCP is a pre-existing gap tracked separately: on IOCP the read
+   bytes land in the watcher's overlapped buffer, so SSL_read on the worker sees
+   an empty socket and returns WANT_READ; wiring it needs a memory BIO fed from
+   the watcher drain. On epoll/kqueue this path works as-is.) */
+static void _connection_do_reads(http_connection_t* connection) {
+  if (!connection->is_ssl || connection->ssl == NULL) {
+    return;
+  }
+  for (int batch = 0; batch < 16; batch++) {
+    char buffer[READ_BUFFER_SIZE];
+    if (connection->sock == NULL) {
+      return;
+    }
+
+    ssize_t bytes_read = SSL_read(connection->ssl, buffer, sizeof(buffer));
+    if (bytes_read <= 0) {
+      int ssl_error = SSL_get_error(connection->ssl, (int)bytes_read);
+      if (ssl_error == SSL_ERROR_WANT_READ) {
+        return;
+      }
+      message_t msg;
+      msg.type = HTTP_CONNECTION_HANGUP;
+      msg.payload = NULL;
+      msg.payload_destroy = NULL;
+      actor_send(&connection->actor, &msg);
+      /* Stop via the deferred path so a completion-based backend doesn't free
+         the watcher's overlapped while a completion is still pending. */
+      _connection_stop_watcher(connection);
+      return;
     }
 
     buffer_t* data = buffer_create_from_pointer_copy((uint8_t*)buffer, (size_t)bytes_read);

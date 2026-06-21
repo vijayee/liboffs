@@ -3,8 +3,14 @@
 //
 
 #include <gtest/gtest.h>
+#ifndef _WIN32
 #include <arpa/inet.h>
 #include <unistd.h>
+#else
+/* Windows: htonl/INADDR_LOOPBACK come from winsock2 (pulled in via the
+ * platform headers) and unlink is shimmed by platform_posix_compat. */
+#include "../src/Platform/platform.h"
+#endif
 
 extern "C" {
 #include "Network/network.h"

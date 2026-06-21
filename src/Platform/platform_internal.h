@@ -16,15 +16,19 @@
     return 0;
   }
 
-  /* Windows AF_UNIX detection */
+  /* Windows AF_UNIX detection. Winsock must be initialized before socket()
+     is called, otherwise socket() fails with WSANOTINITIALISED and AF_UNIX is
+     falsely reported unavailable. _platform_winsock_init() is idempotent. */
   static inline int _platform_has_af_unix(void) {
     static int checked = 0;
     static int available = 0;
     if (!checked) {
-      SOCKET s = socket(AF_UNIX, SOCK_STREAM, 0);
-      if (s != INVALID_SOCKET) {
-        available = 1;
-        closesocket(s);
+      if (_platform_winsock_init() == 0) {
+        SOCKET s = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (s != INVALID_SOCKET) {
+          available = 1;
+          closesocket(s);
+        }
       }
       checked = 1;
     }

@@ -11,20 +11,15 @@ extern "C" {
 #include "../src/ClientAPI/HTTP/http_headers.h"
 #include "../src/ClientAPI/HTTP/cors.h"
 #include "../src/Scheduler/scheduler.h"
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#include "../src/Platform/platform.h"
+#include "../src/Platform/platform_socket.h"
 #include <string.h>
 #include <stdlib.h>
-#include <pthread.h>
-#include <poll.h>
 
-#ifdef _WIN32
-#define platform_usleep(ms) Sleep(ms)
-#else
-#define platform_usleep(us) usleep(us)
-#endif
+/* usleep is POSIX-only; platform_sleep_ms is the cross-platform equivalent.
+ * Call sites pass microsecond values (e.g. 10000 == 10ms), so divide by 1000.
+ * The previous Win32 branch slept in milliseconds, making 10000 mean 10s. */
+#define platform_usleep(us) platform_sleep_ms((us) / 1000)
 }
 
 namespace http_test {
@@ -59,7 +54,7 @@ static void _test_delete_handler(http_request_t* request, http_response_t* respo
   http_response_end(response);
 }
 
-__attribute__((unused))
+PLATFORM_UNUSED
 static void _test_param_handler(http_request_t* request, http_response_t* response, void* user_data) {
   const char* name = http_request_param(request, 1);
   if (name != NULL) {
@@ -158,7 +153,7 @@ public:
   uint16_t port;
 
   void SetUp() override {
-    port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
+    port = _next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
     pool = scheduler_pool_create(4);
     scheduler_pool_start(pool);
   }
@@ -176,63 +171,83 @@ public:
   }
 };
 
-static int _connect_to_server(uint16_t port) {
-  int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (fd < 0) return -1;
+static platform_socket_t* _connect_to_server(uint16_t port) {
+  platform_socket_t* sock = platform_socket_create(PLATFORM_AF_INET, 1);
+  if (sock == NULL) return NULL;
 
-  struct sockaddr_in addr;
+  platform_address_t addr;
   memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(port);
-  addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+  addr.family = PLATFORM_AF_INET;
+  addr.inet.addr = 0x0100007f; /* 127.0.0.1 in network byte order */
+  addr.inet.port = port;
 
-  if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-    close(fd);
-    return -1;
+  if (platform_socket_connect(sock, &addr) != 0) {
+    platform_socket_destroy(sock);
+    return NULL;
   }
-  return fd;
+  platform_socket_set_nonblocking(sock);
+  return sock;
 }
 
-static int _send_and_recv(int fd, const char* request, char* response, size_t response_size) {
+static int _send_all(platform_socket_t* sock, const char* buf, size_t len) {
+  size_t sent_total = 0;
+  for (int attempts = 0; attempts < 1000 && sent_total < len; attempts++) {
+    ssize_t sent = platform_socket_send(sock, buf + sent_total, len - sent_total);
+    if (sent > 0) {
+      sent_total += (size_t)sent;
+    } else if (sent == 0) {
+      return -1;
+    } else {
+      /* Nonblocking socket: EWOULDBLOCK means try again shortly. */
+      platform_sleep_ms(10);
+    }
+  }
+  return (sent_total == len) ? 0 : -1;
+}
+
+static int _send_and_recv(platform_socket_t* sock, const char* request,
+                          char* response, size_t response_size) {
   size_t req_len = strlen(request);
-  ssize_t sent = send(fd, request, req_len, 0);
-  if (sent != (ssize_t)req_len) return -1;
+  if (_send_all(sock, request, req_len) != 0) return -1;
 
   size_t total_received = 0;
-  for (int attempts = 0; attempts < 100; attempts++) {
-    struct pollfd poll_fd;
-    poll_fd.fd = fd;
-    poll_fd.events = POLLIN;
-    poll_fd.revents = 0;
-    int poll_result = poll(&poll_fd, 1, 10);
-    if (poll_result > 0 && (poll_fd.revents & POLLIN)) {
-      ssize_t received = recv(fd, response + total_received, response_size - total_received - 1, 0);
-      if (received > 0) {
-        total_received += (size_t)received;
-        response[total_received] = '\0';
-        char* header_end = strstr(response, "\r\n\r\n");
-        if (header_end != NULL) {
-          size_t header_len = (header_end - response) + 4;
-          char* content_length_str = strstr(response, "Content-Length: ");
-          if (content_length_str != NULL && content_length_str < header_end) {
-            size_t content_length = (size_t)atol(content_length_str + 16);
-            if (total_received >= header_len + content_length) {
-              return 0;
-            }
-          } else if (strstr(response, "Content-Length: 0") != NULL ||
-                     strstr(response, "Connection: close") != NULL) {
-            if (total_received > header_len) {
-              return 0;
-            }
+  for (int attempts = 0; attempts < 1000; attempts++) {
+    if (total_received + 1 >= response_size) break;
+    ssize_t received = platform_socket_recv(sock, response + total_received,
+                                             response_size - total_received - 1);
+    if (received > 0) {
+      total_received += (size_t)received;
+      response[total_received] = '\0';
+      char* header_end = strstr(response, "\r\n\r\n");
+      if (header_end != NULL) {
+        size_t header_len = (size_t)(header_end - response) + 4;
+        char* content_length_str = strstr(response, "Content-Length: ");
+        if (content_length_str != NULL && content_length_str < header_end) {
+          size_t content_length = (size_t)atol(content_length_str + 16);
+          if (total_received >= header_len + content_length) {
+            return 0;
           }
+        } else if (strstr(response, "Content-Length: 0") != NULL ||
+                   strstr(response, "Connection: close") != NULL) {
           if (total_received > header_len) {
             return 0;
           }
         }
+        if (total_received > header_len) {
+          return 0;
+        }
       }
+    } else if (received == 0) {
+      /* Peer closed the connection. */
+      response[total_received] = '\0';
+      return (total_received > 0) ? 0 : -1;
+    } else {
+      /* EWOULDBLOCK on a nonblocking socket: back off and retry. */
+      platform_sleep_ms(10);
     }
   }
 
+  response[total_received] = '\0';
   return total_received > 0 ? 0 : -1;
 }
 
@@ -257,23 +272,23 @@ TEST_F(TestHttpServer, TestGetRequest) {
   http_server_get(server, "^/hello$", _test_get_handler, NULL);
   http_server_listen(server);
 
-  int fd = -1;
+  platform_socket_t* sock = NULL;
   for (int attempts = 0; attempts < 50; attempts++) {
     platform_usleep(10000);
-    fd = _connect_to_server(port);
-    if (fd >= 0) break;
+    sock = _connect_to_server(port);
+    if (sock != NULL) break;
   }
-  ASSERT_GE(fd, 0);
+  ASSERT_NE(sock, nullptr);
 
   char response[4096];
   const char* request = "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
-  int result = _send_and_recv(fd, request, response, sizeof(response));
+  int result = _send_and_recv(sock, request, response, sizeof(response));
   EXPECT_EQ(result, 0);
 
   EXPECT_NE(strstr(response, "200"), nullptr);
   EXPECT_NE(strstr(response, "Hello, World!"), nullptr);
 
-  close(fd);
+  platform_socket_destroy(sock);
 }
 
 TEST_F(TestHttpServer, TestPostRequest) {
@@ -283,22 +298,22 @@ TEST_F(TestHttpServer, TestPostRequest) {
   http_server_post(server, "^/items$", _test_post_handler, NULL);
   http_server_listen(server);
 
-  int fd = -1;
+  platform_socket_t* sock = NULL;
   for (int attempts = 0; attempts < 50; attempts++) {
     platform_usleep(10000);
-    fd = _connect_to_server(port);
-    if (fd >= 0) break;
+    sock = _connect_to_server(port);
+    if (sock != NULL) break;
   }
-  ASSERT_GE(fd, 0);
+  ASSERT_NE(sock, nullptr);
 
   char response[4096];
   const char* request = "POST /items HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
-  int result = _send_and_recv(fd, request, response, sizeof(response));
+  int result = _send_and_recv(sock, request, response, sizeof(response));
   EXPECT_EQ(result, 0);
 
   EXPECT_NE(strstr(response, "201"), nullptr);
 
-  close(fd);
+  platform_socket_destroy(sock);
 }
 
 TEST_F(TestHttpServer, TestPutRequest) {
@@ -308,22 +323,22 @@ TEST_F(TestHttpServer, TestPutRequest) {
   http_server_put(server, "^/items/([0-9]+)$", _test_put_handler, NULL);
   http_server_listen(server);
 
-  int fd = -1;
+  platform_socket_t* sock = NULL;
   for (int attempts = 0; attempts < 50; attempts++) {
     platform_usleep(10000);
-    fd = _connect_to_server(port);
-    if (fd >= 0) break;
+    sock = _connect_to_server(port);
+    if (sock != NULL) break;
   }
-  ASSERT_GE(fd, 0);
+  ASSERT_NE(sock, nullptr);
 
   char response[4096];
   const char* request = "PUT /items/42 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
-  int result = _send_and_recv(fd, request, response, sizeof(response));
+  int result = _send_and_recv(sock, request, response, sizeof(response));
   EXPECT_EQ(result, 0);
 
   EXPECT_NE(strstr(response, "200"), nullptr);
 
-  close(fd);
+  platform_socket_destroy(sock);
 }
 
 TEST_F(TestHttpServer, TestDeleteRequest) {
@@ -333,22 +348,22 @@ TEST_F(TestHttpServer, TestDeleteRequest) {
   http_server_delete(server, "^/items/([0-9]+)$", _test_delete_handler, NULL);
   http_server_listen(server);
 
-  int fd = -1;
+  platform_socket_t* sock = NULL;
   for (int attempts = 0; attempts < 50; attempts++) {
     platform_usleep(10000);
-    fd = _connect_to_server(port);
-    if (fd >= 0) break;
+    sock = _connect_to_server(port);
+    if (sock != NULL) break;
   }
-  ASSERT_GE(fd, 0);
+  ASSERT_NE(sock, nullptr);
 
   char response[4096];
   const char* request = "DELETE /items/42 HTTP/1.1\r\nHost: localhost\r\n\r\n";
-  int result = _send_and_recv(fd, request, response, sizeof(response));
+  int result = _send_and_recv(sock, request, response, sizeof(response));
   EXPECT_EQ(result, 0);
 
   EXPECT_NE(strstr(response, "200"), nullptr);
 
-  close(fd);
+  platform_socket_destroy(sock);
 }
 
 TEST_F(TestHttpServer, TestRequestBody) {
@@ -358,23 +373,23 @@ TEST_F(TestHttpServer, TestRequestBody) {
   http_server_post(server, "^/echo$", _test_echo_body_handler, NULL);
   http_server_listen(server);
 
-  int fd = -1;
+  platform_socket_t* sock = NULL;
   for (int attempts = 0; attempts < 50; attempts++) {
     platform_usleep(10000);
-    fd = _connect_to_server(port);
-    if (fd >= 0) break;
+    sock = _connect_to_server(port);
+    if (sock != NULL) break;
   }
-  ASSERT_GE(fd, 0);
+  ASSERT_NE(sock, nullptr);
 
   char response[4096];
   const char* request = "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 11\r\n\r\nHello World";
-  int result = _send_and_recv(fd, request, response, sizeof(response));
+  int result = _send_and_recv(sock, request, response, sizeof(response));
   EXPECT_EQ(result, 0);
 
   EXPECT_NE(strstr(response, "200"), nullptr);
   EXPECT_NE(strstr(response, "Hello World"), nullptr);
 
-  close(fd);
+  platform_socket_destroy(sock);
 }
 
 TEST_F(TestHttpServer, TestNotFoundRoute) {
@@ -384,22 +399,22 @@ TEST_F(TestHttpServer, TestNotFoundRoute) {
   http_server_get(server, "^/exists$", _test_get_handler, NULL);
   http_server_listen(server);
 
-  int fd = -1;
+  platform_socket_t* sock = NULL;
   for (int attempts = 0; attempts < 50; attempts++) {
     platform_usleep(10000);
-    fd = _connect_to_server(port);
-    if (fd >= 0) break;
+    sock = _connect_to_server(port);
+    if (sock != NULL) break;
   }
-  ASSERT_GE(fd, 0);
+  ASSERT_NE(sock, nullptr);
 
   char response[4096];
   const char* request = "GET /nonexistent HTTP/1.1\r\nHost: localhost\r\n\r\n";
-  int result = _send_and_recv(fd, request, response, sizeof(response));
+  int result = _send_and_recv(sock, request, response, sizeof(response));
   EXPECT_EQ(result, 0);
 
   EXPECT_NE(strstr(response, "404"), nullptr);
 
-  close(fd);
+  platform_socket_destroy(sock);
 }
 
 // --- Middleware Tests ---
@@ -428,24 +443,24 @@ TEST_F(TestHttpServer, TestMiddlewareStopsChain) {
   http_server_get(server, "^/hello$", _test_get_handler, NULL);
   http_server_listen(server);
 
-  int fd = -1;
+  platform_socket_t* sock = NULL;
   for (int attempts = 0; attempts < 50; attempts++) {
     platform_usleep(10000);
-    fd = _connect_to_server(port);
-    if (fd >= 0) break;
+    sock = _connect_to_server(port);
+    if (sock != NULL) break;
   }
-  ASSERT_GE(fd, 0);
+  ASSERT_NE(sock, nullptr);
 
   char response[4096];
   const char* request = "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
-  int result = _send_and_recv(fd, request, response, sizeof(response));
+  int result = _send_and_recv(sock, request, response, sizeof(response));
   EXPECT_EQ(result, 0);
 
   EXPECT_NE(strstr(response, "200"), nullptr);
   EXPECT_NE(strstr(response, "X-Middleware: stopped"), nullptr);
   EXPECT_EQ(strstr(response, "Hello, World!"), nullptr);
 
-  close(fd);
+  platform_socket_destroy(sock);
 }
 
 TEST_F(TestHttpServer, TestMiddlewareContinuesChain) {
@@ -456,24 +471,24 @@ TEST_F(TestHttpServer, TestMiddlewareContinuesChain) {
   http_server_get(server, "^/hello$", _test_get_handler, NULL);
   http_server_listen(server);
 
-  int fd = -1;
+  platform_socket_t* sock = NULL;
   for (int attempts = 0; attempts < 50; attempts++) {
     platform_usleep(10000);
-    fd = _connect_to_server(port);
-    if (fd >= 0) break;
+    sock = _connect_to_server(port);
+    if (sock != NULL) break;
   }
-  ASSERT_GE(fd, 0);
+  ASSERT_NE(sock, nullptr);
 
   char response[4096];
   const char* request = "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
-  int result = _send_and_recv(fd, request, response, sizeof(response));
+  int result = _send_and_recv(sock, request, response, sizeof(response));
   EXPECT_EQ(result, 0);
 
   EXPECT_NE(strstr(response, "200"), nullptr);
   EXPECT_NE(strstr(response, "X-Middleware: passed"), nullptr);
   EXPECT_NE(strstr(response, "Hello, World!"), nullptr);
 
-  close(fd);
+  platform_socket_destroy(sock);
 }
 
 // --- CORS Tests ---
@@ -488,17 +503,17 @@ TEST_F(TestHttpServer, TestCorsPreflight) {
   http_server_get(server, "^/hello$", _test_get_handler, NULL);
   http_server_listen(server);
 
-  int fd = -1;
+  platform_socket_t* sock = NULL;
   for (int attempts = 0; attempts < 50; attempts++) {
     platform_usleep(10000);
-    fd = _connect_to_server(port);
-    if (fd >= 0) break;
+    sock = _connect_to_server(port);
+    if (sock != NULL) break;
   }
-  ASSERT_GE(fd, 0);
+  ASSERT_NE(sock, nullptr);
 
   char response[4096];
   const char* request = "OPTIONS /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
-  int result = _send_and_recv(fd, request, response, sizeof(response));
+  int result = _send_and_recv(sock, request, response, sizeof(response));
   EXPECT_EQ(result, 0);
 
   EXPECT_NE(strstr(response, "204"), nullptr);
@@ -507,7 +522,7 @@ TEST_F(TestHttpServer, TestCorsPreflight) {
   EXPECT_NE(strstr(response, "Access-Control-Allow-Headers:"), nullptr);
   EXPECT_NE(strstr(response, "Access-Control-Max-Age:"), nullptr);
 
-  close(fd);
+  platform_socket_destroy(sock);
 }
 
 TEST_F(TestHttpServer, TestCorsOnGetRequest) {
@@ -520,24 +535,24 @@ TEST_F(TestHttpServer, TestCorsOnGetRequest) {
   http_server_get(server, "^/hello$", _test_get_handler, NULL);
   http_server_listen(server);
 
-  int fd = -1;
+  platform_socket_t* sock = NULL;
   for (int attempts = 0; attempts < 50; attempts++) {
     platform_usleep(10000);
-    fd = _connect_to_server(port);
-    if (fd >= 0) break;
+    sock = _connect_to_server(port);
+    if (sock != NULL) break;
   }
-  ASSERT_GE(fd, 0);
+  ASSERT_NE(sock, nullptr);
 
   char response[4096];
   const char* request = "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
-  int result = _send_and_recv(fd, request, response, sizeof(response));
+  int result = _send_and_recv(sock, request, response, sizeof(response));
   EXPECT_EQ(result, 0);
 
   EXPECT_NE(strstr(response, "200"), nullptr);
   EXPECT_NE(strstr(response, "Access-Control-Allow-Origin: *"), nullptr);
   EXPECT_NE(strstr(response, "Hello, World!"), nullptr);
 
-  close(fd);
+  platform_socket_destroy(sock);
 }
 
 TEST(TestCorsConfig, TestDefaultConfig) {

@@ -24,6 +24,7 @@
 #include "../../BlockCache/block_cache.h"
 #include "../block_handlers.h"
 #include "../config_handlers.h"
+#include "../peer_handlers.h"
 #include "../../Scheduler/scheduler.h"
 #include "../../Platform/platform.h"
 #include <poll-dancer/poll-dancer.h>
@@ -58,6 +59,7 @@ typedef struct unix_connection_t {
   tuple_cache_t* tc;
   block_handler_ctx_t block_ctx;
   config_handler_ctx_t config_ctx;
+  peer_handler_ctx_t peer_ctx;
   /* Streaming PUT state */
   writeable_off_stream_t* put_ws;
   writeable_descriptor_t* put_desc;

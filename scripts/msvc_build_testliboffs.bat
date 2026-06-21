@@ -53,12 +53,12 @@ set "RC2=%ERRORLEVEL%"
 
 if not "%RC1%"=="0" (
   echo.
-  echo *** run 1 (named-pipe branch) FAILED with code %RC1%
+  echo *** run 1 ^(named-pipe branch^) FAILED with code %RC1%
   exit /b %RC1%
 )
 if not "%RC2%"=="0" (
   echo.
-  echo *** run 2 (default branch) FAILED with code %RC2%
+  echo *** run 2 ^(default branch^) FAILED with code %RC2%
   exit /b %RC2%
 )
 

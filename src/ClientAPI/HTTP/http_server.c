@@ -68,7 +68,25 @@ void _server_dispatch(void* state, message_t* msg) {
     case HTTP_SERVER_STOP_WATCHER: {
       watcher_update_payload_t* payload = (watcher_update_payload_t*)msg->payload;
       if (payload->watcher != NULL) {
-        pd_watcher_stop(payload->watcher);
+        /* Do NOT call pd_watcher_stop here. On a completion-based backend
+           (Windows IOCP), pd_watcher_stop -> iocp_watcher_unregister frees the
+           watcher's overlapped (platform_data) synchronously. But a re-armed
+           WSARecv may still be outstanding — the connection's CLOSE path runs
+           on a worker and closes the socket, which cancels that pending
+           WSARecv and posts a STATUS_CANCELLED completion referencing the
+           overlapped. Freeing the overlapped now would leave that completion
+           pointing at freed memory; when the I/O thread dequeues it, it reads
+           a stale/garbage Internal field, the cancel-filter misses, and the
+           callback runs against freed watcher_data (use-after-free -> crash).
+           Deferring the whole stop+destroy to the destroy stack keeps the
+           overlapped alive while the loop is running, so the abort completion
+           is correctly filtered (real STATUS_CANCELLED from a live overlapped)
+           and no UAF occurs. The destroy stack is drained on POSIX each loop
+           iteration (epoll has no outstanding overlapped, so a late stop is
+           safe) and on Windows in http_server_destroy, after the I/O thread
+           has been joined — so by the time pd_watcher_destroy runs the real
+           stop+free there is no concurrent reader, and any still-queued abort
+           completion is discarded when the IOCP handle closes. */
         _destroy_stack_push(server, payload->watcher);
       }
       break;
@@ -375,47 +393,59 @@ void http_server_use(http_server_t* server, http_middleware_t middleware, void* 
   vec_push(&server->middlewares, entry);
 }
 
+/* Accept one pending connection (shared by the POSIX listen-watcher callback
+   and the Windows accept-poll loop). Honours the drain flag, the
+   max_connections cap, and SSL setup. */
+static void _http_server_accept_one(http_server_t* server) {
+  if (atomic_load(&server->draining)) {
+    return;
+  }
+
+  platform_socket_t* client_sock = platform_socket_accept(server->listen_sock, NULL);
+  if (client_sock == NULL) {
+#ifndef _WIN32
+    /* On POSIX the listen-watcher only fires accept when READ is ready, so a
+       NULL here is a real (permanent) error worth logging. On Windows the
+       poll loop calls accept every iteration and NULL means WSAEWOULDBLOCK
+       (no pending connection), which is normal; errno is not set by the
+       Winsock path, so the check would log against stale errno. */
+    if (errno == EBADF || errno == EINVAL || errno == ENOTSOCK || errno == EOPNOTSUPP) {
+      log_error("http_server: accept failed permanently (errno=%d)", errno);
+    }
+#endif
+    return;
+  }
+
+  if (server->max_connections > 0 &&
+      atomic_load(&server->active_connections) >= server->max_connections) {
+    platform_socket_destroy(client_sock);
+    return;
+  }
+
+  http_connection_t* connection = http_connection_create(server, client_sock);
+  if (connection == NULL) {
+    platform_socket_destroy(client_sock);
+    return;
+  }
+  vec_push(&server->connections, connection);
+  atomic_fetch_add(&server->active_connections, 1);
+
+  if (server->ssl_ctx != NULL) {
+    connection->ssl = SSL_new(server->ssl_ctx);
+    SSL_set_fd(connection->ssl, platform_socket_fd(client_sock));
+    SSL_set_accept_state(connection->ssl);
+    connection->is_ssl = 1;
+  }
+}
+
 static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                              pd_event_t events, void* user_data) {
   (void)loop;
   (void)watcher;
   http_server_t* server = (http_server_t*)user_data;
 
-  if (atomic_load(&server->draining)) {
-    return;
-  }
-
   if (events & PD_EVENT_READ) {
-    platform_socket_t* client_sock = platform_socket_accept(server->listen_sock, NULL);
-    if (client_sock == NULL) {
-      /* Only log permanent accept failures (EBADF, EINVAL, ENOTSOCK, EOPNOTSUPP).
-         Transient errors like EAGAIN, ECONNABORTED, EINTR are normal. */
-      if (errno == EBADF || errno == EINVAL || errno == ENOTSOCK || errno == EOPNOTSUPP) {
-        log_error("http_server: accept failed permanently (errno=%d)", errno);
-      }
-      return;
-    }
-
-    if (server->max_connections > 0 &&
-        atomic_load(&server->active_connections) >= server->max_connections) {
-      platform_socket_destroy(client_sock);
-      return;
-    }
-
-    http_connection_t* connection = http_connection_create(server, client_sock);
-    if (connection == NULL) {
-      platform_socket_destroy(client_sock);
-      return;
-    }
-    vec_push(&server->connections, connection);
-    atomic_fetch_add(&server->active_connections, 1);
-
-    if (server->ssl_ctx != NULL) {
-      connection->ssl = SSL_new(server->ssl_ctx);
-      SSL_set_fd(connection->ssl, platform_socket_fd(client_sock));
-      SSL_set_accept_state(connection->ssl);
-      connection->is_ssl = 1;
-    }
+    _http_server_accept_one(server);
   }
 }
 
@@ -423,6 +453,34 @@ static void* _server_thread(void* arg) {
   http_server_t* server = (http_server_t*)arg;
   platform_thread_setup_stack();
 
+#ifdef _WIN32
+  /* Windows: IOCP is completion-based and cannot deliver a READ event on a
+     listening socket (WSARecv on a listen socket fails WSAENOTCONN), so a
+     poll-dancer READ watcher can't drive accept here — the same constraint
+     the AF_UNIX transport works around. The listen socket is non-blocking
+     (see http_server_create), so poll platform_socket_accept each loop
+     iteration on this same thread, which also services per-connection I/O
+     via pd_loop_run_once. platform_socket_accept returns NULL silently when
+     no connection is pending (WSAEWOULDBLOCK), so the poll costs only the
+     loop wait. The short (10ms) loop timeout bounds accept latency and makes
+     shutdown prompt: http_server_stop clears `running` and posts
+     pd_loop_async_send, so the next iteration exits.
+
+     Unlike the POSIX branch we do NOT drain the destroy stack here: a
+     stopped connection watcher's overlapped may still be referenced by an
+     in-flight ERROR_OPERATION_ABORTED completion this same loop will process
+     next; freeing it now (via _destroy_stack_drain) would free that overlapped
+     out from under the pending completion — a use-after-free. Watcher
+     destruction is deferred to http_server_destroy (run after this loop
+     thread is joined and the IOCP is closed, so pending completions are
+     discarded). */
+  while (atomic_load(&server->running)) {
+    _http_server_accept_one(server);
+    pd_loop_run_once(server->loop, 10);
+  }
+  pd_loop_stop(server->loop);
+  return NULL;
+#else
   server->listen_watcher = pd_watcher_create(server->loop, platform_socket_fd(server->listen_sock),
     PD_EVENT_READ, _accept_callback, server);
   if (server->listen_watcher != NULL) {
@@ -441,6 +499,7 @@ static void* _server_thread(void* arg) {
   pd_loop_stop(server->loop);
 
   return NULL;
+#endif
 }
 
 void http_server_listen(http_server_t* server) {

@@ -6,9 +6,11 @@
 #include "../../Platform/platform.h"
 #include "../../Actor/message.h"
 #include "../../Actor/message_queue.h"
+#include "../../Util/log.h"
 #include <poll-dancer/poll-dancer.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
@@ -63,7 +65,25 @@ void _tcp_server_dispatch(void* state, message_t* msg) {
     case TCP_SERVER_STOP_WATCHER: {
       tcp_watcher_update_payload_t* payload = (tcp_watcher_update_payload_t*)msg->payload;
       if (payload->watcher != NULL) {
-        pd_watcher_stop(payload->watcher);
+        /* Do NOT call pd_watcher_stop here. On a completion-based backend
+           (Windows IOCP), pd_watcher_stop -> iocp_watcher_unregister frees the
+           watcher's overlapped (platform_data) synchronously. But a re-armed
+           WSARecv may still be outstanding — the connection's CLOSE path runs
+           on a worker and closes the socket, which cancels that pending
+           WSARecv and posts a STATUS_CANCELLED completion referencing the
+           overlapped. Freeing the overlapped now would leave that completion
+           pointing at freed memory; when the I/O thread dequeues it, it reads
+           a stale/garbage Internal field, the cancel-filter misses, and the
+           callback runs against freed watcher_data (use-after-free -> crash).
+           Deferring the whole stop+destroy to the destroy stack keeps the
+           overlapped alive while the loop is running, so the abort completion
+           is correctly filtered (real STATUS_CANCELLED from a live overlapped)
+           and no UAF occurs. The destroy stack is drained on POSIX each loop
+           iteration (epoll has no outstanding overlapped, so a late stop is
+           safe) and on Windows in tcp_transport_destroy, after the I/O thread
+           has been joined — so by the time pd_watcher_destroy runs the real
+           stop+free there is no concurrent reader, and any still-queued abort
+           completion is discarded when the IOCP handle closes. */
         _destroy_stack_push(transport, payload->watcher);
       }
       break;
@@ -294,6 +314,39 @@ void tcp_transport_destroy(tcp_transport_t* transport) {
   free(transport);
 }
 
+/* Accept one pending connection (shared by the POSIX listen-watcher callback
+   and the Windows accept-poll loop). Honours the max_connections cap. */
+static void _tcp_transport_accept_one(tcp_transport_t* transport) {
+  platform_socket_t* client_sock = platform_socket_accept(transport->listen_sock, NULL);
+  if (client_sock == NULL) {
+#ifndef _WIN32
+    /* On POSIX the listen-watcher only fires accept when READ is ready, so a
+       NULL here is a real (permanent) error worth logging. On Windows the
+       poll loop calls accept every iteration and NULL means WSAEWOULDBLOCK
+       (no pending connection), which is normal; errno is not set by the
+       Winsock path, so the check would log against stale errno. */
+    if (errno == EBADF || errno == EINVAL || errno == ENOTSOCK || errno == EOPNOTSUPP) {
+      log_error("tcp_transport: accept failed permanently (errno=%d)", errno);
+    }
+#endif
+    return;
+  }
+
+  if (transport->max_connections > 0 &&
+      atomic_load(&transport->active_connections) >= transport->max_connections) {
+    platform_socket_destroy(client_sock);
+    return;
+  }
+
+  tcp_connection_t* connection = tcp_connection_create(transport, client_sock);
+  if (connection == NULL) {
+    platform_socket_destroy(client_sock);
+    return;
+  }
+  vec_push(&transport->connections, connection);
+  atomic_fetch_add(&transport->active_connections, 1);
+}
+
 static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                pd_event_t events, void* user_data) {
   (void)loop;
@@ -301,25 +354,7 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   tcp_transport_t* transport = (tcp_transport_t*)user_data;
 
   if (events & PD_EVENT_READ) {
-    platform_socket_t* client_sock = platform_socket_accept(transport->listen_sock, NULL);
-    if (client_sock == NULL) {
-      perror("accept");
-      return;
-    }
-
-    if (transport->max_connections > 0 &&
-        atomic_load(&transport->active_connections) >= transport->max_connections) {
-      platform_socket_destroy(client_sock);
-      return;
-    }
-
-    tcp_connection_t* connection = tcp_connection_create(transport, client_sock);
-    if (connection == NULL) {
-      platform_socket_destroy(client_sock);
-      return;
-    }
-    vec_push(&transport->connections, connection);
-    atomic_fetch_add(&transport->active_connections, 1);
+    _tcp_transport_accept_one(transport);
   }
 }
 
@@ -327,6 +362,34 @@ static void* _server_thread(void* arg) {
   tcp_transport_t* transport = (tcp_transport_t*)arg;
   platform_thread_setup_stack();
 
+#ifdef _WIN32
+  /* Windows: IOCP is completion-based and cannot deliver a READ event on a
+     listening socket (WSARecv on a listen socket fails WSAENOTCONN), so a
+     poll-dancer READ watcher can't drive accept here — the same constraint
+     the AF_UNIX transport works around. The listen socket is non-blocking
+     (see tcp_transport_create), so poll platform_socket_accept each loop
+     iteration on this same thread, which also services per-connection I/O
+     via pd_loop_run_once. platform_socket_accept returns NULL silently when
+     no connection is pending (WSAEWOULDBLOCK), so the poll costs only the
+     loop wait. The short (10ms) loop timeout bounds accept latency and makes
+     shutdown prompt: tcp_transport_stop clears `running` and posts
+     pd_loop_async_send, so the next iteration exits.
+
+     Unlike the POSIX branch we do NOT drain the destroy stack here: a
+     stopped connection watcher's overlapped may still be referenced by an
+     in-flight ERROR_OPERATION_ABORTED completion this same loop will process
+     next; freeing it now (via _destroy_stack_drain) would free that overlapped
+     out from under the pending completion — a use-after-free. Watcher
+     destruction is deferred to tcp_transport_destroy (run after this loop
+     thread is joined and the IOCP is closed, so pending completions are
+     discarded). */
+  while (atomic_load(&transport->running)) {
+    _tcp_transport_accept_one(transport);
+    pd_loop_run_once(transport->loop, 10);
+  }
+  pd_loop_stop(transport->loop);
+  return NULL;
+#else
   transport->listen_watcher = pd_watcher_create(transport->loop, platform_socket_fd(transport->listen_sock),
     PD_EVENT_READ, _accept_callback, transport);
   if (transport->listen_watcher != NULL) {
@@ -345,6 +408,7 @@ static void* _server_thread(void* arg) {
   pd_loop_stop(transport->loop);
 
   return NULL;
+#endif
 }
 
 void tcp_transport_start(tcp_transport_t* transport) {

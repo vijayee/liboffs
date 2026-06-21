@@ -82,24 +82,21 @@ if(WIN32)
   list(FILTER C_SRC EXCLUDE REGEX "src/Update/")
   # The Unix transport now compiles on Windows: it dispatches to AF_UNIX
   # (Windows 10 1803+) or named pipes (older Windows) via platform_local.
-  # The TCP/WS transports still use POSIX-only socket APIs.
-  list(FILTER C_SRC EXCLUDE REGEX "src/ClientAPI/TCP/")
-  list(FILTER C_SRC EXCLUDE REGEX "src/ClientAPI/WS/")
-  # The standalone C client library directly includes the WS frame header
-  # and POSIX socket APIs. Excluded on Windows until a Winsock2 rewrite lands.
-  list(FILTER C_SRC EXCLUDE REGEX "src/ClientLibs/c/")
+  # The TCP/WS transports compile on Windows via the platform_socket shim
+  # and an IOCP-safe accept/read path: poll platform_socket_accept each
+  # loop iteration (IOCP can't deliver READ on a listening socket) and
+  # defer watcher stop to the destroy stack so a pending IOCP completion
+  # never touches freed memory.
+  # The standalone C client library (src/ClientLibs/c/offs_client.c) now
+  # builds on Windows via the platform_socket shim plus Winsock2 includes
+  # for offs_http_get, so the whole src/ClientLibs/c/ directory is part of
+  # offs.lib on every platform.
   # The HTTP module is compiled on Windows via a minimal POSIX regex shim
   # (see src/Platform/platform_regex_compat.{h,c}). Routes match as literal
   # strings — no regex metacharacters. Leave the .c files in the build.
 endif()
 
 file(GLOB_RECURSE C_INC "src/*/*.h")
-if(WIN32)
-  # Drop headers from excluded source directories so files that include them
-  # through transitive paths don't see POSIX-only references either.
-  list(FILTER C_INC EXCLUDE REGEX "src/ClientAPI/TCP/")
-  list(FILTER C_INC EXCLUDE REGEX "src/ClientAPI/WS/")
-endif()
 
 include(CTest)
 add_subdirectory(deps)
@@ -199,31 +196,16 @@ target_link_libraries(offs PRIVATE bcrypt_os)
 # add_library(offs)) so it propagates to every C target in this file and in
 # any subdirectory added later (Platform, Network/Relay, tools, test, etc.).
 
-# Standalone C test for OFD resolver (not gtest-based)
-# The OFD resolver is excluded from offs.lib on Windows because it links
-# offs_http_get (POSIX sockets). The test only exercises the pure helpers
-# (offs_ofd_total_blocks, offs_ofd_build_recyclers), so compile the resolver
-# source directly into the test target. We provide a stub offs_http_get that
-# returns NULL since the test never triggers the HTTP path.
+# Standalone C test for OFD resolver (not gtest-based). The resolver and
+# offs_http_get both live in offs.lib on every platform (offs_client.c now
+# builds on Windows via the platform_socket/Winsock2 shim), so the test links
+# them from offs.lib — no per-target source or stub needed.
 add_executable(test_offs_ofd_resolver
   src/ClientLibs/c/test_offs_ofd_resolver.c
 )
 add_dependencies(test_offs_ofd_resolver cbor)
 add_dependencies(test_offs_ofd_resolver offs)
 target_link_libraries(test_offs_ofd_resolver PRIVATE offs)
-if(WIN32)
-  target_sources(test_offs_ofd_resolver PRIVATE src/ClientLibs/c/offs_ofd_resolver.c)
-  # Stubs for the POSIX-only HTTP path referenced by offs_ofd_resolver.c but
-  # unused by the test (the test calls only offs_ofd_total_blocks and
-  # offs_ofd_build_recyclers). The linker needs symbols even if they are
-  # never executed.
-  target_sources(test_offs_ofd_resolver PRIVATE
-    "${CMAKE_CURRENT_BINARY_DIR}/test_offs_ofd_stubs.c")
-  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/test_offs_ofd_stubs.c"
-"#include \"${CMAKE_CURRENT_SOURCE_DIR}/src/ClientLibs/c/offs_client.h\"
-buffer_t* offs_http_get(const char* url) { (void)url; return NULL; }
-")
-endif()
 target_link_libraries(test_offs_ofd_resolver PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 target_link_libraries(test_offs_ofd_resolver PUBLIC cbor)
 target_include_directories(test_offs_ofd_resolver PRIVATE ${C_INC})
@@ -306,6 +288,18 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/pcre2/CMakeLists.txt)
     # http_route.h transitively needs the include path. Add it as PUBLIC.
     target_link_libraries(offs PRIVATE pcre2-8-static pcre2-posix-static)
     target_include_directories(offs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/deps/pcre2/src)
+  endif()
+  if(WIN32)
+    # wt_transport's Windows/Schannel server-credential path imports the PEM
+    # cert + key into a transient cert store (PFXImportCertStore /
+    # CertEnumCertificatesInStore / CertFreeCertificateContext / CertCloseStore,
+    # all in crypt32.dll) and, on shutdown, deletes the auto-named CNG key
+    # container PFXImportCertStore created (NCryptOpenStorageProvider /
+    # NCryptOpenKey / NCryptDeleteKey / NCryptFreeObject, in ncrypt.dll). offs
+    # is a static archive, so CMake propagates these PRIVATE dependencies to
+    # every executable that links offs (testliboffs, the integration tests,
+    # offsd).
+    target_link_libraries(offs PRIVATE crypt32 ncrypt)
   endif()
 endif()
 

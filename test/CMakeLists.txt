@@ -65,26 +65,20 @@ if (BUILD_TESTING)
             test_health_handler.cpp
             test_health_wire.cpp
             test_unix_transport.cpp
+            test_health_http.cpp
             test_regex_shim.cpp
+            test_network.cpp
+            test_http_server.cpp
+            test_off_routes.cpp
+            test_tcp_transport.cpp
+            test_ws_transport.cpp
+            test_offs_client.cpp
             # test_peer_verify generates its own CA certificate in SetUp via
             # ca_generate (same routine the offs-ca tool exposes), so the suite
             # is self-contained and no longer depends on a stale gitignored
             # certs/ca_cert.pem left on disk from a manual run.
             ${CMAKE_CURRENT_SOURCE_DIR}/../tools/offs-ca/ca_ops.c
             )
-    # The following tests use raw POSIX sockets, getpid, and pthread directly,
-    # which are not available under MSVC. Add them to the build only on POSIX.
-    if(NOT WIN32)
-      target_sources(testliboffs PRIVATE
-            test_http_server.cpp
-            test_off_routes.cpp
-            test_network.cpp
-            test_tcp_transport.cpp
-            test_ws_transport.cpp
-            test_health_http.cpp
-            test_offs_client.cpp
-            )
-    endif()
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
@@ -114,6 +108,15 @@ if (BUILD_TESTING)
       target_compile_definitions(testliboffs PRIVATE HAS_MSQUIC)
       target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../deps/msquic/src/inc)
       target_link_libraries(testliboffs PRIVATE msquic::msquic msquic::platform)
+      # msquic builds as a shared library (msquic.dll, via QUIC_BUILD_SHARED).
+      # Copy it next to the test executable so the matching version is found at
+      # load time: a stale msquic.dll elsewhere on PATH (e.g. the Windows
+      # Performance Toolkit copy) would otherwise load and MsQuicOpen2 would
+      # fail with E_NOINTERFACE (version mismatch), skipping every WT/QUIC
+      # test. copy_if_different keeps this a no-op on incremental builds.
+      add_custom_command(TARGET testliboffs POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:msquic::msquic> $<TARGET_FILE_DIR:testliboffs>)
     endif()
     target_include_directories(testliboffs PUBLIC ${C_INC})
     target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)

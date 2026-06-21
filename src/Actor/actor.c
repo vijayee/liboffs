@@ -19,11 +19,27 @@ void actor_init(actor_t* actor, void* state, void (*dispatch)(void* state, messa
 
 void actor_destroy(actor_t* actor) {
   /* Mark the actor as destroyed so the scheduler skips it and actor_send
-     drops new messages. Then drain and free the message queue. */
+     drops new messages. */
   atomic_fetch_or(&actor->flags, ACTOR_FLAG_DESTROY);
   /* Release any senders that were muted because of this actor. */
   if (atomic_load(&actor->flags) & ACTOR_FLAG_PRESSURED) {
     backpressure_release(actor);
+  }
+  /* A pool worker may still be inside actor_run on this actor, touching
+     actor->queue (message_queue_pop / message_queue_markempty) after dispatch
+     returns, so the queue cannot be torn down until that worker has cleared
+     ACTOR_FLAG_RUNNING (it only does so at scheduler.c after actor_run
+     returns). Skip the wait only when WE are that worker — i.e. self-destruction
+     from within the actor's own dispatch — because then RUNNING is held by our
+     own call stack and spinning would deadlock; actor_run's post-dispatch
+     ACTOR_FLAG_DESTROY check (below) already avoids touching the freed queue via
+     its saved-payload path. For non-pool / inline actors RUNNING is never set,
+     so the wait is a no-op. */
+  scheduler_t* self = scheduler_get_current();
+  if (!(self != NULL && self->current == actor)) {
+    while (atomic_load(&actor->flags) & ACTOR_FLAG_RUNNING) {
+      platform_sleep_ms(0);
+    }
   }
   message_queue_destroy(&actor->queue);
 }

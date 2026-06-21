@@ -13,6 +13,30 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#ifdef _WIN32
+/* The msquic Windows TLS backend is Schannel, which cannot load a server
+ * certificate from PEM files (QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE returns
+ * QUIC_STATUS_NOT_SUPPORTED). To keep the same PEM-cert-file configuration
+ * shape the POSIX/OpenSSL path uses, the Windows path imports the PEM cert
+ * + key into a transient cert store and hands the resulting PCCERT_CONTEXT
+ * to msquic via QUIC_CREDENTIAL_TYPE_CERTIFICATE_CONTEXT.
+ *
+ * Schannel/QUIC mandates TLS 1.3, whose RSA-PSS signatures require a CNG
+ * (NCrypt) key — a persisted key container. A truly ephemeral key (legacy
+ * CSP via CERT_KEY_CONTEXT_PROP_ID, or a BCrypt handle) is rejected with
+ * SEC_E_NO_CREDENTIALS, so PFXImportCertStore with flags=0 (which persists
+ * the key into a CNG container) is the only working path. That leaves one
+ * auto-named key-container entry behind per wt_transport_create; the
+ * unload path below deletes that container on shutdown so a clean daemon
+ * restart leaves no residue. */
+#include <wincrypt.h>
+#include <ncrypt.h>
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/pkcs12.h>
+#include <openssl/x509.h>
+#endif
 
 static void* _server_thread(void* arg);
 
@@ -23,6 +47,147 @@ static QUIC_STATUS QUIC_API _wt_stream_callback(
     HQUIC stream, void* context, QUIC_STREAM_EVENT* event);
 static QUIC_STATUS QUIC_API _wt_listener_callback(
     HQUIC listener, void* context, QUIC_LISTENER_EVENT* event);
+
+#ifdef _WIN32
+/* Import the PEM cert + key from transport->cert_path / key_path into a
+ * transient cert store and fill cred_config for
+ * QUIC_CREDENTIAL_TYPE_CERTIFICATE_CONTEXT. PFXImportCertStore persists the
+ * private key into a CNG key container (Schannel's TLS 1.3 requirement); the
+ * container is deleted on shutdown by _wt_unload_windows_credential so a
+ * clean daemon restart leaves no residue. On success the store and the
+ * enumerated context are stored on the transport for lifetime management
+ * (released in wt_transport_destroy after ConfigurationClose, since Schannel
+ * holds the context for as long as the credential handle is open). Returns 0
+ * on success, -1 on failure (with a diagnostic on stderr). */
+static int _wt_load_windows_credential(wt_transport_t* transport,
+                                       QUIC_CREDENTIAL_CONFIG* cred_config) {
+  BIO* cert_bio = BIO_new_file(transport->cert_path, "rb");
+  if (cert_bio == NULL) {
+    fprintf(stderr, "wt_transport: cannot open cert file %s\n", transport->cert_path);
+    return -1;
+  }
+  X509* cert = PEM_read_bio_X509(cert_bio, NULL, NULL, NULL);
+  BIO_free(cert_bio);
+  if (cert == NULL) {
+    fprintf(stderr, "wt_transport: cannot parse PEM cert %s\n", transport->cert_path);
+    return -1;
+  }
+
+  BIO* key_bio = BIO_new_file(transport->key_path, "rb");
+  if (key_bio == NULL) {
+    fprintf(stderr, "wt_transport: cannot open key file %s\n", transport->key_path);
+    X509_free(cert);
+    return -1;
+  }
+  EVP_PKEY* key = PEM_read_bio_PrivateKey(key_bio, NULL, NULL, NULL);
+  BIO_free(key_bio);
+  if (key == NULL) {
+    fprintf(stderr, "wt_transport: cannot parse PEM key %s\n", transport->key_path);
+    X509_free(cert);
+    return -1;
+  }
+
+  /* Build an in-memory PKCS12 (PEM cert + key, throwaway password) and import
+   * it into a transient cert store. PFXImportCertStore with flags=0 persists
+   * the private key into a CNG key container so the context carries
+   * CERT_KEY_PROV_INFO_PROP_ID — Schannel's TLS 1.3 path requires a CNG key.
+   * PKCS12_DEFAULT_IV was removed in OpenSSL 3.x, so the iteration/encoding
+   * args are all 0 (library defaults). */
+  PKCS12* p12 = PKCS12_create("offswt", "offs", key, cert, NULL, 0, 0, 0, 0, 0);
+  X509_free(cert);
+  EVP_PKEY_free(key);
+  if (p12 == NULL) {
+    fprintf(stderr, "wt_transport: PKCS12_create failed\n");
+    return -1;
+  }
+
+  BIO* der_bio = BIO_new(BIO_s_mem());
+  if (der_bio == NULL || i2d_PKCS12_bio(der_bio, p12) != 1) {
+    fprintf(stderr, "wt_transport: PKCS12 DER export failed\n");
+    if (der_bio != NULL) BIO_free(der_bio);
+    PKCS12_free(p12);
+    return -1;
+  }
+  PKCS12_free(p12);
+  char* der_ptr = NULL;
+  long der_len = BIO_get_mem_data(der_bio, &der_ptr);
+  CRYPT_DATA_BLOB pfx_blob = { (DWORD)der_len, (BYTE*)der_ptr };
+
+  HCERTSTORE store = PFXImportCertStore(&pfx_blob, L"offswt", 0);
+  BIO_free(der_bio);
+  if (store == NULL) {
+    fprintf(stderr, "wt_transport: PFXImportCertStore failed: %lu\n",
+            (unsigned long)GetLastError());
+    return -1;
+  }
+
+  PCCERT_CONTEXT context = CertEnumCertificatesInStore(store, NULL);
+  if (context == NULL) {
+    fprintf(stderr, "wt_transport: imported cert store has no certificates: %lu\n",
+            (unsigned long)GetLastError());
+    CertCloseStore(store, 0);
+    return -1;
+  }
+
+  transport->win_cert_store = (void*)(ULONG_PTR)store;
+  transport->win_cert_context = (void*)(ULONG_PTR)context;
+  cred_config->Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_CONTEXT;
+  cred_config->CertificateContext = (QUIC_CERTIFICATE*)(ULONG_PTR)context;
+  cred_config->Flags = QUIC_CREDENTIAL_FLAG_NONE;
+  return 0;
+}
+
+/* Release the cert store + context stored on the transport and best-effort
+ * delete the auto-named CNG/CSP key container PFXImportCertStore created, so a
+ * clean shutdown leaves no key-container residue. Must be called AFTER
+ * ConfigurationClose (Schannel holds the context for the credential handle's
+ * lifetime). Failures are logged on stderr and otherwise ignored — a leaked
+ * container entry is inert on a crashing process; we only optimize the clean
+ * path. dwProvType==0 means CNG (KSP, delete via NCrypt); non-zero means a
+ * legacy CSP (delete the named key container via CRYPT_DELETEKEYSET). */
+static void _wt_unload_windows_credential(wt_transport_t* transport) {
+  PCCERT_CONTEXT context = (PCCERT_CONTEXT)transport->win_cert_context;
+  HCERTSTORE store = (HCERTSTORE)transport->win_cert_store;
+  if (context != NULL) {
+    DWORD prov_len = 0;
+    if (CertGetCertificateContextProperty(context, CERT_KEY_PROV_INFO_PROP_ID,
+                                          NULL, &prov_len) && prov_len > 0) {
+      BYTE* prov_buf = get_clear_memory(prov_len);
+      if (prov_buf != NULL &&
+          CertGetCertificateContextProperty(context, CERT_KEY_PROV_INFO_PROP_ID,
+                                              prov_buf, &prov_len)) {
+        CRYPT_KEY_PROV_INFO* prov = (CRYPT_KEY_PROV_INFO*)prov_buf;
+        if (prov->dwProvType == 0) {
+          /* CNG key: delete the named key from its storage provider. */
+          NCRYPT_PROV_HANDLE hProvider = 0;
+          if (NCryptOpenStorageProvider(&hProvider, prov->pwszProvName, 0)
+              == ERROR_SUCCESS) {
+            NCRYPT_KEY_HANDLE hKey = 0;
+            if (NCryptOpenKey(hProvider, &hKey, prov->pwszContainerName,
+                              prov->dwKeySpec, 0) == ERROR_SUCCESS) {
+              NCryptDeleteKey(hKey, 0);  /* frees hKey */
+            }
+            NCryptFreeObject((NCRYPT_HANDLE)hProvider);
+          }
+        } else {
+          /* Legacy CSP key: delete the named key container. */
+          HCRYPTPROV hProv = 0;
+          CryptAcquireContextW(&hProv, prov->pwszContainerName,
+                                prov->pwszProvName, prov->dwProvType,
+                                CRYPT_DELETEKEYSET);
+        }
+      }
+      free(prov_buf);
+    }
+    CertFreeCertificateContext(context);
+    transport->win_cert_context = NULL;
+  }
+  if (store != NULL) {
+    CertCloseStore(store, 0);
+    transport->win_cert_store = NULL;
+  }
+}
+#endif /* _WIN32 */
 
 static void _destroy_stack_init(wt_transport_t* transport) {
   transport->destroy_lock = platform_mutex_create();
@@ -123,6 +288,8 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
   } else {
     transport->key_path = NULL;
   }
+  transport->win_cert_store = NULL;
+  transport->win_cert_context = NULL;
 
   transport->msquic = offs_msquic_open();
   if (transport->msquic == NULL) {
@@ -211,6 +378,12 @@ void wt_transport_destroy(wt_transport_t* transport) {
     transport->msquic->RegistrationClose(transport->registration);
   }
   offs_msquic_close();
+#ifdef _WIN32
+  /* ConfigurationClose has released the Schannel credential handle that held
+   * the cert context, so it is now safe to drop the context + store and delete
+   * the auto-named key container PFXImportCertStore created. */
+  _wt_unload_windows_credential(transport);
+#endif
   if (transport->cert_path != NULL) {
     free(transport->cert_path);
   }
@@ -383,12 +556,28 @@ static void* _server_thread(void* arg) {
   /* Load credentials */
   QUIC_CREDENTIAL_CONFIG cred_config = {0};
   if (transport->cert_path != NULL && transport->key_path != NULL) {
+#ifdef _WIN32
+    /* Schannel cannot consume PEM cert files; import the pair into a cert
+     * store and load via CERTIFICATE_CONTEXT. On import failure, fall through
+     * to the no-cert path is NOT acceptable for a configured server, so fail
+     * the transport outright (matching the POSIX path's hard failure on a
+     * bad cert file). */
+    if (_wt_load_windows_credential(transport, &cred_config) != 0) {
+      transport->msquic->ConfigurationClose(transport->configuration);
+      transport->configuration = NULL;
+      transport->msquic->RegistrationClose(transport->registration);
+      transport->registration = NULL;
+      atomic_store(&transport->running, 0);
+      return NULL;
+    }
+#else
     cred_config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
     cred_config.CertificateFile = &(QUIC_CERTIFICATE_FILE){
       .CertificateFile = transport->cert_path,
       .PrivateKeyFile = transport->key_path
     };
     cred_config.Flags = QUIC_CREDENTIAL_FLAG_NONE;
+#endif
   } else {
     /* Self-signed / insecure mode for testing */
     cred_config.Type = QUIC_CREDENTIAL_TYPE_NONE;

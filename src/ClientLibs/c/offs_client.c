@@ -1,6 +1,16 @@
 //
 // Created by victor on 5/20/26.
 //
+#ifdef _WIN32
+/* Winsock2 must be included before windows.h (and before any header that
+ * pulls windows in, such as OpenSSL or poll-dancer) to avoid the winsock1/
+ * winsock2 conflict. Provides getaddrinfo/inet_ntop/setsockopt/SO_RCVTIMEO
+ * used by offs_http_get. */
+#include <winsock2.h>
+#include <windows.h>
+#include <ws2tcpip.h>
+#endif
+
 #include "offs_client.h"
 #include "../../ClientAPI/client_api_wire.h"
 #include "../../Network/stream_framer.h"
@@ -10,16 +20,17 @@
 #include "../../ClientAPI/WS/ws_frame.h"
 
 #include <string.h>
-#include <strings.h>
 #include <stdlib.h>
 #include <stdio.h>
+#ifndef _WIN32
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#endif
 #include "../../Platform/platform.h"
 #include "../../Platform/platform_local.h"
-#include <pthread.h>
 #include <openssl/sha.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -35,15 +46,13 @@
 /* OpenSSL is initialized once per process and never cleaned up — the 240-byte
  * CONF_modules_load allocation is a one-time global cost that persists until
  * process exit. Calling OPENSSL_cleanup() would break other OpenSSL users in
- * the same process (e.g. the WS transport server). */
-static pthread_once_t _ssl_init_once = PTHREAD_ONCE_INIT;
-
-static void _ssl_init_impl(void) {
-  OPENSSL_init_ssl(0, NULL);
-}
-
+ * the same process (e.g. the WS transport server).
+ *
+ * OPENSSL_init_ssl is thread-safe and idempotent (internally refcounted since
+ * OpenSSL 1.1.0), so it needs no pthread_once / INIT_ONCE guard — every call
+ * after the first is a cheap no-op. */
 static void _ssl_init(void) {
-  pthread_once(&_ssl_init_once, _ssl_init_impl);
+  OPENSSL_init_ssl(0, NULL);
 }
 
 typedef enum {
@@ -455,18 +464,10 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
   }
 }
 
-static ssize_t _ws_recv(offs_client_t* client, uint8_t* buf, size_t buf_size) {
-  if (client->transport.ws.is_ssl && client->transport.ws.ssl != NULL) {
-    return SSL_read(client->transport.ws.ssl, buf, (int)buf_size);
-  }
-  return platform_socket_recv(client->transport.ws.sock, buf, buf_size);
-}
-
 static void _client_raw_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                        pd_event_t events, void* user_data) {
   offs_client_t* client = (offs_client_t*)user_data;
   (void)loop;
-  (void)watcher;
 
   if (events & (PD_EVENT_ERROR | PD_EVENT_HANGUP)) {
     client->connected = 0;
@@ -475,35 +476,61 @@ static void _client_raw_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   }
 
   if (events & PD_EVENT_READ) {
-    /* Drain all available data — level-triggered epoll still needs the loop
-       to wake between recv() calls. Reading only one buffer per callback
-       can lose data when the kernel has multiple buffers worth ready. */
-    while (1) {
-      uint8_t buf[READ_BUFFER_SIZE];
-      ssize_t bytes_read = platform_socket_recv(client->transport.raw.sock, buf, sizeof(buf));
-      if (bytes_read <= 0) {
-        if (bytes_read == 0) {
-          client->connected = 0;
-          client->running = 0;
+    /* On Windows IOCP the bytes that triggered this completion sit in the
+     * watcher's internal buffer; drain them with pd_watcher_drain_read.
+     * On POSIX that returns 0, so fall back to a synchronous recv loop
+     * (level-triggered epoll needs the loop to wake between recv() calls).
+     * Feed all available bytes into the framer, then pull complete frames. */
+    uint8_t buf[READ_BUFFER_SIZE];
+    size_t total_read = 0;
+    size_t n = pd_watcher_drain_read(watcher, buf, sizeof(buf));
+    while (n > 0) {
+      stream_framer_feed(client->framer, buf, n);
+      total_read += n;
+      if (n < sizeof(buf)) break;
+      n = pd_watcher_drain_read(watcher, buf, sizeof(buf));
+    }
+    if (total_read == 0) {
+      while (1) {
+        ssize_t bytes_read = platform_socket_recv(client->transport.raw.sock, buf, sizeof(buf));
+        if (bytes_read <= 0) {
+          if (bytes_read == 0) {
+            client->connected = 0;
+            client->running = 0;
+          }
+          break;
         }
-        break;
-      }
-      stream_framer_feed(client->framer, buf, (size_t)bytes_read);
-      uint8_t* frame_data;
-      size_t frame_len;
-      while ((frame_data = stream_framer_next(client->framer, &frame_len)) != NULL) {
-        struct cbor_load_result load_result;
-        cbor_item_t* cbor_item = cbor_load(frame_data, frame_len, &load_result);
-        free(frame_data);
-        if (cbor_item == NULL || load_result.error.code != CBOR_ERR_NONE) {
-          if (cbor_item != NULL) cbor_decref(&cbor_item);
-          continue;
-        }
-        uint8_t type = client_api_wire_get_type(cbor_item);
-        _handle_frame(client, type, cbor_item);
-        cbor_decref(&cbor_item);
+        stream_framer_feed(client->framer, buf, (size_t)bytes_read);
       }
     }
+
+    uint8_t* frame_data;
+    size_t frame_len;
+    while ((frame_data = stream_framer_next(client->framer, &frame_len)) != NULL) {
+      struct cbor_load_result load_result;
+      cbor_item_t* cbor_item = cbor_load(frame_data, frame_len, &load_result);
+      free(frame_data);
+      if (cbor_item == NULL || load_result.error.code != CBOR_ERR_NONE) {
+        if (cbor_item != NULL) cbor_decref(&cbor_item);
+        continue;
+      }
+      uint8_t type = client_api_wire_get_type(cbor_item);
+      _handle_frame(client, type, cbor_item);
+      cbor_decref(&cbor_item);
+    }
+  }
+}
+
+static void _ws_append_recv_buf(offs_client_t* client, const uint8_t* data, size_t len) {
+  if (len == 0) return;
+  if (client->transport.ws.recv_buf == NULL) {
+    client->transport.ws.recv_buf = buffer_create(len);
+    memcpy(client->transport.ws.recv_buf->data, data, len);
+    client->transport.ws.recv_buf->size = len;
+  } else {
+    buffer_ensure_capacity(client->transport.ws.recv_buf, client->transport.ws.recv_buf->size + len);
+    memcpy(client->transport.ws.recv_buf->data + client->transport.ws.recv_buf->size, data, len);
+    client->transport.ws.recv_buf->size += len;
   }
 }
 
@@ -511,7 +538,6 @@ static void _client_ws_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                       pd_event_t events, void* user_data) {
   offs_client_t* client = (offs_client_t*)user_data;
   (void)loop;
-  (void)watcher;
 
   if (events & (PD_EVENT_ERROR | PD_EVENT_HANGUP)) {
     client->connected = 0;
@@ -521,22 +547,36 @@ static void _client_ws_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
 
   if (events & PD_EVENT_READ) {
     uint8_t buf[READ_BUFFER_SIZE];
-    ssize_t bytes_read = _ws_recv(client, buf, sizeof(buf));
-    if (bytes_read <= 0) {
-      client->connected = 0;
-      client->running = 0;
-      return;
-    }
 
-    /* Append to recv buffer */
-    if (client->transport.ws.recv_buf == NULL) {
-      client->transport.ws.recv_buf = buffer_create(bytes_read);
-      memcpy(client->transport.ws.recv_buf->data, buf, bytes_read);
-      client->transport.ws.recv_buf->size = bytes_read;
+    /* SSL owns the encrypted byte stream and reads it itself via the socket
+     * BIO, so keep SSL_read for wss://. For plain ws:// the Windows IOCP
+     * completion buffers the bytes in the watcher — drain them with
+     * pd_watcher_drain_read (POSIX returns 0, falling back to recv). */
+    if (client->transport.ws.is_ssl && client->transport.ws.ssl != NULL) {
+      ssize_t bytes_read = SSL_read(client->transport.ws.ssl, buf, sizeof(buf));
+      if (bytes_read <= 0) {
+        client->connected = 0;
+        client->running = 0;
+        return;
+      }
+      _ws_append_recv_buf(client, buf, (size_t)bytes_read);
     } else {
-      buffer_ensure_capacity(client->transport.ws.recv_buf, client->transport.ws.recv_buf->size + (size_t)bytes_read);
-      memcpy(client->transport.ws.recv_buf->data + client->transport.ws.recv_buf->size, buf, (size_t)bytes_read);
-      client->transport.ws.recv_buf->size += (size_t)bytes_read;
+      size_t n = pd_watcher_drain_read(watcher, buf, sizeof(buf));
+      if (n == 0) {
+        ssize_t bytes_read = platform_socket_recv(client->transport.ws.sock, buf, sizeof(buf));
+        if (bytes_read <= 0) {
+          client->connected = 0;
+          client->running = 0;
+          return;
+        }
+        _ws_append_recv_buf(client, buf, (size_t)bytes_read);
+      } else {
+        while (n > 0) {
+          _ws_append_recv_buf(client, buf, n);
+          if (n < sizeof(buf)) break;
+          n = pd_watcher_drain_read(watcher, buf, sizeof(buf));
+        }
+      }
     }
 
     /* Parse all complete WebSocket frames */
@@ -1541,14 +1581,22 @@ buffer_t* offs_http_get(const char* url) {
     return NULL;
   }
 
-  /* Set send/recv timeouts on the underlying fd */
+  /* Set send/recv timeouts on the underlying fd. Windows interprets
+   * SO_RCVTIMEO/SO_SNDTIMEO as a DWORD millisecond count; POSIX uses
+   * struct timeval. */
   {
+    int fd = platform_socket_fd(sock);
+#ifdef _WIN32
+    DWORD timeout_ms = 10000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
+#else
     struct timeval tv;
     tv.tv_sec = 10;
     tv.tv_usec = 0;
-    int fd = platform_socket_fd(sock);
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
   }
 
   if (platform_socket_connect(sock, &addr) < 0) {

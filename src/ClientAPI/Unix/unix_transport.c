@@ -13,8 +13,14 @@
 #include <errno.h>
 
 static void* _server_thread(void* arg);
+/* _accept_callback drives accept via the poll-dancer readiness listen watcher,
+ * used only on readiness backends (epoll/kqueue). Windows IOCP can't deliver a
+ * READ event on a listening socket, so the Windows AF_UNIX path polls accept()
+ * in _server_thread instead and never references this callback. */
+#ifndef _WIN32
 static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                pd_event_t events, void* user_data);
+#endif
 static void* _pipe_loop_thread(void* arg);
 
 static void _destroy_stack_init(unix_transport_t* transport) {
@@ -220,6 +226,7 @@ void unix_transport_destroy(unix_transport_t* transport) {
   free(transport);
 }
 
+#ifndef _WIN32
 static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                pd_event_t events, void* user_data) {
   (void)loop;
@@ -257,6 +264,7 @@ static void _accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
     platform_local_rearm(transport->listen_sock);
   }
 }
+#endif
 
 /* The pipe loop thread: services the transport's loop (IOCP) so that
  * per-connection read/watch completions get processed. This is a
@@ -281,8 +289,11 @@ static void* _server_thread(void* arg) {
    * never completes (a client connecting only signals via ConnectNamedPipe).
    * Run a blocking accept loop on this thread; a separate
    * _pipe_loop_thread services the IOCP for per-connection watchers.
-   * For AF_UNIX listeners, use the standard poll-dancer watcher — its
-   * ReadFile-on-socket semantics match the AF_UNIX readiness model. */
+   * For AF_UNIX listeners the strategy is platform-dependent: POSIX uses the
+   * poll-dancer readiness listen watcher (epoll/kqueue deliver READ when a
+   * connection is pending); Windows IOCP is completion-based and cannot
+   * deliver a READ event on a listening socket, so it polls accept() in the
+   * loop below instead. */
   if (platform_socket_is_pipe(transport->listen_sock)) {
     /* Spawn the loop thread. It services transport->loop in the
      * background so connection I/O is not starved by the blocking
@@ -337,6 +348,49 @@ static void* _server_thread(void* arg) {
     return NULL;
   }
 
+#ifdef _WIN32
+  /* Windows AF_UNIX: IOCP is completion-based and cannot deliver a READ
+   * event on a listening socket — issuing WSARecv on a listen socket fails
+   * with WSAENOTCONN, so a poll-dancer READ watcher can't drive accept here.
+   * The listen socket is non-blocking (see unix_transport_create); poll
+   * accept() each loop iteration on this same thread, which also services
+   * per-connection I/O via pd_loop_run_once. The short loop timeout bounds
+   * accept latency and makes shutdown prompt: unix_transport_stop clears
+   * `running` and posts via pd_loop_async_send, so the next iteration exits.
+   * platform_local_accept returns NULL silently when no connection is
+   * pending (WSAEWOULDBLOCK), so the poll costs only the loop wait.
+   *
+   * Unlike the POSIX branch we do NOT drain the destroy stack here: a
+   * stopped connection watcher's overlapped is still referenced by an
+   * in-flight ERROR_OPERATION_ABORTED completion that this same loop will
+   * process next. Freeing the watcher now (via _destroy_stack_drain) would
+   * free that overlapped out from under the pending completion — a use-
+   * after-free that corrupts the heap. We defer watcher destruction to
+   * unix_transport_destroy (run after this loop thread is joined and the
+   * IOCP is closed, so pending completions are discarded), mirroring the
+   * named-pipe path. Stopped watchers accumulate until teardown, which is
+   * the same trade-off the pipe path already makes. */
+  while (atomic_load(&transport->running)) {
+    platform_socket_t* client_sock = platform_local_accept(transport->listen_sock);
+    if (client_sock != NULL) {
+      if (transport->max_connections > 0 &&
+          atomic_load(&transport->active_connections) >= transport->max_connections) {
+        platform_socket_destroy(client_sock);
+      } else {
+        unix_connection_t* connection = unix_connection_create(transport, client_sock);
+        if (connection == NULL) {
+          platform_socket_destroy(client_sock);
+        } else {
+          vec_push(&transport->connections, connection);
+          atomic_fetch_add(&transport->active_connections, 1);
+        }
+      }
+    }
+    pd_loop_run_once(transport->loop, 10);
+  }
+  pd_loop_stop(transport->loop);
+  return NULL;
+#else
   transport->listen_watcher = platform_socket_watcher_create(transport->loop, transport->listen_sock,
     PD_EVENT_READ, _accept_callback, transport);
   if (transport->listen_watcher != NULL) {
@@ -355,6 +409,7 @@ static void* _server_thread(void* arg) {
   pd_loop_stop(transport->loop);
 
   return NULL;
+#endif
 }
 
 void unix_transport_start(unix_transport_t* transport) {

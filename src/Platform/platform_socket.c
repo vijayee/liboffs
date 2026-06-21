@@ -418,6 +418,31 @@
                       (const char*)&opt, sizeof(opt)) == 0 ? 0 : -1;
   }
 
+  /* Map Winsock WSAGetLastError() codes to POSIX errno values. Winsock does
+   * NOT set C errno on failure — it reports errors through WSAGetLastError()
+   * — so callers that check errno (e.g. http_connection's write path testing
+   * `errno != EAGAIN`) would otherwise see stale errno and treat a transient
+   * WSAEWOULDBLOCK as a fatal error, closing the connection. Map the codes
+   * the send/recv paths can actually surface. */
+  static int _wsaerr_to_errno(int wsaerr) {
+    switch (wsaerr) {
+      case WSAEWOULDBLOCK:        return EAGAIN; /* == EWOULDBLOCK on Windows */
+      case WSAEINTR:              return EINTR;
+      case WSAECONNRESET:         return ECONNRESET;
+      case WSAECONNABORTED:       return ECONNABORTED;
+      case WSAESHUTDOWN:          return EPIPE;
+      case WSAENETRESET:          return ENETRESET;
+      case WSAENOTCONN:            return ENOTCONN;
+      case WSAENOTSOCK:           return EBADF;
+      case WSAEMSGSIZE:           return EMSGSIZE;
+      case WSAEHOSTUNREACH:       return EHOSTUNREACH;
+      case WSAENETUNREACH:        return ENETUNREACH;
+      case WSAETIMEDOUT:          return ETIMEDOUT;
+      case WSAECONNREFUSED:       return ECONNREFUSED;
+      default:                    return EIO;
+    }
+  }
+
   /* Map a small set of common Windows error codes to POSIX errno values.
    * The full mapping would be a 100+ entry table; this covers the errors
    * we actually surface from WriteFile/ReadFile/CreateNamedPipe paths. */
@@ -459,6 +484,10 @@
       return (ssize_t)written;
     }
     int result = send(sock->fd, (const char*)buf, (int)len, 0);
+    if (result == SOCKET_ERROR) {
+      errno = _wsaerr_to_errno(WSAGetLastError());
+      return -1;
+    }
     return (ssize_t)result;
   }
 
@@ -487,6 +516,10 @@
       return (ssize_t)read_bytes;
     }
     int result = recv(sock->fd, (char*)buf, (int)len, 0);
+    if (result == SOCKET_ERROR) {
+      errno = _wsaerr_to_errno(WSAGetLastError());
+      return -1;
+    }
     return (ssize_t)result;
   }
 

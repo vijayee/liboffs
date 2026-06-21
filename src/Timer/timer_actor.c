@@ -56,14 +56,55 @@ static bool _timer_actor_track(timer_actor_t* ta, pd_timer_t* timer) {
   return true;
 }
 
-static void _timer_actor_untrack(timer_actor_t* ta, pd_timer_t* timer) {
+/* Remove a timer from the tracked set. Returns true if the timer was found and
+   removed, false if it was already gone (e.g. cancelled by a concurrent
+   TIMER_CANCEL, or torn down by _timer_actor_destroy_all_tracked). Callers
+   must use the return value to decide whether it is safe to stop/destroy the
+   timer pointer — operating on an untracked (already-freed) timer would be a
+   use-after-free. */
+static bool _timer_actor_untrack(timer_actor_t* ta, pd_timer_t* timer) {
   for (size_t i = 0; i < ta->active_timer_count; i++) {
     if (ta->active_timers[i] == timer) {
       ta->active_timers[i] = ta->active_timers[ta->active_timer_count - 1];
       ta->active_timer_count--;
-      return;
+      return true;
     }
   }
+  return false;
+}
+
+/* Destroy every tracked timer synchronously under loop_lock while the loop
+   thread is still alive. pd_timer_destroy drains the IOCP via
+   iocp_drain_sync, which posts a sync completion and waits for the loop
+   thread to process it; if the loop thread has already been joined the drain
+   hits its 5s timeout per timer, which is the source of the per-test teardown
+   stall. Performing this teardown before joining the loop thread keeps the
+   drain fast.
+
+   Holding loop_lock serializes this against a concurrent TIMER_SET /
+   TIMER_CANCEL dispatch on a pool worker (which takes the same lock). Callers
+   must first ensure no dispatch is in flight: timer_actor_stop and
+   timer_actor_destroy set ACTOR_FLAG_DESTROY up front (which makes actor_run
+   skip new dispatches), and the pool is either joined (test teardown calls
+   scheduler_pool_stop first) or drained via scheduler_pool_wait_for_idle. A
+   TIMER_CANCEL that already passed actor_run's destroy-flag check and is
+   waiting on loop_lock is handled safely: by the time it acquires the lock,
+   _timer_actor_untrack has already removed every timer, so its
+   _timer_actor_untrack lookup returns false and it skips the freed pointer
+   rather than touching it. */
+static void _timer_actor_destroy_all_tracked(timer_actor_t* timer_actor) {
+  platform_mutex_lock(timer_actor->loop_lock);
+  for (size_t i = 0; i < timer_actor->active_timer_count; i++) {
+    pd_timer_t* timer = timer_actor->active_timers[i];
+    if (timer == NULL) continue;
+    void* user_data = timer->user_data;
+    pd_timer_stop(timer);
+    pd_timer_destroy(timer);
+    free(user_data);
+    timer_actor->active_timers[i] = NULL;
+  }
+  timer_actor->active_timer_count = 0;
+  platform_mutex_unlock(timer_actor->loop_lock);
 }
 
 static debounce_entry_t* _timer_actor_find_debounce(timer_actor_t* ta,
@@ -169,13 +210,19 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
            the IOCP via iocp_drain_sync before freeing the placeholder
            watcher. Deferring destroy to the timer thread would reopen
            the window where a fast TIMER_CANCEL→TIMER_SET sequence
-           races on the loop's watcher array. */
+           races on the loop's watcher array.
+
+           _timer_actor_untrack returns false if the timer was already
+           removed (a duplicate/late TIMER_CANCEL, or teardown via
+           _timer_actor_destroy_all_tracked); in that case the pointer is
+           already freed and must not be touched. */
         platform_mutex_lock(timer_actor->loop_lock);
-        pd_timer_stop(timer);
-        void* user_data = timer->user_data;
-        _timer_actor_untrack(timer_actor, timer);
-        pd_timer_destroy(timer);
-        free(user_data);
+        if (_timer_actor_untrack(timer_actor, timer)) {
+          void* user_data = timer->user_data;
+          pd_timer_stop(timer);
+          pd_timer_destroy(timer);
+          free(user_data);
+        }
         platform_mutex_unlock(timer_actor->loop_lock);
       }
       msg->payload_destroy = NULL;
@@ -344,17 +391,16 @@ void timer_actor_stop(timer_actor_t* timer_actor) {
                                            flags | ACTOR_FLAG_DESTROY)) {
   }
 
+  /* Destroy tracked timers while the loop thread is still alive so
+     pd_timer_destroy's IOCP drain_sync completes promptly; doing this after
+     joining the loop thread (the old order) left the drain with no live loop
+     to process the posted sync, hitting a 5s timeout per timer. */
+  _timer_actor_destroy_all_tracked(timer_actor);
+
   atomic_store(&timer_actor->running, 0);
   pd_loop_async_send(timer_actor->loop, NULL);
   platform_thread_join(timer_actor->thread);
   timer_actor->thread = NULL;
-
-  for (size_t i = 0; i < timer_actor->active_timer_count; i++) {
-    pd_timer_t* timer = timer_actor->active_timers[i];
-    if (timer != NULL) {
-      pd_timer_stop(timer);
-    }
-  }
 }
 
 void timer_actor_destroy(timer_actor_t* timer_actor) {
@@ -366,20 +412,21 @@ void timer_actor_destroy(timer_actor_t* timer_actor) {
   if (pool != NULL && !atomic_load(&pool->terminate)) {
     scheduler_pool_wait_for_idle(pool);
   }
+  /* Destroy tracked timers while the loop thread is still alive so
+     pd_timer_destroy's IOCP drain_sync completes promptly. The old code
+     joined the loop thread first and then destroyed the timers, leaving
+     drain_sync with no live loop to process the posted sync — a 5s timeout
+     per leftover timer. When timer_actor_stop ran first it only stopped
+     (not destroyed) the timers, so this destroy path still owned the
+     destroy and still stalled; destroying here before the join fixes both
+     the standalone-destroy and stop-then-destroy paths. The helper is a
+     no-op if timer_actor_stop already destroyed the tracked timers. */
+  _timer_actor_destroy_all_tracked(timer_actor);
   if (atomic_load(&timer_actor->running)) {
     atomic_store(&timer_actor->running, 0);
     pd_loop_async_send(timer_actor->loop, NULL);
     platform_thread_join(timer_actor->thread);
     timer_actor->thread = NULL;
-  }
-  for (size_t i = 0; i < timer_actor->active_timer_count; i++) {
-    pd_timer_t* timer = timer_actor->active_timers[i];
-    if (timer != NULL) {
-      void* user_data = timer->user_data;
-      pd_timer_stop(timer);
-      pd_timer_destroy(timer);
-      free(user_data);
-    }
   }
   free(timer_actor->active_timers);
   _destroy_stack_destroy(timer_actor);

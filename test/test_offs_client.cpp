@@ -17,9 +17,13 @@ extern "C" {
 #include "../src/Timer/timer_actor.h"
 #include "../src/Util/rm_rf.h"
 #include "../src/ClientAPI/WS/ws_transport.h"
-#include <unistd.h>
+#include "../src/Platform/platform.h"
 #include <string.h>
 #include <stdlib.h>
+
+/* usleep is POSIX-only; platform_sleep_ms is the cross-platform equivalent.
+ * Call sites pass microsecond values (e.g. 10000 == 10ms), so divide by 1000. */
+#define platform_usleep(us) platform_sleep_ms((us) / 1000)
 }
 
 struct PutCallbackContext {
@@ -228,7 +232,7 @@ protected:
         health_ctx.running = &running_val;
         health_ctx.draining = &draining_val;
 
-        snprintf(socket_path, sizeof(socket_path), "/tmp/test_client_sock_%d", getpid());
+        snprintf(socket_path, sizeof(socket_path), "/tmp/test_client_sock_%d", platform_getpid());
         unlink(socket_path);
 
         transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path, NULL, &health_ctx);
@@ -284,7 +288,7 @@ TEST_F(TestOffsClient, PutBufferedWithApiKey) {
     EXPECT_EQ(result, 0);
 
     for (int attempts = 0; attempts < 200 && !ctx.called.load(std::memory_order_acquire); attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     EXPECT_EQ(ctx.called, 1);
     EXPECT_NE(ctx.ori_string, nullptr);
@@ -309,7 +313,7 @@ TEST_F(TestOffsClient, PutBuffered) {
 
     /* Wait for callback with timeout */
     for (int attempts = 0; attempts < 200 && !ctx.called.load(std::memory_order_acquire); attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     EXPECT_EQ(ctx.called, 1);
     EXPECT_NE(ctx.ori_string, nullptr);
@@ -339,7 +343,7 @@ TEST_F(TestOffsClient, PutStreaming) {
 
     /* Wait for callback with timeout */
     for (int attempts = 0; attempts < 200 && !ctx.called.load(std::memory_order_acquire); attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     EXPECT_EQ(ctx.called, 1);
     EXPECT_NE(ctx.ori_string, nullptr);
@@ -364,7 +368,7 @@ TEST_F(TestOffsClient, GetAfterPut) {
 
     /* Wait for PUT callback */
     for (int attempts = 0; attempts < 200 && !put_ctx.called.load(std::memory_order_acquire); attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     ASSERT_EQ(put_ctx.called, 1);
     ASSERT_NE(put_ctx.ori_string, nullptr);
@@ -422,7 +426,7 @@ TEST_F(TestOffsClient, PutAndGet_256KB) {
     _fill_random(data, size);
     PutCallbackContext put_ctx;
     offs_client_put(client, "application/octet-stream", "256kb.bin", size, data, size, _put_callback, &put_ctx);
-    for (int a = 0; a < 500 && !put_ctx.called.load(std::memory_order_acquire); a++) usleep(10000);
+    for (int a = 0; a < 500 && !put_ctx.called.load(std::memory_order_acquire); a++) platform_usleep(10000);
     ASSERT_EQ(put_ctx.called, 1);
     char* ori = strdup(put_ctx.ori_string);
     free(put_ctx.ori_string);
@@ -446,7 +450,7 @@ TEST_F(TestOffsClient, PutAndGet_128KB) {
     _fill_random(data, size);
     PutCallbackContext put_ctx;
     offs_client_put(client, "application/octet-stream", "128kb.bin", size, data, size, _put_callback, &put_ctx);
-    for (int a = 0; a < 500 && !put_ctx.called.load(std::memory_order_acquire); a++) usleep(10000);
+    for (int a = 0; a < 500 && !put_ctx.called.load(std::memory_order_acquire); a++) platform_usleep(10000);
     ASSERT_EQ(put_ctx.called, 1);
     char* ori = strdup(put_ctx.ori_string);
     free(put_ctx.ori_string);
@@ -470,7 +474,7 @@ TEST_F(TestOffsClient, PutAndGet_100KB) {
     _fill_random(data, size);
     PutCallbackContext put_ctx;
     offs_client_put(client, "application/octet-stream", "100kb.bin", size, data, size, _put_callback, &put_ctx);
-    for (int a = 0; a < 500 && !put_ctx.called.load(std::memory_order_acquire); a++) usleep(10000);
+    for (int a = 0; a < 500 && !put_ctx.called.load(std::memory_order_acquire); a++) platform_usleep(10000);
     ASSERT_EQ(put_ctx.called, 1);
     char* ori = strdup(put_ctx.ori_string);
     free(put_ctx.ori_string);
@@ -494,7 +498,7 @@ TEST_F(TestOffsClient, PutAndGet_512KB) {
     _fill_random(data, size);
     PutCallbackContext put_ctx;
     offs_client_put(client, "application/octet-stream", "512kb.bin", size, data, size, _put_callback, &put_ctx);
-    for (int a = 0; a < 500 && !put_ctx.called.load(std::memory_order_acquire); a++) usleep(10000);
+    for (int a = 0; a < 500 && !put_ctx.called.load(std::memory_order_acquire); a++) platform_usleep(10000);
     ASSERT_EQ(put_ctx.called, 1);
     char* ori = strdup(put_ctx.ori_string);
     free(put_ctx.ori_string);
@@ -529,7 +533,7 @@ TEST_F(TestOffsClient, PutAndGet_1MB) {
     EXPECT_EQ(result, 0);
 
     for (int attempts = 0; attempts < 500 && !put_ctx.called.load(std::memory_order_acquire); attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     ASSERT_EQ(put_ctx.called, 1);
     ASSERT_NE(put_ctx.ori_string, nullptr);
@@ -580,7 +584,7 @@ TEST_F(TestOffsClient, PutAndGet_10MB) {
     EXPECT_EQ(result, 0);
 
     for (int attempts = 0; attempts < 1000 && !put_ctx.called.load(std::memory_order_acquire); attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     ASSERT_EQ(put_ctx.called, 1);
     ASSERT_NE(put_ctx.ori_string, nullptr);
@@ -643,7 +647,7 @@ TEST_F(TestOffsClient, PutStreaming_1MB) {
     EXPECT_EQ(result, 0);
 
     for (int attempts = 0; attempts < 500 && !put_ctx.called.load(std::memory_order_acquire); attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     ASSERT_EQ(put_ctx.called, 1);
     ASSERT_NE(put_ctx.ori_string, nullptr);
@@ -716,7 +720,7 @@ TEST_F(TestOffsClient, BlockPut) {
     EXPECT_EQ(result, 0);
 
     for (int attempts = 0; attempts < 200 && !ctx.called; attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     EXPECT_EQ(ctx.called, 1);
     if (ctx.hash_data != nullptr) {
@@ -741,7 +745,7 @@ TEST_F(TestOffsClient, BlockPutGetRoundTrip) {
     for (int attempts = 0; attempts < 200
          && put_ctx.called.load(std::memory_order_acquire) == 0;
          attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     EXPECT_EQ(put_ctx.called, 1);
     ASSERT_NE(put_ctx.hash_data, nullptr);
@@ -758,7 +762,7 @@ TEST_F(TestOffsClient, BlockPutGetRoundTrip) {
     for (int attempts = 0; attempts < 200
          && get_ctx.called.load(std::memory_order_acquire) == 0;
          attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     EXPECT_EQ(get_ctx.called, 1);
     if (get_ctx.status != 0) {
@@ -790,7 +794,7 @@ TEST_F(TestOffsClient, BlockDelete) {
     for (int attempts = 0; attempts < 200
          && put_ctx.called.load(std::memory_order_acquire) == 0;
          attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     EXPECT_EQ(put_ctx.called, 1);
     ASSERT_NE(put_ctx.hash_data, nullptr);
@@ -803,7 +807,7 @@ TEST_F(TestOffsClient, BlockDelete) {
     EXPECT_EQ(result, 0);
 
     for (int attempts = 0; attempts < 200 && !del_ctx.called; attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     EXPECT_EQ(del_ctx.called, 1);
 
@@ -822,7 +826,7 @@ TEST_F(TestOffsClient, Health) {
     EXPECT_EQ(result, 0);
 
     for (int attempts = 0; attempts < 200 && !ctx.called; attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     EXPECT_EQ(ctx.called, 1);
     ASSERT_NE(ctx.json_response, nullptr);
@@ -873,12 +877,12 @@ protected:
         ofd_cache = ofd_cache_create(pool, bc, 300000);
         tc = tuple_cache_create(100, pool);
 
-        port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
+        port = _next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
         snprintf(url, sizeof(url), "ws://127.0.0.1:%d/offs", port);
 
         transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL, NULL);
         for (int retry = 0; transport == nullptr && retry < 10; retry++) {
-            port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
+            port = _next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
             snprintf(url, sizeof(url), "ws://127.0.0.1:%d/offs", port);
             transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL, NULL);
         }
@@ -886,7 +890,7 @@ protected:
         ws_transport_start(transport);
 
         /* Wait for server to be ready */
-        usleep(100000);
+        platform_usleep(100000);
     }
 
     void TearDown() override {
@@ -937,7 +941,7 @@ TEST_F(TestOffsWsClient, PutBuffered) {
     EXPECT_EQ(result, 0);
 
     for (int attempts = 0; attempts < 200 && !ctx.called; attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     EXPECT_EQ(ctx.called, 1);
     EXPECT_NE(ctx.ori_string, nullptr);
@@ -961,7 +965,7 @@ TEST_F(TestOffsWsClient, GetAfterPut) {
     EXPECT_EQ(result, 0);
 
     for (int attempts = 0; attempts < 200 && !put_ctx.called.load(std::memory_order_acquire); attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     ASSERT_EQ(put_ctx.called, 1);
     ASSERT_NE(put_ctx.ori_string, nullptr);
@@ -997,6 +1001,67 @@ TEST_F(TestOffsWsClient, GetAfterPut) {
     offs_client_disconnect(client);
 }
 
+/* Large WS round trip: exercises the server ws_connection send path for a frame
+ * that does not fit in one send. On Windows IOCP, PD_EVENT_WRITE is never
+ * delivered, so the server must flush partial sends via a bounded blocking
+ * retry (see ws_connection.c) — without it this test times out at GET. */
+TEST_F(TestOffsWsClient, PutAndGet_1MB) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+
+    const size_t size = 1024 * 1024;
+    uint8_t* data = (uint8_t*)malloc(size);
+    /* LCG fill (same generator as _fill_random in the offs_client_test
+     * namespace) — inlined here because _fill_random is not visible across
+     * namespaces. */
+    {
+        uint32_t st = 1;
+        for (size_t i = 0; i < size; i++) { st = st * 1103515245u + 12345u; data[i] = (uint8_t)(st >> 16); }
+    }
+
+    PutCallbackContext put_ctx;
+    put_ctx.ori_string = nullptr;
+    put_ctx.called = 0;
+
+    int result = offs_client_put(client, "application/octet-stream", "1mb_ws.bin",
+                                  size, data, size, _put_callback, &put_ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 500 && !put_ctx.called.load(std::memory_order_acquire); attempts++) {
+        platform_usleep(10000);
+    }
+    ASSERT_EQ(put_ctx.called, 1);
+    ASSERT_NE(put_ctx.ori_string, nullptr);
+    char* ori_string = strdup(put_ctx.ori_string);
+    free(put_ctx.ori_string);
+
+    GetDataCallbackContext get_ctx;
+    std::future<GetResult> get_fut = get_ctx.promise.get_future();
+    result = offs_client_get(client, ori_string, _get_data_callback,
+                              _get_end_callback, _error_callback, &get_ctx);
+    EXPECT_EQ(result, 0);
+
+    if (!_wait_future(get_fut, 30000)) {
+        FAIL() << "GET timed out";
+    }
+    GetResult get_res = get_fut.get();
+
+    if (get_res.error) {
+        FAIL() << "Got error response, status_code=" << (int)get_res.status_code;
+    }
+
+    EXPECT_EQ(get_ctx.end_called, 1);
+    EXPECT_EQ(get_ctx.data_len.load(), size);
+    if (get_ctx.data != nullptr) {
+        EXPECT_EQ(memcmp(get_ctx.data, data, size), 0);
+        free(get_ctx.data);
+    }
+
+    free(ori_string);
+    free(data);
+    offs_client_disconnect(client);
+}
+
 } // namespace offs_ws_client_test
 
 /* --- WebTransport client tests (requires MsQuic) --- */
@@ -1004,6 +1069,7 @@ TEST_F(TestOffsWsClient, GetAfterPut) {
 extern "C" {
 #include "../src/ClientAPI/WT/wt_transport.h"
 #include "../src/Util/atomic_compat.h"
+#include "../tools/offs-ca/ca_ops.h"
 }
 
 namespace offs_wt_client_test {
@@ -1032,15 +1098,17 @@ protected:
         cache_dir = mkdtemp(dir_template);
         cache_dir = strdup(cache_dir);
 
-        /* Generate self-signed cert for WT server */
+        /* Generate a self-signed RSA cert for the WT server in-process via the
+         * same ca_generate routine the offs-ca tool exposes (and that
+         * test_peer_verify uses). The old system("openssl req ... 2>/dev/null")
+         * shell-out broke on Windows cmd, which does not understand /dev/null,
+         * so the redirect failed before openssl ran, no cert was produced, and
+         * wt_transport_create failed at ConfigurationLoadCredential. RSA is
+         * used (not ed25519) because Schannel — msquic's Windows TLS provider
+         * — reliably accepts RSA. */
         snprintf(cert_path, sizeof(cert_path), "%s/test_cert.pem", cache_dir);
         snprintf(key_path, sizeof(key_path), "%s/test_key.pem", cache_dir);
-        char cmd[1024];
-        snprintf(cmd, sizeof(cmd),
-            "openssl req -x509 -newkey rsa:2048 -keyout %s -out %s "
-            "-days 1 -nodes -subj '/CN=localhost' 2>/dev/null",
-            key_path, cert_path);
-        int rc = system(cmd);
+        int rc = ca_generate("/CN=localhost", 1, "rsa", cert_path, key_path);
         if (rc != 0) {
             /* Cannot generate cert — tests will skip */
             cert_path[0] = '\0';
@@ -1062,7 +1130,7 @@ protected:
         ofd_cache = ofd_cache_create(pool, bc, 300000);
         tc = tuple_cache_create(100, pool);
 
-        port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
+        port = _next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
         snprintf(url, sizeof(url), "wt://127.0.0.1:%d", port);
 
         const char* cp = (cert_path[0] != '\0') ? cert_path : NULL;
@@ -1072,7 +1140,7 @@ protected:
             wt_transport_start(transport);
             /* Wait for QUIC server listener to be ready */
             for (int attempts = 0; attempts < 100 && !atomic_load(&transport->listening); attempts++) {
-                usleep(10000);
+                platform_usleep(10000);
             }
             if (!atomic_load(&transport->listening)) {
                 /* Server thread exited early — join it and destroy transport */
@@ -1135,7 +1203,7 @@ TEST_F(TestOffsWtClient, PutBuffered) {
     EXPECT_EQ(result, 0);
 
     for (int attempts = 0; attempts < 200 && !ctx.called; attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     EXPECT_EQ(ctx.called, 1);
     EXPECT_NE(ctx.ori_string, nullptr);
@@ -1162,7 +1230,7 @@ TEST_F(TestOffsWtClient, GetAfterPut) {
     EXPECT_EQ(result, 0);
 
     for (int attempts = 0; attempts < 200 && !put_ctx.called.load(std::memory_order_acquire); attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     ASSERT_EQ(put_ctx.called, 1);
     ASSERT_NE(put_ctx.ori_string, nullptr);
@@ -1199,6 +1267,9 @@ TEST_F(TestOffsWtClient, GetAfterPut) {
 }
 
 TEST_F(TestOffsWtClient, Health) {
+    if (transport == nullptr) {
+        GTEST_SKIP() << "WT transport creation failed (MsQuic not available)";
+    }
     offs_client_t* client = offs_client_connect(url, NULL);
     ASSERT_NE(client, nullptr);
 
@@ -1209,7 +1280,7 @@ TEST_F(TestOffsWtClient, Health) {
     EXPECT_EQ(result, 0);
 
     for (int attempts = 0; attempts < 200 && !ctx.called; attempts++) {
-        usleep(10000);
+        platform_usleep(10000);
     }
     EXPECT_EQ(ctx.called, 1);
     ASSERT_NE(ctx.json_response, nullptr);
