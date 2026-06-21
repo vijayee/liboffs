@@ -17,74 +17,90 @@ extern "C" {
 #include "../src/Timer/timer_actor.h"
 #include "../src/Util/mkdir_p.h"
 #include "../src/Util/rm_rf.h"
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#include "../src/Platform/platform.h"
+#include "../src/Platform/platform_socket.h"
 #include <string.h>
 #include <stdlib.h>
-#include <poll.h>
+
+/* usleep is POSIX-only; platform_sleep_ms is the cross-platform equivalent.
+ * Call sites pass microsecond values (e.g. 10000 == 10ms), so divide by 1000. */
+#define platform_usleep(us) platform_sleep_ms((us) / 1000)
 }
 
 namespace off_routes_test {
 
 static uint16_t _next_port = 19080;
 
-static int _connect_to_server(uint16_t port) {
-    int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (fd < 0) return -1;
+static platform_socket_t* _connect_to_server(uint16_t port) {
+    platform_socket_t* sock = platform_socket_create(PLATFORM_AF_INET, 1);
+    if (sock == NULL) return NULL;
 
-    struct sockaddr_in addr;
+    platform_address_t addr;
     memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    addr.family = PLATFORM_AF_INET;
+    addr.inet.addr = 0x0100007f; /* 127.0.0.1 in network byte order */
+    addr.inet.port = port;
 
-    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(fd);
-        return -1;
+    if (platform_socket_connect(sock, &addr) != 0) {
+        platform_socket_destroy(sock);
+        return NULL;
     }
-    return fd;
+    platform_socket_set_nonblocking(sock);
+    return sock;
 }
 
-static int _send_and_recv(int fd, const char* request, size_t req_len,
+static int _send_all(platform_socket_t* sock, const char* buf, size_t len) {
+    size_t sent_total = 0;
+    for (int attempts = 0; attempts < 1000 && sent_total < len; attempts++) {
+        ssize_t sent = platform_socket_send(sock, buf + sent_total, len - sent_total);
+        if (sent > 0) {
+            sent_total += (size_t)sent;
+        } else if (sent == 0) {
+            return -1;
+        } else {
+            /* Nonblocking socket: EWOULDBLOCK means try again shortly. */
+            platform_sleep_ms(10);
+        }
+    }
+    return (sent_total == len) ? 0 : -1;
+}
+
+static int _send_and_recv(platform_socket_t* sock, const char* request, size_t req_len,
                           char* response, size_t response_size, int timeout_ms) {
-    ssize_t sent = send(fd, request, req_len, 0);
-    if (sent != (ssize_t)req_len) return -1;
+    if (_send_all(sock, request, req_len) != 0) return -1;
 
     size_t total_received = 0;
     for (int attempts = 0; attempts < timeout_ms / 10; attempts++) {
-        struct pollfd poll_fd;
-        poll_fd.fd = fd;
-        poll_fd.events = POLLIN;
-        poll_fd.revents = 0;
-        int poll_result = poll(&poll_fd, 1, 10);
-        if (poll_result > 0 && (poll_fd.revents & POLLIN)) {
-            ssize_t received = recv(fd, response + total_received,
-                                    response_size - total_received - 1, 0);
-            if (received > 0) {
-                total_received += (size_t)received;
-                response[total_received] = '\0';
-                char* header_end = strstr(response, "\r\n\r\n");
-                if (header_end != NULL) {
-                    size_t header_len = (header_end - response) + 4;
-                    char* content_length_str = strstr(response, "Content-Length: ");
-                    if (content_length_str != NULL && content_length_str < header_end) {
-                        size_t content_length = (size_t)atol(content_length_str + 16);
-                        if (total_received >= header_len + content_length) {
-                            return 0;
-                        }
-                    }
-                    if (strstr(response, "Connection: close") != NULL &&
-                        total_received > header_len) {
+        if (total_received + 1 >= response_size) break;
+        ssize_t received = platform_socket_recv(sock, response + total_received,
+                                                response_size - total_received - 1);
+        if (received > 0) {
+            total_received += (size_t)received;
+            response[total_received] = '\0';
+            char* header_end = strstr(response, "\r\n\r\n");
+            if (header_end != NULL) {
+                size_t header_len = (size_t)(header_end - response) + 4;
+                char* content_length_str = strstr(response, "Content-Length: ");
+                if (content_length_str != NULL && content_length_str < header_end) {
+                    size_t content_length = (size_t)atol(content_length_str + 16);
+                    if (total_received >= header_len + content_length) {
                         return 0;
                     }
                 }
-            } else if (received == 0) {
-                return total_received > 0 ? 0 : -1;
+                if (strstr(response, "Connection: close") != NULL &&
+                    total_received > header_len) {
+                    return 0;
+                }
             }
+        } else if (received == 0) {
+            response[total_received] = '\0';
+            return total_received > 0 ? 0 : -1;
+        } else {
+            /* EWOULDBLOCK on a nonblocking socket: back off and retry. */
+            platform_sleep_ms(10);
         }
     }
+    response[total_received] = '\0';
     return total_received > 0 ? 0 : -1;
 }
 
@@ -100,7 +116,7 @@ protected:
     char* cache_dir;
 
     void SetUp() override {
-        port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
+        port = _next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
         pool = scheduler_pool_create(4);
         scheduler_pool_start(pool);
 
@@ -149,78 +165,78 @@ TEST_F(TestOffRoutes, PutMissingHeaders) {
     off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL, NULL);
     http_server_listen(server);
 
-    int fd = -1;
+    platform_socket_t* sock = NULL;
     for (int attempts = 0; attempts < 50; attempts++) {
-        usleep(10000);
-        fd = _connect_to_server(port);
-        if (fd >= 0) break;
+        platform_usleep(10000);
+        sock = _connect_to_server(port);
+        if (sock != NULL) break;
     }
-    ASSERT_GE(fd, 0);
+    ASSERT_NE(sock, nullptr);
 
     char response[4096];
     const char* request = "PUT /offsystem HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
-    int result = _send_and_recv(fd, request, strlen(request), response, sizeof(response), 2000);
+    int result = _send_and_recv(sock,request, strlen(request), response, sizeof(response), 2000);
     EXPECT_EQ(result, 0);
     EXPECT_NE(strstr(response, "400"), nullptr);
 
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 TEST_F(TestOffRoutes, GetInvalidUrl) {
     off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL, NULL);
     http_server_listen(server);
 
-    int fd = -1;
+    platform_socket_t* sock = NULL;
     for (int attempts = 0; attempts < 50; attempts++) {
-        usleep(10000);
-        fd = _connect_to_server(port);
-        if (fd >= 0) break;
+        platform_usleep(10000);
+        sock = _connect_to_server(port);
+        if (sock != NULL) break;
     }
-    ASSERT_GE(fd, 0);
+    ASSERT_NE(sock, nullptr);
 
     char response[4096];
     const char* request = "GET /offsystem/v3/invalid HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    int result = _send_and_recv(fd, request, strlen(request), response, sizeof(response), 2000);
+    int result = _send_and_recv(sock,request, strlen(request), response, sizeof(response), 2000);
     EXPECT_EQ(result, 0);
     // URL doesn't match OFF_GET_PATTERN, so server returns 404
     EXPECT_NE(strstr(response, "404"), nullptr);
 
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 TEST_F(TestOffRoutes, DeleteInvalidUrl) {
     off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL, NULL);
     http_server_listen(server);
 
-    int fd = -1;
+    platform_socket_t* sock = NULL;
     for (int attempts = 0; attempts < 50; attempts++) {
-        usleep(10000);
-        fd = _connect_to_server(port);
-        if (fd >= 0) break;
+        platform_usleep(10000);
+        sock = _connect_to_server(port);
+        if (sock != NULL) break;
     }
-    ASSERT_GE(fd, 0);
+    ASSERT_NE(sock, nullptr);
 
     char response[4096];
     const char* request = "DELETE /offsystem/v3/invalid HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    int result = _send_and_recv(fd, request, strlen(request), response, sizeof(response), 2000);
+    int result = _send_and_recv(sock,request, strlen(request), response, sizeof(response), 2000);
     EXPECT_EQ(result, 0);
     // URL doesn't match OFF_GET_PATTERN, so server returns 404
     EXPECT_NE(strstr(response, "404"), nullptr);
 
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 TEST_F(TestOffRoutes, PutAndGetRoundTrip) {
     off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL, NULL);
     http_server_listen(server);
 
-    int fd = -1;
+    platform_socket_t* sock = NULL;
     for (int attempts = 0; attempts < 50; attempts++) {
-        usleep(10000);
-        fd = _connect_to_server(port);
-        if (fd >= 0) break;
+        platform_usleep(10000);
+        sock = _connect_to_server(port);
+        if (sock != NULL) break;
     }
-    ASSERT_GE(fd, 0);
+    ASSERT_NE(sock, nullptr);
 
     // PUT request with a small body
     const char* body = "Hello OFF System!";
@@ -239,7 +255,7 @@ TEST_F(TestOffRoutes, PutAndGetRoundTrip) {
 
     char put_response[8192];
     memset(put_response, 0, sizeof(put_response));
-    int result = _send_and_recv(fd, put_request, (size_t)put_len,
+    int result = _send_and_recv(sock,put_request, (size_t)put_len,
                                 put_response, sizeof(put_response), 5000);
     EXPECT_EQ(result, 0);
     EXPECT_NE(strstr(put_response, "200"), nullptr);
@@ -255,16 +271,16 @@ TEST_F(TestOffRoutes, PutAndGetRoundTrip) {
     // The body should contain /offsystem/v3/...
     EXPECT_NE(strstr(put_body, "/offsystem/v3/"), nullptr);
 
-    close(fd);
+    platform_socket_destroy(sock);
 
     // GET the content back using the returned URL
-    fd = -1;
+    sock = NULL;
     for (int attempts = 0; attempts < 50; attempts++) {
-        usleep(10000);
-        fd = _connect_to_server(port);
-        if (fd >= 0) break;
+        platform_usleep(10000);
+        sock = _connect_to_server(port);
+        if (sock != NULL) break;
     }
-    ASSERT_GE(fd, 0);
+    ASSERT_NE(sock, nullptr);
 
     char get_request[4096];
     int get_len = snprintf(get_request, sizeof(get_request),
@@ -274,24 +290,24 @@ TEST_F(TestOffRoutes, PutAndGetRoundTrip) {
         put_body);
 
     char get_response[8192];
-    result = _send_and_recv(fd, get_request, (size_t)get_len,
+    result = _send_and_recv(sock,get_request, (size_t)get_len,
                             get_response, sizeof(get_response), 5000);
     EXPECT_EQ(result, 0);
 
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 TEST_F(TestOffRoutes, DirectoryOfdRawRoundTrip) {
     off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL, NULL);
     http_server_listen(server);
 
-    int fd = -1;
+    platform_socket_t* sock = NULL;
     for (int attempts = 0; attempts < 50; attempts++) {
-        usleep(10000);
-        fd = _connect_to_server(port);
-        if (fd >= 0) break;
+        platform_usleep(10000);
+        sock = _connect_to_server(port);
+        if (sock != NULL) break;
     }
-    ASSERT_GE(fd, 0);
+    ASSERT_NE(sock, nullptr);
 
     /* Create a CBOR-encoded OFD */
     ofd_t* ofd = ofd_create();
@@ -328,7 +344,7 @@ TEST_F(TestOffRoutes, DirectoryOfdRawRoundTrip) {
 
     char put_response[8192];
     memset(put_response, 0, sizeof(put_response));
-    int result = _send_and_recv(fd, put_request, (size_t)put_len,
+    int result = _send_and_recv(sock,put_request, (size_t)put_len,
                                 put_response, sizeof(put_response), 5000);
     EXPECT_EQ(result, 0);
     EXPECT_NE(strstr(put_response, "200"), nullptr);
@@ -341,17 +357,17 @@ TEST_F(TestOffRoutes, DirectoryOfdRawRoundTrip) {
     while (url_len > 0 && (put_body[url_len-1] == '\r' || put_body[url_len-1] == '\n'))
         put_body[--url_len] = '\0';
 
-    close(fd);
+    platform_socket_destroy(sock);
     buffer_destroy(encoded);
 
     /* Now GET the URL — this triggers async directory resolution */
-    fd = -1;
+    sock = NULL;
     for (int attempts = 0; attempts < 50; attempts++) {
-        usleep(10000);
-        fd = _connect_to_server(port);
-        if (fd >= 0) break;
+        platform_usleep(10000);
+        sock = _connect_to_server(port);
+        if (sock != NULL) break;
     }
-    ASSERT_GE(fd, 0);
+    ASSERT_NE(sock, nullptr);
 
     char get_request[8192];
     int get_len = snprintf(get_request, sizeof(get_request),
@@ -362,11 +378,11 @@ TEST_F(TestOffRoutes, DirectoryOfdRawRoundTrip) {
 
     char get_response[16384];
     memset(get_response, 0, sizeof(get_response));
-    result = _send_and_recv(fd, get_request, (size_t)get_len,
+    result = _send_and_recv(sock,get_request, (size_t)get_len,
                             get_response, sizeof(get_response), 5000);
     EXPECT_EQ(result, 0);
 
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 } // namespace off_routes_test
