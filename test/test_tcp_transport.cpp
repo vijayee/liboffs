@@ -13,47 +13,47 @@ extern "C" {
 #include "../src/Configuration/config.h"
 #include "../src/Timer/timer_actor.h"
 #include "../src/Util/rm_rf.h"
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#include "../src/Platform/platform.h"
+#include "../src/Platform/platform_socket.h"
 #include <string.h>
 #include <stdlib.h>
-#include <poll.h>
+
+/* usleep is POSIX-only; platform_sleep_ms is the cross-platform equivalent.
+ * Call sites pass microsecond values (e.g. 10000 == 10ms), so divide by 1000. */
+#define platform_usleep(us) platform_sleep_ms((us) / 1000)
 }
 
 namespace tcp_transport_test {
 
 static uint16_t _next_port = 29080;
 
-static int _connect_tcp(const char* host, uint16_t port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    struct sockaddr_in addr;
+static platform_socket_t* _connect_tcp(const char* host, uint16_t port) {
+    platform_socket_t* sock = platform_socket_create(PLATFORM_AF_INET, 1);
+    if (sock == NULL) return NULL;
+    platform_address_t addr;
     memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {
-        close(fd);
-        return -1;
+    if (platform_address_parse(&addr, host, port) != 0) {
+        platform_socket_destroy(sock);
+        return NULL;
     }
-    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(fd);
-        return -1;
+    if (platform_socket_connect(sock, &addr) != 0) {
+        platform_socket_destroy(sock);
+        return NULL;
     }
-    return fd;
+    platform_socket_set_nonblocking(sock);
+    return sock;
 }
 
-static int _connect_with_retry(const char* host, uint16_t port, int max_attempts = 50) {
+static platform_socket_t* _connect_with_retry(const char* host, uint16_t port, int max_attempts = 50) {
     for (int attempts = 0; attempts < max_attempts; attempts++) {
-        usleep(10000);
-        int fd = _connect_tcp(host, port);
-        if (fd >= 0) return fd;
+        platform_usleep(10000);
+        platform_socket_t* sock = _connect_tcp(host, port);
+        if (sock != NULL) return sock;
     }
-    return -1;
+    return NULL;
 }
 
-static int _send_frame(int fd, cbor_item_t* frame) {
+static int _send_frame(platform_socket_t* sock, cbor_item_t* frame) {
     unsigned char* cbor_buf = NULL;
     size_t cbor_len = 0;
     cbor_len = cbor_serialize_alloc(frame, &cbor_buf, &cbor_len);
@@ -65,15 +65,29 @@ static int _send_frame(int fd, cbor_item_t* frame) {
     free(cbor_buf);
     if (framed == NULL) return -1;
 
-    ssize_t sent = send(fd, framed, framed_len, MSG_NOSIGNAL);
+    /* MSG_NOSIGNAL is POSIX-only (Windows has no SIGPIPE); platform_socket_send
+     * takes no flags. Loop to handle partial sends on a nonblocking socket. */
+    size_t sent_total = 0;
+    for (int attempts = 0; attempts < 1000 && sent_total < framed_len; attempts++) {
+        ssize_t sent = platform_socket_send(sock, framed + sent_total,
+                                             framed_len - sent_total);
+        if (sent > 0) {
+            sent_total += (size_t)sent;
+        } else if (sent == 0) {
+            break;
+        } else {
+            platform_sleep_ms(10);
+        }
+    }
+    int rc = (sent_total == framed_len) ? 0 : -1;
     free(framed);
-    return (sent == (ssize_t)framed_len) ? 0 : -1;
+    return rc;
 }
 
-static cbor_item_t* _recv_frame(int fd, stream_framer_t* framer, int timeout_ms = 10000) {
+static cbor_item_t* _recv_frame(platform_socket_t* sock, stream_framer_t* framer, int timeout_ms = 10000) {
     uint8_t buf[65536];
     for (int attempts = 0; attempts < timeout_ms / 10; attempts++) {
-        /* Check framer for buffered frames before polling the socket */
+        /* Check framer for buffered frames before reading the socket. */
         size_t frame_len;
         uint8_t* frame_data = stream_framer_next(framer, &frame_len);
         if (frame_data != NULL) {
@@ -86,15 +100,15 @@ static cbor_item_t* _recv_frame(int fd, stream_framer_t* framer, int timeout_ms 
             if (item != NULL) cbor_decref(&item);
         }
 
-        struct pollfd poll_fd;
-        poll_fd.fd = fd;
-        poll_fd.events = POLLIN;
-        poll_fd.revents = 0;
-        int poll_result = poll(&poll_fd, 1, 10);
-        if (poll_result > 0 && (poll_fd.revents & POLLIN)) {
-            ssize_t received = recv(fd, buf, sizeof(buf), 0);
-            if (received <= 0) return nullptr;
+        ssize_t received = platform_socket_recv(sock, buf, sizeof(buf));
+        if (received > 0) {
             stream_framer_feed(framer, buf, (size_t)received);
+        } else if (received == 0) {
+            /* Peer closed the connection. */
+            return nullptr;
+        } else {
+            /* EWOULDBLOCK on a nonblocking socket: back off and retry. */
+            platform_sleep_ms(10);
         }
     }
     return nullptr;
@@ -112,7 +126,7 @@ protected:
     uint16_t port;
 
     void SetUp() override {
-        port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
+        port = _next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
         pool = scheduler_pool_create(4);
         scheduler_pool_start(pool);
         timer = timer_actor_create(pool);
@@ -138,7 +152,7 @@ protected:
 
         transport = tcp_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, NULL, NULL);
         for (int retry = 0; transport == nullptr && retry < 10; retry++) {
-            port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
+            port = _next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
             transport = tcp_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, NULL, NULL);
         }
         ASSERT_NE(transport, nullptr);
@@ -165,14 +179,14 @@ protected:
 };
 
 TEST_F(TestTcpTransport, ConnectAndClose) {
-    int fd = _connect_with_retry("127.0.0.1", port);
-    ASSERT_GE(fd, 0);
-    close(fd);
+    platform_socket_t* sock = _connect_with_retry("127.0.0.1", port);
+    ASSERT_NE(sock, nullptr);
+    platform_socket_destroy(sock);
 }
 
 TEST_F(TestTcpTransport, PutSmallData) {
-    int fd = _connect_with_retry("127.0.0.1", port);
-    ASSERT_GE(fd, 0);
+    platform_socket_t* sock = _connect_with_retry("127.0.0.1", port);
+    ASSERT_NE(sock, nullptr);
 
     const char* content_type = "application/octet-stream";
     const char* file_name = "test_tcp_file.bin";
@@ -189,10 +203,10 @@ TEST_F(TestTcpTransport, PutSmallData) {
 
     cbor_item_t* frame = client_api_put_request_encode(&msg);
     ASSERT_NE(frame, nullptr);
-    ASSERT_EQ(_send_frame(fd, frame), 0);
+    ASSERT_EQ(_send_frame(sock,frame), 0);
 
     stream_framer_t* framer = stream_framer_create();
-    cbor_item_t* response = _recv_frame(fd, framer);
+    cbor_item_t* response = _recv_frame(sock,framer);
     ASSERT_NE(response, nullptr);
 
     uint8_t type = client_api_wire_get_type(response);
@@ -210,12 +224,12 @@ TEST_F(TestTcpTransport, PutSmallData) {
     }
     cbor_decref(&response);
     stream_framer_destroy(framer);
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 TEST_F(TestTcpTransport, GetInvalidOri) {
-    int fd = _connect_with_retry("127.0.0.1", port);
-    ASSERT_GE(fd, 0);
+    platform_socket_t* sock = _connect_with_retry("127.0.0.1", port);
+    ASSERT_NE(sock, nullptr);
 
     client_api_get_request_t msg;
     memset(&msg, 0, sizeof(msg));
@@ -224,10 +238,10 @@ TEST_F(TestTcpTransport, GetInvalidOri) {
 
     cbor_item_t* frame = client_api_get_request_encode(&msg);
     ASSERT_NE(frame, nullptr);
-    ASSERT_EQ(_send_frame(fd, frame), 0);
+    ASSERT_EQ(_send_frame(sock,frame), 0);
 
     stream_framer_t* framer = stream_framer_create();
-    cbor_item_t* response = _recv_frame(fd, framer);
+    cbor_item_t* response = _recv_frame(sock,framer);
     ASSERT_NE(response, nullptr);
 
     uint8_t type = client_api_wire_get_type(response);
@@ -245,12 +259,12 @@ TEST_F(TestTcpTransport, GetInvalidOri) {
     }
     cbor_decref(&response);
     stream_framer_destroy(framer);
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 TEST_F(TestTcpTransport, StreamingPut) {
-    int fd = _connect_with_retry("127.0.0.1", port);
-    ASSERT_GE(fd, 0);
+    platform_socket_t* sock = _connect_with_retry("127.0.0.1", port);
+    ASSERT_NE(sock, nullptr);
 
     const char* content_type = "application/octet-stream";
     const char* file_name = "stream_tcp_test.bin";
@@ -267,7 +281,7 @@ TEST_F(TestTcpTransport, StreamingPut) {
 
     cbor_item_t* frame = client_api_put_request_encode(&put_req);
     ASSERT_NE(frame, nullptr);
-    ASSERT_EQ(_send_frame(fd, frame), 0);
+    ASSERT_EQ(_send_frame(sock,frame), 0);
 
     client_api_put_data_t data_msg;
     memset(&data_msg, 0, sizeof(data_msg));
@@ -276,14 +290,14 @@ TEST_F(TestTcpTransport, StreamingPut) {
 
     frame = client_api_put_data_encode(&data_msg);
     ASSERT_NE(frame, nullptr);
-    ASSERT_EQ(_send_frame(fd, frame), 0);
+    ASSERT_EQ(_send_frame(sock,frame), 0);
 
     frame = client_api_put_end_encode();
     ASSERT_NE(frame, nullptr);
-    ASSERT_EQ(_send_frame(fd, frame), 0);
+    ASSERT_EQ(_send_frame(sock,frame), 0);
 
     stream_framer_t* framer = stream_framer_create();
-    cbor_item_t* response = _recv_frame(fd, framer);
+    cbor_item_t* response = _recv_frame(sock,framer);
     ASSERT_NE(response, nullptr);
 
     uint8_t type = client_api_wire_get_type(response);
@@ -301,12 +315,12 @@ TEST_F(TestTcpTransport, StreamingPut) {
     }
     cbor_decref(&response);
     stream_framer_destroy(framer);
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 TEST_F(TestTcpTransport, PutAndGetRoundTrip) {
-    int fd = _connect_with_retry("127.0.0.1", port);
-    ASSERT_GE(fd, 0);
+    platform_socket_t* sock = _connect_with_retry("127.0.0.1", port);
+    ASSERT_NE(sock, nullptr);
 
     const char* content_type = "application/octet-stream";
     const char* file_name = "roundtrip_tcp.bin";
@@ -323,10 +337,10 @@ TEST_F(TestTcpTransport, PutAndGetRoundTrip) {
 
     cbor_item_t* frame = client_api_put_request_encode(&put_req);
     ASSERT_NE(frame, nullptr);
-    ASSERT_EQ(_send_frame(fd, frame), 0);
+    ASSERT_EQ(_send_frame(sock,frame), 0);
 
     stream_framer_t* framer = stream_framer_create();
-    cbor_item_t* response = _recv_frame(fd, framer);
+    cbor_item_t* response = _recv_frame(sock,framer);
     ASSERT_NE(response, nullptr);
 
     uint8_t type = client_api_wire_get_type(response);
@@ -348,18 +362,18 @@ TEST_F(TestTcpTransport, PutAndGetRoundTrip) {
 
     frame = client_api_get_request_encode(&get_req);
     ASSERT_NE(frame, nullptr);
-    ASSERT_EQ(_send_frame(fd, frame), 0);
+    ASSERT_EQ(_send_frame(sock,frame), 0);
     free(ori_string);
 
     /* Expect GET_RESPONSE_START */
-    response = _recv_frame(fd, framer);
+    response = _recv_frame(sock,framer);
     ASSERT_NE(response, nullptr);
     type = client_api_wire_get_type(response);
     EXPECT_EQ(type, CLIENT_API_GET_RESPONSE_START);
     cbor_decref(&response);
 
     /* Expect GET_DATA */
-    response = _recv_frame(fd, framer);
+    response = _recv_frame(sock,framer);
     ASSERT_NE(response, nullptr);
     type = client_api_wire_get_type(response);
     if (type == CLIENT_API_GET_DATA) {
@@ -376,14 +390,14 @@ TEST_F(TestTcpTransport, PutAndGetRoundTrip) {
     cbor_decref(&response);
 
     /* Expect GET_END */
-    response = _recv_frame(fd, framer);
+    response = _recv_frame(sock,framer);
     ASSERT_NE(response, nullptr);
     type = client_api_wire_get_type(response);
     EXPECT_EQ(type, CLIENT_API_GET_END);
     cbor_decref(&response);
 
     stream_framer_destroy(framer);
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 TEST_F(TestTcpTransport, HealthRequest) {
@@ -399,25 +413,25 @@ TEST_F(TestTcpTransport, HealthRequest) {
     ASSERT_NE(health_transport, nullptr);
     int tcp_port = port + 1;
     for (int retry = 0; health_transport == nullptr && retry < 10; retry++) {
-        tcp_port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
+        tcp_port = _next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
         health_transport = tcp_transport_create(
             pool, bc, ofd_cache, tc, "127.0.0.1", tcp_port, NULL, NULL, NULL, &health_ctx);
     }
     ASSERT_NE(health_transport, nullptr);
     tcp_transport_start(health_transport);
 
-    int fd = _connect_with_retry("127.0.0.1", tcp_port);
-    ASSERT_GE(fd, 0);
+    platform_socket_t* sock = _connect_with_retry("127.0.0.1", tcp_port);
+    ASSERT_NE(sock, nullptr);
 
     cbor_item_t* health_req = client_api_health_request_encode();
     ASSERT_NE(health_req, nullptr);
-    int send_ret = _send_frame(fd, health_req);
+    int send_ret = _send_frame(sock,health_req);
     ASSERT_EQ(send_ret, 0);
 
     stream_framer_t* framer = stream_framer_create();
     ASSERT_NE(framer, nullptr);
 
-    cbor_item_t* response = _recv_frame(fd, framer);
+    cbor_item_t* response = _recv_frame(sock,framer);
     ASSERT_NE(response, nullptr);
     uint8_t type = client_api_wire_get_type(response);
     EXPECT_EQ(type, CLIENT_API_HEALTH_RESPONSE);
@@ -431,7 +445,7 @@ TEST_F(TestTcpTransport, HealthRequest) {
     cbor_decref(&response);
 
     stream_framer_destroy(framer);
-    close(fd);
+    platform_socket_destroy(sock);
 
     tcp_transport_stop(health_transport);
     scheduler_pool_wait_for_idle(pool);

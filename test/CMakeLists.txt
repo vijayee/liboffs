@@ -70,6 +70,7 @@ if (BUILD_TESTING)
             test_network.cpp
             test_http_server.cpp
             test_off_routes.cpp
+            test_tcp_transport.cpp
             # test_peer_verify generates its own CA certificate in SetUp via
             # ca_generate (same routine the offs-ca tool exposes), so the suite
             # is self-contained and no longer depends on a stale gitignored
@@ -80,7 +81,6 @@ if (BUILD_TESTING)
     # which are not available under MSVC. Add them to the build only on POSIX.
     if(NOT WIN32)
       target_sources(testliboffs PRIVATE
-            test_tcp_transport.cpp
             test_ws_transport.cpp
             test_offs_client.cpp
             )
