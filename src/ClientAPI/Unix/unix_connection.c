@@ -802,6 +802,61 @@ void unix_connection_dispatch(void* state, message_t* msg) {
         DESTROY(buf, buffer);
         break;
       }
+#ifdef _WIN32
+      /* poll-dancer's IOCP backend drives only READ through overlapped I/O;
+       * pd_watcher_update with PD_EVENT_WRITE is a no-op, so the
+       * buffer-then-arm-WRITE strategy used on POSIX (below) can never flush
+       * a partial send — a large frame would stall forever once the kernel
+       * send buffer fills. On a local AF_UNIX socket the peer drains the
+       * kernel buffer continuously, so a bounded synchronous retry lets the
+       * full frame through without blocking the connection actor for long.
+       * If the peer genuinely stalls we cap the retries and fall back to
+       * write_buffer + arming WRITE (harmless on IOCP, keeps the POSIX path
+       * intact). This mirrors the offs_client, which uses blocking sends. */
+      {
+        buffer_t* combined = buf;
+        if (connection->write_buffer != NULL && connection->write_buffer->size > 0) {
+          size_t total = connection->write_buffer->size + buf->size;
+          combined = buffer_create(total);
+          memcpy(combined->data, connection->write_buffer->data,
+                 connection->write_buffer->size);
+          memcpy(combined->data + connection->write_buffer->size,
+                 buf->data, buf->size);
+          combined->size = total;
+          DESTROY(connection->write_buffer, buffer);
+          connection->write_buffer = NULL;
+          DESTROY(buf, buffer);
+        }
+        size_t sent_total = 0;
+        for (int attempts = 0; attempts < 2000 && sent_total < combined->size; attempts++) {
+          ssize_t sent = platform_socket_send(connection->sock,
+                                                combined->data + sent_total,
+                                                combined->size - sent_total);
+          if (sent > 0) {
+            sent_total += (size_t)sent;
+          } else if (sent == 0) {
+            break;  /* peer closed */
+          } else {
+            platform_sleep_ms(1);  /* EAGAIN/EWOULDBLOCK: back off and retry */
+          }
+        }
+        if (sent_total == combined->size) {
+          DESTROY(combined, buffer);
+        } else if (sent_total == 0) {
+          DESTROY(combined, buffer);
+          _connection_stop_watcher(connection);
+          _connection_close_fd(connection);
+        } else {
+          size_t remaining = combined->size - sent_total;
+          memmove(combined->data, combined->data + sent_total, remaining);
+          combined->size = remaining;
+          connection->write_buffer = combined;
+          connection->write_pending = 1;
+          _connection_update_watcher(connection, PD_EVENT_READ | PD_EVENT_WRITE);
+        }
+        break;
+      }
+#else
       if (connection->write_buffer != NULL && connection->write_buffer->size > 0) {
         buffer_ensure_capacity(connection->write_buffer, connection->write_buffer->size + buf->size);
         memcpy(connection->write_buffer->data + connection->write_buffer->size,
@@ -837,6 +892,7 @@ void unix_connection_dispatch(void* state, message_t* msg) {
         DESTROY(buf, buffer);
       }
       break;
+#endif
     }
 
     case UNIX_CONNECTION_WRITABLE: {
