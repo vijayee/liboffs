@@ -14,48 +14,64 @@ extern "C" {
 #include "../src/Configuration/config.h"
 #include "../src/Timer/timer_actor.h"
 #include "../src/Util/rm_rf.h"
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#include "../src/Platform/platform.h"
+#include "../src/Platform/platform_socket.h"
 #include <string.h>
 #include <stdlib.h>
-#include <poll.h>
+
+/* usleep is POSIX-only; platform_sleep_ms is the cross-platform equivalent.
+ * Call sites pass microsecond values (e.g. 10000 == 10ms), so divide by 1000. */
+#define platform_usleep(us) platform_sleep_ms((us) / 1000)
 }
 
 namespace ws_transport_test {
 
 static uint16_t _next_port = 39080;
 
-static int _connect_tcp(const char* host, uint16_t port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    struct sockaddr_in addr;
+static platform_socket_t* _connect_tcp(const char* host, uint16_t port) {
+    platform_socket_t* sock = platform_socket_create(PLATFORM_AF_INET, 1);
+    if (sock == NULL) return NULL;
+    platform_address_t addr;
     memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {
-        close(fd);
-        return -1;
+    if (platform_address_parse(&addr, host, port) != 0) {
+        platform_socket_destroy(sock);
+        return NULL;
     }
-    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(fd);
-        return -1;
+    if (platform_socket_connect(sock, &addr) != 0) {
+        platform_socket_destroy(sock);
+        return NULL;
     }
-    return fd;
+    platform_socket_set_nonblocking(sock);
+    return sock;
 }
 
-static int _connect_with_retry(const char* host, uint16_t port, int max_attempts = 50) {
+static platform_socket_t* _connect_with_retry(const char* host, uint16_t port, int max_attempts = 50) {
     for (int attempts = 0; attempts < max_attempts; attempts++) {
-        usleep(10000);
-        int fd = _connect_tcp(host, port);
-        if (fd >= 0) return fd;
+        platform_usleep(10000);
+        platform_socket_t* sock = _connect_tcp(host, port);
+        if (sock != NULL) return sock;
     }
-    return -1;
+    return NULL;
+}
+
+static int _send_all(platform_socket_t* sock, const char* buf, size_t len) {
+    size_t sent_total = 0;
+    for (int attempts = 0; attempts < 1000 && sent_total < len; attempts++) {
+        ssize_t sent = platform_socket_send(sock, buf + sent_total, len - sent_total);
+        if (sent > 0) {
+            sent_total += (size_t)sent;
+        } else if (sent == 0) {
+            return -1;
+        } else {
+            /* Nonblocking socket: EWOULDBLOCK means try again shortly. */
+            platform_sleep_ms(10);
+        }
+    }
+    return (sent_total == len) ? 0 : -1;
 }
 
 /* Perform WebSocket HTTP upgrade handshake */
-static int _ws_upgrade(int fd) {
+static int _ws_upgrade(platform_socket_t* sock) {
     const char* upgrade_request =
         "GET /offs HTTP/1.1\r\n"
         "Host: 127.0.0.1\r\n"
@@ -63,25 +79,27 @@ static int _ws_upgrade(int fd) {
         "Connection: Upgrade\r\n"
         "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
         "Sec-WebSocket-Version: 13\r\n\r\n";
-    ssize_t sent = send(fd, upgrade_request, strlen(upgrade_request), MSG_NOSIGNAL);
-    if (sent != (ssize_t)strlen(upgrade_request)) return -1;
+    if (_send_all(sock, upgrade_request, strlen(upgrade_request)) != 0) return -1;
 
     char response[4096];
     memset(response, 0, sizeof(response));
-    /* Wait for response with poll */
+    size_t total = 0;
+    /* Wait for the 101 Switching Protocols response. */
     for (int attempts = 0; attempts < 200; attempts++) {
-        struct pollfd poll_fd;
-        poll_fd.fd = fd;
-        poll_fd.events = POLLIN;
-        poll_fd.revents = 0;
-        int poll_result = poll(&poll_fd, 1, 10);
-        if (poll_result > 0 && (poll_fd.revents & POLLIN)) {
-            ssize_t received = recv(fd, response, sizeof(response) - 1, 0);
-            if (received <= 0) return -1;
-            response[received] = '\0';
+        if (total + 1 >= sizeof(response)) break;
+        ssize_t received = platform_socket_recv(sock, response + total,
+                                                 sizeof(response) - total - 1);
+        if (received > 0) {
+            total += (size_t)received;
+            response[total] = '\0';
             if (strstr(response, "101") != NULL) {
                 return 0;
             }
+        } else if (received == 0) {
+            return -1;
+        } else {
+            /* EWOULDBLOCK on a nonblocking socket: back off and retry. */
+            platform_sleep_ms(10);
         }
     }
     return -1;
@@ -124,7 +142,7 @@ static uint8_t* _ws_build_frame(const uint8_t* payload, size_t payload_len, size
 }
 
 /* Send a CBOR message as a masked binary WebSocket frame */
-static int _ws_send_cbor(int fd, cbor_item_t* frame) {
+static int _ws_send_cbor(platform_socket_t* sock, cbor_item_t* frame) {
     unsigned char* cbor_buf = NULL;
     size_t cbor_len = 0;
     cbor_len = cbor_serialize_alloc(frame, &cbor_buf, &cbor_len);
@@ -136,72 +154,75 @@ static int _ws_send_cbor(int fd, cbor_item_t* frame) {
     free(cbor_buf);
     if (ws_frame == NULL) return -1;
 
-    ssize_t sent = send(fd, ws_frame, ws_len, MSG_NOSIGNAL);
+    /* MSG_NOSIGNAL is POSIX-only (Windows has no SIGPIPE); platform_socket_send
+     * takes no flags. _send_all loops over partial sends on a nonblocking socket. */
+    int rc = _send_all(sock, (const char*)ws_frame, ws_len);
     free(ws_frame);
-    return (sent == (ssize_t)ws_len) ? 0 : -1;
+    return rc;
 }
 
 /* Receive a WebSocket frame from the server and parse out the CBOR payload.
  * Returns decoded cbor_item_t* or NULL. */
-static cbor_item_t* _ws_recv_cbor(int fd, int timeout_ms = 3000) {
+static cbor_item_t* _ws_recv_cbor(platform_socket_t* sock, int timeout_ms = 3000) {
     uint8_t buf[65536];
     size_t buf_len = 0;
 
     for (int attempts = 0; attempts < timeout_ms / 10; attempts++) {
-        if (buf_len > 0) {
-            /* Try to parse a complete WS frame from buffer */
-            if (buf_len < 2) goto need_more;
-
+        /* Try to parse a complete WS frame from the buffer. */
+        if (buf_len >= 2) {
             uint8_t opcode = buf[0] & 0x0F;
-            if (opcode != 0x02) {
-                /* Not a binary frame — skip it or fail */
-                /* For close/ping frames, handle differently */
-                if (opcode == 0x08) return nullptr; /* close frame */
-                goto need_more;
-            }
+            if (opcode == 0x08) return nullptr; /* close frame */
+            if (opcode == 0x02) {
+                uint8_t len_byte = buf[1];
+                size_t payload_offset = 0;
+                size_t payload_len = 0;
+                int have_header = 0;
 
-            uint8_t len_byte = buf[1];
-            size_t payload_offset;
-            size_t payload_len;
-
-            if (len_byte < 126) {
-                payload_len = len_byte;
-                payload_offset = 2;
-            } else if (len_byte == 126) {
-                if (buf_len < 4) goto need_more;
-                payload_len = ((size_t)buf[2] << 8) | buf[3];
-                payload_offset = 4;
-            } else {
-                if (buf_len < 10) goto need_more;
-                payload_len = 0;
-                for (int i = 4; i < 10; i++) {
-                    payload_len = (payload_len << 8) | buf[i];
+                if (len_byte < 126) {
+                    payload_len = len_byte;
+                    payload_offset = 2;
+                    have_header = 1;
+                } else if (len_byte == 126) {
+                    if (buf_len >= 4) {
+                        payload_len = ((size_t)buf[2] << 8) | buf[3];
+                        payload_offset = 4;
+                        have_header = 1;
+                    }
+                } else {
+                    if (buf_len >= 10) {
+                        payload_len = 0;
+                        for (int i = 4; i < 10; i++) {
+                            payload_len = (payload_len << 8) | buf[i];
+                        }
+                        payload_offset = 10;
+                        have_header = 1;
+                    }
                 }
-                payload_offset = 10;
-            }
 
-            if (buf_len < payload_offset + payload_len) goto need_more;
-
-            /* Server frames are unmasked */
-            struct cbor_load_result load_result;
-            cbor_item_t* item = cbor_load(buf + payload_offset, payload_len, &load_result);
-            if (item != NULL && load_result.error.code == CBOR_ERR_NONE) {
-                return item;
+                if (have_header && buf_len >= payload_offset + payload_len) {
+                    /* Server frames are unmasked */
+                    struct cbor_load_result load_result;
+                    cbor_item_t* item = cbor_load(buf + payload_offset, payload_len, &load_result);
+                    if (item != NULL && load_result.error.code == CBOR_ERR_NONE) {
+                        return item;
+                    }
+                    if (item != NULL) cbor_decref(&item);
+                    return nullptr;
+                }
             }
-            if (item != NULL) cbor_decref(&item);
-            return nullptr;
+            /* Non-binary opcode (not close) or incomplete header: read more. */
         }
 
-need_more:
-        struct pollfd poll_fd;
-        poll_fd.fd = fd;
-        poll_fd.events = POLLIN;
-        poll_fd.revents = 0;
-        int poll_result = poll(&poll_fd, 1, 10);
-        if (poll_result > 0 && (poll_fd.revents & POLLIN)) {
-            ssize_t received = recv(fd, buf + buf_len, sizeof(buf) - buf_len, 0);
-            if (received <= 0) return nullptr;
+        if (buf_len >= sizeof(buf)) return nullptr;
+        ssize_t received = platform_socket_recv(sock, buf + buf_len, sizeof(buf) - buf_len);
+        if (received > 0) {
             buf_len += (size_t)received;
+        } else if (received == 0) {
+            /* Peer closed the connection. */
+            return nullptr;
+        } else {
+            /* EWOULDBLOCK on a nonblocking socket: back off and retry. */
+            platform_sleep_ms(10);
         }
     }
     return nullptr;
@@ -219,7 +240,7 @@ protected:
     uint16_t port;
 
     void SetUp() override {
-        port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
+        port = _next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
         pool = scheduler_pool_create(4);
         scheduler_pool_start(pool);
         timer = timer_actor_create(pool);
@@ -245,7 +266,7 @@ protected:
 
         transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL, NULL);
         for (int retry = 0; transport == nullptr && retry < 10; retry++) {
-            port = _next_port++ + (uint16_t)((getpid() % 127) * 100);
+            port = _next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
             transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, NULL, NULL, 0, NULL, NULL);
         }
         ASSERT_NE(transport, nullptr);
@@ -272,19 +293,19 @@ protected:
 };
 
 TEST_F(TestWsTransport, ConnectAndUpgrade) {
-    int fd = _connect_with_retry("127.0.0.1", port);
-    ASSERT_GE(fd, 0);
+    platform_socket_t* sock = _connect_with_retry("127.0.0.1", port);
+    ASSERT_NE(sock, nullptr);
 
-    int upgrade_result = _ws_upgrade(fd);
+    int upgrade_result = _ws_upgrade(sock);
     EXPECT_EQ(upgrade_result, 0);
 
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 TEST_F(TestWsTransport, PutSmallData) {
-    int fd = _connect_with_retry("127.0.0.1", port);
-    ASSERT_GE(fd, 0);
-    ASSERT_EQ(_ws_upgrade(fd), 0);
+    platform_socket_t* sock = _connect_with_retry("127.0.0.1", port);
+    ASSERT_NE(sock, nullptr);
+    ASSERT_EQ(_ws_upgrade(sock), 0);
 
     const char* content_type = "application/octet-stream";
     const char* file_name = "test_ws_file.bin";
@@ -301,9 +322,9 @@ TEST_F(TestWsTransport, PutSmallData) {
 
     cbor_item_t* frame = client_api_put_request_encode(&msg);
     ASSERT_NE(frame, nullptr);
-    ASSERT_EQ(_ws_send_cbor(fd, frame), 0);
+    ASSERT_EQ(_ws_send_cbor(sock, frame), 0);
 
-    cbor_item_t* response = _ws_recv_cbor(fd);
+    cbor_item_t* response = _ws_recv_cbor(sock);
     ASSERT_NE(response, nullptr);
 
     uint8_t type = client_api_wire_get_type(response);
@@ -320,13 +341,13 @@ TEST_F(TestWsTransport, PutSmallData) {
         }
     }
     cbor_decref(&response);
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 TEST_F(TestWsTransport, GetInvalidOri) {
-    int fd = _connect_with_retry("127.0.0.1", port);
-    ASSERT_GE(fd, 0);
-    ASSERT_EQ(_ws_upgrade(fd), 0);
+    platform_socket_t* sock = _connect_with_retry("127.0.0.1", port);
+    ASSERT_NE(sock, nullptr);
+    ASSERT_EQ(_ws_upgrade(sock), 0);
 
     client_api_get_request_t msg;
     memset(&msg, 0, sizeof(msg));
@@ -335,9 +356,9 @@ TEST_F(TestWsTransport, GetInvalidOri) {
 
     cbor_item_t* frame = client_api_get_request_encode(&msg);
     ASSERT_NE(frame, nullptr);
-    ASSERT_EQ(_ws_send_cbor(fd, frame), 0);
+    ASSERT_EQ(_ws_send_cbor(sock, frame), 0);
 
-    cbor_item_t* response = _ws_recv_cbor(fd);
+    cbor_item_t* response = _ws_recv_cbor(sock);
     ASSERT_NE(response, nullptr);
 
     uint8_t type = client_api_wire_get_type(response);
@@ -354,7 +375,7 @@ TEST_F(TestWsTransport, GetInvalidOri) {
         }
     }
     cbor_decref(&response);
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 TEST(TestWsFrame, BuildMaskedRoundTrip) {
@@ -380,17 +401,17 @@ TEST(TestWsFrame, BuildMaskedRoundTrip) {
 }
 
 TEST_F(TestWsTransport, HealthRequest) {
-    int fd = _connect_with_retry("127.0.0.1", port);
-    ASSERT_GE(fd, 0);
-    int upgrade_ret = _ws_upgrade(fd);
+    platform_socket_t* sock = _connect_with_retry("127.0.0.1", port);
+    ASSERT_NE(sock, nullptr);
+    int upgrade_ret = _ws_upgrade(sock);
     ASSERT_EQ(upgrade_ret, 0);
 
     cbor_item_t* health_req = client_api_health_request_encode();
     ASSERT_NE(health_req, nullptr);
-    int send_ret = _ws_send_cbor(fd, health_req);
+    int send_ret = _ws_send_cbor(sock, health_req);
     ASSERT_EQ(send_ret, 0);
 
-    cbor_item_t* response = _ws_recv_cbor(fd, 5000);
+    cbor_item_t* response = _ws_recv_cbor(sock, 5000);
     ASSERT_NE(response, nullptr);
     uint8_t type = client_api_wire_get_type(response);
     EXPECT_EQ(type, CLIENT_API_HEALTH_RESPONSE);
@@ -402,7 +423,7 @@ TEST_F(TestWsTransport, HealthRequest) {
     client_api_health_response_destroy(&decoded);
     cbor_decref(&response);
 
-    close(fd);
+    platform_socket_destroy(sock);
 }
 
 } // namespace ws_transport_test
