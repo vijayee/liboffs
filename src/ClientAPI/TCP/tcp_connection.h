@@ -49,6 +49,7 @@ typedef struct tcp_connection_t {
   stream_framer_t* framer;
   buffer_t* write_buffer;
   uint8_t write_pending;
+  ATOMIC(uint8_t) read_pending;      /* I/O thread has sent READABLE; actor hasn't processed it yet */
   uint8_t is_closing;
   uint8_t is_ssl;
   uint8_t is_authenticated;

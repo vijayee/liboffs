@@ -74,6 +74,7 @@ typedef struct {
 
 static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                        pd_event_t events, void* user_data);
+static void _connection_do_reads(ws_connection_t* connection);
 static void _ws_dispatch_frame(ws_connection_t* conn, uint8_t type, cbor_item_t* frame);
 
 /* --- Base64 encode helper for WebSocket accept key --- */
@@ -1152,6 +1153,19 @@ void ws_connection_dispatch(void* state, message_t* msg) {
       break;
     }
 
+    case WS_CONNECTION_READABLE: {
+      /* ASIO-style: the I/O thread notified us (SSL only) that data is
+         available. SSL_read + feed the decrypted bytes back through the
+         WS_CONNECTION_DATA path (which handles upgrade parsing and WS frame
+         parsing). */
+      atomic_store(&connection->read_pending, 0);
+      if (connection->sock == NULL) {
+        break;
+      }
+      _connection_do_reads(connection);
+      break;
+    }
+
     case WS_CONNECTION_WRITE: {
       buffer_t* buf = (buffer_t*)msg->payload;
       msg->payload = NULL;
@@ -1316,10 +1330,23 @@ void ws_connection_dispatch(void* state, message_t* msg) {
 
 /* --- Read callback (runs on I/O thread) --- */
 
+/* I/O event callback — runs on the I/O thread. For plain WS it drains the
+   bytes that completed the read directly here and ships them to the
+   connection actor as a DATA message (the actor handles both the HTTP
+   upgrade handshake and WebSocket framing). For SSL it can't — the
+   ciphertext has to be decrypted via SSL_read on the worker — so it sends a
+   READABLE notification and the actor recvs/decrypts and re-feeds DATA. The
+   split exists because of Windows IOCP: a completion-based backend places the
+   read bytes in the watcher's overlapped buffer, which is only valid until
+   this callback returns (the loop re-arms a fresh WSARecv into the same
+   buffer afterward), so the worker can't recv() them later — it would see an
+   empty socket (EAGAIN) and never frame anything. Draining here and sending
+   DATA mirrors unix_connection/http_connection and works on every backend
+   (on POSIX pd_watcher_drain_read returns 0 and we fall back to a synchronous
+   recv). */
 static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                        pd_event_t events, void* user_data) {
   (void)loop;
-  (void)watcher;
   ws_connection_t* connection = (ws_connection_t*)user_data;
 
   if (events & PD_EVENT_WRITE) {
@@ -1336,54 +1363,49 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
     msg.payload = NULL;
     msg.payload_destroy = NULL;
     actor_send(&connection->actor, &msg);
-    pd_watcher_t* claimed = ATOMIC_EXCHANGE(&connection->watcher, NULL);
-    if (claimed != NULL) {
-      pd_watcher_stop(claimed);
-      /* Defer watcher destruction through server actor's destroy stack */
-      if (connection->transport != NULL) {
-        ws_watcher_update_payload_t* payload = get_clear_memory(sizeof(ws_watcher_update_payload_t));
-        payload->watcher = claimed;
-        payload->events = 0;
-        message_t stop_msg;
-        stop_msg.type = WS_SERVER_STOP_WATCHER;
-        stop_msg.payload = payload;
-        stop_msg.payload_destroy = free;
-        actor_send(&connection->transport->actor, &stop_msg);
-      } else {
-        pd_watcher_destroy(claimed);
-      }
-    }
+    /* Stop the watcher via the transport actor's deferred destroy path. A
+       completion-based backend (Windows IOCP) may still have an in-flight
+       overlapped on this watcher; freeing it here would race that completion
+       (use-after-free). _connection_stop_watcher claims the watcher atomically
+       and defers pd_watcher_destroy to the I/O-thread destroy stack, so the
+       pending completion is drained before the free. */
+    _connection_stop_watcher(connection);
     return;
   }
 
   if (events & PD_EVENT_READ) {
-    uint8_t read_buffer[READ_BUFFER_SIZE];
-    ssize_t bytes_read;
-
     if (connection->is_ssl && connection->ssl != NULL) {
-      bytes_read = SSL_read(connection->ssl, read_buffer, sizeof(read_buffer));
-      if (bytes_read <= 0) {
-        int ssl_err = SSL_get_error(connection->ssl, (int)bytes_read);
-        if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
-          return;
-        }
-        if (ssl_err == SSL_ERROR_ZERO_RETURN || ssl_err == SSL_ERROR_SYSCALL) {
-          message_t msg;
-          msg.type = WS_CONNECTION_HANGUP;
-          msg.payload = NULL;
-          msg.payload_destroy = NULL;
-          actor_send(&connection->actor, &msg);
-          return;
-        }
+      /* SSL: decryption must happen on the worker via SSL_read, so just
+         notify. One READABLE in flight at a time backpressures via the TCP
+         window. (SSL over Windows IOCP is a pre-existing gap: SSL_read on the
+         worker hits the same empty-socket EAGAIN as a plain recv would.
+         Wiring it up needs a memory BIO fed from the watcher drain — tracked
+         as a follow-up, not handled here.) */
+      if (atomic_load(&connection->read_pending) == 0) {
+        atomic_store(&connection->read_pending, 1);
         message_t msg;
-        msg.type = WS_CONNECTION_ERROR;
+        msg.type = WS_CONNECTION_READABLE;
         msg.payload = NULL;
         msg.payload_destroy = NULL;
         actor_send(&connection->actor, &msg);
-        return;
       }
-    } else {
-      bytes_read = platform_socket_recv(connection->sock, read_buffer, sizeof(read_buffer));
+      return;
+    }
+
+    /* Plain WS: drain the watcher's completed read buffer here, then send the
+       bytes to the actor as DATA. Loop in case more than one buffer's worth
+       completed. */
+    uint8_t buffer[READ_BUFFER_SIZE];
+    size_t total_read = 0;
+    size_t n = pd_watcher_drain_read(watcher, buffer, sizeof(buffer));
+    while (n > 0) {
+      total_read += n;
+      if (n < sizeof(buffer)) break; /* buffer fully drained */
+      n = pd_watcher_drain_read(watcher, buffer, sizeof(buffer));
+    }
+    if (total_read == 0) {
+      /* POSIX path: synchronous recv. */
+      ssize_t bytes_read = platform_socket_recv(connection->sock, buffer, sizeof(buffer));
       if (bytes_read <= 0) {
         if (bytes_read == 0) {
           message_t msg;
@@ -1403,10 +1425,61 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
         actor_send(&connection->actor, &msg);
         return;
       }
+      total_read = (size_t)bytes_read;
     }
 
-    /* Always send raw data to actor thread — it handles upgrade parsing and WS frame parsing */
-    buffer_t* data = buffer_create_from_pointer_copy(read_buffer, (size_t)bytes_read);
+    /* Send raw data to actor thread — it handles upgrade parsing and WS frame
+       parsing. */
+    buffer_t* data = buffer_create_from_pointer_copy(buffer, total_read);
+    message_t msg;
+    msg.type = WS_CONNECTION_DATA;
+    msg.payload = data;
+    msg.payload_destroy = (void (*)(void*))buffer_destroy;
+    actor_send(&connection->actor, &msg);
+  }
+}
+
+/* Perform a batch of SSL reads. Called from the connection actor dispatch
+   (WS_CONNECTION_READABLE) on scheduler worker threads. The I/O-thread read
+   callback sends READABLE only for SSL connections — plain WS is drained in the
+   callback and shipped as a DATA message — so this path is SSL-only: SSL_read
+   must run on the worker to decrypt the ciphertext. Each decrypted chunk is fed
+   straight back through WS_CONNECTION_DATA, which reuses the existing upgrade
+   and frame-parsing logic. (SSL over Windows IOCP is a pre-existing gap tracked
+   separately: on IOCP the read bytes land in the watcher's overlapped buffer, so
+   SSL_read on the worker sees an empty socket and returns WANT_READ; wiring it
+   needs a memory BIO fed from the watcher drain. On epoll/kqueue this path works
+   as-is.) */
+static void _connection_do_reads(ws_connection_t* connection) {
+  if (!connection->is_ssl || connection->ssl == NULL) {
+    return;
+  }
+  for (int batch = 0; batch < 16; batch++) {
+    uint8_t buffer[READ_BUFFER_SIZE];
+    if (connection->sock == NULL) {
+      return;
+    }
+
+    ssize_t bytes_read = SSL_read(connection->ssl, buffer, sizeof(buffer));
+    if (bytes_read <= 0) {
+      int ssl_error = SSL_get_error(connection->ssl, (int)bytes_read);
+      if (ssl_error == SSL_ERROR_WANT_READ) {
+        return;
+      }
+      message_t msg;
+      msg.type = WS_CONNECTION_HANGUP;
+      msg.payload = NULL;
+      msg.payload_destroy = NULL;
+      actor_send(&connection->actor, &msg);
+      /* Stop via the deferred path so a completion-based backend doesn't free
+         the watcher's overlapped while a completion is still pending. */
+      _connection_stop_watcher(connection);
+      return;
+    }
+
+    /* Feed the decrypted bytes back through the WS_CONNECTION_DATA path, which
+       handles upgrade parsing and WebSocket framing. */
+    buffer_t* data = buffer_create_from_pointer_copy(buffer, (size_t)bytes_read);
     message_t msg;
     msg.type = WS_CONNECTION_DATA;
     msg.payload = data;
@@ -1428,6 +1501,7 @@ ws_connection_t* ws_connection_create(ws_transport_t* transport, platform_socket
   connection->tc = transport->tc;
   connection->write_buffer = NULL;
   connection->write_pending = 0;
+  atomic_store(&connection->read_pending, 0);
   connection->is_closing = 0;
   connection->is_ssl = 0;
   connection->is_authenticated = (transport->api_key_hash == NULL) ? 1 : 0;
