@@ -289,6 +289,15 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/pcre2/CMakeLists.txt)
     target_link_libraries(offs PRIVATE pcre2-8-static pcre2-posix-static)
     target_include_directories(offs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/deps/pcre2/src)
   endif()
+  if(WIN32)
+    # wt_transport's Windows/Schannel server-credential path imports the PEM
+    # cert + key into a transient cert store (PFXImportCertStore /
+    # CertEnumCertificatesInStore / CertFreeCertificateContext / CertCloseStore),
+    # all of which live in crypt32.dll. offs is a static archive, so CMake
+    # propagates this PRIVATE dependency to every executable that links offs
+    # (testliboffs, the integration tests, offsd).
+    target_link_libraries(offs PRIVATE crypt32)
+  endif()
 endif()
 
 find_package(OpenSSL REQUIRED)

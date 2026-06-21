@@ -13,6 +13,20 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#ifdef _WIN32
+/* The msquic Windows TLS backend is Schannel, which cannot load a server
+ * certificate from PEM files (QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE returns
+ * QUIC_STATUS_NOT_SUPPORTED). To keep the same PEM-cert-file configuration
+ * shape the POSIX/OpenSSL path uses, the Windows path imports the PEM cert
+ * + key into a transient in-memory cert store and hands the resulting
+ * PCCERT_CONTEXT to msquic via QUIC_CREDENTIAL_TYPE_CERTIFICATE_CONTEXT. */
+#include <wincrypt.h>
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/pkcs12.h>
+#include <openssl/x509.h>
+#endif
 
 static void* _server_thread(void* arg);
 
@@ -23,6 +37,104 @@ static QUIC_STATUS QUIC_API _wt_stream_callback(
     HQUIC stream, void* context, QUIC_STREAM_EVENT* event);
 static QUIC_STATUS QUIC_API _wt_listener_callback(
     HQUIC listener, void* context, QUIC_LISTENER_EVENT* event);
+
+#ifdef _WIN32
+/* Import the PEM cert + key from transport->cert_path / key_path into a
+ * transient in-memory cert store and fill cred_config for
+ * QUIC_CREDENTIAL_TYPE_CERTIFICATE_CONTEXT. On success the store and the
+ * enumerated context are stored on the transport for lifetime management
+ * (released in wt_transport_destroy after ConfigurationClose, since Schannel
+ * holds the context for as long as the credential handle is open). Returns 0
+ * on success, -1 on failure (with a diagnostic on stderr). */
+static int _wt_load_windows_credential(wt_transport_t* transport,
+                                       QUIC_CREDENTIAL_CONFIG* cred_config) {
+  BIO* cert_bio = BIO_new_file(transport->cert_path, "rb");
+  if (cert_bio == NULL) {
+    fprintf(stderr, "wt_transport: cannot open cert file %s\n", transport->cert_path);
+    return -1;
+  }
+  X509* cert = PEM_read_bio_X509(cert_bio, NULL, NULL, NULL);
+  BIO_free(cert_bio);
+  if (cert == NULL) {
+    fprintf(stderr, "wt_transport: cannot parse PEM cert %s\n", transport->cert_path);
+    return -1;
+  }
+
+  BIO* key_bio = BIO_new_file(transport->key_path, "rb");
+  if (key_bio == NULL) {
+    fprintf(stderr, "wt_transport: cannot open key file %s\n", transport->key_path);
+    X509_free(cert);
+    return -1;
+  }
+  EVP_PKEY* key = PEM_read_bio_PrivateKey(key_bio, NULL, NULL, NULL);
+  BIO_free(key_bio);
+  if (key == NULL) {
+    fprintf(stderr, "wt_transport: cannot parse PEM key %s\n", transport->key_path);
+    X509_free(cert);
+    return -1;
+  }
+
+  /* Bundle cert + key into a PKCS#12 guarded by a throwaway password, then
+   * export to DER for PFXImportCertStore. The password only guards the in-
+   * memory blob during the import; it is never persisted. All-zero nid/iter
+   * arguments select OpenSSL's defaults; the result is a standard PFX that
+   * PFXImportCertStore reads. */
+  PKCS12* p12 = PKCS12_create("offswt", "offs", key, cert, NULL, 0, 0, 0, 0, 0);
+  X509_free(cert);
+  EVP_PKEY_free(key);
+  if (p12 == NULL) {
+    fprintf(stderr, "wt_transport: PKCS12_create failed\n");
+    return -1;
+  }
+
+  BIO* der_bio = BIO_new(BIO_s_mem());
+  if (i2d_PKCS12_bio(der_bio, p12) != 1) {
+    BIO_free(der_bio);
+    PKCS12_free(p12);
+    fprintf(stderr, "wt_transport: PKCS12 DER export failed\n");
+    return -1;
+  }
+  PKCS12_free(p12);
+  char* der_ptr = NULL;
+  long der_len = BIO_get_mem_data(der_bio, &der_ptr);
+  CRYPT_DATA_BLOB pfx_blob = { (DWORD)der_len, (BYTE*)der_ptr };
+
+  /* Persist the private key into a key container (flags = 0) so the cert
+   * context carries CERT_KEY_PROV_INFO_PROP_ID — Schannel's
+   * AcquireCredentialsHandleW for a server credential acquires the key via
+   * CryptAcquireCertificatePrivateKey and fails with SEC_E_NO_CREDENTIALS
+   * (0x8009030e) if the context has no key, which is what
+   * PKCS12_NO_PERSIST_KEY produces. The cert itself stays in this memory
+   * store (it is not added to the user's "MY" store); closing the store
+   * releases the cert, leaving only a small, auto-named key-container entry
+   * behind, which the OS tolerates across daemon restarts. */
+  HCERTSTORE store = PFXImportCertStore(&pfx_blob, L"offswt", 0);
+  BIO_free(der_bio);
+  if (store == NULL) {
+    fprintf(stderr, "wt_transport: PFXImportCertStore failed: %lu\n",
+            (unsigned long)GetLastError());
+    return -1;
+  }
+
+  PCCERT_CONTEXT context = CertEnumCertificatesInStore(store, NULL);
+  if (context == NULL) {
+    fprintf(stderr, "wt_transport: imported cert store has no certificates: %lu\n",
+            (unsigned long)GetLastError());
+    CertCloseStore(store, 0);
+    return -1;
+  }
+
+  transport->win_cert_store = (void*)store;
+  /* PCCERT_CONTEXT is a pointer-to-const; round through ULONG_PTR so storing
+   * it in a void* does not discard const (and so the value handed to msquic,
+   * which expects a QUIC_CERTIFICATE* = void*, matches what we later free). */
+  transport->win_cert_context = (void*)(ULONG_PTR)context;
+  cred_config->Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_CONTEXT;
+  cred_config->CertificateContext = (QUIC_CERTIFICATE*)(ULONG_PTR)context;
+  cred_config->Flags = QUIC_CREDENTIAL_FLAG_NONE;
+  return 0;
+}
+#endif /* _WIN32 */
 
 static void _destroy_stack_init(wt_transport_t* transport) {
   transport->destroy_lock = platform_mutex_create();
@@ -123,6 +235,8 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
   } else {
     transport->key_path = NULL;
   }
+  transport->win_cert_store = NULL;
+  transport->win_cert_context = NULL;
 
   transport->msquic = offs_msquic_open();
   if (transport->msquic == NULL) {
@@ -211,6 +325,19 @@ void wt_transport_destroy(wt_transport_t* transport) {
     transport->msquic->RegistrationClose(transport->registration);
   }
   offs_msquic_close();
+#ifdef _WIN32
+  /* ConfigurationClose has released the Schannel credential handle that held
+   * the cert context, so it is now safe to release the imported store and
+   * context. Free the context before the store it was enumerated from. */
+  if (transport->win_cert_context != NULL) {
+    CertFreeCertificateContext((PCCERT_CONTEXT)transport->win_cert_context);
+    transport->win_cert_context = NULL;
+  }
+  if (transport->win_cert_store != NULL) {
+    CertCloseStore((HCERTSTORE)transport->win_cert_store, 0);
+    transport->win_cert_store = NULL;
+  }
+#endif
   if (transport->cert_path != NULL) {
     free(transport->cert_path);
   }
@@ -383,12 +510,28 @@ static void* _server_thread(void* arg) {
   /* Load credentials */
   QUIC_CREDENTIAL_CONFIG cred_config = {0};
   if (transport->cert_path != NULL && transport->key_path != NULL) {
+#ifdef _WIN32
+    /* Schannel cannot consume PEM cert files; import the pair into a cert
+     * store and load via CERTIFICATE_CONTEXT. On import failure, fall through
+     * to the no-cert path is NOT acceptable for a configured server, so fail
+     * the transport outright (matching the POSIX path's hard failure on a
+     * bad cert file). */
+    if (_wt_load_windows_credential(transport, &cred_config) != 0) {
+      transport->msquic->ConfigurationClose(transport->configuration);
+      transport->configuration = NULL;
+      transport->msquic->RegistrationClose(transport->registration);
+      transport->registration = NULL;
+      atomic_store(&transport->running, 0);
+      return NULL;
+    }
+#else
     cred_config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
     cred_config.CertificateFile = &(QUIC_CERTIFICATE_FILE){
       .CertificateFile = transport->cert_path,
       .PrivateKeyFile = transport->key_path
     };
     cred_config.Flags = QUIC_CREDENTIAL_FLAG_NONE;
+#endif
   } else {
     /* Self-signed / insecure mode for testing */
     cred_config.Type = QUIC_CREDENTIAL_TYPE_NONE;

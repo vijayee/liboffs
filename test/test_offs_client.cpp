@@ -1069,6 +1069,7 @@ TEST_F(TestOffsWsClient, PutAndGet_1MB) {
 extern "C" {
 #include "../src/ClientAPI/WT/wt_transport.h"
 #include "../src/Util/atomic_compat.h"
+#include "../tools/offs-ca/ca_ops.h"
 }
 
 namespace offs_wt_client_test {
@@ -1097,15 +1098,17 @@ protected:
         cache_dir = mkdtemp(dir_template);
         cache_dir = strdup(cache_dir);
 
-        /* Generate self-signed cert for WT server */
+        /* Generate a self-signed RSA cert for the WT server in-process via the
+         * same ca_generate routine the offs-ca tool exposes (and that
+         * test_peer_verify uses). The old system("openssl req ... 2>/dev/null")
+         * shell-out broke on Windows cmd, which does not understand /dev/null,
+         * so the redirect failed before openssl ran, no cert was produced, and
+         * wt_transport_create failed at ConfigurationLoadCredential. RSA is
+         * used (not ed25519) because Schannel — msquic's Windows TLS provider
+         * — reliably accepts RSA. */
         snprintf(cert_path, sizeof(cert_path), "%s/test_cert.pem", cache_dir);
         snprintf(key_path, sizeof(key_path), "%s/test_key.pem", cache_dir);
-        char cmd[1024];
-        snprintf(cmd, sizeof(cmd),
-            "openssl req -x509 -newkey rsa:2048 -keyout %s -out %s "
-            "-days 1 -nodes -subj '/CN=localhost' 2>/dev/null",
-            key_path, cert_path);
-        int rc = system(cmd);
+        int rc = ca_generate("/CN=localhost", 1, "rsa", cert_path, key_path);
         if (rc != 0) {
             /* Cannot generate cert — tests will skip */
             cert_path[0] = '\0';
