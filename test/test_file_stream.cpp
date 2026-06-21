@@ -109,13 +109,22 @@ namespace PushFileStream {
     stream_subscribe((stream_t*) rs, error_event, this, (void(*)(void*, void*)) on_error_r, NULL);
     stream_subscribe((stream_t*) rs, close_event, this, on_close_r, NULL );
     stream_subscribe((stream_t*) rs, complete_event, this, (void(*)(void*, void*)) on_complete_r, NULL);
-    stream_subscribe((stream_t*) rs, data_event, this, (void(*)(void*, void*)) on_data, NULL);
 
     std::string filename2 = "./test2.pdf";
     writeable_push_file_stream_t*  ws = writeable_push_file_stream_create(pool, (char*) filename2.c_str());
     stream_subscribe((stream_t*) ws, error_event, this, (void(*)(void*, void*)) on_error_w, NULL);
     stream_subscribe((stream_t*) ws, close_event, this, (void(*)(void*, void*)) on_close_w, NULL);
     readable_push_stream_pipe((stream_t*) rs, (stream_t*) ws);
+    // Subscribe the data_event observer AFTER the pipe is established. The
+    // first data_event subscriber triggers readable_push_stream's auto-push
+    // (streams.c stream_subscribe auto-push guard). Subscribing before the
+    // pipe wires ws let a pool worker drain the whole file to the observer
+    // alone, close rs, and leave ws's close promise forever unresolved — a
+    // scheduling race Windows reliably lost. The pipe's own internal
+    // data_event subscribe is now the first, so auto-push fires with ws
+    // attached; this observer subscribe (count==1, no auto-push) then
+    // registers before the worker emits the first chunk.
+    stream_subscribe((stream_t*) rs, data_event, this, (void(*)(void*, void*)) on_data, NULL);
 
     std::future<void> r_close_future = r_close_promise.promise.get_future();
     std::future<void> w_close_future = w_close_promise.promise.get_future();
