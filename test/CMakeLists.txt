@@ -72,19 +72,13 @@ if (BUILD_TESTING)
             test_off_routes.cpp
             test_tcp_transport.cpp
             test_ws_transport.cpp
+            test_offs_client.cpp
             # test_peer_verify generates its own CA certificate in SetUp via
             # ca_generate (same routine the offs-ca tool exposes), so the suite
             # is self-contained and no longer depends on a stale gitignored
             # certs/ca_cert.pem left on disk from a manual run.
             ${CMAKE_CURRENT_SOURCE_DIR}/../tools/offs-ca/ca_ops.c
             )
-    # The following tests use raw POSIX sockets, getpid, and pthread directly,
-    # which are not available under MSVC. Add them to the build only on POSIX.
-    if(NOT WIN32)
-      target_sources(testliboffs PRIVATE
-            test_offs_client.cpp
-            )
-    endif()
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
