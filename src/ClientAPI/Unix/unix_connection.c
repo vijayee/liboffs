@@ -564,6 +564,8 @@ static void _unix_handle_auth(unix_connection_t* conn, cbor_item_t* frame) {
   if (conn->transport == NULL || conn->transport->api_key_hash == NULL) {
     conn->is_authenticated = 1;
     conn->block_ctx.is_authenticated = 1;
+    conn->config_ctx.is_authenticated = 1;
+    conn->peer_ctx.is_authenticated = 1;
     return;
   }
 
@@ -580,6 +582,8 @@ static void _unix_handle_auth(unix_connection_t* conn, cbor_item_t* frame) {
   if (bcrypt_check(key, conn->transport->api_key_hash) == 0) {
     conn->is_authenticated = 1;
     conn->block_ctx.is_authenticated = 1;
+    conn->config_ctx.is_authenticated = 1;
+    conn->peer_ctx.is_authenticated = 1;
   } else {
     _unix_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication failed");
   }
@@ -622,6 +626,24 @@ static void _unix_dispatch_frame(unix_connection_t* conn, uint8_t type, cbor_ite
       break;
     case CLIENT_API_CONFIG_RELOAD_REQUEST:
       config_handle_reload_request(&conn->config_ctx, frame);
+      break;
+    case CLIENT_API_PEER_INFO_REQUEST:
+      peer_handle_info_request(&conn->peer_ctx, frame);
+      break;
+    case CLIENT_API_PEER_LIST_REQUEST:
+      peer_handle_list_request(&conn->peer_ctx, frame);
+      break;
+    case CLIENT_API_PEER_CONNECT:
+      peer_handle_connect(&conn->peer_ctx, frame);
+      break;
+    case CLIENT_API_FRIEND_ADD:
+      peer_handle_friend_add(&conn->peer_ctx, frame);
+      break;
+    case CLIENT_API_FRIEND_REMOVE:
+      peer_handle_friend_remove(&conn->peer_ctx, frame);
+      break;
+    case CLIENT_API_FRIEND_LIST:
+      peer_handle_friend_list_request(&conn->peer_ctx, frame);
       break;
     case CLIENT_API_HEALTH_REQUEST: {
       health_data_t data = health_data_collect(conn->transport->health_ctx);
@@ -1103,6 +1125,14 @@ unix_connection_t* unix_connection_create(unix_transport_t* transport, platform_
   connection->config_ctx.is_authenticated = connection->is_authenticated;
   connection->config_ctx.send_frame = (config_send_frame_fn)_unix_connection_send_frame;
   connection->config_ctx.send_error = (config_send_error_fn)_unix_connection_send_error;
+
+  connection->peer_ctx.conn = (block_connection_t*)connection;
+  connection->peer_ctx.network = transport->config_node ? transport->config_node->network : NULL;
+  connection->peer_ctx.authority = transport->config_node ? transport->config_node->authority : NULL;
+  connection->peer_ctx.actor = &connection->actor;
+  connection->peer_ctx.is_authenticated = connection->is_authenticated;
+  connection->peer_ctx.send_frame = (block_send_frame_fn)_unix_connection_send_frame;
+  connection->peer_ctx.send_error = (block_send_error_fn)_unix_connection_send_error;
 
   actor_init(&connection->actor, connection, unix_connection_dispatch, transport->pool);
 
