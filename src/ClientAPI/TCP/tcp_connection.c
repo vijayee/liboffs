@@ -30,7 +30,9 @@
 #include <cbor.h>
 #include <string.h>
 #include <stdlib.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <errno.h>
 #include <stdio.h>
 #include <openssl/ssl.h>

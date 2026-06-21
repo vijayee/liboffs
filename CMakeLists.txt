@@ -82,9 +82,11 @@ if(WIN32)
   list(FILTER C_SRC EXCLUDE REGEX "src/Update/")
   # The Unix transport now compiles on Windows: it dispatches to AF_UNIX
   # (Windows 10 1803+) or named pipes (older Windows) via platform_local.
-  # The TCP/WS transports still use POSIX-only socket APIs.
-  list(FILTER C_SRC EXCLUDE REGEX "src/ClientAPI/TCP/")
-  list(FILTER C_SRC EXCLUDE REGEX "src/ClientAPI/WS/")
+  # The TCP/WS transports compile on Windows via the platform_socket shim
+  # and an IOCP-safe accept/read path: poll platform_socket_accept each
+  # loop iteration (IOCP can't deliver READ on a listening socket) and
+  # defer watcher stop to the destroy stack so a pending IOCP completion
+  # never touches freed memory.
   # The standalone C client library directly includes the WS frame header
   # and POSIX socket APIs. Excluded on Windows until a Winsock2 rewrite lands.
   list(FILTER C_SRC EXCLUDE REGEX "src/ClientLibs/c/")
@@ -94,12 +96,6 @@ if(WIN32)
 endif()
 
 file(GLOB_RECURSE C_INC "src/*/*.h")
-if(WIN32)
-  # Drop headers from excluded source directories so files that include them
-  # through transitive paths don't see POSIX-only references either.
-  list(FILTER C_INC EXCLUDE REGEX "src/ClientAPI/TCP/")
-  list(FILTER C_INC EXCLUDE REGEX "src/ClientAPI/WS/")
-endif()
 
 include(CTest)
 add_subdirectory(deps)

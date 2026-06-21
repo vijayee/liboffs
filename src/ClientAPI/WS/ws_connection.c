@@ -28,9 +28,11 @@
 #include "../../Util/vec.h"
 #include <cbor.h>
 #include <string.h>
+#ifndef _WIN32
 #include <strings.h>
-#include <stdlib.h>
 #include <unistd.h>
+#endif
+#include <stdlib.h>
 #include <errno.h>
 #include <stdio.h>
 #include <openssl/ssl.h>
