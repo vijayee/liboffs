@@ -58,27 +58,27 @@ class _AppShellState extends State<AppShell> {
           setState(() => _selectedIndex = index);
           Navigator.pop(context);
         },
-        children: [
-          const Padding(
+        children: const [
+          Padding(
             padding: EdgeInsets.symmetric(vertical: 16),
             child: Image(
               image: AssetImage('assets/images/off-logo-lettered.svg'),
               height: 80,
             ),
           ),
-          const NavigationDrawerDestination(
+          NavigationDrawerDestination(
             icon: Icon(Icons.upload),
             label: Text('Import'),
           ),
-          const NavigationDrawerDestination(
+          NavigationDrawerDestination(
             icon: Icon(Icons.download),
             label: Text('Export'),
           ),
-          const NavigationDrawerDestination(
+          NavigationDrawerDestination(
             icon: Icon(Icons.link),
             label: Text('Connect'),
           ),
-          const NavigationDrawerDestination(
+          NavigationDrawerDestination(
             icon: Icon(Icons.settings),
             label: Text('Configuration'),
           ),
