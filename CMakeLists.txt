@@ -3,15 +3,16 @@ project(offs C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
-# OFFS_ENABLE_QUIC controls whether the msquic QUIC / relay / WebTransport / NAT
-# detection code is built or compiled as no-op stubs. msquic is a heavy submodule
-# and a no-msquic build is a valid client-only / no-P2P configuration (the stub
-# paths compile, link, and return -1/NULL at runtime), so this is an opt-OUT
-# knob rather than a hard requirement: default ON preserves the "build it when
-# the submodule is present" behavior, while OFF gives an explicit, loudly-logged
-# no-P2P build. When ON but the submodule is missing, we fail loudly with an
-# actionable message instead of silently producing a network-less binary.
-option(OFFS_ENABLE_QUIC "Build msquic QUIC / relay / WebTransport support" ON)
+# msquic QUIC is a required submodule dependency (pinned in .gitmodules as
+# deps/msquic). The project depends on it for QUIC / relay / WebTransport /
+# NAT-detection and peer-to-peer networking, so the build fails entirely if
+# the submodule is missing rather than degrading to no-op stubs. HAS_MSQUIC is
+# always defined and msquic is always linked into the offs target.
+#
+# OFFS_ENABLE_QUIC is no longer an option: an explicit -DOFFS_ENABLE_QUIC=OFF
+# invocation is rejected below as a hard error (it used to produce a silent
+# network-less / no-P2P build, which is not a configuration this project
+# supports).
 
 # poll-dancer — built as an external project, same pattern as libcbor above.
 # Pinned via the deps/poll-dancer git submodule (commit recorded in .gitmodules).
@@ -227,40 +228,46 @@ target_include_directories(test_peer_info PRIVATE ${C_INC})
 target_include_directories(test_peer_info PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_include_directories(test_peer_info PUBLIC ${LIBCBOR_BUILD_PATH}/include)
 
-# msquic QUIC library — built when OFFS_ENABLE_QUIC=ON and the submodule is
-# present. Gated by the OFFS_ENABLE_QUIC option (declared at the top of this
-# file) so a missing submodule is a loud, actionable error rather than a silent
-# degrade to stub QUIC/relay/WT code. OFF gives an explicit no-P2P build.
-if(OFFS_ENABLE_QUIC)
-  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/CMakeLists.txt)
-    set(QUIC_DISABLE_WERROR ON CACHE BOOL "" FORCE)
-    set(QUIC_TLS_OPENSSL_COMPAT_DEFINE "QUIC_TLS_OPENSSL_COMPAT" CACHE STRING "" FORCE)
-    # msquic's CMakeLists unconditionally sets /WX (treat warnings as errors) on
-    # Windows and does not honor QUIC_DISABLE_WERROR. Pre-set QUIC_WARNING_FLAGS
-    # with /WX- before add_subdirectory so the warnings interface target picks
-    # it up.
-    if(MSVC)
-      set(QUIC_WARNING_FLAGS /WX- /W4 /sdl /wd4206 CACHE INTERNAL "" FORCE)
-    endif()
-    add_subdirectory(deps/msquic)
-    # Re-assert /WX- after add_subdirectory in case msquic re-set the variable
-    # without FORCE inside its own CMakeLists. Re-assigning INTERFACE compile
-    # options on the `warnings` target is the only path that actually affects
-    # the compile line on the generated Visual Studio projects.
-    if(MSVC AND TARGET warnings)
-      set_property(TARGET warnings PROPERTY INTERFACE_COMPILE_OPTIONS "/WX-;/W4;/sdl;/wd4206")
-    endif()
-    target_compile_definitions(offs PRIVATE HAS_MSQUIC)
-    target_include_directories(offs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/src/inc)
-    target_link_libraries(offs PRIVATE msquic::msquic msquic::platform)
-  else()
-    message(FATAL_ERROR
-      "OFFS_ENABLE_QUIC=ON but deps/msquic submodule is missing. "
-      "Run: git submodule update --init --recursive, "
-      "or disable with -DOFFS_ENABLE_QUIC=OFF for a client-only/no-P2P build.")
+# msquic QUIC library — required submodule dependency. Built unconditionally
+# when deps/msquic is present; a missing submodule is a loud, actionable
+# FATAL_ERROR instead of a silent degrade to stub QUIC/relay/WT code. An
+# explicit -DOFFS_ENABLE_QUIC=OFF (the former opt-out) is rejected as a hard
+# error: msquic is no longer optional.
+if(DEFINED OFFS_ENABLE_QUIC AND NOT OFFS_ENABLE_QUIC)
+  message(FATAL_ERROR
+    "OFFS_ENABLE_QUIC=OFF is no longer supported. msquic is a required "
+    "submodule dependency (deps/msquic); the project depends on it for "
+    "QUIC/relay/WebTransport/peer-to-peer networking. Remove "
+    "-DOFFS_ENABLE_QUIC=OFF and run `git submodule update --init --recursive` "
+    "to fetch deps/msquic.")
+endif()
+
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/CMakeLists.txt)
+  set(QUIC_DISABLE_WERROR ON CACHE BOOL "" FORCE)
+  set(QUIC_TLS_OPENSSL_COMPAT_DEFINE "QUIC_TLS_OPENSSL_COMPAT" CACHE STRING "" FORCE)
+  # msquic's CMakeLists unconditionally sets /WX (treat warnings as errors) on
+  # Windows and does not honor QUIC_DISABLE_WERROR. Pre-set QUIC_WARNING_FLAGS
+  # with /WX- before add_subdirectory so the warnings interface target picks
+  # it up.
+  if(MSVC)
+    set(QUIC_WARNING_FLAGS /WX- /W4 /sdl /wd4206 CACHE INTERNAL "" FORCE)
   endif()
+  add_subdirectory(deps/msquic)
+  # Re-assert /WX- after add_subdirectory in case msquic re-set the variable
+  # without FORCE inside its own CMakeLists. Re-assigning INTERFACE compile
+  # options on the `warnings` target is the only path that actually affects
+  # the compile line on the generated Visual Studio projects.
+  if(MSVC AND TARGET warnings)
+    set_property(TARGET warnings PROPERTY INTERFACE_COMPILE_OPTIONS "/WX-;/W4;/sdl;/wd4206")
+  endif()
+  target_compile_definitions(offs PRIVATE HAS_MSQUIC)
+  target_include_directories(offs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/src/inc)
+  target_link_libraries(offs PRIVATE msquic::msquic msquic::platform)
 else()
-  message(STATUS "OFFS_ENABLE_QUIC=OFF — QUIC/relay/WT/NAT-detect compiled as stubs (no-P2P build).")
+  message(FATAL_ERROR
+    "Required submodule deps/msquic is missing. msquic is a hard build "
+    "dependency (QUIC/relay/WebTransport/peer-to-peer networking). Run: "
+    "git submodule update --init --recursive")
 endif()
 
 # pcre2 — POSIX regex compatibility wrapper, used on Windows to back the

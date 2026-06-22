@@ -65,12 +65,21 @@ bool actor_send(actor_t* actor, message_t* msg) {
          or pressured. This prevents deadlock chains where every actor in a
          pipeline gets muted and nobody can make forward progress. */
       if (!(atomic_load(&sender->flags) & (ACTOR_FLAG_MUTED | ACTOR_FLAG_PRESSURED))) {
-        muted_sender_node_t* msn = get_clear_memory(sizeof(muted_sender_node_t));
-        msn->sender = sender;
-        do {
-          msn->next = atomic_load(&actor->pressured_senders);
-        } while (!atomic_compare_exchange_strong(&actor->pressured_senders, &msn->next, msn));
-        atomic_fetch_or(&sender->flags, ACTOR_FLAG_MUTED);
+        /* Don't mute senders to an actor being torn down: backpressure_release
+           in actor_destroy has already (or is about to) drain pressured_senders,
+           and a late append here would orphan the muted_sender_node and leave
+           this sender muted forever. The message above was already pushed and
+           is drained with the queue, so skipping the mute is safe. (A narrow
+           append-in-flight window remains during destroy that would need a
+           per-actor lock to close fully — see actor_destroy.) */
+        if (!(atomic_load(&actor->flags) & ACTOR_FLAG_DESTROY)) {
+          muted_sender_node_t* msn = get_clear_memory(sizeof(muted_sender_node_t));
+          msn->sender = sender;
+          do {
+            msn->next = atomic_load(&actor->pressured_senders);
+          } while (!atomic_compare_exchange_strong(&actor->pressured_senders, &msn->next, msn));
+          atomic_fetch_or(&sender->flags, ACTOR_FLAG_MUTED);
+        }
       }
     }
   }

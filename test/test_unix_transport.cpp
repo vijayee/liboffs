@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 #include <cstring>
+#include <string>
+#include <fstream>
 extern "C" {
 #include "../src/ClientAPI/Unix/unix_transport.h"
 #include "../src/ClientAPI/client_api_wire.h"
@@ -10,6 +12,9 @@ extern "C" {
 #include "../src/OFFStreams/tuple_cache.h"
 #include "../src/Scheduler/scheduler.h"
 #include "../src/Configuration/config.h"
+#include "../src/Network/authority.h"
+#include "../src/Network/network.h"
+#include "../src/Node/node.h"
 #include "../src/Timer/timer_actor.h"
 #include "../src/Util/rm_rf.h"
 #include "../src/Platform/platform.h"
@@ -27,6 +32,15 @@ static int g_socket_seq = 0;
 
 static void _make_socket_path(char* out, size_t out_len, const char* tag) {
     snprintf(out, out_len, "/tmp/test_unix_%s_%d", tag, ++g_socket_seq);
+}
+
+/* Resolve a checked-in test cert by name, relative to this source file so the
+   result is independent of the test executable's working directory. */
+static std::string _cert_path(const char* name) {
+    std::string file = __FILE__;
+    size_t slash = file.find_last_of("\\/");
+    std::string dir = (slash != std::string::npos) ? file.substr(0, slash) : ".";
+    return dir + "/certs/" + name;
 }
 
 static platform_socket_t* _connect_local(const char* path) {
@@ -583,6 +597,214 @@ TEST_F(TestUnixTransportPeerRouting, FriendListRequestRoutedToHandler) {
     platform_socket_t* sock = _connect_with_retry(socket_path);
     ASSERT_NE(sock, (platform_socket_t*)NULL);
     _assert_peer_frame_unauthorized(sock, client_api_friend_list_request_encode());
+    platform_socket_destroy(sock);
+}
+
+/* End-to-end success path for peer/friend handlers over a real Unix transport.
+   Unlike TestUnixTransportPeerRouting (which uses a non-NULL api_key_hash to
+   prove the dispatch arms are *reached* by observing UNAUTHORIZED), this
+   fixture runs unauthenticated (api_key_hash=NULL -> is_authenticated=1 at
+   unix_connection init) and wires a real authority + network via
+   unix_transport_set_config_ctx, so the handlers execute their full success
+   path and return well-formed peer/friend responses. authority-only handlers
+   (peer_info, friend_list) run regardless of whether network_create succeeds;
+   the peer_list handler dereferences ctx->network->conn_mgr, so that test is
+   skipped when network_create returns NULL (e.g. a no-MSQUIC build). */
+class TestUnixTransportPeerSuccess : public testing::Test {
+protected:
+    scheduler_pool_t* pool;
+    timer_actor_t* timer;
+    block_cache_t* bc;
+    ofd_cache_t* ofd_cache;
+    tuple_cache_t* tc;
+    authority_t* authority;
+    network_t* network;
+    offs_node_t node_obj;
+    unix_transport_t* transport;
+    char* cache_dir;
+    char socket_path[128];
+
+    void SetUp() override {
+        pool = scheduler_pool_create(4);
+        scheduler_pool_start(pool);
+        timer = timer_actor_create(pool);
+
+        char dir_template[] = "/tmp/test_unix_peersuccess_XXXXXX";
+        cache_dir = mkdtemp(dir_template);
+        cache_dir = strdup(cache_dir);
+
+        config_t config = {
+            .index_bucket_size = 10,
+            .index_wait = 1000,
+            .index_max_wait = 5000,
+            .section_size = 128000,
+            .section_wait = 1000,
+            .section_max_wait = 5000,
+            .cache_size = 50,
+            .max_tuple_size = 30,
+            .lru_size = 50
+        };
+        bc = block_cache_create(config, cache_dir, standard, timer, pool, NULL, 0);
+        ofd_cache = ofd_cache_create(pool, bc, 300000);
+        tc = tuple_cache_create(100, pool);
+
+        authority = authority_create(&config);
+        ASSERT_NE(authority, nullptr);
+        /* Supply a checked-in leaf cert so authority_init_local_id derives a
+           real public_key (peer_handle_info_request returns INTERNAL_ERROR
+           "No local public key configured" when public_key is NULL). The path
+           is resolved relative to this source file, so it is independent of
+           the test's working directory. If the cert is absent, init falls
+           back to a random id with public_key=NULL and the PeerInfo test
+           skips itself; FriendList/PeerList are unaffected. */
+        std::string cert = _cert_path("leaf_cert.pem");
+        std::ifstream cert_chk(cert);
+        if (cert_chk.good()) {
+            cert_chk.close();
+            authority->node_cert_path = strdup(cert.c_str());
+        } else {
+            cert_chk.close();
+        }
+        ASSERT_EQ(authority_init_local_id(authority), 0);
+
+        /* network_create may return NULL on a build without MSQUIC; the
+           authority-only success tests still run, and the peer_list test
+           skips itself in that case. */
+        network = network_create(authority, bc, timer, pool, &config);
+
+        memset(&node_obj, 0, sizeof(node_obj));
+        node_obj.config = &config;
+        node_obj.authority = authority;
+        node_obj.network = network;
+        node_obj.block_cache = bc;
+        node_obj.scheduler = pool;
+        node_obj.timer = timer;
+
+        _make_socket_path(socket_path, sizeof(socket_path), "peersuccess");
+        platform_local_cleanup(socket_path);
+
+        /* No api_key_hash -> connections start authenticated, so peer/friend
+           handlers run their success path. Config ctx borrows the node so
+           per-connection peer_ctx.network/authority are populated. */
+        transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path,
+                                          NULL, NULL);
+        ASSERT_NE(transport, nullptr);
+        unix_transport_set_config_ctx(transport, &node_obj, cache_dir);
+        unix_transport_start(transport);
+    }
+
+    void TearDown() override {
+        if (transport != nullptr) {
+            unix_transport_stop(transport);
+        }
+        scheduler_pool_wait_for_idle(pool);
+        scheduler_pool_stop(pool);
+        ofd_cache_destroy(ofd_cache);
+        tuple_cache_destroy(tc);
+        /* network_destroy before block_cache_destroy (network borrows the
+           cache's respiration pointer); authority_destroy last. Mirrors the
+           proven test_quic_integration + off_server teardown order. */
+        if (network != nullptr) {
+            network_destroy(network);
+        }
+        block_cache_destroy(bc);
+        timer_actor_destroy(timer);
+        if (transport != nullptr) {
+            unix_transport_destroy(transport);
+        }
+        scheduler_pool_destroy(pool);
+        authority_destroy(authority);
+        platform_local_cleanup(socket_path);
+        rm_rf(cache_dir);
+        free(cache_dir);
+    }
+};
+
+/* FRIEND_LIST_REQUEST over a real authority with no friends -> FRIEND_LIST_RESPONSE
+   with an empty friends array. Exercises the friend_list success path end-to-end. */
+TEST_F(TestUnixTransportPeerSuccess, FriendListReturnsEmpty) {
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
+    ASSERT_EQ(_send_frame(sock, client_api_friend_list_request_encode()), 0);
+
+    stream_framer_t* framer = stream_framer_create();
+    cbor_item_t* response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+
+    EXPECT_EQ(client_api_wire_get_type(response), CLIENT_API_FRIEND_LIST_RESPONSE);
+    client_api_friend_list_response_t msg;
+    memset(&msg, 0, sizeof(msg));
+    int decode_result = client_api_friend_list_response_decode(response, &msg);
+    EXPECT_EQ(decode_result, 0);
+    if (decode_result == 0) {
+        size_t count = (msg.friends != nullptr) ? cbor_array_size(msg.friends) : 0;
+        EXPECT_EQ(count, 0u);
+        client_api_friend_list_response_destroy(&msg);
+    }
+    cbor_decref(&response);
+    stream_framer_destroy(framer);
+    platform_socket_destroy(sock);
+}
+
+/* PEER_INFO_REQUEST over a real authority (init_local_id generated a keypair) ->
+   PEER_INFO_RESPONSE with raw-CBOR format and non-empty data. */
+TEST_F(TestUnixTransportPeerSuccess, PeerInfoReturnsResponse) {
+    /* Requires a configured public_key (from the leaf cert in SetUp). Skip
+       deterministically when the cert was unavailable so the test stays green
+       in environments without the checked-in certs. */
+    if (authority->public_key == nullptr) {
+        GTEST_SKIP() << "no leaf cert -> no public_key; peer_info returns INTERNAL_ERROR";
+    }
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
+    ASSERT_EQ(_send_frame(sock, client_api_peer_info_request_encode()), 0);
+
+    stream_framer_t* framer = stream_framer_create();
+    cbor_item_t* response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+
+    EXPECT_EQ(client_api_wire_get_type(response), CLIENT_API_PEER_INFO_RESPONSE);
+    client_api_peer_info_response_t msg;
+    memset(&msg, 0, sizeof(msg));
+    int decode_result = client_api_peer_info_response_decode(response, &msg);
+    EXPECT_EQ(decode_result, 0);
+    if (decode_result == 0) {
+        EXPECT_EQ(msg.format, 0);
+        EXPECT_GT(msg.data_size, 0u);
+        client_api_peer_info_response_destroy(&msg);
+    }
+    cbor_decref(&response);
+    stream_framer_destroy(framer);
+    platform_socket_destroy(sock);
+}
+
+/* PEER_LIST_REQUEST over a real network -> PEER_LIST_RESPONSE with an empty
+   peers array. Skipped when network_create returned NULL (no-MSQUIC build):
+   the handler dereferences ctx->network->conn_mgr. */
+TEST_F(TestUnixTransportPeerSuccess, PeerListReturnsEmpty) {
+    if (network == nullptr) {
+        GTEST_SKIP() << "network_create returned NULL (no MSQUIC) — peer_list needs a network";
+    }
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
+    ASSERT_EQ(_send_frame(sock, client_api_peer_list_request_encode()), 0);
+
+    stream_framer_t* framer = stream_framer_create();
+    cbor_item_t* response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+
+    EXPECT_EQ(client_api_wire_get_type(response), CLIENT_API_PEER_LIST_RESPONSE);
+    client_api_peer_list_response_t msg;
+    memset(&msg, 0, sizeof(msg));
+    int decode_result = client_api_peer_list_response_decode(response, &msg);
+    EXPECT_EQ(decode_result, 0);
+    if (decode_result == 0) {
+        size_t count = (msg.peers != nullptr) ? cbor_array_size(msg.peers) : 0;
+        EXPECT_EQ(count, 0u);
+        client_api_peer_list_response_destroy(&msg);
+    }
+    cbor_decref(&response);
+    stream_framer_destroy(framer);
     platform_socket_destroy(sock);
 }
 

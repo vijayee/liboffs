@@ -284,13 +284,16 @@ void peer_handle_friend_add(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     }
   }
 
+  /* Report whether the best-effort connect to the first direct address
+     succeeded, mirroring peer_handle_connect. The friend is added to the
+     authority list either way; this only surfaces the connect outcome so the
+     caller can retry or report. */
   client_api_peer_connect_result_t result;
   memset(&result, 0, sizeof(result));
-  result.status = CLIENT_API_STATUS_OK;
+  result.status = connected ? CLIENT_API_STATUS_OK : CLIENT_API_STATUS_BAD_REQUEST;
 
   cbor_item_t* out_frame = client_api_peer_connect_result_encode(&result);
   ctx->send_frame(ctx->conn, out_frame);
-  (void)connected; /* attempt was best-effort */
 }
 
 void peer_handle_friend_remove(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
