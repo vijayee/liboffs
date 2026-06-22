@@ -92,17 +92,17 @@
    * instead of the named-pipe default.
    *
    * The Windows local-IPC default is the named-pipe backend. AF_UNIX is
-   * available as an opt-in for advanced/testing use. Rationale: the
-   * daemon (platform_local_listen) and a cross-process client
-   * (platform_local_connect) both pick AF_UNIX when it is the default,
-   * and while AF_UNIX listen/connect/accept all succeed, the per-
-   * connection IOCP I/O on an accepted AF_UNIX socket does not round-
-   * trip cross-process (the request is accepted but the response never
-   * returns; later connects are refused). The named-pipe backend, which
-   * uses a different IOCP path, works end-to-end. Making pipes the
-   * default keeps offsd <-> offs CLI working out of the box; AF_UNIX
-   * remains selectable for in-process tests and future work on the
-   * accepted-socket IOCP path. Set the env on BOTH processes to use it. */
+   * available as an opt-in for advanced/testing use. AF_UNIX cross-
+   * process I/O on an accepted socket works provided the linked poll-
+   * dancer includes the IOCP fd->HANDLE fix (poll-dancer 50a9e38: cast
+   * the Winsock SOCKET to a HANDLE directly instead of calling
+   * _get_osfhandle, which aborted with STATUS_STACK_BUFFER_OVERRUN on
+   * the first accepted socket and killed the daemon; see the windows-
+   * afunix-cli-rpc-broken memory). The named-pipe backend stays the
+   * default because it works on every Windows SKU (AF_UNIX needs
+   * Windows 10 1803+) and uses a simpler HANDLE/ReadFile IOCP path
+   * independent of Winsock. Set the env on BOTH processes to opt into
+   * AF_UNIX. */
   static int _use_af_unix(void) {
     const char* v = getenv("OFFS_USE_AF_UNIX");
     if (v == NULL) return 0;
