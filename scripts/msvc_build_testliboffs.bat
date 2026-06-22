@@ -36,20 +36,24 @@ if not exist "%TEST_EXE%" (
 )
 
 REM Run the TestPlatformLocal + TestUnixTransport suite twice:
-REM  1) with OFFS_FORCE_NAMED_PIPE=1 (exercises the named-pipe backend);
-REM  2) with OFFS_FORCE_NAMED_PIPE unset (default branch — AF_UNIX on
-REM     Windows 10 1803+, falls through to named pipes on older SKUs).
+REM  1) with OFFS_FORCE_NAMED_PIPE=1 (the named-pipe backend, which is
+REM     also the default);
+REM  2) with OFFS_USE_AF_UNIX=1 (opts into the AF_UNIX backend on
+REM     Windows 10 1803+; falls through to named pipes on older SKUs or
+REM     if AF_UNIX bind/listen fails).
 echo.
-echo === testliboffs run 1: OFFS_FORCE_NAMED_PIPE=1 ===
+echo === testliboffs run 1: OFFS_FORCE_NAMED_PIPE=1 (named-pipe) ===
 set "OFFS_FORCE_NAMED_PIPE=1"
 "%TEST_EXE%" --gtest_filter=TestPlatformLocal*:TestUnixTransport.*
 set "RC1=%ERRORLEVEL%"
 set "OFFS_FORCE_NAMED_PIPE="
 
 echo.
-echo === testliboffs run 2: OFFS_FORCE_NAMED_PIPE unset (default) ===
+echo === testliboffs run 2: OFFS_USE_AF_UNIX=1 (AF_UNIX) ===
+set "OFFS_USE_AF_UNIX=1"
 "%TEST_EXE%" --gtest_filter=TestPlatformLocal*:TestUnixTransport.*
 set "RC2=%ERRORLEVEL%"
+set "OFFS_USE_AF_UNIX="
 
 if not "%RC1%"=="0" (
   echo.
@@ -58,7 +62,7 @@ if not "%RC1%"=="0" (
 )
 if not "%RC2%"=="0" (
   echo.
-  echo *** run 2 ^(default branch^) FAILED with code %RC2%
+  echo *** run 2 ^(AF_UNIX branch^) FAILED with code %RC2%
   exit /b %RC2%
 )
 

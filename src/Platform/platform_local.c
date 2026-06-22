@@ -53,10 +53,12 @@
     platform_file_unlink(path);
   }
 #else
-  /* Windows implementation — AF_UNIX (Windows 10 1803+) with named-pipe
-   * fallback for older Windows. The OFFS_FORCE_NAMED_PIPE environment
-   * variable selects the backend at runtime: "1" forces pipes, "0" or
-   * unset uses AF_UNIX when available, falling back to pipes. */
+  /* Windows implementation — named-pipe backend by default, with AF_UNIX
+   * (Windows 10 1803+) available as an opt-in. The OFFS_FORCE_NAMED_PIPE
+   * environment variable ("1") explicitly forces pipes; OFFS_USE_AF_UNIX
+   * ("1") opts into AF_UNIX when the platform supports it. Unset, the
+   * backend is named pipes. See _use_af_unix for why pipes are the
+   * default. */
   #include <windows.h>
   #include <winsock2.h>
   #include <afunix.h>
@@ -75,11 +77,34 @@
   #define OFFS_PIPE_PREFIX   "\\\\.\\pipe\\liboffs-"
 
   /* Returns non-zero if the OFFS_FORCE_NAMED_PIPE environment variable
-   * is set to a truthy value ("1", "true", "yes", "on"). Used to
-   * force-test the named-pipe branch on Windows versions that support
-   * AF_UNIX. */
+   * is set to a truthy value ("1", "true", "yes", "on"). Explicitly
+   * forces the named-pipe backend regardless of the default. */
   static int _force_named_pipe(void) {
     const char* v = getenv("OFFS_FORCE_NAMED_PIPE");
+    if (v == NULL) return 0;
+    if (v[0] == '1' || v[0] == 't' || v[0] == 'T' ||
+        v[0] == 'y' || v[0] == 'Y') return 1;
+    return 0;
+  }
+
+  /* Returns non-zero if the OFFS_USE_AF_UNIX environment variable is set
+   * to a truthy value. Opts into the AF_UNIX backend on Windows 10 1803+
+   * instead of the named-pipe default.
+   *
+   * The Windows local-IPC default is the named-pipe backend. AF_UNIX is
+   * available as an opt-in for advanced/testing use. Rationale: the
+   * daemon (platform_local_listen) and a cross-process client
+   * (platform_local_connect) both pick AF_UNIX when it is the default,
+   * and while AF_UNIX listen/connect/accept all succeed, the per-
+   * connection IOCP I/O on an accepted AF_UNIX socket does not round-
+   * trip cross-process (the request is accepted but the response never
+   * returns; later connects are refused). The named-pipe backend, which
+   * uses a different IOCP path, works end-to-end. Making pipes the
+   * default keeps offsd <-> offs CLI working out of the box; AF_UNIX
+   * remains selectable for in-process tests and future work on the
+   * accepted-socket IOCP path. Set the env on BOTH processes to use it. */
+  static int _use_af_unix(void) {
+    const char* v = getenv("OFFS_USE_AF_UNIX");
     if (v == NULL) return 0;
     if (v[0] == '1' || v[0] == 't' || v[0] == 'T' ||
         v[0] == 'y' || v[0] == 'Y') return 1;
@@ -399,12 +424,13 @@ accept_done:
   /* ---- Public API dispatch ---- */
 
   platform_socket_t* platform_local_listen(const char* path) {
-    if (_force_named_pipe()) {
+    /* Default backend is named pipes. AF_UNIX is opt-in (OFFS_USE_AF_UNIX);
+     * OFFS_FORCE_NAMED_PIPE explicitly forces pipes. When AF_UNIX is
+     * selected, still fall through to pipes if the platform lacks AF_UNIX
+     * or the bind/listen fails (older Windows, stripped server SKUs). */
+    if (!_use_af_unix() || _force_named_pipe()) {
       return _pipe_listen(path);
     }
-    /* Try AF_UNIX first on Windows 10 1803+; if the platform doesn't
-     * support it (older Windows, stripped server SKUs) fall through to
-     * the named-pipe backend. */
     platform_socket_t* sock = _afunix_listen(path);
     if (sock != NULL) return sock;
     return _pipe_listen(path);
@@ -419,13 +445,21 @@ accept_done:
   }
 
   platform_socket_t* platform_local_connect(const char* path) {
-    if (_force_named_pipe()) {
+    /* Mirror platform_local_listen's backend selection so client and
+     * server use the same transport. Default is named pipes; AF_UNIX is
+     * opt-in (OFFS_USE_AF_UNIX); OFFS_FORCE_NAMED_PIPE forces pipes. When
+     * AF_UNIX is selected but the connect fails (e.g. the server fell
+     * back to pipes because its AF_UNIX listen failed), fall back to
+     * pipes so an opted-in client can still reach a pipe-backed server. */
+    if (!_use_af_unix() || _force_named_pipe()) {
       return _pipe_connect(path);
     }
     if (!_platform_has_af_unix()) {
       return _pipe_connect(path);
     }
-    return _afunix_connect(path);
+    platform_socket_t* sock = _afunix_connect(path);
+    if (sock != NULL) return sock;
+    return _pipe_connect(path);
   }
 
   int platform_local_rearm(platform_socket_t* listener) {
