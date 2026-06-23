@@ -52,6 +52,17 @@
   void platform_local_cleanup(const char* path) {
     platform_file_unlink(path);
   }
+
+  /* POSIX AF_UNIX listeners don't need rearming after accept — the
+   * listening fd stays in the listening state and the next accept
+   * can proceed immediately. The rearm concept exists only for the
+   * Windows named-pipe backend where each accept consumes a pipe
+   * instance that must be recreated. Return 0 so unix_transport.c
+   * can call this unconditionally without a platform guard. */
+  int platform_local_rearm(platform_socket_t* listener) {
+    (void)listener;
+    return 0;
+  }
 #else
   /* Windows implementation — named-pipe backend by default, with AF_UNIX
    * (Windows 10 1803+) available as an opt-in. The OFFS_FORCE_NAMED_PIPE
