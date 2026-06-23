@@ -152,10 +152,15 @@ int client_api_put_request_decode(cbor_item_t* item, client_api_put_request_t* m
     client_api_put_request_destroy(msg);
     return -1;
   }
-  if (msg->stream_length > OFFS_MAX_CBOR_MESSAGE_SIZE) {
-    client_api_put_request_destroy(msg);
-    return -1;
-  }
+  /* stream_length is the total size of a streaming PUT (the sum of all
+   * subsequent PUT_DATA frames), not the size of a single CBOR message.
+   * Capping it at OFFS_MAX_CBOR_MESSAGE_SIZE (64MB) made any upload larger
+   * than 64MB fail at PUT_START with "Invalid PUT request" — the server
+   * rejected the stream before a single PUT_DATA frame was processed.
+   * The server does not allocate stream_length bytes upfront
+   * (writeable_descriptor_create stores it as metadata only), so the
+   * only resource bound that matters is the per-frame data_size check
+   * below. Leave stream_length unbounded apart from the != 0 check. */
 
   if (cbor_array_size(item) >= 5) {
     cbor_item_t* server_address = cbor_array_get(item, 4);
