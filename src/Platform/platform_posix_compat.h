@@ -18,6 +18,8 @@
   #include <BaseTsd.h>
   typedef SSIZE_T ssize_t;
   #define _SSIZE_T_DEFINED
+#else
+  #include <sys/types.h>
 #endif
 
 #if defined(_MSC_VER)
