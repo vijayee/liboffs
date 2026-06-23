@@ -682,7 +682,13 @@ static void* _recv_thread(void* arg) {
   client->loop = pd_loop_create(NULL);
   if (client->loop == NULL) return NULL;
 
-  client->watcher = pd_watcher_create(client->loop, platform_socket_fd(sock),
+  /* Pipe-backed sockets (Windows named pipes) must register with
+   * pd_watcher_create_for_handle — pd_watcher_create treats its fd as a
+   * Winsock SOCKET and issues WSARecv at registration, which fails on a
+   * pipe HANDLE so no READ completions ever deliver and responses are never
+   * read. platform_socket_watcher_create branches on is_pipe for us; the
+   * server-side unix_connection uses the same helper. */
+  client->watcher = platform_socket_watcher_create(client->loop, sock,
       PD_EVENT_READ | PD_EVENT_ERROR | PD_EVENT_HANGUP,
       callback, client);
   if (client->watcher == NULL) {

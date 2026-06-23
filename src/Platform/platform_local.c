@@ -414,12 +414,16 @@ accept_done:
       return NULL;
     }
 
-    /* PIPE_NOWAIT makes synchronous WriteFile return immediately with
-     * ERROR_NO_DATA when the pipe buffer is full, so the calling
-     * thread doesn't block. ReadFile behavior with PIPE_NOWAIT is
-     * similar — the loop uses IOCP, but actor threads doing direct
-     * reads will see ERROR_NO_DATA instead of blocking. */
-    DWORD mode = PIPE_READMODE_BYTE | PIPE_NOWAIT;
+    /* PIPE_WAIT (the default) keeps reads in blocking-wait mode. The recv
+     * thread monitors this handle with poll-dancer's IOCP backend, which
+     * issues an overlapped ReadFile at registration and expects it to pend
+     * (ERROR_IO_PENDING) so a completion fires when data arrives. PIPE_NOWAIT
+     * would make that ReadFile return ERROR_NO_DATA immediately with no
+     * pending operation, so the watcher would fail to register and
+     * responses would never be read. Writes stay synchronous (WriteFile with
+     * a NULL overlapped blocks until the bytes are accepted, matching the
+     * server-side pipe created with PIPE_WAIT), which is fine for a client. */
+    DWORD mode = PIPE_READMODE_BYTE | PIPE_WAIT;
     if (!SetNamedPipeHandleState(h, &mode, NULL, NULL)) {
       DWORD err = GetLastError();
       log_warn("platform_local_connect: SetNamedPipeHandleState failed (err=%lu)", err);
