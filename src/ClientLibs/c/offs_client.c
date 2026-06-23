@@ -28,6 +28,8 @@
 #include <sys/time.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <poll.h>
+#include <errno.h>
 #endif
 #include "../../Platform/platform.h"
 #include "../../Platform/platform_local.h"
@@ -230,13 +232,48 @@ static QUIC_STATUS QUIC_API _wt_connection_callback(
 #endif /* HAS_MSQUIC */
 
 static int _raw_send(offs_client_t* client, const uint8_t* data, size_t len) {
-  ssize_t sent = platform_socket_send(client->transport.raw.sock, data, len);
-  if (sent < 0) return -1;
-  size_t total_sent = (size_t)sent;
+  size_t total_sent = 0;
   while (total_sent < len) {
-    sent = platform_socket_send(client->transport.raw.sock, data + total_sent, len - total_sent);
-    if (sent <= 0) return -1;
-    total_sent += (size_t)sent;
+    ssize_t sent = platform_socket_send(client->transport.raw.sock,
+                                        data + total_sent, len - total_sent);
+    if (sent > 0) {
+      total_sent += (size_t)sent;
+      continue;
+    }
+    if (sent == 0) {
+      /* send() returning 0 on a stream socket is a peer-closed condition. */
+      return -1;
+    }
+    /* sent < 0: distinguish EAGAIN/EWOULDBLOCK/EINTR (retry) from real errors.
+     * The socket is non-blocking so a full kernel send buffer surfaces as
+     * EAGAIN — wait for writability with poll() rather than abandoning a
+     * partial PUT that the server will never see the rest of. */
+#ifndef _WIN32
+    int sock_fd = platform_socket_fd(client->transport.raw.sock);
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      struct pollfd pfd = {sock_fd, POLLOUT, 0};
+      int rc;
+      do {
+        rc = poll(&pfd, 1, 30000);
+      } while (rc < 0 && errno == EINTR);
+      if (rc <= 0) return -1;
+      continue;
+    }
+    if (errno == EINTR) continue;
+#else
+    int wsa_err = WSAGetLastError();
+    if (wsa_err == WSAEWOULDBLOCK) {
+      SOCKET s = (SOCKET)platform_socket_fd(client->transport.raw.sock);
+      fd_set wset;
+      FD_ZERO(&wset);
+      FD_SET(s, &wset);
+      struct timeval tv = {30, 0};
+      int rc = select(0, NULL, &wset, NULL, &tv);
+      if (rc <= 0) return -1;
+      continue;
+    }
+#endif
+    return -1;
   }
   return 0;
 }
@@ -325,14 +362,8 @@ static void _send_frame(offs_client_t* client, cbor_item_t* frame) {
       memcpy(client->write_buffer->data + client->write_buffer->size, framed, framed_len);
       client->write_buffer->size += framed_len;
     } else {
-      ssize_t sent = platform_socket_send(client->transport.raw.sock, framed, framed_len);
-      if (sent < 0) {
+      if (_raw_send(client, framed, framed_len) < 0) {
         client->connected = 0;
-      } else if ((size_t)sent < framed_len) {
-        size_t remaining = framed_len - (size_t)sent;
-        client->write_buffer = buffer_create(remaining);
-        memcpy(client->write_buffer->data, framed + sent, remaining);
-        client->write_buffer->size = remaining;
       }
     }
     platform_mutex_unlock(client->lock);
@@ -877,6 +908,14 @@ static offs_client_t* _connect_attempt(const char* transport_url, const char* ap
     client->transport.raw.sock = _connect_unix(path);
     client->transport.raw.is_unix = 1;
     client->transport_type = OFFS_TRANSPORT_UNIX;
+    /* The raw read callback drains all available bytes in a loop; a blocking
+     * socket would stall on the second recv waiting for data that already
+     * fired the watcher. Non-blocking lets the drain loop break on EAGAIN.
+     * The WS path reuses _connect_tcp but does a single recv per callback,
+     * so it does NOT want non-blocking — set it only for the raw transport. */
+    if (client->transport.raw.sock != NULL) {
+      platform_socket_set_nonblocking(client->transport.raw.sock);
+    }
   } else if (strncmp(transport_url, "tcp://", 6) == 0) {
     const char* addr = transport_url + 6;
     char* host = get_memory(strlen(addr) + 1);
@@ -896,6 +935,12 @@ static offs_client_t* _connect_attempt(const char* transport_url, const char* ap
     client->transport.raw.is_unix = 0;
     client->transport_type = OFFS_TRANSPORT_TCP;
     free(host);
+    /* See the unix:// branch: the raw read callback's drain loop needs
+     * EAGAIN, not a blocking wait, to break out when the kernel buffer
+     * is empty. WS reuses _connect_tcp but does not set non-blocking. */
+    if (client->transport.raw.sock != NULL) {
+      platform_socket_set_nonblocking(client->transport.raw.sock);
+    }
   } else if (strncmp(transport_url, "ws://", 5) == 0 || strncmp(transport_url, "wss://", 6) == 0) {
     uint8_t is_ssl = (transport_url[4] == 's');
     const char* addr_start = is_ssl ? transport_url + 6 : transport_url + 5;
