@@ -73,7 +73,10 @@ extern "C" {
 static const char* kSourceFile =
     "/home/victor/Videos/Big Hero 6 2014 1080p/Big.Hero.6.2014.1080p.BluRay.x264.YIFY.mp4";
 
-static const size_t kChunkSize = 64 * 1024;
+static const size_t kChunkSize = 256 * 1024;  // 256KB — 2x standard block size,
+// so each chunk produces exactly 2 blocks. ~7000 frames for 1.77GB (vs ~27000
+// at 64KB), cutting per-frame CBOR+socket overhead 4x without overwhelming the
+// block cache the way 4MB chunks did ("Failed to save robin file").
 // PUT/GET timeouts. Generous upper bound for the slowest path
 // (server-side finalization on a multi-GB upload); in practice the
 // round-trip is well under 2 minutes per transport.

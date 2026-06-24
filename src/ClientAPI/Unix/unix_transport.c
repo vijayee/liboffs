@@ -424,12 +424,14 @@ void unix_transport_stop(unix_transport_t* transport) {
    * _pipe_accept's GetOverlappedResult. Cancel the pending I/O so the
    * blocking call returns NULL and the thread can exit its accept
    * loop. For AF_UNIX listeners, async_send wakes the event loop. */
+#ifdef _WIN32
   if (transport->listen_sock != NULL && platform_socket_is_pipe(transport->listen_sock)) {
     HANDLE h = (HANDLE)platform_socket_handle(transport->listen_sock);
     if (h != NULL && h != INVALID_HANDLE_VALUE) {
       CancelIoEx(h, NULL);
     }
   }
+#endif
   pd_loop_async_send(transport->loop, transport);
   platform_thread_join(transport->thread);
 }

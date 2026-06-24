@@ -5,6 +5,8 @@
 #ifndef OFFS_BCRYPT_H
 #define OFFS_BCRYPT_H
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif

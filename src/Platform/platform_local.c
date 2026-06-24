@@ -52,6 +52,17 @@
   void platform_local_cleanup(const char* path) {
     platform_file_unlink(path);
   }
+
+  /* POSIX AF_UNIX listeners don't need rearming after accept — the
+   * listening fd stays in the listening state and the next accept
+   * can proceed immediately. The rearm concept exists only for the
+   * Windows named-pipe backend where each accept consumes a pipe
+   * instance that must be recreated. Return 0 so unix_transport.c
+   * can call this unconditionally without a platform guard. */
+  int platform_local_rearm(platform_socket_t* listener) {
+    (void)listener;
+    return 0;
+  }
 #else
   /* Windows implementation — named-pipe backend by default, with AF_UNIX
    * (Windows 10 1803+) available as an opt-in. The OFFS_FORCE_NAMED_PIPE
@@ -403,12 +414,21 @@ accept_done:
       return NULL;
     }
 
-    /* PIPE_NOWAIT makes synchronous WriteFile return immediately with
-     * ERROR_NO_DATA when the pipe buffer is full, so the calling
-     * thread doesn't block. ReadFile behavior with PIPE_NOWAIT is
-     * similar — the loop uses IOCP, but actor threads doing direct
-     * reads will see ERROR_NO_DATA instead of blocking. */
-    DWORD mode = PIPE_READMODE_BYTE | PIPE_NOWAIT;
+    /* PIPE_WAIT (the default) keeps reads in blocking-wait mode. The recv
+     * thread monitors this handle with poll-dancer's IOCP backend, which
+     * issues an overlapped ReadFile at registration and expects it to pend
+     * (ERROR_IO_PENDING) so a completion fires when data arrives. PIPE_NOWAIT
+     * would make that ReadFile return ERROR_NO_DATA immediately with no
+     * pending operation, so the watcher would fail to register and
+     * responses would never be read. Client writes are also overlapped: the
+     * offs_client issues WriteFile with its own OVERLAPPED on this IOCP-bound
+     * handle and waits for the loop to deliver the PD_EVENT_WRITE completion,
+     * mirroring the POSIX unix-socket send()+poll(POLLOUT) model with a
+     * bounded backpressure wait (see offs_client.c _raw_send). The server-side
+     * pipe (created in _create_pipe_instance) is also PIPE_WAIT but its writes
+     * stay synchronous bounded-retry (unix_connection.c), since the server
+     * connection actor issues no overlapped writes. */
+    DWORD mode = PIPE_READMODE_BYTE | PIPE_WAIT;
     if (!SetNamedPipeHandleState(h, &mode, NULL, NULL)) {
       DWORD err = GetLastError();
       log_warn("platform_local_connect: SetNamedPipeHandleState failed (err=%lu)", err);
