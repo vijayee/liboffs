@@ -51,9 +51,13 @@ typedef struct unix_transport_t {
   update_status_context_t* update_status_ctx;
   /* Config management: borrowed node + owned data_dir, set via
      unix_transport_set_config_ctx. Per-connection config_handler_ctx_t borrows
-     these. NULL node means config frames are rejected with INTERNAL_ERROR. */
+     these. NULL node means config frames are rejected with INTERNAL_ERROR.
+     trigger_restart, when set, is invoked by the reload handler instead of
+     offs_node_restart (the daemon runs the restart on a non-pool thread). */
   offs_node_t* config_node;
   char* config_data_dir;
+  config_trigger_restart_fn trigger_restart;
+  void* restart_user_data;
 } unix_transport_t;
 
 unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
@@ -72,8 +76,13 @@ void unix_transport_set_update_status_ctx(unix_transport_t* transport,
 
 /* Wire config management onto the Unix transport: the daemon passes its node
    (for config read + restart) and data_dir (where pending_config.json lives).
-   data_dir is copied; node is borrowed. */
+   data_dir is copied; node is borrowed. trigger_restart, when non-NULL, is
+   invoked by the reload handler instead of offs_node_restart so the daemon can
+   run the restart on a non-pool thread (avoids the offs_node_stop self-deadlock
+   on a shared scheduler pool). */
 void unix_transport_set_config_ctx(unix_transport_t* transport,
-                                    offs_node_t* node, const char* data_dir);
+                                    offs_node_t* node, const char* data_dir,
+                                    config_trigger_restart_fn trigger_restart,
+                                    void* restart_user_data);
 
 #endif // OFFS_UNIX_TRANSPORT_H

@@ -446,7 +446,9 @@ void unix_transport_set_update_status_ctx(unix_transport_t* transport,
 }
 
 void unix_transport_set_config_ctx(unix_transport_t* transport,
-                                    offs_node_t* node, const char* data_dir) {
+                                    offs_node_t* node, const char* data_dir,
+                                    config_trigger_restart_fn trigger_restart,
+                                    void* restart_user_data) {
   transport->config_node = node;
   if (transport->config_data_dir != NULL) {
     free(transport->config_data_dir);
@@ -456,4 +458,6 @@ void unix_transport_set_config_ctx(unix_transport_t* transport,
     transport->config_data_dir = get_memory(strlen(data_dir) + 1);
     memcpy(transport->config_data_dir, data_dir, strlen(data_dir) + 1);
   }
+  transport->trigger_restart = trigger_restart;
+  transport->restart_user_data = restart_user_data;
 }

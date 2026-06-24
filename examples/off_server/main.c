@@ -149,7 +149,7 @@ int main(int argc, char** argv) {
   block_routes_register(server, pool, bc, NULL, NULL);
   health_routes_register(server, &health_ctx);
   peer_routes_register(server, &node_obj, &config, NULL);
-  config_routes_register(server, &node_obj, &config, ".");
+  config_routes_register(server, &node_obj, &config, ".", NULL, NULL);
 
   unix_transport_t* unix_transport = NULL;
   if (unix_path != NULL) {
@@ -172,7 +172,7 @@ int main(int argc, char** argv) {
        offs config * over the local socket mirrors the HTTP /config routes.
        The peer/friend handlers are wired via the same config_node borrow
        (unix_connection_create initializes peer_ctx from config_node). */
-    unix_transport_set_config_ctx(unix_transport, &node_obj, ".");
+    unix_transport_set_config_ctx(unix_transport, &node_obj, ".", NULL, NULL);
   }
 
 #ifndef _WIN32

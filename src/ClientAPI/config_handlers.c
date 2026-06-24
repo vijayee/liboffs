@@ -148,5 +148,14 @@ void config_handle_reload_request(config_handler_ctx_t* ctx, cbor_item_t* frame)
   ctx->send_frame(ctx->conn, resp_frame);
   client_api_config_reload_response_destroy(&resp);
 
-  offs_node_restart(ctx->node, ctx->data_dir);
+  /* Hand the restart to the daemon (which runs it on a non-pool thread) if it
+     wired a trigger; otherwise run it inline. The inline path is only safe from
+     a non-pool thread (e.g. a standalone test's main thread) — a pool worker
+     would self-deadlock in offs_node_stop's scheduler_pool_wait_for_idle and
+     destroy a shared scheduler pool. */
+  if (ctx->trigger_restart != NULL) {
+    ctx->trigger_restart(ctx->restart_user_data);
+  } else {
+    offs_node_restart(ctx->node, ctx->data_dir);
+  }
 }
