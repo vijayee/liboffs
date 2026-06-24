@@ -834,7 +834,10 @@ void unix_connection_dispatch(void* state, message_t* msg) {
        * full frame through without blocking the connection actor for long.
        * If the peer genuinely stalls we cap the retries and fall back to
        * write_buffer + arming WRITE (harmless on IOCP, keeps the POSIX path
-       * intact). This mirrors the offs_client, which uses blocking sends. */
+       * intact). This server-side connection actor issues no overlapped
+       * writes; the offs_client, by contrast, does use overlapped writes on
+       * its IOCP-bound named-pipe handle (see offs_client.c _raw_send), but
+       * that path is client-only and does not apply here. */
       {
         buffer_t* combined = buf;
         if (connection->write_buffer != NULL && connection->write_buffer->size > 0) {

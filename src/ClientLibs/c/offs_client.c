@@ -118,7 +118,6 @@ struct offs_client_t {
     } wt;
   } transport;
   stream_framer_t* framer;
-  buffer_t* write_buffer;
   platform_mutex_t* lock;
   platform_thread_t* recv_thread;
   volatile uint8_t running;
@@ -126,6 +125,20 @@ struct offs_client_t {
   pd_watcher_t* watcher;
   uint8_t* read_buf;
   size_t read_buf_size;
+
+#ifdef _WIN32
+  /* Overlapped named-pipe write path (sync-over-async, single in flight).
+   * The sender thread issues WriteFile with &write_ov on the IOCP-bound pipe
+   * handle and waits on write_complete_event for the recv-thread loop to
+   * deliver the PD_EVENT_WRITE completion and signal. Single in flight is
+   * guaranteed by client->lock, held throughout _send_frame -> _raw_send, so
+   * no context pool or multiplexer is needed. Only used when
+   * transport.raw.sock is a pipe (is_pipe); AF_UNIX/TCP sockets keep the
+   * synchronous send()/select() path in _raw_send. */
+  OVERLAPPED write_ov;
+  HANDLE write_complete_event;
+  volatile uint8_t write_async_enabled;
+#endif
 
   /* Auth */
   char* api_key;
@@ -233,6 +246,64 @@ static QUIC_STATUS QUIC_API _wt_connection_callback(
 
 static int _raw_send(offs_client_t* client, const uint8_t* data, size_t len) {
   size_t total_sent = 0;
+
+#ifdef _WIN32
+  /* Overlapped named-pipe write path. The pipe handle is IOCP-bound by the
+   * recv-thread watcher (platform_socket_watcher_create ->
+   * pd_watcher_create_for_handle), so an overlapped WriteFile posts a
+   * completion to that IOCP even when it completes immediately — every write
+   * is drained by the loop and the sender waits for the loop's PD_EVENT_WRITE
+   * callback to signal write_complete_event. Single in flight is enforced by
+   * client->lock (held by _send_frame), so the signaled completion is always
+   * this write's. This mirrors the POSIX unix-socket send()+poll(POLLOUT)
+   * model in completion form: ERROR_IO_PENDING is the analog of EAGAIN, and
+   * the IOCP write completion is the analog of POLLOUT writability. The 30s
+   * wait matches the POSIX poll() and the socket select() below. */
+  if (client->write_async_enabled &&
+      client->transport_type == OFFS_TRANSPORT_UNIX &&
+      platform_socket_is_pipe(client->transport.raw.sock)) {
+    HANDLE h = (HANDLE)platform_socket_handle(client->transport.raw.sock);
+    while (total_sent < len) {
+      ResetEvent(client->write_complete_event);
+      memset(&client->write_ov, 0, sizeof(OVERLAPPED));
+      DWORD chunk = (DWORD)(len - total_sent);
+      DWORD written = 0;
+      BOOL ok = WriteFile(h, data + total_sent, chunk, &written,
+                          &client->write_ov);
+      if (!ok) {
+        DWORD err = GetLastError();
+        if (err != ERROR_IO_PENDING && err != ERROR_MORE_DATA) {
+          /* ERROR_BROKEN_PIPE / ERROR_PIPE_CONNECTED: peer closed. Any other
+           * failure is a hard send error; the connection is no longer usable. */
+          client->connected = 0;
+          return -1;
+        }
+      }
+      /* Whether WriteFile returned TRUE (immediate completion; the packet is
+       * still queued to the IOCP) or ERROR_IO_PENDING, the completion is
+       * delivered through the loop. Wait for it. */
+      DWORD w = WaitForSingleObject(client->write_complete_event, 30000);
+      if (w != WAIT_OBJECT_0) {
+        /* Timeout or wait failure — treat as send failure, matching POSIX's
+         * 30s poll(POLLOUT) timeout. The connection is no longer usable. */
+        client->connected = 0;
+        return -1;
+      }
+      DWORD bytes_written = 0;
+      if (!GetOverlappedResult(h, &client->write_ov, &bytes_written, FALSE)) {
+        client->connected = 0;
+        return -1;
+      }
+      if (bytes_written == 0) {
+        client->connected = 0;
+        return -1;
+      }
+      total_sent += bytes_written;
+    }
+    return 0;
+  }
+#endif
+
   while (total_sent < len) {
     ssize_t sent = platform_socket_send(client->transport.raw.sock,
                                         data + total_sent, len - total_sent);
@@ -308,14 +379,8 @@ static void _send_frame(offs_client_t* client, cbor_item_t* frame) {
     if (framed == NULL) return;
 
     platform_mutex_lock(client->lock);
-    if (client->write_buffer != NULL && client->write_buffer->size > 0) {
-      buffer_ensure_capacity(client->write_buffer, client->write_buffer->size + framed_len);
-      memcpy(client->write_buffer->data + client->write_buffer->size, framed, framed_len);
-      client->write_buffer->size += framed_len;
-    } else {
-      if (_ws_send(client, framed, framed_len) < 0) {
-        client->connected = 0;
-      }
+    if (_ws_send(client, framed, framed_len) < 0) {
+      client->connected = 0;
     }
     platform_mutex_unlock(client->lock);
     free(framed);
@@ -357,14 +422,8 @@ static void _send_frame(offs_client_t* client, cbor_item_t* frame) {
     if (framed == NULL) return;
 
     platform_mutex_lock(client->lock);
-    if (client->write_buffer != NULL && client->write_buffer->size > 0) {
-      buffer_ensure_capacity(client->write_buffer, client->write_buffer->size + framed_len);
-      memcpy(client->write_buffer->data + client->write_buffer->size, framed, framed_len);
-      client->write_buffer->size += framed_len;
-    } else {
-      if (_raw_send(client, framed, framed_len) < 0) {
-        client->connected = 0;
-      }
+    if (_raw_send(client, framed, framed_len) < 0) {
+      client->connected = 0;
     }
     platform_mutex_unlock(client->lock);
     free(framed);
@@ -499,6 +558,19 @@ static void _client_raw_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                        pd_event_t events, void* user_data) {
   offs_client_t* client = (offs_client_t*)user_data;
   (void)loop;
+
+#ifdef _WIN32
+  /* Overlapped write completion on the IOCP-bound pipe handle. The sender
+   * (in _raw_send) issued WriteFile with &client->write_ov and is blocked in
+   * WaitForSingleObject on write_complete_event; signal it and skip read
+   * draining. A read may still be in flight on the watcher's own overlapped,
+   * which this branch never touches. No lock: the sender owns write_async
+   * state while client->lock is held, and this callback only signals. */
+  if (events & PD_EVENT_WRITE) {
+    SetEvent(client->write_complete_event);
+    return;
+  }
+#endif
 
   if (events & (PD_EVENT_ERROR | PD_EVENT_HANGUP)) {
     client->connected = 0;
@@ -687,10 +759,22 @@ static void* _recv_thread(void* arg) {
    * Winsock SOCKET and issues WSARecv at registration, which fails on a
    * pipe HANDLE so no READ completions ever deliver and responses are never
    * read. platform_socket_watcher_create branches on is_pipe for us; the
-   * server-side unix_connection uses the same helper. */
+   * server-side unix_connection uses the same helper. On the pipe path we
+   * also arm PD_EVENT_WRITE: the overlapped client write path in _raw_send
+   * issues WriteFile with its own OVERLAPPED on this IOCP-bound handle, and
+   * the backend demuxes the completion by overlapped pointer and delivers it
+   * here as PD_EVENT_WRITE (which _client_raw_read_callback turns into a
+   * SetEvent to wake the sender). Arming the bit issues no I/O itself; it
+   * only records intent so the demux delivers the completion. */
+  pd_event_t events_mask = (pd_event_t)(PD_EVENT_READ | PD_EVENT_ERROR | PD_EVENT_HANGUP);
+#ifdef _WIN32
+  if (client->transport_type != OFFS_TRANSPORT_WS &&
+      platform_socket_is_pipe(sock)) {
+    events_mask = (pd_event_t)(events_mask | PD_EVENT_WRITE);
+  }
+#endif
   client->watcher = platform_socket_watcher_create(client->loop, sock,
-      PD_EVENT_READ | PD_EVENT_ERROR | PD_EVENT_HANGUP,
-      callback, client);
+      events_mask, callback, client);
   if (client->watcher == NULL) {
     pd_loop_destroy(client->loop);
     client->loop = NULL;
@@ -698,6 +782,19 @@ static void* _recv_thread(void* arg) {
   }
 
   pd_watcher_start(client->watcher);
+
+#ifdef _WIN32
+  /* The pipe handle is now bound to this loop's IOCP port and the loop is
+   * draining completions, so overlapped writes issued by _raw_send can
+   * complete and be delivered here as PD_EVENT_WRITE. Enable the overlapped
+   * write path now. This runs after the auth frame was already sent
+   * synchronously by _connect_attempt (before this thread started), so the
+   * auth write never waited on an IOCP that did not yet exist. Sockets
+   * (is_pipe false) keep the synchronous path. */
+  if (platform_socket_is_pipe(sock)) {
+    client->write_async_enabled = 1;
+  }
+#endif
 
   while (client->running) {
     pd_loop_run_once(client->loop, (int)client->config.poll_timeout_ms);
@@ -884,7 +981,6 @@ static offs_client_t* _connect_attempt(const char* transport_url, const char* ap
   client->connected = 0;
   client->running = 0;
   client->framer = stream_framer_create();
-  client->write_buffer = NULL;
   client->lock = platform_mutex_create();
   client->put_cb = NULL;
   client->put_cb_ctx = NULL;
@@ -1249,6 +1345,28 @@ static offs_client_t* _connect_attempt(const char* transport_url, const char* ap
     return NULL;
   }
 
+#ifdef _WIN32
+  /* A pipe-backed unix:// transport uses the overlapped write path. Create the
+   * manual-reset completion event the sender waits on; the recv thread sets
+   * write_async_enabled to 1 once it has bound the pipe handle to its IOCP port
+   * and the loop is draining completions, so the auth frame below — sent before
+   * the recv thread starts — takes the synchronous platform_socket_send path,
+   * and only later frames use the overlapped path. Sockets (AF_UNIX/TCP) are
+   * not pipes, so they leave write_async_enabled 0 and keep the synchronous
+   * send()/select() path. */
+  if (platform_socket_is_pipe(client->transport.raw.sock)) {
+    client->write_complete_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (client->write_complete_event == NULL) {
+      stream_framer_destroy(client->framer);
+      platform_socket_destroy(client->transport.raw.sock);
+      platform_mutex_destroy(client->lock);
+      free(client->api_key);
+      free(client);
+      return NULL;
+    }
+  }
+#endif
+
   client->connected = 1;
   client->running = 1;
   _send_auth_request(client);
@@ -1282,12 +1400,38 @@ offs_client_t* offs_client_connect(const char* transport_url, const char* api_ke
 void offs_client_disconnect(offs_client_t* client) {
   if (client == NULL) return;
 
+#ifdef _WIN32
+  /* Drain any in-flight overlapped pipe write before tearing the loop down. A
+   * sender in _raw_send holds client->lock across WriteFile +
+   * WaitForSingleObject(write_complete_event); lock+unlock here blocks until
+   * that sender's write completion is delivered by the (still-running) recv
+   * loop and the sender wakes and releases the lock. Doing this BEFORE
+   * clearing running keeps the loop alive to deliver the completion, so the
+   * sender is not stranded for the 30s wait timeout. Sockets never take the
+   * overlapped write path (write_async_enabled stays 0), so this is a no-op for
+   * AF_UNIX/TCP/WS/WT. */
+  if (client->write_async_enabled) {
+    platform_mutex_lock(client->lock);
+    platform_mutex_unlock(client->lock);
+  }
+#endif
+
   client->running = 0;
   client->connected = 0;
 
-  /* Stop the poll-dancer loop to unblock the recv thread */
+  /* Stop the poll-dancer loop. The recv thread also exits on running=0 within
+   * one poll_timeout_ms (10ms), so this is belt-and-suspenders. */
   if (client->loop != NULL) {
     pd_loop_stop(client->loop);
+  }
+
+  /* Join the recv thread BEFORE closing the transport handles: the recv thread
+   * destroys its watcher (CancelIoEx on the pending overlapped read) and loop
+   * before returning, so the handles closed below are released only after no
+   * overlapped I/O references them. WT has no recv thread; the join is a no-op
+   * there. */
+  if (client->recv_thread != NULL) {
+    platform_thread_join(client->recv_thread);
   }
 
   switch (client->transport_type) {
@@ -1340,15 +1484,18 @@ void offs_client_disconnect(offs_client_t* client) {
       break;
   }
 
-  if (client->recv_thread != NULL) {
-    platform_thread_join(client->recv_thread);
+#ifdef _WIN32
+  /* The recv thread is joined and the transport handle is closed above, so no
+   * thread is waiting on write_complete_event and no further overlapped write
+   * can be issued. Safe to close the event exactly once. */
+  if (client->write_complete_event != NULL) {
+    CloseHandle(client->write_complete_event);
+    client->write_complete_event = NULL;
   }
+#endif
 
   if (client->framer != NULL) {
     stream_framer_destroy(client->framer);
-  }
-  if (client->write_buffer != NULL) {
-    DESTROY(client->write_buffer, buffer);
   }
   platform_mutex_destroy(client->lock);
   free(client->api_key);

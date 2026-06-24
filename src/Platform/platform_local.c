@@ -420,9 +420,14 @@ accept_done:
      * (ERROR_IO_PENDING) so a completion fires when data arrives. PIPE_NOWAIT
      * would make that ReadFile return ERROR_NO_DATA immediately with no
      * pending operation, so the watcher would fail to register and
-     * responses would never be read. Writes stay synchronous (WriteFile with
-     * a NULL overlapped blocks until the bytes are accepted, matching the
-     * server-side pipe created with PIPE_WAIT), which is fine for a client. */
+     * responses would never be read. Client writes are also overlapped: the
+     * offs_client issues WriteFile with its own OVERLAPPED on this IOCP-bound
+     * handle and waits for the loop to deliver the PD_EVENT_WRITE completion,
+     * mirroring the POSIX unix-socket send()+poll(POLLOUT) model with a
+     * bounded backpressure wait (see offs_client.c _raw_send). The server-side
+     * pipe (created in _create_pipe_instance) is also PIPE_WAIT but its writes
+     * stay synchronous bounded-retry (unix_connection.c), since the server
+     * connection actor issues no overlapped writes. */
     DWORD mode = PIPE_READMODE_BYTE | PIPE_WAIT;
     if (!SetNamedPipeHandleState(h, &mode, NULL, NULL)) {
       DWORD err = GetLastError();
