@@ -140,6 +140,16 @@ platform_barrier_t* platform_barrier_create(unsigned int count) {
 }
 
 void platform_barrier_destroy(platform_barrier_t* b) {
+  if (b == NULL) {
+    return;
+  }
+  /* InitializeSynchronizationBarrier allocates a kernel-backed barrier object
+     that platform_barrier_wait never auto-deletes (it enters with
+     SYNCHRONIZATION_BARRIER_FLAGS_NO_DELETE), so an explicit
+     DeleteSynchronizationBarrier is required -- without it the object leaks
+     (one per scheduler_pool, i.e. one per offs_node_restart cycle). Mirrors the
+     pthread_barrier_destroy in the POSIX branch. */
+  DeleteSynchronizationBarrier(&b->handle);
   free(b);
 }
 
