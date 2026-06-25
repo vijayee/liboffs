@@ -21,12 +21,6 @@ typedef struct debounce_entry_t {
   void* completion_payload;
 } debounce_entry_t;
 
-typedef struct timer_destroy_node_t {
-  struct timer_destroy_node_t* next;
-  pd_timer_t* timer;
-  void* user_data;
-} timer_destroy_node_t;
-
 typedef struct timer_actor_t {
   actor_t actor;
   pd_loop_t* loop;
@@ -39,31 +33,16 @@ typedef struct timer_actor_t {
   /* Debounce map: tracks one timer per (target, completion_type) pair,
      cancelling the previous timer when a new debounce arrives. */
   debounce_entry_t debounce_map[MAX_DEBOUNCE_KEYS];
-  platform_mutex_t* destroy_lock;
-  struct timer_destroy_node_t* destroy_stack;
-  /* Serializes pd_timer_create/destroy against the timer thread's
-     destroy_stack_drain. Pool workers run _timer_actor_dispatch on
-     parallel threads, and pd_timer_create/destroy mutates the loop's
-     watcher list. The timer thread also mutates the watcher list when
-     it drains the destroy stack. Without this lock, two threads can
-     race on pd_loop_add_watcher / pd_loop_remove_watcher — the
-     watcher array's watcher_count is left inconsistent, and the loop
+  /* Serializes pd_timer_create/start/stop/destroy (which mutate the loop's
+     watcher list) across threads. timer_actor_set and timer_actor_cancel
+     run synchronously on the caller's thread; TIMER_DEBOUNCE and
+     TIMER_DEBOUNCE_FLUSH dispatch on a scheduler pool worker; and
+     _timer_actor_destroy_all_tracked runs at teardown. Without this lock,
+     two of these can race on pd_loop_add_watcher / pd_loop_remove_watcher —
+     the watcher array's watcher_count is left inconsistent, and the loop
      later iterates a stale (already-freed) pointer. */
   platform_mutex_t* loop_lock;
 } timer_actor_t;
-
-typedef struct {
-  uint64_t timer_id;
-  uint64_t timeout_ms;
-  uint64_t interval_ms;
-  actor_t* target;
-  uint32_t completion_type;
-  ATOMIC(uint64_t)* out_timer_id;
-} timer_set_payload_t;
-
-typedef struct {
-  uint64_t timer_id;
-} timer_cancel_payload_t;
 
 typedef struct {
   uint64_t timeout_ms;
