@@ -53,6 +53,55 @@ TEST(TestTimerActor, TestCreateDestroy) {
   scheduler_pool_destroy(pool);
 }
 
+#ifdef _WIN32
+#include <windows.h>
+
+/* Isolate the per-restart OS-handle leak to the timer_actor (which owns a
+   pd_loop IOCP + a loop thread). offs_node_restart destroys and re-creates the
+   timer_actor every cycle, so each cycle must release every OS handle it
+   allocates. The scheduler_pool is created once outside the loop (it is
+   handle-balanced per TestPoolStartStopNoHandleLeak). */
+static DWORD ta_handle_count() {
+  DWORD count = 0;
+  GetProcessHandleCount(GetCurrentProcess(), &count);
+  return count;
+}
+
+TEST(TestTimerActor, TestCreateDestroyNoHandleLeak) {
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  /* Warm up: first cycle may cache runtime handles; discard it for a steady
+     baseline. */
+  for (int i = 0; i < 3; i++) {
+    timer_actor_t* t = timer_actor_create(pool);
+    ASSERT_NE(t, nullptr);
+    timer_actor_destroy(t);
+    scheduler_pool_wait_for_idle(pool);
+  }
+
+  DWORD before = ta_handle_count();
+  const int N = 50;
+  for (int i = 0; i < N; i++) {
+    timer_actor_t* t = timer_actor_create(pool);
+    ASSERT_NE(t, nullptr);
+    timer_actor_destroy(t);
+    scheduler_pool_wait_for_idle(pool);
+  }
+  DWORD after = ta_handle_count();
+
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
+
+  LONG delta = (LONG)after - (LONG)before;
+  EXPECT_LE(delta, 2) << "handle leak: +" << delta << " over " << N
+                      << " timer_actor cycles (before=" << before
+                      << " after=" << after << ")";
+}
+#endif
+
 TEST(TestTimerActor, TestOneShotTimer) {
   scheduler_pool_t* pool = scheduler_pool_create(2);
   ASSERT_NE(pool, nullptr);

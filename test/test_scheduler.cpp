@@ -46,6 +46,57 @@ TEST(TestScheduler, TestPoolStartStop) {
   scheduler_pool_destroy(pool);
 }
 
+#ifdef _WIN32
+#include <windows.h>
+
+/* Regression test for the per-restart OS-handle leak: offs_node_restart
+   destroys and re-creates a scheduler_pool every cycle, and each cycle must
+   release every OS handle it allocates. platform_barrier_destroy previously
+   freed only the wrapper struct and never called DeleteSynchronizationBarrier,
+   leaking one barrier object per cycle. This loops the full
+   create/start/wait/stop/destroy cycle and asserts the process handle count
+   does not grow. */
+static DWORD pool_handle_count() {
+  DWORD count = 0;
+  GetProcessHandleCount(GetCurrentProcess(), &count);
+  return count;
+}
+
+TEST(TestScheduler, TestPoolStartStopNoHandleLeak) {
+  /* Warm up: the first cycle may touch runtime/threadpool internals that cache
+     handles; run a few cycles and discard so the baseline is steady. */
+  for (int i = 0; i < 3; i++) {
+    scheduler_pool_t* pool = scheduler_pool_create(2);
+    ASSERT_NE(pool, nullptr);
+    scheduler_pool_start(pool);
+    platform_sleep_ms(10);
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
+  }
+
+  DWORD before = pool_handle_count();
+  const int N = 50;
+  for (int i = 0; i < N; i++) {
+    scheduler_pool_t* pool = scheduler_pool_create(2);
+    ASSERT_NE(pool, nullptr);
+    scheduler_pool_start(pool);
+    platform_sleep_ms(10);
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
+  }
+  DWORD after = pool_handle_count();
+
+  /* A +1/cycle leak would add N handles across N cycles. Allow a small
+     tolerance for lazy runtime allocations unrelated to the pool. */
+  LONG delta = (LONG)after - (LONG)before;
+  EXPECT_LE(delta, 2) << "handle leak: +" << delta << " over " << N
+                      << " scheduler_pool cycles (before=" << before
+                      << " after=" << after << ")";
+}
+#endif
+
 TEST(TestScheduler, TestActorScheduling) {
   scheduler_pool_t* pool = scheduler_pool_create(2);
   ASSERT_NE(pool, nullptr);
