@@ -51,14 +51,18 @@ void offs_msquic_close(void) {
     return;
   }
   g_msquic_refcount--;
-  if (g_msquic_refcount == 0) {
-    MsQuicClose(g_msquic);
-    g_msquic = NULL;
-    platform_mutex_unlock(g_msquic_lock);
-    platform_mutex_destroy(g_msquic_lock);
-    g_msquic_lock = NULL;
-    return;
-  }
+  /* MsQuic is a PROCESS-LIFETIME singleton: once opened, it is kept open for
+     the life of the process and reused across network create/destroy cycles
+     (including offsd config-reload restarts, which destroy and re-create the
+     network every cycle). Do NOT call MsQuicClose when the refcount reaches 0.
+
+     MsQuicOpen2/MsQuicClose are not idempotent-balanced in a tight loop:
+     MsQuicClose returns before its internal worker/timer threads fully exit,
+     so a close-then-immediately-reopen cycle (refcount 1->0->1) leaks those
+     thread handles -- observed as +1..+3 OS handles per offs_node_restart.
+     Keeping MsQuic open across cycles eliminates the reopen and the leak.
+     The single MsQuic table + this lock are reclaimed by the OS at process
+     exit; a long-running offsd pays the one-time open cost exactly once. */
   platform_mutex_unlock(g_msquic_lock);
 }
 
