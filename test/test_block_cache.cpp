@@ -1,6 +1,18 @@
 #include <gtest/gtest.h>
 #include <future>
 #include <chrono>
+#include <cstdlib>
+
+/* The block_cache fixtures below hardcode a temp location under "/tmp". Two
+   problems flow from that: (1) parallel test processes (or `ctest -j`) collide
+   on the same on-disk block cache directory, corrupting each other's
+   sections/index files; (2) it makes the suite non-hermetic. OFFS_BC_TMP lets a
+   caller redirect that base to a private directory per process. Falls back to
+   "/tmp" so the default behavior is unchanged. */
+static const char* bc_tmp_base() {
+  const char* t = getenv("OFFS_BC_TMP");
+  return (t != NULL && t[0] != '\0') ? t : "/tmp";
+}
 extern "C" {
 #include "../src/BlockCache/block.h"
 #include "../src/BlockCache/block_cache.h"
@@ -228,7 +240,7 @@ public:
   block_t* blocks[BLOCK_COUNT];
   config_t config;
   void SetUp() override {
-    location = path_join("/tmp", "BlockCacheTest");
+    location = path_join(bc_tmp_base(), "BlockCacheTest");
     rm_rf(location);
     pool = scheduler_pool_create(4);
     scheduler_pool_start(pool);
@@ -369,7 +381,7 @@ public:
   config_t config;
   scheduler_pool_t* pool;
   void SetUp() override {
-    location = path_join("/tmp", "BlockCacheIntegrationTest");
+    location = path_join(bc_tmp_base(), "BlockCacheIntegrationTest");
     rm_rf(location);
     pool = scheduler_pool_create(4);
     scheduler_pool_start(pool);
