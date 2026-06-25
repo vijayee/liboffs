@@ -11,6 +11,18 @@ if (BUILD_TESTING)
       set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
       add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../deps/googletest ${CMAKE_BINARY_DIR}/deps/googletest)
     endif()
+    # MSVC AddressSanitizer sets _ANNOTATE_STRING/_ANNOTATE_VECTOR=1 on every
+    # object compiled with /fsanitize=address, and the linker enforces a single
+    # value across all C++/STL objects (LNK2038 otherwise). gtest/gmock are C++
+    # with heavy STL use and are built in-tree here, so under OFFS_ENABLE_ASAN
+    # they must be instrumented too to match the ASan testliboffs objects.
+    if(OFFS_ENABLE_ASAN)
+      foreach(_gtest_t gtest gtest_main gmock gmock_main)
+        if(TARGET ${_gtest_t})
+          target_compile_options(${_gtest_t} PRIVATE /fsanitize=address /Z7)
+        endif()
+      endforeach()
+    endif()
 
     set(GTEST_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../deps/googletest/googletest/include)
     set(GMOCK_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../deps/googletest/googlemock/include)
@@ -79,6 +91,25 @@ if (BUILD_TESTING)
             # certs/ca_cert.pem left on disk from a manual run.
             ${CMAKE_CURRENT_SOURCE_DIR}/../tools/offs-ca/ca_ops.c
             )
+    # Match the OFFS_ENABLE_ASAN gate from the parent CMakeLists.txt: when on,
+    # instrument the test exe and link the AddressSanitizer runtime so the
+    # ASan-instrumented offs objects it links resolve against it. Externals stay
+    # uninstrumented. /Z7 embeds debug info for symbolicated ASan stack traces.
+    if(OFFS_ENABLE_ASAN)
+      target_compile_options(testliboffs PRIVATE /fsanitize=address /Z7)
+      # The ASan runtime auto-links via the /fsanitize=address compiler-emitted
+      # /DEFAULTLIB directive (link.exe needs no /fsanitize=address flag, which
+      # older toolsets reject as LNK4044). /DEBUG emits a full PDB so ASan's
+      # faulting stack traces symbolicate (LNK4302 asks for it explicitly).
+      target_link_options(testliboffs PRIVATE /DEBUG)
+    endif()
+    # Native crash-diagnosis build (no ASan): embed debug info + emit a PDB so
+    # the test_crash_catch vectored handler can symbolicate the faulting stack
+    # at native timing. See OFFS_TEST_DEBUG in the parent CMakeLists.txt.
+    if(OFFS_TEST_DEBUG AND NOT OFFS_ENABLE_ASAN)
+      target_compile_options(testliboffs PRIVATE /Z7)
+      target_link_options(testliboffs PRIVATE /DEBUG)
+    endif()
     add_dependencies(testliboffs cbor)
     add_dependencies(testliboffs offs)
     add_dependencies(testliboffs blake3)
