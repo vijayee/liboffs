@@ -689,7 +689,7 @@ protected:
         transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path,
                                           NULL, NULL);
         ASSERT_NE(transport, nullptr);
-        unix_transport_set_config_ctx(transport, &node_obj, cache_dir);
+        unix_transport_set_config_ctx(transport, &node_obj, cache_dir, NULL, NULL);
         unix_transport_start(transport);
     }
 

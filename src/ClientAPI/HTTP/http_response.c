@@ -59,8 +59,18 @@ http_response_t* http_response_create(scheduler_pool_t* pool, http_connection_t*
   refcounter_init((refcounter_t*)response);
   stream_init((stream_t*)response, push, writeable_stream, 0, pool,
               (void (*)(stream_t*))http_response_destroy);
-  response->stream.actor.state = response;
-  response->stream.actor.dispatch = _http_response_dispatch;
+  /* The response IS its overlay stream: stream_init registered and scheduled
+     ((stream_t*)response)->actor, and all stream machinery operates on that
+     overlay actor. The embedded http_response_t.stream member is vestigial
+     (never read). Set the overlay actor's state/dispatch — not the embedded
+     one — so the response-specific dispatch takes effect on the actor that is
+     actually scheduled. Writing the embedded actor instead would clobber the
+     overlay actor's fields 8 bytes earlier: embedded.state overwrites the
+     overlay dispatch, and embedded.dispatch overwrites the overlay actor's
+     registry_prev link (leaving a code pointer there that crashes the registry
+     detach on response destroy). */
+  ((stream_t*)response)->actor.state = response;
+  ((stream_t*)response)->actor.dispatch = _http_response_dispatch;
   response->status_code = HTTP_STATUS_OK;
   http_headers_init(&response->headers);
   response->headers_sent = 0;

@@ -1,6 +1,18 @@
 #include <gtest/gtest.h>
 #include <future>
 #include <chrono>
+#include <cstdlib>
+
+/* The block_cache fixtures below hardcode a temp location under "/tmp". Two
+   problems flow from that: (1) parallel test processes (or `ctest -j`) collide
+   on the same on-disk block cache directory, corrupting each other's
+   sections/index files; (2) it makes the suite non-hermetic. OFFS_BC_TMP lets a
+   caller redirect that base to a private directory per process. Falls back to
+   "/tmp" so the default behavior is unchanged. */
+static const char* bc_tmp_base() {
+  const char* t = getenv("OFFS_BC_TMP");
+  return (t != NULL && t[0] != '\0') ? t : "/tmp";
+}
 extern "C" {
 #include "../src/BlockCache/block.h"
 #include "../src/BlockCache/block_cache.h"
@@ -157,6 +169,71 @@ static int bc_remove_sync(block_cache_t* bc, buffer_t* hash, scheduler_pool_t* p
   return cs.remove_result;
 }
 
+#ifdef _WIN32
+#include <windows.h>
+
+/* Isolate the per-restart OS-handle leak to block_cache. offs_node_restart
+   destroys and re-creates the block_cache every cycle, so each cycle must
+   release every OS handle it allocates (section/index/WAL file handles, any
+   internal event/thread). The scheduler_pool + timer_actor are created once
+   outside the loop (both handle-balanced per their own isolation tests). */
+static DWORD bc_handle_count() {
+  DWORD count = 0;
+  GetProcessHandleCount(GetCurrentProcess(), &count);
+  return count;
+}
+
+TEST(TestBlockCacheHandleLeak, TestBlockCacheCreateDestroyNoHandleLeak) {
+  const char* base = bc_tmp_base();
+  char* location = path_join(base, "BlockCacheHandleLeakTest");
+  rm_rf(location);
+  mkdir_p(location);
+
+  scheduler_pool_t* pool = scheduler_pool_create(4);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+  timer_actor_t* timer_actor = timer_actor_create(pool);
+  ASSERT_NE(timer_actor, nullptr);
+
+  config_t config = config_default();
+  config.index_wait = 60000;
+  config.index_max_wait = 60000;
+
+  /* Warm up: first cycle may cache runtime/file handles; discard for a steady
+     baseline. */
+  for (int i = 0; i < 2; i++) {
+    block_cache_t* bc = block_cache_create(config, location, standard, timer_actor, pool, NULL, 0);
+    ASSERT_NE(bc, nullptr);
+    block_cache_sync(bc);
+    block_cache_destroy(bc);
+    scheduler_pool_wait_for_idle(pool);
+  }
+
+  DWORD before = bc_handle_count();
+  const int N = 20;
+  for (int i = 0; i < N; i++) {
+    block_cache_t* bc = block_cache_create(config, location, standard, timer_actor, pool, NULL, 0);
+    ASSERT_NE(bc, nullptr);
+    block_cache_sync(bc);
+    block_cache_destroy(bc);
+    scheduler_pool_wait_for_idle(pool);
+  }
+  DWORD after = bc_handle_count();
+
+  timer_actor_destroy(timer_actor);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
+  rm_rf(location);
+  free(location);
+
+  LONG delta = (LONG)after - (LONG)before;
+  EXPECT_LE(delta, 2) << "handle leak: +" << delta << " over " << N
+                      << " block_cache cycles (before=" << before
+                      << " after=" << after << ")";
+}
+#endif
+
 class TestBlockLRU : public testing::Test {
 public:
   size_t size = 5;
@@ -228,7 +305,7 @@ public:
   block_t* blocks[BLOCK_COUNT];
   config_t config;
   void SetUp() override {
-    location = path_join("/tmp", "BlockCacheTest");
+    location = path_join(bc_tmp_base(), "BlockCacheTest");
     rm_rf(location);
     pool = scheduler_pool_create(4);
     scheduler_pool_start(pool);
@@ -369,7 +446,7 @@ public:
   config_t config;
   scheduler_pool_t* pool;
   void SetUp() override {
-    location = path_join("/tmp", "BlockCacheIntegrationTest");
+    location = path_join(bc_tmp_base(), "BlockCacheIntegrationTest");
     rm_rf(location);
     pool = scheduler_pool_create(4);
     scheduler_pool_start(pool);

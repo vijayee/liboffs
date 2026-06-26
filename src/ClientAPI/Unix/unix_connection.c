@@ -1129,6 +1129,8 @@ unix_connection_t* unix_connection_create(unix_transport_t* transport, platform_
   connection->config_ctx.is_authenticated = connection->is_authenticated;
   connection->config_ctx.send_frame = (config_send_frame_fn)_unix_connection_send_frame;
   connection->config_ctx.send_error = (config_send_error_fn)_unix_connection_send_error;
+  connection->config_ctx.trigger_restart = transport->trigger_restart;
+  connection->config_ctx.restart_user_data = transport->restart_user_data;
 
   connection->peer_ctx.conn = (block_connection_t*)connection;
   connection->peer_ctx.network = transport->config_node ? transport->config_node->network : NULL;

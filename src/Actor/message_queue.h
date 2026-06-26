@@ -22,6 +22,13 @@ typedef struct message_queue_t {
   ATOMIC(message_node_t*) head;
   message_node_t* tail;
   ATOMIC(size_t) size;
+  /* Optional back-pointer to the owning pool's pending-messages counter.
+     When non-NULL, push increments and pop decrements it, so the pool always
+     knows how many messages are queued across all of its actors. This is what
+     scheduler_pool_wait_for_idle waits on (in addition to all workers being
+     idle) so it never returns with an undelivered message still stranded in a
+     mailbox. NULL for queues not owned by a scheduler pool. */
+  ATOMIC(size_t)* pending_counter;
 } message_queue_t;
 
 void message_queue_init(message_queue_t* queue);

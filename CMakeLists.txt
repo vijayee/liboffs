@@ -173,6 +173,31 @@ else()
 endif()
 
 add_library(offs STATIC ${C_SRC})
+# Opt-in AddressSanitizer instrumentation of the offs library only (not the
+# external deps: msquic/poll-dancer/libcbor are add_subdirectory/ExternalProject
+# targets that inherit CMAKE_C_FLAGS, so setting /fsanitize=address globally
+# would force ASan onto them — slow and brittle. Scoping to the offs target
+# instruments the code under test while leaving externals uninstrumented, which
+# is the supported ASan usage: the test exe pulls the ASan runtime via its own
+# link options and offs's instrumented objects resolve against it. /Z7 embeds
+# debug info so ASan stack traces symbolicate. Default OFF; normal builds are
+# unaffected.
+option(OFFS_ENABLE_ASAN "Instrument the offs library with AddressSanitizer (MSVC) for debugging" OFF)
+if(OFFS_ENABLE_ASAN)
+  target_compile_options(offs PRIVATE /fsanitize=address /Z7)
+endif()
+
+# Opt-in debug info (PDB + /Z7) for the offs library WITHOUT AddressSanitizer.
+# Used by the test crash-catcher (test_crash_catch.h) to symbolicate a native
+# faulting stack at native timing — ASan changes scheduler/allocation timing
+# and can suppress reproduction of narrow races, so a native-with-symbols build
+# is the tool that actually surfaces the crash site. /Z7 embeds debug info in
+# the objects so frames inside the offs library symbolicate. Default OFF; normal
+# Release builds are unaffected.
+option(OFFS_TEST_DEBUG "Embed debug info (PDB + /Z7) in offs for native crash-diagnosis builds" OFF)
+if(OFFS_TEST_DEBUG AND NOT OFFS_ENABLE_ASAN)
+  target_compile_options(offs PRIVATE /Z7)
+endif()
 add_dependencies(offs cbor)
 add_dependencies(offs http-parser)
 target_include_directories(offs PRIVATE ${blake3_SOURCE_DIR}/c)

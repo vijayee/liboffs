@@ -263,3 +263,17 @@ void config_free(config_t* config) {
   free(config->tcp_tls_key_path);
   free(config);
 }
+
+void config_free_members(config_t* config) {
+  if (config == NULL) return;
+  free(config->api_key_hash);
+  config->api_key_hash = NULL;
+  free(config->https_cert_path);
+  config->https_cert_path = NULL;
+  free(config->https_key_path);
+  config->https_key_path = NULL;
+  free(config->tcp_tls_cert_path);
+  config->tcp_tls_cert_path = NULL;
+  free(config->tcp_tls_key_path);
+  config->tcp_tls_key_path = NULL;
+}

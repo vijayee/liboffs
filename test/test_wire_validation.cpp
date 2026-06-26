@@ -73,14 +73,22 @@ TEST(TestWireValidation, RejectsPutWithZeroStreamLength) {
   EXPECT_NE(rc, 0);
 }
 
-TEST(TestWireValidation, RejectsPutWithOversizedStreamLength) {
+// stream_length is the total size of a streaming PUT (the sum of all
+// subsequent PUT_DATA frames), not a single message size. It is intentionally
+// left unbounded apart from the != 0 check: capping it at
+// OFFS_MAX_CBOR_MESSAGE_SIZE rejected any upload larger than 64 MB at PUT_START
+// before a single PUT_DATA frame was processed, and the server never allocates
+// stream_length bytes up front. The real per-frame bound is the data_size cap
+// in client_api_put_request_decode. So an oversized stream_length must be
+// accepted here. (See client_api_wire.c:155-163 for the rationale.)
+TEST(TestWireValidation, AcceptsPutWithOversizedStreamLength) {
   cbor_item_t* cbor = _build_put_request("text/plain", "file.txt",
       (uint64_t)OFFS_MAX_CBOR_MESSAGE_SIZE + 1);
   client_api_put_request_t msg;
   int rc = client_api_put_request_decode(cbor, &msg);
   if (rc == 0) client_api_put_request_destroy(&msg);
   cbor_decref(&cbor);
-  EXPECT_NE(rc, 0);
+  EXPECT_EQ(rc, 0);
 }
 
 TEST(TestWireValidation, AcceptsValidPutRequest) {

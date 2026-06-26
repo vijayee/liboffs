@@ -643,6 +643,96 @@ TEST(QuicIntegration, NetworkCreateDestroy) {
 #endif
 }
 
+#ifdef _WIN32
+#include <windows.h>
+#include <iostream>
+
+static DWORD net_hl_handle_count() {
+  DWORD count = 0;
+  GetProcessHandleCount(GetCurrentProcess(), &count);
+  return count;
+}
+
+/* Guard the full network create/destroy handle path with a persistent
+   timer_actor + block_cache + authority (the configuration that exhibited a
+   ~0.7-handle/cycle linear leak over 100 cycles). network_create sets five
+   recurring timers; network_destroy cancels them. The leak was the timer
+   cancel path stranding cancel messages under 2 scheduler workers, leaving
+   pd_timers (and their CreateEvent + CreateTimerQueueTimer handles) tracked
+   until timer_actor_destroy — fixed by making timer_actor_cancel synchronous.
+   100 cycles with a midpoint distinguishes a real linear leak from bounded
+   ramp-up caching that plateaus. */
+TEST(QuicIntegration, NetworkCreateDestroyNoHandleLeak) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  config_t config = config_default();
+  authority_t* authority = authority_create(&config);
+  ASSERT_NE(authority, nullptr);
+
+  timer_actor_t* timer = timer_actor_create(pool);
+  ASSERT_NE(timer, nullptr);
+
+  block_cache_t* cache = block_cache_create(config, (char*)"/tmp/test_quic_hl_bc", standard, timer, pool, NULL, 0);
+  ASSERT_NE(cache, nullptr);
+
+  /* Warm up: let runtime/MsQuic/timer-queue caches reach steady state. */
+  bool msquic_ok = true;
+  for (int i = 0; i < 3; i++) {
+    network_t* network = network_create(authority, cache, timer, pool, &config);
+    if (network == nullptr) { msquic_ok = false; break; }
+    scheduler_pool_wait_for_idle(pool);
+    network_destroy(network);
+    scheduler_pool_wait_for_idle(pool);
+  }
+  if (!msquic_ok) {
+    block_cache_destroy(cache);
+    timer_actor_destroy(timer);
+    authority_destroy(authority);
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
+    GTEST_SKIP() << "msquic initialization failed";
+  }
+
+  const int N = 100;
+  DWORD before = net_hl_handle_count();
+  DWORD mid = 0;
+  for (int i = 0; i < N; i++) {
+    network_t* network = network_create(authority, cache, timer, pool, &config);
+    ASSERT_NE(network, nullptr);
+    scheduler_pool_wait_for_idle(pool);
+    network_destroy(network);
+    scheduler_pool_wait_for_idle(pool);
+    if (i == N / 2) mid = net_hl_handle_count();
+  }
+  DWORD after = net_hl_handle_count();
+
+  block_cache_destroy(cache);
+  timer_actor_destroy(timer);
+  authority_destroy(authority);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
+
+  long first_half = (long)mid - (long)before;
+  long second_half = (long)after - (long)mid;
+  long total = (long)after - (long)before;
+  EXPECT_LE(total, 10) << "network handle growth: +" << total << " over " << N
+                       << " cycles (before=" << before << " mid=" << mid
+                       << " after=" << after << ")";
+  if (first_half > 5 && second_half > first_half / 2) {
+    ADD_FAILURE() << "network handle growth is linear, not plateauing: first_half=+"
+                  << first_half << " second_half=+" << second_half;
+  }
+#endif
+}
+#endif /* _WIN32 */
+
 TEST(QuicIntegration, QuicListenerStartStop) {
 #ifndef HAS_MSQUIC
   GTEST_SKIP() << "msquic not available";

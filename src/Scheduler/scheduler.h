@@ -53,6 +53,19 @@ typedef struct scheduler_pool_t {
   ATOMIC(uint8_t) terminate;
   platform_mutex_t* deref_lock;
   pending_deref_node_t* pending_derefs;
+  /* Total undelivered messages across every actor on this pool. Incremented by
+     message_queue_push (via each actor's queue.pending_counter back-pointer)
+     and decremented by message_queue_pop, so it covers both dispatch
+     (actor_run) and drain (message_queue_destroy). scheduler_pool_wait_for_idle
+     waits on this in addition to all workers being idle, so it can never return
+     with a message still stranded in a mailbox. */
+  ATOMIC(size_t) pending_messages;
+  /* Registry of every actor owned by this pool (intrusive doubly-linked list
+     via actor_t.registry_prev/registry_next), used by the
+     scheduler_pool_wait_for_idle recovery scan to find and re-inject stranded
+     actors. Protected by registry_lock. */
+  platform_mutex_t* registry_lock;
+  actor_t* registry_head;
 } scheduler_pool_t;
 
 scheduler_pool_t* scheduler_pool_create(size_t worker_count);

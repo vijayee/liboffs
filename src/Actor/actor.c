@@ -15,6 +15,41 @@ void actor_init(actor_t* actor, void* state, void (*dispatch)(void* state, messa
   actor->pool = pool;
   actor->state = state;
   actor->dispatch = dispatch;
+  actor->registry_prev = NULL;
+  actor->registry_next = NULL;
+  if (pool != NULL) {
+    /* Route this mailbox's push/pop counts to the pool's pending-messages
+       counter, and register the actor so scheduler_pool_wait_for_idle can find
+       and re-inject it if it ever strands. */
+    actor->queue.pending_counter = &pool->pending_messages;
+    platform_mutex_lock(pool->registry_lock);
+    actor->registry_next = pool->registry_head;
+    if (pool->registry_head != NULL) {
+      pool->registry_head->registry_prev = actor;
+    }
+    pool->registry_head = actor;
+    platform_mutex_unlock(pool->registry_lock);
+  }
+}
+
+void actor_detach_pool(actor_t* actor) {
+  if (actor->pool == NULL) {
+    return;
+  }
+  scheduler_pool_t* pool = actor->pool;
+  platform_mutex_lock(pool->registry_lock);
+  if (actor->registry_prev != NULL) {
+    actor->registry_prev->registry_next = actor->registry_next;
+  } else {
+    pool->registry_head = actor->registry_next;
+  }
+  if (actor->registry_next != NULL) {
+    actor->registry_next->registry_prev = actor->registry_prev;
+  }
+  actor->registry_prev = NULL;
+  actor->registry_next = NULL;
+  actor->pool = NULL;
+  platform_mutex_unlock(pool->registry_lock);
 }
 
 void actor_destroy(actor_t* actor) {
@@ -25,6 +60,12 @@ void actor_destroy(actor_t* actor) {
   if (atomic_load(&actor->flags) & ACTOR_FLAG_PRESSURED) {
     backpressure_release(actor);
   }
+  /* Unregister from the pool's actor registry before touching the queue, so a
+     concurrent scheduler_pool_wait_for_idle recovery scan can never dereference
+     an actor whose mailbox is about to be (or already is) torn down. The
+     ACTOR_FLAG_DESTROY set above is the secondary guard for any scan already
+     in flight on this actor. */
+  actor_detach_pool(actor);
   /* A pool worker may still be inside actor_run on this actor, touching
      actor->queue (message_queue_pop / message_queue_markempty) after dispatch
      returns, so the queue cannot be torn down until that worker has cleared

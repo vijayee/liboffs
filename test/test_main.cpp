@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 #include <string.h>
+#include "test_crash_catch.h"
 extern "C" {
 #include "../src/RefCounter/refcounter.h"
 #include "../src/Buffer/buffer.h"
@@ -18,6 +19,11 @@ extern "C" {
 }
 
 int main(int argc, char** argv) {
+  /* Install the vectored crash-catcher (no-op unless OFFS_CRASH_TRACE is set in
+     the environment). When enabled, a fatal access violation prints a
+     symbolicated faulting stack to stderr before the process dies, so a
+     background reproduction loop captures the crash site without a debugger. */
+  test_crash_catch_init();
   /* Do not call OPENSSL_init_crypto / OPENSSL_cleanup here.
    *
    * On OpenSSL 3.0.2 the bundled quictls (transitively via msquic) registers

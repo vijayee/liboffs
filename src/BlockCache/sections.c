@@ -829,6 +829,16 @@ void sections_destroy(sections_t* sections) {
        the completion payload, but no new work reaches the actor. */
     atomic_fetch_or(&sections->actor.flags, ACTOR_FLAG_DESTROY);
     timer_actor_debounce_flush(sections->timer_actor, &sections->actor, SECTION_WRITE_META);
+    /* SECTION_SAVE_META is debounced in round_robin_add (target =
+       &sections->actor) on every sections_create cycle. It must be flushed
+       here, BEFORE actor_destroy nulls sections->actor.pool — otherwise the
+       only other flush site (round_robin_destroy, gated on
+       robin->save_target->pool != NULL) is skipped and the debounce entry +
+       its pd_timer leak one OS handle per cycle (CreateTimerQueueTimer /
+       stop_event), accumulating up to the MAX_DEBOUNCE_KEYS cap. The stale
+       entry would also keep a target pointer to freed sections_t memory, so
+       the still-armed repeating timer's actor_send would be a use-after-free. */
+    timer_actor_debounce_flush(sections->timer_actor, &sections->actor, SECTION_SAVE_META);
     platform_sleep_ms(10);
     scheduler_pool_wait_for_idle(sections->actor.pool);
   }

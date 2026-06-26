@@ -2,6 +2,7 @@
 // Created by victor on 5/28/26.
 //
 #include "config_routes.h"
+#include "../config_handlers.h"
 #include "http_response.h"
 #include "http_request.h"
 #include "http_headers.h"
@@ -17,6 +18,8 @@
 typedef struct {
   offs_node_t* node;
   char* data_dir;
+  config_trigger_restart_fn trigger_restart; /* NULL → offs_node_restart fallback */
+  void* restart_user_data;
 } config_routes_ctx_t;
 
 /* Auth: check Bearer token OR local binding */
@@ -212,7 +215,11 @@ static void _config_restart_handler(http_request_t* request, http_response_t* re
   http_response_end(response);
 
   /* Trigger restart */
-  offs_node_restart(ctx->node, ctx->data_dir);
+  if (ctx->trigger_restart != NULL) {
+    ctx->trigger_restart(ctx->restart_user_data);
+  } else {
+    offs_node_restart(ctx->node, ctx->data_dir);
+  }
 }
 
 static void _config_routes_ctx_destroy(void* data) {
@@ -222,12 +229,16 @@ static void _config_routes_ctx_destroy(void* data) {
 }
 
 void config_routes_register(http_server_t* server, offs_node_t* node,
-                            const config_t* config, const char* data_dir) {
+                            const config_t* config, const char* data_dir,
+                            config_trigger_restart_fn trigger_restart,
+                            void* restart_user_data) {
   (void)config; /* unused — config is accessed via node->config */
 
   config_routes_ctx_t* ctx = get_clear_memory(sizeof(config_routes_ctx_t));
   ctx->node = node;
   ctx->data_dir = strdup(data_dir);
+  ctx->trigger_restart = trigger_restart;
+  ctx->restart_user_data = restart_user_data;
 
   http_server_get_with_data(server, "/config", _config_get_handler, ctx,
                             _config_routes_ctx_destroy);

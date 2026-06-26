@@ -181,6 +181,9 @@ void unix_transport_destroy(unix_transport_t* transport) {
   }
   for (int i = transport->connections.length - 1; i >= 0; i--) {
     unix_connection_t* conn = transport->connections.data[i];
+    /* Detach from the pool registry before freeing conn, so no dangling
+     * registry pointer remains for a recovery scan / pool-destroy detach. */
+    actor_detach_pool(&conn->actor);
     message_queue_destroy(&conn->actor.queue);
     if (ATOMIC_LOAD(&conn->watcher) != NULL) {
       pd_watcher_t* watcher = ATOMIC_EXCHANGE(&conn->watcher, NULL);
@@ -446,7 +449,9 @@ void unix_transport_set_update_status_ctx(unix_transport_t* transport,
 }
 
 void unix_transport_set_config_ctx(unix_transport_t* transport,
-                                    offs_node_t* node, const char* data_dir) {
+                                    offs_node_t* node, const char* data_dir,
+                                    config_trigger_restart_fn trigger_restart,
+                                    void* restart_user_data) {
   transport->config_node = node;
   if (transport->config_data_dir != NULL) {
     free(transport->config_data_dir);
@@ -456,4 +461,6 @@ void unix_transport_set_config_ctx(unix_transport_t* transport,
     transport->config_data_dir = get_memory(strlen(data_dir) + 1);
     memcpy(transport->config_data_dir, data_dir, strlen(data_dir) + 1);
   }
+  transport->trigger_restart = trigger_restart;
+  transport->restart_user_data = restart_user_data;
 }
