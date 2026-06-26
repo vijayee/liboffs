@@ -181,6 +181,9 @@ void unix_transport_destroy(unix_transport_t* transport) {
   }
   for (int i = transport->connections.length - 1; i >= 0; i--) {
     unix_connection_t* conn = transport->connections.data[i];
+    /* Detach from the pool registry before freeing conn, so no dangling
+     * registry pointer remains for a recovery scan / pool-destroy detach. */
+    actor_detach_pool(&conn->actor);
     message_queue_destroy(&conn->actor.queue);
     if (ATOMIC_LOAD(&conn->watcher) != NULL) {
       pd_watcher_t* watcher = ATOMIC_EXCHANGE(&conn->watcher, NULL);

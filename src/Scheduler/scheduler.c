@@ -9,6 +9,7 @@
 #include "../Util/log.h"
 #include "../Platform/platform.h"
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -197,16 +198,42 @@ scheduler_pool_t* scheduler_pool_create(size_t worker_count) {
   pool->idle = platform_condvar_create();
   pool->deref_lock = platform_mutex_create();
   pool->pending_derefs = NULL;
+  pool->registry_lock = platform_mutex_create();
+  pool->registry_head = NULL;
   atomic_store_explicit(&pool->idle_count, 0, memory_order_relaxed);
   atomic_store_explicit(&pool->active_count, 0, memory_order_relaxed);
   atomic_store_explicit(&pool->terminate, 0, memory_order_relaxed);
+  atomic_store_explicit(&pool->pending_messages, 0, memory_order_relaxed);
   return pool;
 }
 
 void scheduler_pool_destroy(scheduler_pool_t* pool) {
+  /* Detach every still-registered actor from this pool before the pool's
+     memory (registry_lock, pending_messages) is freed. Existing call sites
+     routinely destroy the pool BEFORE destroying its actors
+     (e.g. scheduler_pool_destroy then actor_destroy), and actor_destroy /
+     message_queue_destroy touch actor->pool (to unregister from the registry
+     and to decrement pending_messages). Nulling each actor's pool pointer and
+     pending_counter here makes those later calls no-ops instead of
+     use-after-frees. Workers are already joined (scheduler_pool_stop) and no
+     actor_send can land (callers quiesce before destroy), so this is race-free. */
+  platform_mutex_lock(pool->registry_lock);
+  actor_t* actor = pool->registry_head;
+  while (actor != NULL) {
+    actor_t* next = actor->registry_next;
+    actor->pool = NULL;
+    actor->queue.pending_counter = NULL;
+    actor->registry_prev = NULL;
+    actor->registry_next = NULL;
+    actor = next;
+  }
+  pool->registry_head = NULL;
+  platform_mutex_unlock(pool->registry_lock);
+
   /* Drain any remaining pending derefs */
   scheduler_pool_drain_pending_derefs(pool);
   platform_mutex_destroy(pool->deref_lock);
+  platform_mutex_destroy(pool->registry_lock);
   for (size_t index = 0; index < pool->worker_count; index++) {
     deque_destroy(&pool->workers[index].local_queue);
   }
@@ -275,11 +302,113 @@ void scheduler_pool_drain_pending_derefs(scheduler_pool_t* pool) {
   }
 }
 
+/* Recovery scan for stranded actors. Called by scheduler_pool_wait_for_idle
+   when every worker is idle yet pending_messages is non-zero — the symptom of
+   the elusive work-stealing strand, where a message was pushed to an actor's
+   mailbox but the actor is in no worker's deque/inject queue and is not
+   running (so no worker will ever pick it up on its own). Re-injecting such an
+   actor wakes a worker to drain its mailbox, restoring forward progress.
+
+   The race itself is emergent from the inject/idle/steal interaction and is
+   not pinned to a single structure; this scan makes wait_for_idle correct
+   regardless of how a message strands, which is the property callers actually
+   depend on (every queued message is dispatched before wait_for_idle returns).
+
+   A strand can also be a lost wakeup: an actor whose SCHEDULED flag is set but
+   which is in no worker's deque and not in the inject queue (the schedule+inject
+   raced with the idle machinery and was lost). Such a stale-SCHEDULED actor is
+   re-injected too — when every worker is idle, a SCHEDULED flag can only be
+   stale, because a genuinely-scheduled actor would occupy a worker's deque or
+   the inject queue and that worker would not be idle. Re-injecting cannot
+   double-run it: no worker holds it when all are idle.
+
+   Only DESTROY-flagged actors are skipped: their owner is tearing them down
+   and will drain the mailbox itself via message_queue_destroy (which decrements
+   pending_messages), so re-injecting would race with that teardown.
+
+   registry_lock is held throughout, including across scheduler_inject. No
+   other path acquires registry_lock while holding inject.lock (actor_send and
+   backpressure_release take inject.lock without registry_lock; actor_destroy
+   takes them sequentially — backpressure_release releases inject.lock before
+   actor_detach_pool takes registry_lock), so this nested registry->inject order
+   is deadlock-free. Holding the lock for the whole scan also means a concurrent
+   actor_destroy / actor_detach_pool (both take registry_lock) cannot free an
+   actor mid-scan, so the scan never dereferences freed memory. Returns true if
+   any actor was re-injected, false if none was re-injectable (meaning the
+   remaining pending messages live only in DESTROY actors whose owner will
+   drain them). */
+static bool _scheduler_pool_reinject_stranded(scheduler_pool_t* pool) {
+  bool reinjected = false;
+  platform_mutex_lock(pool->registry_lock);
+  actor_t* actor = pool->registry_head;
+  while (actor != NULL) {
+    uint8_t flags = atomic_load(&actor->flags);
+    if (!(flags & ACTOR_FLAG_DESTROY) && !message_queue_isempty(&actor->queue)) {
+      atomic_fetch_or(&actor->flags, ACTOR_FLAG_SCHEDULED);
+      scheduler_inject(pool, actor);
+      reinjected = true;
+    }
+    actor = actor->registry_next;
+  }
+  platform_mutex_unlock(pool->registry_lock);
+  return reinjected;
+}
+
 void scheduler_pool_wait_for_idle(scheduler_pool_t* pool) {
   if (pool == NULL) return;
   if (atomic_load(&pool->terminate)) return;
+
+  /* Bound on consecutive "all idle yet messages remain" recovery attempts. A
+     correct run needs at most a handful (one per stranded actor batch); this
+     only trips if the pending-messages counter desyncs from the mailboxes or
+     the recovery scan fails to make progress — a real bug worth failing loudly
+     rather than hanging silently. */
+  static const uint32_t RECOVERY_LIMIT = 10000;
+  uint32_t recovery_attempts = 0;
+
   platform_mutex_lock(pool->idle_lock);
-  while (atomic_load(&pool->idle_count) != pool->worker_count) {
+  for (;;) {
+    if (atomic_load(&pool->idle_count) == pool->worker_count &&
+        atomic_load(&pool->pending_messages) == 0) {
+      break;
+    }
+    if (atomic_load(&pool->idle_count) == pool->worker_count) {
+      /* All workers idle but messages remain. Re-inject any stranded live
+         actor so a worker wakes and drains its mailbox. If none is
+         re-injectable, the remaining pending messages live only in
+         DESTROY-flagged actors whose owner will drain them after we return
+         (the established http/transport teardown pattern: set ACTOR_FLAG_DESTROY,
+         wait_for_idle, then message_queue_destroy + free), so it is correct to
+         return here — no dispatchable work is stranded. */
+      platform_mutex_unlock(pool->idle_lock);
+      bool reinjected = _scheduler_pool_reinject_stranded(pool);
+      platform_mutex_lock(pool->idle_lock);
+      if (!reinjected) {
+        break;
+      }
+      if (++recovery_attempts > RECOVERY_LIMIT) {
+        platform_mutex_unlock(pool->idle_lock);
+        log_error("scheduler_pool_wait_for_idle: stuck with %zu pending messages "
+                  "and all %zu workers idle after %u recovery attempts "
+                  "(counter/registry desync or unrecoverable strand)",
+                  atomic_load(&pool->pending_messages), pool->worker_count,
+                  recovery_attempts);
+        abort();
+      }
+      /* A worker woken by the re-inject may have already drained its mailbox,
+         gone idle, and signalled this condvar while we ran the scan WITHOUT
+         holding idle_lock. Re-check the idle+drained predicate so we don't
+         condvar_wait for a signal that already fired (which would hang, since
+         no further signal arrives while every worker stays idle). From this
+         check through condvar_wait we hold idle_lock, and condvar_wait
+         releases it atomically as it blocks — so any later idle-signal cannot
+         fire until we are parked, closing the missed-signal window. */
+      if (atomic_load(&pool->idle_count) == pool->worker_count &&
+          atomic_load(&pool->pending_messages) == 0) {
+        break;
+      }
+      /* Fall through to condvar_wait to await worker progress. */
+    }
     platform_condvar_wait(pool->idle, pool->idle_lock);
   }
   platform_mutex_unlock(pool->idle_lock);

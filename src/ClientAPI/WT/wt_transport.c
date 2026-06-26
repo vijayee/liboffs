@@ -334,6 +334,9 @@ void wt_transport_destroy(wt_transport_t* transport) {
   }
   for (int i = transport->connections.length - 1; i >= 0; i--) {
     wt_connection_t* conn = transport->connections.data[i];
+    /* Detach from the pool registry before freeing conn, so no dangling
+     * registry pointer remains for a recovery scan / pool-destroy detach. */
+    actor_detach_pool(&conn->actor);
     message_queue_destroy(&conn->actor.queue);
     if (conn->framer != NULL) {
       stream_framer_destroy(conn->framer);

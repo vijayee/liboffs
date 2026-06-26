@@ -26,6 +26,7 @@ void message_queue_init(message_queue_t* queue) {
   atomic_store(&queue->head, _set_empty_flag(sentinel));
   queue->tail = sentinel;
   atomic_store(&queue->size, 0);
+  queue->pending_counter = NULL;
 }
 
 bool message_queue_push(message_queue_t* queue, message_node_t* first, message_node_t* last) {
@@ -36,6 +37,9 @@ bool message_queue_push(message_queue_t* queue, message_node_t* first, message_n
   prev = _clear_empty_flag(prev);
   atomic_store_explicit(&prev->next, first, memory_order_release);
   atomic_fetch_add_explicit(&queue->size, 1, memory_order_relaxed);
+  if (queue->pending_counter != NULL) {
+    atomic_fetch_add_explicit(queue->pending_counter, 1, memory_order_release);
+  }
   return was_empty;
 }
 
@@ -47,6 +51,9 @@ bool message_queue_push_single(message_queue_t* queue, message_node_t* first, me
   prev = _clear_empty_flag(prev);
   atomic_store_explicit(&prev->next, first, memory_order_release);
   atomic_fetch_add_explicit(&queue->size, 1, memory_order_relaxed);
+  if (queue->pending_counter != NULL) {
+    atomic_fetch_add_explicit(queue->pending_counter, 1, memory_order_release);
+  }
   return was_empty;
 }
 
@@ -57,6 +64,9 @@ message_node_t* message_queue_pop(message_queue_t* queue) {
     queue->tail = next;
     atomic_thread_fence(memory_order_acquire);
     atomic_fetch_sub_explicit(&queue->size, 1, memory_order_relaxed);
+    if (queue->pending_counter != NULL) {
+      atomic_fetch_sub_explicit(queue->pending_counter, 1, memory_order_acq_rel);
+    }
     free(tail);
     return next;
   }

@@ -32,10 +32,27 @@ typedef struct actor_t {
   scheduler_pool_t* pool;
   void* state;
   void (*dispatch)(void* state, message_t* msg);
+  /* Intrusive doubly-linked list nodes for the owning pool's actor registry.
+     The registry lets scheduler_pool_wait_for_idle enumerate every actor and
+     re-inject any whose mailbox is non-empty but which is not scheduled — the
+     recovery path for the elusive work-stealing strand (see
+     scheduler_pool_wait_for_idle). Only touched under the pool's
+     registry_lock; NULL for inline actors (pool == NULL). */
+  struct actor_t* registry_prev;
+  struct actor_t* registry_next;
 } actor_t;
 
 void actor_init(actor_t* actor, void* state, void (*dispatch)(void* state, message_t* msg), scheduler_pool_t* pool);
 void actor_destroy(actor_t* actor);
+/* Unregister the actor from its pool's registry without draining the queue or
+   running backpressure_release. The registry-only subset of actor_destroy, for
+   callers that tear an actor down themselves (set ACTOR_FLAG_DESTROY, drain the
+   queue, free the struct) and intentionally bypass actor_destroy to avoid
+   backpressure_release waking worker threads during shutdown. Without this, a
+   freed actor stays in the registry and the next registry traversal would
+   dereference freed memory. Idempotent: nulls actor->pool, so a later call (or
+   actor_destroy / the pool-destroy detach loop having nulled pool) is a no-op. */
+void actor_detach_pool(actor_t* actor);
 bool actor_send(actor_t* actor, message_t* msg);
 bool actor_run(actor_t* actor, size_t batch_size);
 void backpressure_apply(actor_t* actor);

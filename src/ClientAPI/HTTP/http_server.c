@@ -250,8 +250,13 @@ void http_server_destroy(http_server_t* server) {
    * until the scheduler pool is stopped, which is fine during shutdown. */
   for (int i = server->connections.length - 1; i >= 0; i--) {
     http_connection_t* conn = server->connections.data[i];
-    /* Drain and free the actor's message queue without triggering
-     * backpressure_release (which would wake workers). */
+    /* Detach the actor from the pool registry and drain/free its message
+     * queue without triggering backpressure_release (which would wake
+     * workers). actor_detach_pool removes it from the registry so freeing
+     * conn below leaves no dangling pointer for a recovery scan / pool-destroy
+     * detach to dereference; message_queue_destroy still decrements
+     * pending_messages (pending_counter is left intact). */
+    actor_detach_pool(&conn->actor);
     message_queue_destroy(&conn->actor.queue);
     /* Clean up the watcher — the I/O thread is already stopped so we
      * can stop and destroy it directly on the main thread. */
