@@ -200,6 +200,41 @@ refcounter_t* refcounter_consume(refcounter_t** refcounter) {
   return holder;
 }
 
+void refcounter_take(refcounter_t* refcounter) {
+  if (refcounter == NULL) {
+    return;
+  }
+#ifndef OFFS_ATOMIC
+  platform_mutex_lock(refcounter->lock);
+  if (refcounter->yield > 0) {
+    refcounter->yield--;
+    if (refcounter->pending_deref > 0) {
+      refcounter->pending_deref--;
+      refcounter->count--;
+    }
+  }
+  platform_mutex_unlock(refcounter->lock);
+#else
+  if (refcounter->is_actor) {
+    if (refcounter->yield > 0) {
+      refcounter->yield--;
+      if (refcounter->pending_deref > 0) {
+        refcounter->pending_deref--;
+        refcounter->count--;
+      }
+    }
+  } else {
+    if (OFFS_ATOMIC_LOAD_N(refcounter->yield, OFFS_MO_RELAXED) > 0) {
+      OFFS_ATOMIC_FETCH_SUB(refcounter->yield, 1, OFFS_MO_RELAXED);
+      if (OFFS_ATOMIC_LOAD_N(refcounter->pending_deref, OFFS_MO_RELAXED) > 0) {
+        OFFS_ATOMIC_FETCH_SUB(refcounter->pending_deref, 1, OFFS_MO_RELAXED);
+        OFFS_ATOMIC_FETCH_SUB(refcounter->count, 1, OFFS_MO_RELAXED);
+      }
+    }
+  }
+#endif
+}
+
 void refcounter_destroy_lock(refcounter_t* refcounter) {
 #ifndef OFFS_ATOMIC
   platform_mutex_destroy(refcounter->lock);

@@ -9,7 +9,6 @@
 #include "../Scheduler/scheduler.h"
 #include "../Util/error.h"
 #include "../Util/atomic_compat.h"
-#include "../Platform/platform_thread.h"
 
 typedef enum {
   readable_stream = 0,
@@ -149,16 +148,11 @@ struct stream_t {
   stream_type_e type;
   stream_force_e force;
   ATOMIC(size_t) next_handler_id;
-  /* Serializes all handler-list access (subscribe/unsubscribe/notify
-     snapshot/remove-onces). Without it, stream_subscribe on one thread can
-     add nodes to a list while stream_notify on a worker thread snapshots
-     list->count then walks the node list — the snapshot array is sized by
-     the stale count, so the walk writes past it (heap-buffer-overflow), and
-     the concurrent linked-list mutation is a data race. Dispatch runs
-     OUTSIDE this lock (handlers may re-enter stream ops / send to other
-     actors), so it is held only for the short list-snapshot / mutation
-     critical sections. */
-  platform_mutex_t* handlers_lock;
+  /* The handler lists are owned by the stream's actor: stream_subscribe,
+     stream_unsubscribe, stream_once and stream_notify all route through actor
+     messages, so the lists are only ever read and mutated on the actor thread
+     — no lock is needed. next_handler_id is atomically incremented by the
+     caller so the subscribe id can be returned synchronously. */
   stream_event_handler_list_t* handlers[STREAM_HANDLER_COUNT];
   uint8_t readable;
   uint8_t is_piped;
@@ -235,23 +229,21 @@ void readable_stream_push_handler(stream_t* stream, void (*on_push)(stream_t*));
 void readable_push_stream_pipe(stream_t* rs, stream_t* ws);
 /* Notifies a stream's handlers of an event with an optional payload.
  *
- * Ownership: stream_notify takes a TRANSIENT reference to the payload for the
- * duration of dispatch only — it does NOT consume the caller's reference. The
- * caller retains ownership and must release its own reference (the no-handler
- * paths are the exception: with no handlers to hand the payload to, stream_notify
- * destroys it and returns consumed=1 so the caller knows its reference was
- * dropped and must not be released again).
+ * This is the PUBLIC entry point: it does NOT dispatch synchronously. It wraps
+ * the payload in a STREAM_NOTIFY message and hands it to the stream's actor,
+ * which dispatches it to the handlers on the actor thread. This keeps the
+ * handler list touched by exactly one thread (the actor), so subscribe /
+ * unsubscribe / once / notify never race on the list.
  *
- * Returns 1 if stream_notify consumed (destroyed / dropped the caller's
- * reference to) the payload — the no-handler paths, where there is no handler
- * to take ownership so the payload would otherwise leak. Returns 0 if the
- * caller still owns its reference — the has-handler path, which only takes a
- * transient reference for dispatch safety and leaves the caller's reference
- * intact. Callers that pass a freshly-created, unowned payload (e.g. the
- * inline OFFS_ERROR(...) "No X Handler Defined" notifications) ignore the
- * return value; the STREAM_NOTIFY dispatch path uses it to avoid a
- * double-destroy (see stream_dispatch). */
-uint8_t stream_notify(stream_t* stream, stream_event_e event, void* payload, void (*payload_destroy)(void*));
+ * Ownership: stream_notify TAKES OWNERSHIP of the payload (and the caller's
+ * reference, if any). The message owns the payload until the actor dispatches
+ * it: handlers that keep the payload take their own reference, and the
+ * no-handler path destroys it. If the stream is destroyed before the message is
+ * dispatched, the message's payload_destroy releases it. Callers that pass a
+ * freshly-created, unowned payload (e.g. the inline OFFS_ERROR(...) "No X
+ * Handler Defined" notifications) transfer that unowned payload here; callers
+ * that pass a referenced payload (CONSUME(...)) transfer their reference here. */
+void stream_notify(stream_t* stream, stream_event_e event, void* payload, void (*payload_destroy)(void*));
 void readable_push_stream_push(stream_t* stream);
 void readable_stream_read(stream_t* stream, size_t size, void* ctx, void (*cb)(void*, void*));
 void writeable_stream_write_handler(stream_t* stream, void (*)(stream_t*, void*));

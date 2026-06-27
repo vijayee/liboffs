@@ -60,6 +60,15 @@ void* refcounter_reference(refcounter_t* refcounter);
 void refcounter_dereference(refcounter_t* refcounter);
 bool refcounter_dereference_is_zero(refcounter_t* refcounter);
 refcounter_t* refcounter_consume(refcounter_t** refcounter);
+/* Claim ownership of a reference that was transferred via refcounter_consume
+   (a "yielded" reference): absorb the pending yield WITHOUT adding a new
+   reference, leaving the holder with a clean count=1, yield=0 ref. If there is
+   no pending yield (the reference was transferred by pointer, e.g. a plain
+   freshly-created object), this is a no-op — the holder already owns count=1.
+   Used by stream_notify to take ownership of a payload whether the caller
+   passed it via CONSUME(...) (yield=1) or plain (yield=0), so the message
+   wrapper always owns exactly one clean reference. NULL is a no-op. */
+void refcounter_take(refcounter_t* refcounter);
 uint16_t refcounter_count(refcounter_t* refcounter);
 uint8_t refcounter_pending_derefs(refcounter_t* refcounter);
 void refcounter_destroy_lock(refcounter_t* refcounter);
