@@ -84,6 +84,7 @@ if (BUILD_TESTING)
             test_http_server_ssl.cpp
             test_off_routes.cpp
             test_tcp_transport.cpp
+            test_tcp_transport_ssl.cpp
             test_ws_transport.cpp
             test_offs_client.cpp
             # test_peer_verify generates its own CA certificate in SetUp via
