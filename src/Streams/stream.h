@@ -9,6 +9,7 @@
 #include "../Scheduler/scheduler.h"
 #include "../Util/error.h"
 #include "../Util/atomic_compat.h"
+#include "../Platform/platform_thread.h"
 
 typedef enum {
   readable_stream = 0,
@@ -148,6 +149,16 @@ struct stream_t {
   stream_type_e type;
   stream_force_e force;
   ATOMIC(size_t) next_handler_id;
+  /* Serializes all handler-list access (subscribe/unsubscribe/notify
+     snapshot/remove-onces). Without it, stream_subscribe on one thread can
+     add nodes to a list while stream_notify on a worker thread snapshots
+     list->count then walks the node list — the snapshot array is sized by
+     the stale count, so the walk writes past it (heap-buffer-overflow), and
+     the concurrent linked-list mutation is a data race. Dispatch runs
+     OUTSIDE this lock (handlers may re-enter stream ops / send to other
+     actors), so it is held only for the short list-snapshot / mutation
+     critical sections. */
+  platform_mutex_t* handlers_lock;
   stream_event_handler_list_t* handlers[STREAM_HANDLER_COUNT];
   uint8_t readable;
   uint8_t is_piped;

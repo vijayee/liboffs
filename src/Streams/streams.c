@@ -163,6 +163,69 @@ void stream_event_list_remove_onces(stream_event_handler_list_t* list) {
   }
 }
 
+/* Unlink a single node from its list and return the handler it held (the
+   caller destroys the handler). Does NOT destroy the handler or decrement
+   count-ownership — the caller owns the returned handler and must call
+   stream_event_handler_destroy on it. Must be called with the owning
+   stream's handlers_lock held (list mutation). */
+static stream_event_handler_t* _stream_event_list_unlink_node(
+    stream_event_handler_list_t* list, stream_event_handler_list_node_t* node) {
+  if ((list->last == NULL) && (list->first == NULL)) {
+    return NULL;
+  }
+  if (list->last == node) {
+    list->last = node->previous;
+  }
+  if (list->first == node) {
+    list->first = node->next;
+  }
+  if (node->previous != NULL) {
+    node->previous->next = node->next;
+  }
+  if (node->next != NULL) {
+    node->next->previous = node->previous;
+  }
+  stream_event_handler_t* handler = node->handler;
+  list->count--;
+  free(node);
+  return handler;
+}
+
+/* Unlink every once-handler node from the list and return the unlinked
+   handlers as a freshly-allocated array (caller frees the array AND destroys
+   each handler). *out_count receives the array length. Must be called with
+   the owning stream's handlers_lock held (list mutation). Destroying the
+   handlers is the caller's job so it can happen OUTSIDE the lock — a
+   handler's ctx_destroy must not re-enter the lock. */
+static stream_event_handler_t** _stream_event_list_unlink_onces(
+    stream_event_handler_list_t* list, size_t* out_count) {
+  *out_count = 0;
+  if (list->first == NULL) {
+    return NULL;
+  }
+  size_t n = 0;
+  for (stream_event_handler_list_node_t* c = list->first; c != NULL; c = c->next) {
+    if (c->handler->once == 1) {
+      n++;
+    }
+  }
+  if (n == 0) {
+    return NULL;
+  }
+  stream_event_handler_t** removed = get_memory(n * sizeof(stream_event_handler_t*));
+  size_t i = 0;
+  stream_event_handler_list_node_t* current = list->first;
+  while (current != NULL) {
+    stream_event_handler_list_node_t* next = current->next;
+    if (current->handler->once == 1) {
+      removed[i++] = _stream_event_list_unlink_node(list, current);
+    }
+    current = next;
+  }
+  *out_count = i;
+  return removed;
+}
+
 /* ---- stream lifecycle ---- */
 
 void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, uint8_t auto_push, scheduler_pool_t* pool, void (*destructor)(stream_t*)) {
@@ -172,6 +235,7 @@ void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, uin
   stream->pool = pool;
   stream->pipe_notifiers = NULL;
   stream->auto_push = auto_push;
+  stream->handlers_lock = platform_mutex_create();
   if (force == push) {
     stream->on_pipe = _readable_push_stream_on_pipe;
     stream->on_piped = _writeable_push_stream_on_piped;
@@ -200,6 +264,13 @@ void stream_deinit(stream_t* stream) {
       stream->pullable_stream = NULL;
     }
     actor_destroy(&stream->actor);
+    /* actor_destroy has waited for any in-flight dispatch (RUNNING cleared,
+       or we are the self-destruct dispatch thread), so no stream_notify can
+       still be holding handlers_lock. Safe to tear the lock down now. */
+    if (stream->handlers_lock != NULL) {
+      platform_mutex_destroy(stream->handlers_lock);
+      stream->handlers_lock = NULL;
+    }
   }
 }
 
@@ -300,8 +371,19 @@ void stream_dispatch(void* state, message_t* msg) {
 
 uint8_t stream_notify(stream_t* stream, stream_event_e event, void* payload, void (*payload_destroy)(void*)) {
   stream_event_handler_list_t* list = stream->handlers[event];
+
+  /* Snapshot the handler list under handlers_lock so the snapshot array size
+     (list->count) and the node walk see a consistent list. A concurrent
+     stream_subscribe could otherwise enqueue nodes past the snapshot count and
+     the walk would write past the allocation (heap-buffer-overflow), and the
+     concurrent linked-list mutation is a data race. Handler callbacks are
+     dispatched OUTSIDE the lock (they may re-enter stream ops / send to other
+     actors), so the lock is held only for the snapshot and the once-node
+     unlink — never across handler dispatch. */
+  platform_mutex_lock(stream->handlers_lock);
   size_t count = list->count;
   if (count == 0) {
+    platform_mutex_unlock(stream->handlers_lock);
     if (event == error_event) {
       async_error_t* error = (async_error_t*) payload;
       if (error != NULL && error->message != NULL) {
@@ -309,10 +391,6 @@ uint8_t stream_notify(stream_t* stream, stream_event_e event, void* payload, voi
       } else {
         log_error("Unhandled stream error: (null)");
       }
-      if (payload_destroy != NULL) {
-        payload_destroy(payload);
-      }
-      return 1;
     }
     if (payload_destroy != NULL) {
       payload_destroy(payload);
@@ -322,6 +400,9 @@ uint8_t stream_notify(stream_t* stream, stream_event_e event, void* payload, voi
   stream_event_handler_t** handlers = get_memory(count * sizeof(stream_event_handler_t*));
   stream_event_handler_list_node_t* current = list->first;
   if ((event == error_event) && (current == NULL)) {
+    /* count > 0 but the node list is empty — a list desync; treat as
+       no-handler so the error is logged and the payload is released. */
+    platform_mutex_unlock(stream->handlers_lock);
     free(handlers);
     async_error_t* error = (async_error_t*) payload;
     if (error != NULL && error->message != NULL) {
@@ -347,13 +428,27 @@ uint8_t stream_notify(stream_t* stream, stream_event_e event, void* payload, voi
     handlers[i++] = REFERENCE(current->handler, stream_event_handler_t);
     current = current->next;
   }
+  platform_mutex_unlock(stream->handlers_lock);
+
   for (size_t c = 0; c < i; c++) {
     handlers[c]->handler(handlers[c]->ctx, payload);
     DESTROY(handlers[c], stream_event_handler);
   }
   free(handlers);
+
   if (has_onces == 1) {
-    stream_event_list_remove_onces(list);
+    /* Unlink the once-handler nodes under the lock (list mutation), then
+       destroy the unlinked handlers OUTSIDE the lock — a handler's
+       ctx_destroy may recurse into stream ops and must not re-enter
+       handlers_lock. */
+    size_t removed_count = 0;
+    platform_mutex_lock(stream->handlers_lock);
+    stream_event_handler_t** removed = _stream_event_list_unlink_onces(list, &removed_count);
+    platform_mutex_unlock(stream->handlers_lock);
+    for (size_t c = 0; c < removed_count; c++) {
+      stream_event_handler_destroy(removed[c]);
+    }
+    free(removed);
   }
   /* Release our transient hold on the payload; the caller's reference is still
    * intact, so the caller (or the message wrapper) remains the owner. */
@@ -534,12 +629,14 @@ void readable_pull_stream_pull(stream_t* stream) {
 size_t stream_subscribe(stream_t* stream, stream_event_e event, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*)) {
   size_t id = ++stream->next_handler_id;
   uint8_t push = 0;
+  stream_event_handler_t* _handler = stream_event_handler_create(id, ctx, handler, ctx_destroy, 0);
+
+  platform_mutex_lock(stream->handlers_lock);
   if ((event == data_event) && (stream->handlers[event]->count == 0)) {
     push = ((!stream->is_piped) && stream->auto_push);
   }
-  stream_event_handler_t* _handler = stream_event_handler_create(id, ctx, handler, ctx_destroy, 0);
-
   stream_event_list_enqueue(stream->handlers[event], _handler);
+  platform_mutex_unlock(stream->handlers_lock);
   if (push) {
     readable_push_stream_push(stream);
   }
@@ -548,8 +645,12 @@ size_t stream_subscribe(stream_t* stream, stream_event_e event, void* ctx, void 
 
 void stream_unsubscribe(stream_t* stream, stream_event_e event, size_t id) {
   if (stream == NULL) return;
+  platform_mutex_lock(stream->handlers_lock);
   stream_event_handler_list_t* list = stream->handlers[event];
-  if (list == NULL) return;
+  if (list == NULL) {
+    platform_mutex_unlock(stream->handlers_lock);
+    return;
+  }
   stream_event_handler_list_node_t* current = list->first;
   stream_event_handler_list_node_t* next = NULL;
   stream_event_handler_list_node_t* node = NULL;
@@ -561,20 +662,30 @@ void stream_unsubscribe(stream_t* stream, stream_event_e event, size_t id) {
     }
     current = next;
   }
+  stream_event_handler_t* removed = NULL;
   if (node != NULL) {
-    stream_event_list_remove(list, node);
+    /* Unlink under the lock; destroy the handler outside it so the handler's
+       ctx_destroy (which may recurse into stream ops) cannot re-enter
+       handlers_lock. */
+    removed = _stream_event_list_unlink_node(list, node);
+  }
+  platform_mutex_unlock(stream->handlers_lock);
+  if (removed != NULL) {
+    stream_event_handler_destroy(removed);
   }
 }
 
 size_t stream_once(stream_t* stream, stream_event_e event, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*)) {
   size_t id = ++stream->next_handler_id;
   uint8_t push = 0;
+  stream_event_handler_t* _handler = stream_event_handler_create(id, ctx, handler, ctx_destroy, 1);
+
+  platform_mutex_lock(stream->handlers_lock);
   if ((event == data_event) && (stream->handlers[event]->count == 1)) {
     push = ((!stream->is_piped) && stream->auto_push);
   }
-  stream_event_handler_t* _handler = stream_event_handler_create(id, ctx, handler, ctx_destroy, 1);
-
   stream_event_list_enqueue(stream->handlers[event], _handler);
+  platform_mutex_unlock(stream->handlers_lock);
   if (push) {
     readable_push_stream_push(stream);
   }
@@ -583,8 +694,14 @@ size_t stream_once(stream_t* stream, stream_event_e event, void* ctx, void (* ha
 
 void stream_subscribe_internal(stream_t* stream, stream_event_e event, size_t id, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*), uint8_t once) {
   stream_event_handler_t* _handler = stream_event_handler_create(id, ctx, handler, ctx_destroy, once);
+  uint8_t push = 0;
+  platform_mutex_lock(stream->handlers_lock);
   stream_event_list_enqueue(stream->handlers[event], _handler);
   if ((event == data_event) && (stream->handlers[event]->count == 1) && stream->auto_push && stream->on_push != NULL) {
+    push = 1;
+  }
+  platform_mutex_unlock(stream->handlers_lock);
+  if (push) {
     readable_push_stream_push(stream);
   }
 }
