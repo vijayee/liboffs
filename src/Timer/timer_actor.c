@@ -185,8 +185,11 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
         }
       }
       platform_mutex_unlock(timer_actor->loop_lock);
-      msg->payload_destroy = NULL;
-      msg->payload = NULL;
+      /* payload (timer_debounce_payload_t) is read-only to this dispatch —
+         the fields are copied into the timer's completion payload above.
+         Let actor_run free it via msg->payload_destroy (free). The previous
+         CONSUME here (NULLing msg fields) leaked the payload because the
+         dispatch never freed it. */
       break;
     }
     case TIMER_DEBOUNCE_FLUSH: {
@@ -222,17 +225,16 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
       } else {
         platform_mutex_unlock(timer_actor->loop_lock);
       }
-      msg->payload_destroy = NULL;
-      msg->payload = NULL;
+      /* payload (timer_debounce_payload_t) fields are copied into the dispatch
+         copy above. Let actor_run free the original via msg->payload_destroy. */
       break;
     }
     case TIMER_COMPLETION: {
       timer_completion_payload_t* completion = (timer_completion_payload_t*)msg->payload;
       /* Allocate a fresh copy of the completion to forward to the target
-       * actor. The original payload is owned by the dispatch and will be
-       * freed by actor_run's normal post-dispatch cleanup; we simply
-       * consume (set msg->payload = NULL) to indicate ownership transfer
-       * of the original to the runner. */
+       * actor. The original payload's fields are copied into `copy` and the
+       * original is then freed by actor_run's post-dispatch cleanup via
+       * msg->payload_destroy (free). */
       timer_completion_payload_t* copy = get_clear_memory(sizeof(timer_completion_payload_t));
       *copy = *completion;
       message_t target_msg = {0};
@@ -240,8 +242,6 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
       target_msg.payload = copy;
       target_msg.payload_destroy = free;
       actor_send(copy->target, &target_msg);
-      msg->payload = NULL;
-      msg->payload_destroy = NULL;
       break;
     }
     default:
