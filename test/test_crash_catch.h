@@ -18,6 +18,8 @@
 #ifndef TEST_CRASH_CATCH_H
 #define TEST_CRASH_CATCH_H
 
+#if defined(_WIN32)
+
 #include <windows.h>
 #include <dbghelp.h>
 #include <stdio.h>
@@ -208,5 +210,15 @@ static void test_crash_catch_init(void) {
   fprintf(stderr, "[test_crash_catch] vectored handler installed (OFFS_CRASH_TRACE=%s)\n", e);
   fflush(stderr);
 }
+
+#else  /* !defined(_WIN32) */
+
+/* On non-Windows platforms the vectored exception handler has no equivalent
+   (Unix test runs already get a symbolicated backtrace from SIGSEGV/SIGABRT
+   via the shell). Provide a no-op so test_main.cpp can call it unconditionally
+   without a platform guard. */
+static inline void test_crash_catch_init(void) {}
+
+#endif /* defined(_WIN32) */
 
 #endif /* TEST_CRASH_CATCH_H */
