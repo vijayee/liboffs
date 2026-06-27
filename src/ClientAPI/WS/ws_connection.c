@@ -1307,7 +1307,13 @@ static void _connection_ssl_data_handle(ws_connection_t* connection,
     _connection_stop_watcher(connection);
     return;
   }
-  (void)_connection_ssl_flush_wbio(connection);
+  /* The plaintext router (_ws_connection_feed_plaintext above) can close the
+     connection (freeing ssl + the BIOs). If that happens in the last batch the
+     for-loop exits here instead of hitting the sock==NULL guard at the top, so
+     re-check ssl before touching wbio. */
+  if (connection->ssl != NULL) {
+    (void)_connection_ssl_flush_wbio(connection);
+  }
 }
 #endif
 

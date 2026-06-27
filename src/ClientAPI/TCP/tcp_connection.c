@@ -141,6 +141,10 @@ static void _connection_close_fd(tcp_connection_t* connection) {
     SSL_shutdown(connection->ssl);
     SSL_free(connection->ssl);
     connection->ssl = NULL;
+    /* SSL_free freed the memory BIOs it owns (Windows IOCP). Drop the dangling
+     * pointers so nothing can dereference them after this close. */
+    connection->rbio = NULL;
+    connection->wbio = NULL;
   }
   if (connection->sock != NULL) {
     platform_socket_destroy(connection->sock);
@@ -886,7 +890,13 @@ static void _connection_ssl_data_handle(tcp_connection_t* connection,
     _connection_stop_watcher(connection);
     return;
   }
-  (void)_connection_ssl_flush_wbio(connection);
+  /* The plaintext router (stream_framer + _tcp_dispatch_frame above) can close
+   * the connection (freeing ssl + the BIOs). If that happens in the last batch
+   * the for-loop exits here instead of hitting the sock==NULL guard at the top,
+   * so re-check ssl before touching wbio. */
+  if (connection->ssl != NULL) {
+    (void)_connection_ssl_flush_wbio(connection);
+  }
 }
 #endif
 
