@@ -118,6 +118,10 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
   if (server->listen_sock == NULL) {
     log_error("http_server_create: socket creation failed");
     perror("socket");
+    /* actor_init above registered server->actor in the pool's registry; every
+       error path must detach it before freeing, or scheduler_pool_destroy will
+       later walk a freed actor (use-after-free in the registry linked list). */
+    actor_destroy(&server->actor);
     free(server);
     return NULL;
   }
@@ -137,6 +141,7 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
     log_error("http_server_create: bind failed for port %u", port);
     perror("bind");
     platform_socket_destroy(server->listen_sock);
+    actor_destroy(&server->actor);
     free(server);
     return NULL;
   }
@@ -145,6 +150,7 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
     log_error("http_server_create: listen failed");
     perror("listen");
     platform_socket_destroy(server->listen_sock);
+    actor_destroy(&server->actor);
     free(server);
     return NULL;
   }
@@ -171,6 +177,7 @@ http_server_t* http_server_create_ssl(scheduler_pool_t* pool, const char* host, 
   if (server->ssl_ctx == NULL) {
     fprintf(stderr, "http_server_create_ssl: failed to create SSL_CTX\n");
     platform_socket_destroy(server->listen_sock);
+    actor_destroy(&server->actor);
     free(server);
     return NULL;
   }
@@ -179,6 +186,7 @@ http_server_t* http_server_create_ssl(scheduler_pool_t* pool, const char* host, 
     fprintf(stderr, "http_server_create_ssl: failed to load certificate from %s\n", cert_path);
     SSL_CTX_free(server->ssl_ctx);
     platform_socket_destroy(server->listen_sock);
+    actor_destroy(&server->actor);
     free(server);
     return NULL;
   }
@@ -187,6 +195,7 @@ http_server_t* http_server_create_ssl(scheduler_pool_t* pool, const char* host, 
     fprintf(stderr, "http_server_create_ssl: failed to load private key from %s\n", key_path);
     SSL_CTX_free(server->ssl_ctx);
     platform_socket_destroy(server->listen_sock);
+    actor_destroy(&server->actor);
     free(server);
     return NULL;
   }
@@ -195,6 +204,7 @@ http_server_t* http_server_create_ssl(scheduler_pool_t* pool, const char* host, 
     fprintf(stderr, "http_server_create_ssl: private key does not match certificate\n");
     SSL_CTX_free(server->ssl_ctx);
     platform_socket_destroy(server->listen_sock);
+    actor_destroy(&server->actor);
     free(server);
     return NULL;
   }
