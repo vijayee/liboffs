@@ -222,7 +222,25 @@ void stream_unsubscribe(stream_t* stream, stream_event_e event, size_t id);
 void writeable_stream_data_handler(stream_t* stream, void (*on_data)(stream_t*, void*));
 void readable_stream_push_handler(stream_t* stream, void (*on_push)(stream_t*));
 void readable_push_stream_pipe(stream_t* rs, stream_t* ws);
-void stream_notify(stream_t* stream, stream_event_e event, void* payload, void (*payload_destroy)(void*));
+/* Notifies a stream's handlers of an event with an optional payload.
+ *
+ * Ownership: stream_notify takes a TRANSIENT reference to the payload for the
+ * duration of dispatch only — it does NOT consume the caller's reference. The
+ * caller retains ownership and must release its own reference (the no-handler
+ * paths are the exception: with no handlers to hand the payload to, stream_notify
+ * destroys it and returns consumed=1 so the caller knows its reference was
+ * dropped and must not be released again).
+ *
+ * Returns 1 if stream_notify consumed (destroyed / dropped the caller's
+ * reference to) the payload — the no-handler paths, where there is no handler
+ * to take ownership so the payload would otherwise leak. Returns 0 if the
+ * caller still owns its reference — the has-handler path, which only takes a
+ * transient reference for dispatch safety and leaves the caller's reference
+ * intact. Callers that pass a freshly-created, unowned payload (e.g. the
+ * inline OFFS_ERROR(...) "No X Handler Defined" notifications) ignore the
+ * return value; the STREAM_NOTIFY dispatch path uses it to avoid a
+ * double-destroy (see stream_dispatch). */
+uint8_t stream_notify(stream_t* stream, stream_event_e event, void* payload, void (*payload_destroy)(void*));
 void readable_push_stream_push(stream_t* stream);
 void readable_stream_read(stream_t* stream, size_t size, void* ctx, void (*cb)(void*, void*));
 void writeable_stream_write_handler(stream_t* stream, void (*)(stream_t*, void*));

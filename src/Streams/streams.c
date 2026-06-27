@@ -268,7 +268,19 @@ void stream_dispatch(void* state, message_t* msg) {
       stream_event_e event = notify_payload->event;
       void* payload = notify_payload->payload;
       void (*payload_destroy)(void*) = notify_payload->payload_destroy;
-      stream_notify(stream, event, payload, payload_destroy);
+      /* stream_notify returns 1 (consumed) in the no-handler path, where it
+       * destroys the inner payload itself. In that case clear the wrapper's
+       * inner pointers so the message's _stream_notify_payload_destroy does
+       * not destroy the inner payload a second time (double-destroy /
+       * use-after-free on the refcounted error_t). When stream_notify returns 0
+       * (has-handler path) it only held a transient reference and the wrapper
+       * still owns the inner payload, so leave the pointers for
+       * _stream_notify_payload_destroy to release as before. */
+      uint8_t consumed = stream_notify(stream, event, payload, payload_destroy);
+      if (consumed) {
+        notify_payload->payload = NULL;
+        notify_payload->payload_destroy = NULL;
+      }
       break;
     }
     case STREAM_SET_PULLING: {
@@ -286,7 +298,7 @@ void stream_dispatch(void* state, message_t* msg) {
 
 /* ---- stream notify (replaces VLA with heap alloc) ---- */
 
-void stream_notify(stream_t* stream, stream_event_e event, void* payload, void (*payload_destroy)(void*)) {
+uint8_t stream_notify(stream_t* stream, stream_event_e event, void* payload, void (*payload_destroy)(void*)) {
   stream_event_handler_list_t* list = stream->handlers[event];
   size_t count = list->count;
   if (count == 0) {
@@ -300,12 +312,12 @@ void stream_notify(stream_t* stream, stream_event_e event, void* payload, void (
       if (payload_destroy != NULL) {
         payload_destroy(payload);
       }
-      return;
+      return 1;
     }
     if (payload_destroy != NULL) {
       payload_destroy(payload);
     }
-    return;
+    return 1;
   }
   stream_event_handler_t** handlers = get_memory(count * sizeof(stream_event_handler_t*));
   stream_event_handler_list_node_t* current = list->first;
@@ -320,7 +332,7 @@ void stream_notify(stream_t* stream, stream_event_e event, void* payload, void (
     if (payload_destroy != NULL) {
       payload_destroy(payload);
     }
-    return;
+    return 1;
   }
   /* Hold a reference to the payload so no handler can free it mid-dispatch */
   if (payload != NULL) {
@@ -343,10 +355,12 @@ void stream_notify(stream_t* stream, stream_event_e event, void* payload, void (
   if (has_onces == 1) {
     stream_event_list_remove_onces(list);
   }
-  /* Release our hold on the payload */
+  /* Release our transient hold on the payload; the caller's reference is still
+   * intact, so the caller (or the message wrapper) remains the owner. */
   if (payload_destroy != NULL) {
     payload_destroy(payload);
   }
+  return 0;
 }
 
 /* ---- stream operations ---- */
