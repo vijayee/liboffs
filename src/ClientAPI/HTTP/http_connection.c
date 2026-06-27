@@ -501,6 +501,34 @@ static void _connection_ssl_data_handle(http_connection_t* connection,
 }
 #endif
 
+#ifndef _WIN32
+/* POSIX SSL write: SSL_write against the kernel socket (SSL_set_fd binding).
+ * The nonblocking socket may return WANT_WRITE/WANT_READ during TLS record
+ * framing or key-update renegotiation; on loopback the peer drains continuously
+ * so a bounded synchronous retry completes the send without blocking the
+ * connection actor for long. Mirrors the Windows IOCP SSL send path's retry
+ * budget. Returns 0 = fully sent, -1 = hard error or partial (caller closes,
+ * since TLS records are session-ordered and must not be partially dropped). */
+static int _connection_ssl_send_posix(http_connection_t* connection,
+                                       const uint8_t* data, size_t len) {
+  size_t sent_total = 0;
+  for (int attempts = 0; attempts < 2000 && sent_total < len; attempts++) {
+    int written = SSL_write(connection->ssl, data + sent_total,
+                             (int)(len - sent_total));
+    if (written > 0) {
+      sent_total += (size_t)written;
+      continue;
+    }
+    int err = SSL_get_error(connection->ssl, written);
+    if (err != SSL_ERROR_WANT_WRITE && err != SSL_ERROR_WANT_READ) {
+      return -1;
+    }
+    platform_sleep_ms(1);
+  }
+  return (sent_total == len) ? 0 : -1;
+}
+#endif
+
 /* Connection actor dispatch — runs on scheduler worker threads. */
 void http_connection_dispatch(void* state, message_t* msg) {
   http_connection_t* connection = (http_connection_t*)state;
@@ -619,6 +647,21 @@ void http_connection_dispatch(void* state, message_t* msg) {
         break;
       }
 #else
+      if (connection->is_ssl && connection->ssl != NULL) {
+        /* POSIX SSL write: bounded-retry SSL_write against the kernel socket.
+           See _connection_ssl_send_posix. A partial send that can't finish
+           within the retry budget is fatal-close (TLS records are session-
+           ordered and must not be partially dropped). The plain HTTP path
+           below remains event-driven (buffer + arm WRITE) since plain sends
+           have no TLS renegotiation coupling. */
+        int rc = _connection_ssl_send_posix(connection, buf->data, buf->size);
+        DESTROY(buf, buffer);
+        if (rc != 0) {
+          _connection_stop_watcher(connection);
+          _connection_close_fd(connection);
+        }
+        break;
+      }
       /* If there's already buffered data, append to it */
       if (connection->write_buffer != NULL && connection->write_buffer->size > 0) {
         buffer_ensure_capacity(connection->write_buffer, connection->write_buffer->size + buf->size);

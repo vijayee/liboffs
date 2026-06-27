@@ -22,6 +22,10 @@
 # include <winsock2.h>
 # include <ws2tcpip.h>
 # include <windows.h>
+#else
+# include <sys/socket.h>
+# include <sys/time.h>
+# include <unistd.h>
 #endif
 
 #include <gtest/gtest.h>
@@ -38,7 +42,6 @@ extern "C" {
 }
 
 #include <openssl/ssl.h>
-#include <openssl/err.h>
 
 #include <string>
 #include <vector>
