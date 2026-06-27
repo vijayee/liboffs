@@ -437,9 +437,36 @@ static void _http_server_accept_one(http_server_t* server) {
 
   if (server->ssl_ctx != NULL) {
     connection->ssl = SSL_new(server->ssl_ctx);
+#ifdef _WIN32
+    /* IOCP completes a server-side read into a watcher-owned buffer that the
+     * worker can't recv() from (the kernel socket is empty by then), so decouple
+     * OpenSSL from the socket: a memory-BIO pair is fed ciphertext drained by
+     * the I/O thread (HTTP_CONNECTION_DATA) and SSL_read decrypts it on the
+     * worker. See _connection_ssl_data_handle in http_connection.c. */
+    connection->rbio = BIO_new(BIO_s_mem());
+    connection->wbio = BIO_new(BIO_s_mem());
+    if (connection->ssl != NULL && connection->rbio != NULL && connection->wbio != NULL) {
+      SSL_set_bio(connection->ssl, connection->rbio, connection->wbio);
+      SSL_set_accept_state(connection->ssl);
+      connection->is_ssl = 1;
+    } else {
+      /* OOM during accept — free partials and leave is_ssl=0 so the first bytes
+       * fail parsing and close the connection cleanly rather than crash. SSL
+       * owns the BIOs only after SSL_set_bio, so free them by hand here. */
+      if (connection->rbio != NULL) BIO_free(connection->rbio);
+      if (connection->wbio != NULL) BIO_free(connection->wbio);
+      connection->rbio = NULL;
+      connection->wbio = NULL;
+      if (connection->ssl != NULL) {
+        SSL_free(connection->ssl);
+        connection->ssl = NULL;
+      }
+    }
+#else
     SSL_set_fd(connection->ssl, platform_socket_fd(client_sock));
     SSL_set_accept_state(connection->ssl);
     connection->is_ssl = 1;
+#endif
   }
 }
 
