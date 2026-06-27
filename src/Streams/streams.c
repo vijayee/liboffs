@@ -234,6 +234,24 @@ void _stream_purge_handlers(stream_t* stream) {
   }
 }
 
+/* Synchronously deliver a caller-owned error_event to the stream's handlers.
+   Unlike public stream_notify (which transfers ownership of the payload to a
+   message wrapper), this is a BORROW: the caller owns the error, and
+   _stream_notify_dispatch only takes a transient reference for handler safety.
+   It returns 1 when it consumed the payload itself (no-handler path: it
+   destroyed the error), in which case the caller must NOT free it; otherwise
+   it returns 0 (has-handler path: it released only its transient ref) and the
+   caller still owns the reference and must destroy it. Used for the
+   fire-and-forget "no <handler> defined" errors raised directly on the actor
+   thread — there is no async wrapper to own them, so the caller owns and frees
+   when dispatch did not. */
+static void _stream_notify_owned_error(stream_t* stream, async_error_t* error) {
+  uint8_t consumed = _stream_notify_dispatch(stream, error_event, error, (void (*)(void*))error_destroy);
+  if (!consumed) {
+    error_destroy(error);
+  }
+}
+
 void stream_dispatch(void* state, message_t* msg) {
   stream_t* stream = (stream_t*) state;
   switch (msg->type) {
@@ -241,7 +259,7 @@ void stream_dispatch(void* state, message_t* msg) {
       if (stream->on_push != NULL) {
         stream->on_push(stream);
       } else {
-        _stream_notify_dispatch(stream, error_event, OFFS_ERROR("No Push Handler Defined"), (void (*)(void*))error_destroy);
+        _stream_notify_owned_error(stream, OFFS_ERROR("No Push Handler Defined"));
       }
       break;
     case READABLE_READ: {
@@ -249,7 +267,7 @@ void stream_dispatch(void* state, message_t* msg) {
       if (stream->on_read != NULL) {
         stream->on_read(stream, p->size, p->ctx, p->cb);
       } else {
-        _stream_notify_dispatch(stream, error_event, OFFS_ERROR("No Read Handler Defined"), (void (*)(void*))error_destroy);
+        _stream_notify_owned_error(stream, OFFS_ERROR("No Read Handler Defined"));
       }
       break;
     }
@@ -258,7 +276,7 @@ void stream_dispatch(void* state, message_t* msg) {
       if (stream->on_write != NULL) {
         stream->on_write(stream, p->data);
       } else {
-        _stream_notify_dispatch(stream, error_event, OFFS_ERROR("No Write Handler Defined"), (void (*)(void*))error_destroy);
+        _stream_notify_owned_error(stream, OFFS_ERROR("No Write Handler Defined"));
       }
       if (stream->is_pulling && stream->pullable_stream != NULL) {
         readable_pull_stream_pull(stream->pullable_stream);
@@ -269,14 +287,14 @@ void stream_dispatch(void* state, message_t* msg) {
       if (stream->on_close != NULL) {
         stream->on_close(stream);
       } else {
-        _stream_notify_dispatch(stream, error_event, OFFS_ERROR("No Close Handler Defined"), (void (*)(void*))error_destroy);
+        _stream_notify_owned_error(stream, OFFS_ERROR("No Close Handler Defined"));
       }
       break;
     case READABLE_PULL:
       if (stream->on_pull != NULL) {
         stream->on_pull(stream);
       } else {
-        _stream_notify_dispatch(stream, error_event, OFFS_ERROR("No Readable Pull Handler Defined"), (void (*)(void*))error_destroy);
+        _stream_notify_owned_error(stream, OFFS_ERROR("No Readable Pull Handler Defined"));
       }
       break;
     case DEFERRED_DEREF:
@@ -346,20 +364,25 @@ void stream_notify(stream_t* stream, stream_event_e event, void* payload, void (
   wrapper->event = event;
   wrapper->payload = payload;
   wrapper->payload_destroy = payload_destroy;
-  /* Take ownership of the caller's reference. Callers transfer the payload
-     either by pointer (a plain freshly-created object: count=1, yield=0) or by
-     CONSUME(...) (a yielded reference: count=1, yield=1). refcounter_take
-     absorbs a pending yield if present and is a no-op otherwise, so the wrapper
-     always owns exactly one clean count=1, yield=0 reference. That is what
-     _stream_notify_dispatch expects: it adds a transient +1 for dispatch
-     safety and the wrapper's _stream_notify_payload_destroy releases the one
-     the wrapper owns (and the no-handler path releases it and clears the
-     wrapper). Without this, a CONSUME'd payload's yield would be absorbed by
-     _stream_notify_dispatch's transient reference instead of by the wrapper,
-     collapsing the two refs into one and double-destroying the payload. NULL
+  /* Ownership is the CALLER's decision, signalled by the refcounter's yield
+     flag — stream_notify never presumes a transfer:
+       - transfer: the caller yielded/consumed the payload before calling
+         (CONSUME(var, T), YIELD, or OFFS_ERROR_TRANSFER for a freshly-made
+         error). The reference arrives with yield=1; refcounter_reference
+         ADOPTS that yield (no count change), so the wrapper owns exactly the
+         one ref the caller released (count stays 1).
+       - share:     the caller passes the payload un-yielded (yield=0) and
+         RETAINS its own reference. refcounter_reference ADDS a new reference
+         (count++), so the wrapper owns a fresh ref and frees only that one;
+         the caller's reference survives stream_notify and stays valid.
+     Adopt-when-yielded, add-when-not is precisely refcounter_reference, so it
+     is the only op needed here. _stream_notify_dispatch then takes a transient
+     +1 for handler-safety and releases it after dispatch, and the wrapper's
+     _stream_notify_payload_destroy releases the one ref the wrapper owns (the
+     no-handler path releases it directly and clears the wrapper). NULL
      payloads (close/finished/complete event signals) carry no reference. */
   if (payload != NULL) {
-    refcounter_take((refcounter_t*) payload);
+    refcounter_reference((refcounter_t*) payload);
   }
   message_t msg;
   msg.type = STREAM_NOTIFY;
@@ -535,7 +558,7 @@ void readable_stream_pull_handler(stream_t* stream, void (*on_pull)(stream_t*)) 
 
 void writeable_stream_write_handler(stream_t* stream, void (*handler)(stream_t*, void*)) {
   if (stream->type == readable_stream) {
-    stream_notify(stream, error_event, OFFS_ERROR("Read Stream cannot set write handlers"), (void (*)(void*))error_destroy);
+    stream_notify(stream, error_event, OFFS_ERROR_TRANSFER("Read Stream cannot set write handlers"), (void (*)(void*))error_destroy);
   } else {
     stream->on_write = handler;
   }
@@ -592,7 +615,7 @@ void writeable_stream_write(stream_t* stream, void* data) {
 
 void readable_pull_stream_pull(stream_t* stream) {
   if (stream->type == writeable_stream || stream->force == push) {
-    stream_notify(stream, error_event, OFFS_ERROR("Invalid Readable Pull Stream"), (void (*)(void*))error_destroy);
+    stream_notify(stream, error_event, OFFS_ERROR_TRANSFER("Invalid Readable Pull Stream"), (void (*)(void*))error_destroy);
     return;
   }
 
@@ -703,9 +726,9 @@ void stream_unsubscribe_internal(stream_t* stream, stream_event_e event, size_t 
 
 void readable_push_stream_pipe(stream_t* rs, stream_t* ws) {
   if (rs->type == writeable_stream || rs->force == pull) {
-    stream_notify(rs, error_event, OFFS_ERROR("Invalid read stream being piped"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Invalid read stream being piped"), (void (*)(void*))error_destroy);
   } else if (ws->type == readable_stream || ws->force == pull) {
-    stream_notify(rs, error_event, OFFS_ERROR("Invalid write stream being piped to"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Invalid write stream being piped to"), (void (*)(void*))error_destroy);
   } else {
     rs->on_pipe(rs, ws);
   }
@@ -713,7 +736,7 @@ void readable_push_stream_pipe(stream_t* rs, stream_t* ws) {
 
 void _readable_push_stream_on_pipe(stream_t* rs, stream_t* ws) {
   if (rs->is_deactivated == 1) {
-    stream_notify(rs, error_event, OFFS_ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (rs->pipe_notifiers == NULL) {
       size_t size = 0;
@@ -774,7 +797,7 @@ void _writeable_push_stream_on_piped(stream_t* ws, stream_t* rs) {
     abort();
   }
   if (ws->is_deactivated == 1) {
-    stream_notify(ws, error_event, OFFS_ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
+    stream_notify(ws, error_event, OFFS_ERROR_TRANSFER("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (ws->pipe_notifiers == NULL) {
       size_t size = 0;
@@ -848,9 +871,9 @@ void _writeable_push_stream_complete_notify(stream_t* stream, void* payload) {
 
 void writeable_pull_stream_pipe(stream_t* ws, stream_t* rs) {
   if (rs->type == writeable_stream || rs->force == push) {
-    stream_notify(rs, error_event, OFFS_ERROR("Invalid write stream being piped"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Invalid write stream being piped"), (void (*)(void*))error_destroy);
   } else if (ws->type == readable_stream || ws->force == push) {
-    stream_notify(rs, error_event, OFFS_ERROR("Invalid read stream being piped to"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Invalid read stream being piped to"), (void (*)(void*))error_destroy);
   } else {
     ws->on_pipe(ws, rs);
   }
@@ -862,7 +885,7 @@ void _writeable_pull_stream_on_pipe(stream_t* ws, stream_t* rs) {
     abort();
   }
   if (ws->is_deactivated == 1) {
-    stream_notify(ws, error_event, OFFS_ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
+    stream_notify(ws, error_event, OFFS_ERROR_TRANSFER("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (ws->pipe_notifiers == NULL) {
       size_t size = 0;
@@ -907,7 +930,7 @@ void _readable_pull_stream_on_piped(stream_t* rs, stream_t* ws) {
     abort();
   }
   if (rs->is_deactivated == 1) {
-    stream_notify(rs, error_event, OFFS_ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (rs->pipe_notifiers == NULL) {
       size_t size = 0;

@@ -24,6 +24,17 @@ void error_destroy(async_error_t* error);
 
 #define OFFS_ERROR(MESSAGE) error_create((MESSAGE), (char*)__FILE__, (char*)__func__, __LINE__)
 
+/* OFFS_ERROR creates a fresh error (count=1, yield=0). OFFS_ERROR_TRANSFER
+   does the same AND yields it (yield=1), signalling that the caller is
+   transferring ownership of the single reference to whoever receives it
+   (e.g. a stream_notify payload). The receiver adopts the yielded reference
+   rather than allocating a new one, so the reference is moved, not copied.
+   Use OFFS_ERROR_TRANSFER whenever the freshly-made error is handed off
+   wholesale and the caller will not retain it; use OFFS_ERROR only when the
+   caller keeps the reference. */
+#define OFFS_ERROR_TRANSFER(MESSAGE) offs_error_transfer((MESSAGE), (char*)__FILE__, (char*)__func__, __LINE__)
+async_error_t* offs_error_transfer(char* message, char* file, char* function, int line);
+
 // Only define ERROR(...) if the Windows SDK hasn't already taken the name.
 // On non-Windows builds (or after carefully undef'ing first) this gives us
 // the short form; otherwise callers must use OFFS_ERROR.
