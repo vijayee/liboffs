@@ -146,8 +146,8 @@ TEST(HealthHTTP, GetHealthReturns200) {
   http_server_destroy(server);
   scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
-  timer_actor_destroy(timer);
   block_cache_destroy(bc);
+  timer_actor_destroy(timer);
   scheduler_pool_destroy(pool);
 }
 
@@ -266,8 +266,8 @@ TEST(HealthHTTP, HealthResponseContainsExpectedFields) {
   http_server_destroy(server);
   scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
-  timer_actor_destroy(timer);
   block_cache_destroy(bc);
+  timer_actor_destroy(timer);
   scheduler_pool_destroy(pool);
 }
 

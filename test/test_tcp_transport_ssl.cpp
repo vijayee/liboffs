@@ -255,10 +255,10 @@ protected:
     if (transport != nullptr) tcp_transport_stop(transport);
     scheduler_pool_wait_for_idle(pool);
     scheduler_pool_stop(pool);
-    timer_actor_destroy(timer);
     ofd_cache_destroy(ofd_cache);
     tuple_cache_destroy(tc);
     block_cache_destroy(bc);
+    timer_actor_destroy(timer);
     if (transport != nullptr) tcp_transport_destroy(transport);
     scheduler_pool_destroy(pool);
     rm_rf(cache_dir);
