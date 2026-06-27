@@ -81,9 +81,12 @@ if (BUILD_TESTING)
             test_regex_shim.cpp
             test_network.cpp
             test_http_server.cpp
+            test_http_server_ssl.cpp
             test_off_routes.cpp
             test_tcp_transport.cpp
+            test_tcp_transport_ssl.cpp
             test_ws_transport.cpp
+            test_ws_transport_ssl.cpp
             test_offs_client.cpp
             # test_peer_verify generates its own CA certificate in SetUp via
             # ca_generate (same routine the offs-ca tool exposes), so the suite
@@ -170,6 +173,11 @@ if (BUILD_TESTING)
     # test_rpc_integration block, so it never ran on Windows and those stream
     # suites failed to open ./test.pdf. Stage it unconditionally here instead.
     file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/test.pdf DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+    # test_http_server_ssl reads certs/leaf_cert.pem + leaf_key.pem from its
+    # working directory to start an https server. The certs copy below was nested
+    # inside the if(NOT WIN32) test_rpc_integration block, so it never ran on
+    # Windows and the SSL test could not find its certs. Stage it unconditionally.
+    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/certs DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
     if(NOT WIN32)
       add_executable(test_file_transfer_integration test_file_transfer_integration.cpp test_node_main.c)
       add_dependencies(test_file_transfer_integration cbor)

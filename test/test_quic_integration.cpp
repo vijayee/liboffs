@@ -758,8 +758,8 @@ TEST(QuicIntegration, QuicListenerStartStop) {
 
   network_t* network = network_create(authority, cache, timer, pool, &config);
   if (network == nullptr) {
-    timer_actor_destroy(timer);
     block_cache_destroy(cache);
+    timer_actor_destroy(timer);
     authority_destroy(authority);
     scheduler_pool_wait_for_idle(pool);
     scheduler_pool_stop(pool);
@@ -772,8 +772,8 @@ TEST(QuicIntegration, QuicListenerStartStop) {
   quic_listener_t* listener = quic_listener_create(network, pool);
   if (listener == nullptr) {
     network_destroy(network);
-    timer_actor_destroy(timer);
     block_cache_destroy(cache);
+    timer_actor_destroy(timer);
     authority_destroy(authority);
     scheduler_pool_wait_for_idle(pool);
     scheduler_pool_stop(pool);
@@ -790,8 +790,14 @@ TEST(QuicIntegration, QuicListenerStartStop) {
 
   quic_listener_destroy(listener);
   network_destroy(network);
-  timer_actor_destroy(timer);
+  /* block_cache_destroy flushes pending INDEX_SAVE debounces through the
+     timer_actor (timer_actor_debounce_flush -> actor_send on the timer), so
+     the timer_actor must still be alive and the pool still running when it
+     runs — destroy the cache BEFORE the timer, matching node.c production
+     teardown. Destroying the timer first leaves block_cache->timer_actor
+     dangling and the flush reads freed memory (heap-use-after-free). */
   block_cache_destroy(cache);
+  timer_actor_destroy(timer);
   authority_destroy(authority);
   scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);

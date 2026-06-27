@@ -30,3 +30,11 @@ void error_destroy(async_error_t* error) {
     free(error);
   }
 }
+
+async_error_t* offs_error_transfer(char* message, char* file, char* function, int line) {
+  async_error_t* error = error_create(message, file, function, line);
+  if (error != NULL) {
+    refcounter_yield((refcounter_t*) error);
+  }
+  return error;
+}

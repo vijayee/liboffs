@@ -62,7 +62,7 @@ void readable_push_file_stream_push(readable_push_file_stream_t* stream) {
   size_t bytes = platform_file_read(stream->file, buf, size);
   if (bytes != size) {
     free(buf);
-    stream_notify((stream_t*)stream, error_event, OFFS_ERROR("Invalid Read Size"), (void (*)(void*))error_destroy);
+    stream_notify((stream_t*)stream, error_event, OFFS_ERROR_TRANSFER("Invalid Read Size"), (void (*)(void*))error_destroy);
     return;
   }
 
@@ -80,7 +80,7 @@ void readable_push_file_stream_push(readable_push_file_stream_t* stream) {
 
 void readable_push_file_stream_read(readable_push_file_stream_t* stream, size_t size, void* ctx, void (*cb)(void*, void*)) {
   if (stream->stream.is_deactivated == 1) {
-    stream_notify((stream_t*)stream, error_event, OFFS_ERROR("Stream is already destroyed"), (void (*)(void*))error_destroy);
+    stream_notify((stream_t*)stream, error_event, OFFS_ERROR_TRANSFER("Stream is already destroyed"), (void (*)(void*))error_destroy);
   } else {
     int32_t diff = stream->file_size - stream->cursor;
     if (size > (size_t)diff) {
@@ -90,7 +90,7 @@ void readable_push_file_stream_read(readable_push_file_stream_t* stream, size_t 
     size_t bytes = platform_file_read(stream->file, buf, size);
     if (bytes != size) {
       free(buf);
-      stream_notify((stream_t*)stream, error_event, OFFS_ERROR("Invalid Read Size"), (void (*)(void*))error_destroy);
+      stream_notify((stream_t*)stream, error_event, OFFS_ERROR_TRANSFER("Invalid Read Size"), (void (*)(void*))error_destroy);
       return;
     }
 
@@ -200,7 +200,7 @@ void _readable_pull_file_stream_on_pull(readable_pull_file_stream_t* stream) {
     size_t bytes = platform_file_read(stream->file, buf, size);
     if (bytes != size) {
       free(buf);
-      stream_notify((stream_t*)stream, error_event, OFFS_ERROR("Invalid Read Size"), (void (*)(void*))error_destroy);
+      stream_notify((stream_t*)stream, error_event, OFFS_ERROR_TRANSFER("Invalid Read Size"), (void (*)(void*))error_destroy);
       return;
     }
 

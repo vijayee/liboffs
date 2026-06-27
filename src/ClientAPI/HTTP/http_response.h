@@ -13,7 +13,6 @@
 typedef struct http_connection_t http_connection_t;
 
 typedef struct http_response_t {
-  refcounter_t refcounter;
   stream_t stream;
   uint16_t status_code;
   http_headers_t headers;

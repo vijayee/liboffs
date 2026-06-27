@@ -30,6 +30,12 @@ void _writeable_pull_stream_data_notify(stream_t* stream, void* data);
 void _readable_pull_stream_on_piped(stream_t* rs, stream_t* ws);
 void _writeable_pull_stream_on_pipe(stream_t* ws, stream_t* rs);
 
+/* Static helpers defined later in this file — forward-declared so the public
+   stream_notify / stream_dispatch can route through them. */
+static uint8_t _stream_notify_dispatch(stream_t* stream, stream_event_e event, void* payload, void (*payload_destroy)(void*));
+static void _stream_notify_payload_destroy(void* ptr);
+static void _stream_subscribe_payload_destroy(void* ptr);
+
 /* ---- event handler ---- */
 
 stream_event_handler_t* stream_event_handler_create(size_t id, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*), uint8_t once) {
@@ -188,6 +194,20 @@ void stream_init(stream_t* stream, stream_force_e force, stream_type_e type, uin
 
 void stream_deinit(stream_t* stream) {
   if (refcounter_count((refcounter_t*) stream) == 0) {
+    /* Stop the actor and free its mailbox BEFORE touching the handler lists.
+       The handler lists are the actor's state — subscribe / unsubscribe /
+       once / notify are all routed via actor messages, so the lists are only
+       mutated on the actor thread. We must quiesce the actor (no dispatch in
+       flight) before tearing the lists down, or a message dispatched
+       concurrently with the purge would touch a freed list. actor_destroy sets
+       ACTOR_FLAG_DESTROY (actor_run stops dispatching further messages after
+       the current one), waits for any in-flight dispatch to finish, and frees
+       the mailbox — discarding any still-pending subscribe/unsubscribe/notify
+       messages via their payload_destroy. On the self-destruct path (deinit
+       called from a DEFERRED_DEREF dispatch on this actor's own thread) the
+       RUNNING wait is skipped and the mailbox is freed under us; actor_run's
+       post-dispatch DESTROY check keeps it from touching the freed queue. */
+    actor_destroy(&stream->actor);
     _stream_purge_handlers(stream);
     if (stream->pipe_notifiers != NULL) {
       free(stream->pipe_notifiers);
@@ -199,7 +219,6 @@ void stream_deinit(stream_t* stream) {
       }
       stream->pullable_stream = NULL;
     }
-    actor_destroy(&stream->actor);
   }
 }
 
@@ -215,6 +234,24 @@ void _stream_purge_handlers(stream_t* stream) {
   }
 }
 
+/* Synchronously deliver a caller-owned error_event to the stream's handlers.
+   Unlike public stream_notify (which transfers ownership of the payload to a
+   message wrapper), this is a BORROW: the caller owns the error, and
+   _stream_notify_dispatch only takes a transient reference for handler safety.
+   It returns 1 when it consumed the payload itself (no-handler path: it
+   destroyed the error), in which case the caller must NOT free it; otherwise
+   it returns 0 (has-handler path: it released only its transient ref) and the
+   caller still owns the reference and must destroy it. Used for the
+   fire-and-forget "no <handler> defined" errors raised directly on the actor
+   thread — there is no async wrapper to own them, so the caller owns and frees
+   when dispatch did not. */
+static void _stream_notify_owned_error(stream_t* stream, async_error_t* error) {
+  uint8_t consumed = _stream_notify_dispatch(stream, error_event, error, (void (*)(void*))error_destroy);
+  if (!consumed) {
+    error_destroy(error);
+  }
+}
+
 void stream_dispatch(void* state, message_t* msg) {
   stream_t* stream = (stream_t*) state;
   switch (msg->type) {
@@ -222,7 +259,7 @@ void stream_dispatch(void* state, message_t* msg) {
       if (stream->on_push != NULL) {
         stream->on_push(stream);
       } else {
-        stream_notify(stream, error_event, OFFS_ERROR("No Push Handler Defined"), (void (*)(void*))error_destroy);
+        _stream_notify_owned_error(stream, OFFS_ERROR("No Push Handler Defined"));
       }
       break;
     case READABLE_READ: {
@@ -230,7 +267,7 @@ void stream_dispatch(void* state, message_t* msg) {
       if (stream->on_read != NULL) {
         stream->on_read(stream, p->size, p->ctx, p->cb);
       } else {
-        stream_notify(stream, error_event, OFFS_ERROR("No Read Handler Defined"), (void (*)(void*))error_destroy);
+        _stream_notify_owned_error(stream, OFFS_ERROR("No Read Handler Defined"));
       }
       break;
     }
@@ -239,7 +276,7 @@ void stream_dispatch(void* state, message_t* msg) {
       if (stream->on_write != NULL) {
         stream->on_write(stream, p->data);
       } else {
-        stream_notify(stream, error_event, OFFS_ERROR("No Write Handler Defined"), (void (*)(void*))error_destroy);
+        _stream_notify_owned_error(stream, OFFS_ERROR("No Write Handler Defined"));
       }
       if (stream->is_pulling && stream->pullable_stream != NULL) {
         readable_pull_stream_pull(stream->pullable_stream);
@@ -250,25 +287,55 @@ void stream_dispatch(void* state, message_t* msg) {
       if (stream->on_close != NULL) {
         stream->on_close(stream);
       } else {
-        stream_notify(stream, error_event, OFFS_ERROR("No Close Handler Defined"), (void (*)(void*))error_destroy);
+        _stream_notify_owned_error(stream, OFFS_ERROR("No Close Handler Defined"));
       }
       break;
     case READABLE_PULL:
       if (stream->on_pull != NULL) {
         stream->on_pull(stream);
       } else {
-        stream_notify(stream, error_event, OFFS_ERROR("No Readable Pull Handler Defined"), (void (*)(void*))error_destroy);
+        _stream_notify_owned_error(stream, OFFS_ERROR("No Readable Pull Handler Defined"));
       }
       break;
     case DEFERRED_DEREF:
       stream->destructor(stream);
       break;
+    case STREAM_SUBSCRIBE: {
+      stream_subscribe_payload_t* p = (stream_subscribe_payload_t*) msg->payload;
+      /* Runs on the actor thread: stream_subscribe_internal creates the
+         handler (which takes ownership of ctx) and enqueues it into the
+         list. Clear the payload's ctx/ctx_destroy so the message's
+         _stream_subscribe_payload_destroy does not also destroy ctx — the
+         handler now owns it and will release it on unsubscribe / stream
+         deinit. Mirrors the STREAM_NOTIFY consumed path. */
+      stream_subscribe_internal(stream, p->event, p->id, p->ctx, p->handler, p->ctx_destroy, p->once);
+      p->ctx = NULL;
+      p->ctx_destroy = NULL;
+      break;
+    }
+    case STREAM_UNSUBSCRIBE: {
+      stream_unsubscribe_payload_t* p = (stream_unsubscribe_payload_t*) msg->payload;
+      stream_unsubscribe_internal(stream, p->event, p->id);
+      break;
+    }
     case STREAM_NOTIFY: {
       stream_notify_payload_t* notify_payload = (stream_notify_payload_t*) msg->payload;
       stream_event_e event = notify_payload->event;
       void* payload = notify_payload->payload;
       void (*payload_destroy)(void*) = notify_payload->payload_destroy;
-      stream_notify(stream, event, payload, payload_destroy);
+      /* _stream_notify_dispatch returns 1 (consumed) in the no-handler path,
+       * where it destroys the inner payload itself. In that case clear the
+       * wrapper's inner pointers so the message's _stream_notify_payload_destroy
+       * does not destroy the inner payload a second time (double-destroy /
+       * use-after-free on the refcounted error_t). When it returns 0
+       * (has-handler path) it only held a transient reference and the wrapper
+       * still owns the inner payload, so leave the pointers for
+       * _stream_notify_payload_destroy to release as before. */
+      uint8_t consumed = _stream_notify_dispatch(stream, event, payload, payload_destroy);
+      if (consumed) {
+        notify_payload->payload = NULL;
+        notify_payload->payload_destroy = NULL;
+      }
       break;
     }
     case STREAM_SET_PULLING: {
@@ -284,12 +351,57 @@ void stream_dispatch(void* state, message_t* msg) {
   }
 }
 
-/* ---- stream notify (replaces VLA with heap alloc) ---- */
+/* ---- stream notify ---- */
 
+/* Public entry point: route the notification through the stream's actor so the
+   handler list is only ever touched on the actor thread (subscribe /
+   unsubscribe / once / notify all go via messages). The payload is owned by the
+   message from here on: _stream_notify_payload_destroy releases it if the
+   message is discarded (stream destroyed before dispatch), and the actor
+   dispatches it via _stream_notify_dispatch when the message is processed. */
 void stream_notify(stream_t* stream, stream_event_e event, void* payload, void (*payload_destroy)(void*)) {
+  stream_notify_payload_t* wrapper = get_clear_memory(sizeof(stream_notify_payload_t));
+  wrapper->event = event;
+  wrapper->payload = payload;
+  wrapper->payload_destroy = payload_destroy;
+  /* Ownership is the CALLER's decision, signalled by the refcounter's yield
+     flag — stream_notify never presumes a transfer:
+       - transfer: the caller yielded/consumed the payload before calling
+         (CONSUME(var, T), YIELD, or OFFS_ERROR_TRANSFER for a freshly-made
+         error). The reference arrives with yield=1; refcounter_reference
+         ADOPTS that yield (no count change), so the wrapper owns exactly the
+         one ref the caller released (count stays 1).
+       - share:     the caller passes the payload un-yielded (yield=0) and
+         RETAINS its own reference. refcounter_reference ADDS a new reference
+         (count++), so the wrapper owns a fresh ref and frees only that one;
+         the caller's reference survives stream_notify and stays valid.
+     Adopt-when-yielded, add-when-not is precisely refcounter_reference, so it
+     is the only op needed here. _stream_notify_dispatch then takes a transient
+     +1 for handler-safety and releases it after dispatch, and the wrapper's
+     _stream_notify_payload_destroy releases the one ref the wrapper owns (the
+     no-handler path releases it directly and clears the wrapper). NULL
+     payloads (close/finished/complete event signals) carry no reference. */
+  if (payload != NULL) {
+    refcounter_reference((refcounter_t*) payload);
+  }
+  message_t msg;
+  msg.type = STREAM_NOTIFY;
+  msg.payload = wrapper;
+  msg.payload_destroy = _stream_notify_payload_destroy;
+  actor_send(&stream->actor, &msg);
+}
+
+/* Synchronous handler dispatch. Runs ONLY on the stream's actor thread —
+   either from the STREAM_NOTIFY message (stream_dispatch) or from an on_*
+   handler invoked by stream_dispatch — so the handler list is touched by
+   exactly one thread and needs no lock. Returns 1 if the payload was consumed
+   (the no-handler path destroys it so the caller must not double-free); returns
+   0 if the caller still owns its reference (the has-handler path takes only a
+   transient reference for dispatch safety and leaves the caller's reference
+   intact). */
+static uint8_t _stream_notify_dispatch(stream_t* stream, stream_event_e event, void* payload, void (*payload_destroy)(void*)) {
   stream_event_handler_list_t* list = stream->handlers[event];
-  size_t count = list->count;
-  if (count == 0) {
+  if (list->count == 0) {
     if (event == error_event) {
       async_error_t* error = (async_error_t*) payload;
       if (error != NULL && error->message != NULL) {
@@ -297,56 +409,56 @@ void stream_notify(stream_t* stream, stream_event_e event, void* payload, void (
       } else {
         log_error("Unhandled stream error: (null)");
       }
-      if (payload_destroy != NULL) {
-        payload_destroy(payload);
-      }
-      return;
     }
     if (payload_destroy != NULL) {
       payload_destroy(payload);
     }
-    return;
+    return 1;
   }
-  stream_event_handler_t** handlers = get_memory(count * sizeof(stream_event_handler_t*));
-  stream_event_handler_list_node_t* current = list->first;
-  if ((event == error_event) && (current == NULL)) {
-    free(handlers);
-    async_error_t* error = (async_error_t*) payload;
-    if (error != NULL && error->message != NULL) {
-      log_error("Unhandled stream error: %s", error->message);
-    } else {
-      log_error("Unhandled stream error: (null)");
-    }
-    if (payload_destroy != NULL) {
-      payload_destroy(payload);
-    }
-    return;
-  }
-  /* Hold a reference to the payload so no handler can free it mid-dispatch */
+  /* Hold a transient reference to the payload so no handler can free it
+     mid-dispatch, and reference each handler across its callback — a handler
+     may unsubscribe itself or the stream may close during the callback, so the
+     transient ref keeps the handler (and its list node) alive until we advance
+     to the next node. The list is not mutated during dispatch (any
+     subscribe/unsubscribe/close the handler issues is queued to the actor and
+     runs after stream_notify returns), so walking current->next is safe. */
   if (payload != NULL) {
     refcounter_reference((refcounter_t*) payload);
   }
-  size_t i = 0;
   uint8_t has_onces = 0;
+  stream_event_handler_list_node_t* current = list->first;
   while (current != NULL) {
     if (has_onces == 0) {
       has_onces = current->handler->once;
     }
-    handlers[i++] = REFERENCE(current->handler, stream_event_handler_t);
+    stream_event_handler_t* handler = REFERENCE(current->handler, stream_event_handler_t);
+    handler->handler(handler->ctx, payload);
+    DESTROY(handler, stream_event_handler);
     current = current->next;
   }
-  for (size_t c = 0; c < i; c++) {
-    handlers[c]->handler(handlers[c]->ctx, payload);
-    DESTROY(handlers[c], stream_event_handler);
-  }
-  free(handlers);
   if (has_onces == 1) {
     stream_event_list_remove_onces(list);
   }
-  /* Release our hold on the payload */
+  /* Release our transient hold on the payload; the caller's (the message
+   * wrapper's) reference is still intact, so it remains the owner. */
   if (payload_destroy != NULL) {
     payload_destroy(payload);
   }
+  return 0;
+}
+
+/* payload_destroy for a STREAM_SUBSCRIBE message. If the message was
+   dispatched, stream_subscribe_internal created the handler (which took
+   ownership of ctx) and the dispatch cleared ctx/ctx_destroy, so this just
+   frees the wrapper. If the message was discarded (stream destroyed before
+   dispatch), the handler was never created and ctx is still owned by the
+   wrapper — call ctx_destroy to release it, then free the wrapper. */
+static void _stream_subscribe_payload_destroy(void* ptr) {
+  stream_subscribe_payload_t* p = (stream_subscribe_payload_t*) ptr;
+  if (p->ctx_destroy != NULL && p->ctx != NULL) {
+    p->ctx_destroy(p->ctx);
+  }
+  free(p);
 }
 
 /* ---- stream operations ---- */
@@ -446,7 +558,7 @@ void readable_stream_pull_handler(stream_t* stream, void (*on_pull)(stream_t*)) 
 
 void writeable_stream_write_handler(stream_t* stream, void (*handler)(stream_t*, void*)) {
   if (stream->type == readable_stream) {
-    stream_notify(stream, error_event, OFFS_ERROR("Read Stream cannot set write handlers"), (void (*)(void*))error_destroy);
+    stream_notify(stream, error_event, OFFS_ERROR_TRANSFER("Read Stream cannot set write handlers"), (void (*)(void*))error_destroy);
   } else {
     stream->on_write = handler;
   }
@@ -503,7 +615,7 @@ void writeable_stream_write(stream_t* stream, void* data) {
 
 void readable_pull_stream_pull(stream_t* stream) {
   if (stream->type == writeable_stream || stream->force == push) {
-    stream_notify(stream, error_event, OFFS_ERROR("Invalid Readable Pull Stream"), (void (*)(void*))error_destroy);
+    stream_notify(stream, error_event, OFFS_ERROR_TRANSFER("Invalid Readable Pull Stream"), (void (*)(void*))error_destroy);
     return;
   }
 
@@ -517,61 +629,96 @@ void readable_pull_stream_pull(stream_t* stream) {
 
 /* ---- subscribe / unsubscribe ---- */
 
+/* Public entry points: allocate the handler id atomically (so it can be
+   returned synchronously to the caller) and route the subscription through the
+   stream's actor via a STREAM_SUBSCRIBE message. The actor creates the handler
+   and enqueues it on the actor thread (stream_subscribe_internal), so the
+   handler list is only mutated on the actor thread — no lock, no race with a
+   concurrent stream_notify. FIFO mailbox ordering guarantees the handler is
+   live before any later push/notify the caller issues, and that an unsubscribe
+   queued after a subscribe runs after it (finds the handler). */
+
 size_t stream_subscribe(stream_t* stream, stream_event_e event, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*)) {
   size_t id = ++stream->next_handler_id;
-  uint8_t push = 0;
-  if ((event == data_event) && (stream->handlers[event]->count == 0)) {
-    push = ((!stream->is_piped) && stream->auto_push);
-  }
-  stream_event_handler_t* _handler = stream_event_handler_create(id, ctx, handler, ctx_destroy, 0);
+  stream_subscribe_payload_t* p = get_clear_memory(sizeof(stream_subscribe_payload_t));
+  p->id = id;
+  p->event = event;
+  p->ctx = ctx;
+  p->handler = handler;
+  p->ctx_destroy = ctx_destroy;
+  p->once = 0;
+  message_t msg;
+  msg.type = STREAM_SUBSCRIBE;
+  msg.payload = p;
+  msg.payload_destroy = _stream_subscribe_payload_destroy;
+  actor_send(&stream->actor, &msg);
+  return id;
+}
 
-  stream_event_list_enqueue(stream->handlers[event], _handler);
-  if (push) {
-    readable_push_stream_push(stream);
-  }
+size_t stream_once(stream_t* stream, stream_event_e event, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*)) {
+  size_t id = ++stream->next_handler_id;
+  stream_subscribe_payload_t* p = get_clear_memory(sizeof(stream_subscribe_payload_t));
+  p->id = id;
+  p->event = event;
+  p->ctx = ctx;
+  p->handler = handler;
+  p->ctx_destroy = ctx_destroy;
+  p->once = 1;
+  message_t msg;
+  msg.type = STREAM_SUBSCRIBE;
+  msg.payload = p;
+  msg.payload_destroy = _stream_subscribe_payload_destroy;
+  actor_send(&stream->actor, &msg);
   return id;
 }
 
 void stream_unsubscribe(stream_t* stream, stream_event_e event, size_t id) {
   if (stream == NULL) return;
-  stream_event_handler_list_t* list = stream->handlers[event];
-  if (list == NULL) return;
-  stream_event_handler_list_node_t* current = list->first;
-  stream_event_handler_list_node_t* next = NULL;
-  stream_event_handler_list_node_t* node = NULL;
-  while (current != NULL) {
-    next = current->next;
-    if (current->handler->id == id) {
-      node = current;
-      break;
-    }
-    current = next;
-  }
-  if (node != NULL) {
-    stream_event_list_remove(list, node);
-  }
+  stream_unsubscribe_payload_t* p = get_clear_memory(sizeof(stream_unsubscribe_payload_t));
+  p->event = event;
+  p->id = id;
+  message_t msg;
+  msg.type = STREAM_UNSUBSCRIBE;
+  msg.payload = p;
+  msg.payload_destroy = (void (*)(void*)) free;
+  actor_send(&stream->actor, &msg);
 }
 
-size_t stream_once(stream_t* stream, stream_event_e event, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*)) {
-  size_t id = ++stream->next_handler_id;
+/* Actor-thread implementation of subscribe. Creates the handler (which takes
+   ownership of ctx) and enqueues it, then auto-pushes if this is the first data
+   handler so the producer starts flowing data to the new consumer. The
+   once-variant drives the push when a data handler already exists, preserving
+   the prior subscribe/once auto-push conditions exactly (now evaluated on the
+   actor thread after enqueue). */
+void stream_subscribe_internal(stream_t* stream, stream_event_e event, size_t id, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*), uint8_t once) {
+  stream_event_handler_t* _handler = stream_event_handler_create(id, ctx, handler, ctx_destroy, once);
+  stream_event_handler_list_t* list = stream->handlers[event];
+  size_t count_before = list->count;
+  stream_event_list_enqueue(list, _handler);
   uint8_t push = 0;
-  if ((event == data_event) && (stream->handlers[event]->count == 1)) {
-    push = ((!stream->is_piped) && stream->auto_push);
+  if ((event == data_event) && !stream->is_piped && stream->auto_push) {
+    push = once ? (count_before == 1) : (count_before == 0);
   }
-  stream_event_handler_t* _handler = stream_event_handler_create(id, ctx, handler, ctx_destroy, 1);
-
-  stream_event_list_enqueue(stream->handlers[event], _handler);
   if (push) {
     readable_push_stream_push(stream);
   }
-  return id;
 }
 
-void stream_subscribe_internal(stream_t* stream, stream_event_e event, size_t id, void* ctx, void (* handler)(void*, void*), void (* ctx_destroy)(void*), uint8_t once) {
-  stream_event_handler_t* _handler = stream_event_handler_create(id, ctx, handler, ctx_destroy, once);
-  stream_event_list_enqueue(stream->handlers[event], _handler);
-  if ((event == data_event) && (stream->handlers[event]->count == 1) && stream->auto_push && stream->on_push != NULL) {
-    readable_push_stream_push(stream);
+/* Actor-thread implementation of unsubscribe. Walks the list for the handler
+   with the matching id and removes it (stream_event_list_remove unlinks the
+   node, drops the list's reference on the handler — releasing ctx via
+   ctx_destroy if it was the last reference — and frees the node). */
+void stream_unsubscribe_internal(stream_t* stream, stream_event_e event, size_t id) {
+  stream_event_handler_list_t* list = stream->handlers[event];
+  if (list == NULL) return;
+  stream_event_handler_list_node_t* current = list->first;
+  while (current != NULL) {
+    stream_event_handler_list_node_t* next = current->next;
+    if (current->handler->id == id) {
+      stream_event_list_remove(list, current);
+      return;
+    }
+    current = next;
   }
 }
 
@@ -579,9 +726,9 @@ void stream_subscribe_internal(stream_t* stream, stream_event_e event, size_t id
 
 void readable_push_stream_pipe(stream_t* rs, stream_t* ws) {
   if (rs->type == writeable_stream || rs->force == pull) {
-    stream_notify(rs, error_event, OFFS_ERROR("Invalid read stream being piped"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Invalid read stream being piped"), (void (*)(void*))error_destroy);
   } else if (ws->type == readable_stream || ws->force == pull) {
-    stream_notify(rs, error_event, OFFS_ERROR("Invalid write stream being piped to"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Invalid write stream being piped to"), (void (*)(void*))error_destroy);
   } else {
     rs->on_pipe(rs, ws);
   }
@@ -589,7 +736,7 @@ void readable_push_stream_pipe(stream_t* rs, stream_t* ws) {
 
 void _readable_push_stream_on_pipe(stream_t* rs, stream_t* ws) {
   if (rs->is_deactivated == 1) {
-    stream_notify(rs, error_event, OFFS_ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (rs->pipe_notifiers == NULL) {
       size_t size = 0;
@@ -628,8 +775,15 @@ void _readable_push_stream_piped_notify(stream_t* stream, void* payload) {
 }
 
 void _readable_push_stream_error_notify(stream_t* stream, void* payload) {
-  (void)payload;
-  stream_deactivate(stream, (async_error_t*) payload);
+  /* payload is the dispatched error, held only by _stream_notify_dispatch's
+     transient reference. Take our own reference so the error_event message
+     stream_deactivate builds owns a real ref — stream_deactivate takes
+     ownership of one ref but does not add one, so passing a borrowed ref
+     would let the upstream wrapper free the error out from under the new
+     message. The close-event path stream_deactivate also queues will
+     unsubscribe this handler, so the recursion terminates. */
+  async_error_t* error = REFERENCE((async_error_t*) payload, async_error_t);
+  stream_deactivate(stream, error);
 }
 
 void _readable_push_stream_close_notify(stream_t* stream, void* payload) {
@@ -643,7 +797,7 @@ void _writeable_push_stream_on_piped(stream_t* ws, stream_t* rs) {
     abort();
   }
   if (ws->is_deactivated == 1) {
-    stream_notify(ws, error_event, OFFS_ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
+    stream_notify(ws, error_event, OFFS_ERROR_TRANSFER("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (ws->pipe_notifiers == NULL) {
       size_t size = 0;
@@ -697,7 +851,8 @@ void _writeable_push_stream_data_notify(stream_t* stream, void* data) {
 }
 
 void _writeable_push_stream_error_notify(stream_t* stream, void* payload) {
-  stream_deactivate(stream, (async_error_t*) payload);
+  async_error_t* error = REFERENCE((async_error_t*) payload, async_error_t);
+  stream_deactivate(stream, error);
 }
 
 void _writeable_push_stream_close_notify(stream_t* stream, void* payload) {
@@ -716,9 +871,9 @@ void _writeable_push_stream_complete_notify(stream_t* stream, void* payload) {
 
 void writeable_pull_stream_pipe(stream_t* ws, stream_t* rs) {
   if (rs->type == writeable_stream || rs->force == push) {
-    stream_notify(rs, error_event, OFFS_ERROR("Invalid write stream being piped"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Invalid write stream being piped"), (void (*)(void*))error_destroy);
   } else if (ws->type == readable_stream || ws->force == push) {
-    stream_notify(rs, error_event, OFFS_ERROR("Invalid read stream being piped to"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Invalid read stream being piped to"), (void (*)(void*))error_destroy);
   } else {
     ws->on_pipe(ws, rs);
   }
@@ -730,7 +885,7 @@ void _writeable_pull_stream_on_pipe(stream_t* ws, stream_t* rs) {
     abort();
   }
   if (ws->is_deactivated == 1) {
-    stream_notify(ws, error_event, OFFS_ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
+    stream_notify(ws, error_event, OFFS_ERROR_TRANSFER("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (ws->pipe_notifiers == NULL) {
       size_t size = 0;
@@ -775,7 +930,7 @@ void _readable_pull_stream_on_piped(stream_t* rs, stream_t* ws) {
     abort();
   }
   if (rs->is_deactivated == 1) {
-    stream_notify(rs, error_event, OFFS_ERROR("Stream has been destroyed"), (void (*)(void*))error_destroy);
+    stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (rs->pipe_notifiers == NULL) {
       size_t size = 0;
@@ -817,8 +972,8 @@ void _readable_pull_stream_on_piped(stream_t* rs, stream_t* ws) {
 }
 
 void _readable_pull_stream_error_notify(stream_t* stream, void* payload) {
-  (void)payload;
-  stream_deactivate(stream, (async_error_t*) payload);
+  async_error_t* error = REFERENCE((async_error_t*) payload, async_error_t);
+  stream_deactivate(stream, error);
 }
 
 void _readable_pull_stream_close_notify(stream_t* stream, void* payload) {
@@ -832,8 +987,8 @@ void _readable_pull_stream_finish_notify(stream_t* stream, void* payload) {
 }
 
 void _writeable_pull_stream_error_notify(stream_t* stream, void* payload) {
-  (void)payload;
-  stream_deactivate(stream, (async_error_t*) payload);
+  async_error_t* error = REFERENCE((async_error_t*) payload, async_error_t);
+  stream_deactivate(stream, error);
 }
 
 void _writeable_pull_stream_piped_notify(stream_t* stream, void* payload) {

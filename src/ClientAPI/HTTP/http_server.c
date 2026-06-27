@@ -118,6 +118,10 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
   if (server->listen_sock == NULL) {
     log_error("http_server_create: socket creation failed");
     perror("socket");
+    /* actor_init above registered server->actor in the pool's registry; every
+       error path must detach it before freeing, or scheduler_pool_destroy will
+       later walk a freed actor (use-after-free in the registry linked list). */
+    actor_destroy(&server->actor);
     free(server);
     return NULL;
   }
@@ -137,6 +141,7 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
     log_error("http_server_create: bind failed for port %u", port);
     perror("bind");
     platform_socket_destroy(server->listen_sock);
+    actor_destroy(&server->actor);
     free(server);
     return NULL;
   }
@@ -145,6 +150,7 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
     log_error("http_server_create: listen failed");
     perror("listen");
     platform_socket_destroy(server->listen_sock);
+    actor_destroy(&server->actor);
     free(server);
     return NULL;
   }
@@ -171,6 +177,7 @@ http_server_t* http_server_create_ssl(scheduler_pool_t* pool, const char* host, 
   if (server->ssl_ctx == NULL) {
     fprintf(stderr, "http_server_create_ssl: failed to create SSL_CTX\n");
     platform_socket_destroy(server->listen_sock);
+    actor_destroy(&server->actor);
     free(server);
     return NULL;
   }
@@ -179,6 +186,7 @@ http_server_t* http_server_create_ssl(scheduler_pool_t* pool, const char* host, 
     fprintf(stderr, "http_server_create_ssl: failed to load certificate from %s\n", cert_path);
     SSL_CTX_free(server->ssl_ctx);
     platform_socket_destroy(server->listen_sock);
+    actor_destroy(&server->actor);
     free(server);
     return NULL;
   }
@@ -187,6 +195,7 @@ http_server_t* http_server_create_ssl(scheduler_pool_t* pool, const char* host, 
     fprintf(stderr, "http_server_create_ssl: failed to load private key from %s\n", key_path);
     SSL_CTX_free(server->ssl_ctx);
     platform_socket_destroy(server->listen_sock);
+    actor_destroy(&server->actor);
     free(server);
     return NULL;
   }
@@ -195,6 +204,7 @@ http_server_t* http_server_create_ssl(scheduler_pool_t* pool, const char* host, 
     fprintf(stderr, "http_server_create_ssl: private key does not match certificate\n");
     SSL_CTX_free(server->ssl_ctx);
     platform_socket_destroy(server->listen_sock);
+    actor_destroy(&server->actor);
     free(server);
     return NULL;
   }
@@ -437,9 +447,36 @@ static void _http_server_accept_one(http_server_t* server) {
 
   if (server->ssl_ctx != NULL) {
     connection->ssl = SSL_new(server->ssl_ctx);
+#ifdef _WIN32
+    /* IOCP completes a server-side read into a watcher-owned buffer that the
+     * worker can't recv() from (the kernel socket is empty by then), so decouple
+     * OpenSSL from the socket: a memory-BIO pair is fed ciphertext drained by
+     * the I/O thread (HTTP_CONNECTION_DATA) and SSL_read decrypts it on the
+     * worker. See _connection_ssl_data_handle in http_connection.c. */
+    connection->rbio = BIO_new(BIO_s_mem());
+    connection->wbio = BIO_new(BIO_s_mem());
+    if (connection->ssl != NULL && connection->rbio != NULL && connection->wbio != NULL) {
+      SSL_set_bio(connection->ssl, connection->rbio, connection->wbio);
+      SSL_set_accept_state(connection->ssl);
+      connection->is_ssl = 1;
+    } else {
+      /* OOM during accept — free partials and leave is_ssl=0 so the first bytes
+       * fail parsing and close the connection cleanly rather than crash. SSL
+       * owns the BIOs only after SSL_set_bio, so free them by hand here. */
+      if (connection->rbio != NULL) BIO_free(connection->rbio);
+      if (connection->wbio != NULL) BIO_free(connection->wbio);
+      connection->rbio = NULL;
+      connection->wbio = NULL;
+      if (connection->ssl != NULL) {
+        SSL_free(connection->ssl);
+        connection->ssl = NULL;
+      }
+    }
+#else
     SSL_set_fd(connection->ssl, platform_socket_fd(client_sock));
     SSL_set_accept_state(connection->ssl);
     connection->is_ssl = 1;
+#endif
   }
 }
 

@@ -54,12 +54,15 @@ void http_request_destroy(http_request_t* request) {
 }
 
 void _http_request_dispatch(void* state, message_t* msg) {
-  (void)state;
-  (void)msg;
-  switch (msg->type) {
-    default:
-      break;
-  }
+  /* The request stream is a passive readable stream pushed by the HTTP body
+     parser. stream_subscribe / stream_once / stream_notify route through the
+     actor (STREAM_SUBSCRIBE / STREAM_UNSUBSCRIBE / STREAM_NOTIFY), so the
+     dispatch must hand those to stream_dispatch to register handlers and
+     deliver events — a no-op dispatch would drop them and the body would
+     never reach the route pipeline. The request stream only ever receives
+     subscribe / unsubscribe / notify, so routing every message to
+     stream_dispatch is safe. */
+  stream_dispatch(state, msg);
 }
 
 int http_request_method(http_request_t* request) {

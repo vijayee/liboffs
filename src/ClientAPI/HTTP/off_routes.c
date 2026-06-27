@@ -512,6 +512,7 @@ static void _off_get_dispatch(void* state, message_t* msg) {
 typedef struct {
     http_response_t* response;
     http_connection_t* connection;
+    http_request_t* request;
     buffer_t* file_hash;
     buffer_t* descriptor_hash;
     char* content_type;
@@ -846,6 +847,12 @@ static void _put_on_request_close(void* ctx, void* unused) {
     (void)unused;
     put_context_t* put_ctx = (put_context_t*)ctx;
     writeable_off_stream_finalize(put_ctx->ws);
+    /* The request stream has delivered all its body chunks and is now closed;
+       release the pipeline's reference. Use a deferred deref so the request is
+       freed after this dispatch returns, not while _stream_notify_dispatch is
+       still iterating the request's handler list on the request actor thread. */
+    stream_deferred_deref((stream_t*)put_ctx->request);
+    put_ctx->request = NULL;
 }
 
 static int _off_put_headers_complete(http_connection_t* connection,
@@ -905,6 +912,15 @@ static int _off_put_headers_complete(http_connection_t* connection,
     put_context_t* put_ctx = get_clear_memory(sizeof(put_context_t));
     put_ctx->response = response;
     put_ctx->connection = connection;
+    /* Hold a reference to the request stream for the streaming pipeline. The
+       HTTP connection releases its own reference in _on_message_complete right
+       after queueing the request's close_event (stream_notify is async, so the
+       actor has not processed data_event / close_event yet). Without this
+       reference the request would be freed before its actor delivered the
+       body chunks and the close to the pipeline, and the PUT would hang. The
+       reference is released (deferred) in _put_on_request_close once the
+       request's close_event has actually been dispatched. */
+    put_ctx->request = REFERENCE(request, http_request_t);
     response->is_piped = 1;
     connection->piped_pending = 1;
     refcounter_reference((refcounter_t*)response);

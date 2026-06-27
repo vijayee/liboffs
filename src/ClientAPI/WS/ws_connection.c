@@ -76,7 +76,9 @@ typedef struct {
 
 static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                        pd_event_t events, void* user_data);
+#ifndef _WIN32
 static void _connection_do_reads(ws_connection_t* connection);
+#endif
 static void _ws_dispatch_frame(ws_connection_t* conn, uint8_t type, cbor_item_t* frame);
 
 /* --- Base64 encode helper for WebSocket accept key --- */
@@ -275,6 +277,10 @@ static void _connection_close_fd(ws_connection_t* connection) {
     SSL_shutdown(connection->ssl);
     SSL_free(connection->ssl);
     connection->ssl = NULL;
+    /* SSL_free freed the memory BIOs it owns (Windows IOCP). Drop the dangling
+     * pointers so nothing can dereference them after this close. */
+    connection->rbio = NULL;
+    connection->wbio = NULL;
   }
   if (connection->sock != NULL) {
     platform_socket_destroy(connection->sock);
@@ -990,50 +996,324 @@ static void _ws_handle_ofd_resolve_result(ws_connection_t* conn, message_t* msg)
 
 /* --- Connection dispatch (runs on scheduler worker threads) --- */
 
-#ifdef _WIN32
-/* poll-dancer's IOCP backend never delivers PD_EVENT_WRITE (only READ is
- * driven through overlapped I/O), so the buffer-then-arm-WRITE strategy used
- * on POSIX can't flush a partial send on Windows — a large frame stalls once
- * the kernel send buffer fills. On loopback the peer drains continuously, so a
- * bounded synchronous retry completes the send without blocking the connection
- * actor for long. Handles both plain and TLS connections: SSL_write is retried
- * with the same buffer on SSL_ERROR_WANT_WRITE/WANT_READ (the OpenSSL
- * nonblocking contract). Returns 0 = fully sent, 1 = partial (cap exhausted,
- * caller buffers the remainder), -1 = peer closed, -2 = hard error. */
-static int _connection_send_all_blocking(ws_connection_t* connection,
-                                         buffer_t* combined, size_t* out_sent) {
-  size_t sent_total = 0;
-  for (int attempts = 0; attempts < 2000 && sent_total < combined->size; attempts++) {
-    ssize_t sent;
-    if (connection->is_ssl && connection->ssl != NULL) {
-      sent = SSL_write(connection->ssl, combined->data + sent_total,
-                       (int)(combined->size - sent_total));
+/* Feed one plaintext chunk (already-decrypted on the SSL path, or raw bytes on
+ * the plain path) through the WS state machine: in WS_STATE_UPGRADING it
+ * accumulates the HTTP upgrade request and promotes to WS_STATE_CONNECTED once
+ * the headers arrive; in WS_STATE_CONNECTED it reassembles WebSocket frames and
+ * dispatches them. Takes ownership of `data` (frees it). Used by both the plain
+ * WS_CONNECTION_DATA case and _connection_ssl_data_handle (Windows SSL), so the
+ * SSL path decrypts and hands the plaintext here directly rather than re-shipping
+ * it as WS_CONNECTION_DATA (which would re-enter the SSL guard). */
+static void _ws_connection_feed_plaintext(ws_connection_t* connection, buffer_t* data) {
+  if (connection->state == WS_STATE_UPGRADING) {
+    /* Accumulate data until we see \r\n\r\n (end of HTTP headers) */
+    if (connection->upgrade_buf == NULL) {
+      connection->upgrade_buf = buffer_create_with_capacity(0, data->size + WS_UPGRADE_BUFFER_INITIAL);
+      memcpy(connection->upgrade_buf->data, data->data, data->size);
+      connection->upgrade_buf->size = data->size;
     } else {
-      sent = platform_socket_send(connection->sock, combined->data + sent_total,
-                                   combined->size - sent_total);
+      buffer_ensure_capacity(connection->upgrade_buf, connection->upgrade_buf->size + data->size);
+      memcpy(connection->upgrade_buf->data + connection->upgrade_buf->size, data->data, data->size);
+      connection->upgrade_buf->size += data->size;
     }
+    DESTROY(data, buffer);
+
+    int headers_end = _find_headers_end(connection->upgrade_buf->data, connection->upgrade_buf->size);
+    if (headers_end > 0) {
+      /* Save remaining data (after headers) before _ws_handle_upgrade frees upgrade_buf */
+      size_t remaining = connection->upgrade_buf->size - (size_t)headers_end;
+      buffer_t* post_headers_data = NULL;
+      if (remaining > 0) {
+        post_headers_data = buffer_create_from_pointer_copy(
+          connection->upgrade_buf->data + headers_end, remaining);
+      }
+
+      /* We have a complete HTTP upgrade request — process it */
+      _ws_handle_upgrade(connection, connection->upgrade_buf->data, (size_t)headers_end);
+
+      /* _ws_handle_upgrade destroys upgrade_buf, so don't access it anymore */
+      connection->upgrade_buf = NULL;
+
+      /* Any data after the headers is WebSocket frame data */
+      if (post_headers_data != NULL && connection->state == WS_STATE_CONNECTED) {
+        connection->recv_buf = post_headers_data;
+        post_headers_data = NULL;
+      } else if (post_headers_data != NULL) {
+        DESTROY(post_headers_data, buffer);
+      }
+
+      /* Process any buffered recv data as WebSocket frames */
+      if (connection->recv_buf != NULL && connection->recv_buf->size > 0) {
+        size_t ws_offset = 0;
+        while (ws_offset < connection->recv_buf->size) {
+          ws_frame_t frame;
+          size_t needed = 0;
+          ssize_t consumed = ws_frame_parse(
+            connection->recv_buf->data + ws_offset,
+            connection->recv_buf->size - ws_offset,
+            &frame, &needed);
+          if (consumed == 0) {
+            /* Incomplete frame — stop parsing */
+            break;
+          } else if (consumed < 0) {
+            /* Protocol error */
+            DESTROY(connection->recv_buf, buffer);
+            connection->recv_buf = NULL;
+            _connection_stop_watcher(connection);
+            _connection_close_fd(connection);
+            break;
+          } else {
+            _ws_handle_frame(connection, &frame);
+            ws_frame_destroy(&frame);
+            ws_offset += (size_t)consumed;
+          }
+        }
+        /* Compact recv_buf */
+        if (connection->recv_buf != NULL) {
+          if (ws_offset == 0) {
+            /* Nothing consumed — keep buffer as is */
+          } else if (ws_offset >= connection->recv_buf->size) {
+            DESTROY(connection->recv_buf, buffer);
+            connection->recv_buf = NULL;
+          } else {
+            size_t leftover = connection->recv_buf->size - ws_offset;
+            memmove(connection->recv_buf->data, connection->recv_buf->data + ws_offset, leftover);
+            connection->recv_buf->size = leftover;
+          }
+        }
+      }
+    }
+    /* If headers not complete yet, we'll accumulate more data on next read */
+    return;
+  }
+
+  /* WS_STATE_CONNECTED: buffer data and parse WebSocket frames */
+  if (connection->recv_buf == NULL) {
+    connection->recv_buf = buffer_create_with_capacity(0, data->size);
+    memcpy(connection->recv_buf->data, data->data, data->size);
+    connection->recv_buf->size = data->size;
+  } else {
+    buffer_ensure_capacity(connection->recv_buf, connection->recv_buf->size + data->size);
+    memcpy(connection->recv_buf->data + connection->recv_buf->size, data->data, data->size);
+    connection->recv_buf->size += data->size;
+  }
+  DESTROY(data, buffer);
+
+  /* Parse as many complete WebSocket frames as possible */
+  size_t offset = 0;
+  while (offset < connection->recv_buf->size) {
+    ws_frame_t frame;
+    size_t needed = 0;
+    ssize_t consumed = ws_frame_parse(
+      connection->recv_buf->data + offset,
+      connection->recv_buf->size - offset,
+      &frame, &needed);
+    if (consumed == 0) {
+      /* Incomplete frame — stop parsing, keep remaining bytes */
+      break;
+    } else if (consumed < 0) {
+      /* Protocol error — close the connection */
+      DESTROY(connection->recv_buf, buffer);
+      connection->recv_buf = NULL;
+      _connection_stop_watcher(connection);
+      _connection_close_fd(connection);
+      break;
+    } else {
+      _ws_handle_frame(connection, &frame);
+      ws_frame_destroy(&frame);
+      offset += (size_t)consumed;
+    }
+  }
+  /* Compact recv_buf: shift any remaining bytes to the front */
+  if (connection->recv_buf != NULL) {
+    if (offset == 0) {
+      /* Nothing consumed — keep buffer as is (incomplete frame) */
+    } else if (offset >= connection->recv_buf->size) {
+      /* All data consumed — free the buffer */
+      DESTROY(connection->recv_buf, buffer);
+      connection->recv_buf = NULL;
+    } else {
+      /* Partial consumption — shift remaining data to front */
+      size_t leftover = connection->recv_buf->size - offset;
+      memmove(connection->recv_buf->data, connection->recv_buf->data + offset, leftover);
+      connection->recv_buf->size = leftover;
+    }
+  }
+}
+
+#ifdef _WIN32
+/* poll-dancer's IOCP backend never delivers PD_EVENT_WRITE for the server (it
+ * issues no overlapped writes of its own), so the buffer-then-arm-WRITE strategy
+ * used on POSIX can't flush a partial send on Windows — a large frame stalls
+ * once the kernel send buffer fills. On loopback the peer drains continuously,
+ * so a bounded synchronous retry completes the send. Returns 0 = fully sent,
+ * 1 = partial (cap exhausted), -1 = peer closed, -2 = hard error. *out_sent
+ * receives the bytes accepted. Mirrors http_connection.c:_connection_send_raw_blocking. */
+static int _connection_send_raw_blocking(ws_connection_t* connection,
+                                         const uint8_t* data, size_t len,
+                                         size_t* out_sent) {
+  size_t sent_total = 0;
+  for (int attempts = 0; attempts < 2000 && sent_total < len; attempts++) {
+    ssize_t sent = platform_socket_send(connection->sock, data + sent_total,
+                                         len - sent_total);
     if (sent > 0) {
       sent_total += (size_t)sent;
     } else if (sent == 0) {
       *out_sent = sent_total;
       return -1;  /* peer closed */
     } else {
-      int retry;
-      if (connection->is_ssl && connection->ssl != NULL) {
-        int ssl_err = SSL_get_error(connection->ssl, (int)sent);
-        retry = (ssl_err == SSL_ERROR_WANT_WRITE || ssl_err == SSL_ERROR_WANT_READ);
-      } else {
-        retry = (errno == EAGAIN || errno == EWOULDBLOCK);
-      }
-      if (!retry) {
+      if (errno != EAGAIN && errno != EWOULDBLOCK) {
         *out_sent = sent_total;
         return -2;  /* hard error */
       }
-      platform_sleep_ms(1);  /* EAGAIN/WANT_WRITE: back off and retry */
+      platform_sleep_ms(1);  /* EAGAIN: back off and retry */
     }
   }
   *out_sent = sent_total;
-  return (sent_total == combined->size) ? 0 : 1;
+  return (sent_total == len) ? 0 : 1;
+}
+
+/* Drain ciphertext OpenSSL emitted into the write BIO (handshake response
+ * records, key-update records, or SSL_write output) and send it with bounded
+ * retry. Returns 0 on success, -1 if a record could not be fully flushed — the
+ * caller must close the connection, since TLS records are session-ordered and
+ * must not be partially dropped. */
+static int _connection_ssl_flush_wbio(ws_connection_t* connection) {
+  uint8_t cipher[READ_BUFFER_SIZE];
+  for (;;) {
+    int n = BIO_read(connection->wbio, cipher, sizeof(cipher));
+    if (n <= 0) break;
+    size_t sent = 0;
+    if (_connection_send_raw_blocking(connection, cipher, (size_t)n, &sent) != 0) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
+/* Send plaintext over TLS via the memory write BIO. SSL_write emits TLS records
+ * into wbio — a memory BIO never blocks, so the full plaintext slice is always
+ * accepted in one call — then we drain wbio and raw-send the ciphertext. wbio is
+ * always drained to completion before returning, so a ciphertext send that can't
+ * finish within the bounded retry is fatal for the connection (returns -2; the
+ * caller closes). *out_sent receives the plaintext bytes accepted into the BIO. */
+static int _connection_ssl_send_blocking(ws_connection_t* connection,
+                                         const uint8_t* plaintext, size_t len,
+                                         size_t* out_sent) {
+  size_t sent_total = 0;
+  uint8_t cipher[READ_BUFFER_SIZE];
+  while (sent_total < len) {
+    int n = SSL_write(connection->ssl, plaintext + sent_total,
+                      (int)(len - sent_total));
+    if (n <= 0) {
+      /* A memory write BIO never blocks, so WANT_WRITE/WANT_READ should not
+       * happen here; any non-success is a hard error. Flush whatever was already
+       * emitted, then fail. */
+      (void)_connection_ssl_flush_wbio(connection);
+      *out_sent = sent_total;
+      _connection_stop_watcher(connection);
+      _connection_close_fd(connection);
+      return -2;
+    }
+    sent_total += (size_t)n;
+    for (;;) {
+      int c = BIO_read(connection->wbio, cipher, sizeof(cipher));
+      if (c <= 0) break;
+      size_t csent = 0;
+      if (_connection_send_raw_blocking(connection, cipher, (size_t)c, &csent) != 0) {
+        *out_sent = sent_total;
+        _connection_stop_watcher(connection);
+        _connection_close_fd(connection);
+        return -2;
+      }
+    }
+  }
+  *out_sent = sent_total;
+  return 0;
+}
+
+static int _connection_send_all_blocking(ws_connection_t* connection,
+                                         buffer_t* combined, size_t* out_sent) {
+  if (connection->is_ssl && connection->ssl != NULL) {
+    return _connection_ssl_send_blocking(connection, combined->data,
+                                         combined->size, out_sent);
+  }
+  return _connection_send_raw_blocking(connection, combined->data,
+                                       combined->size, out_sent);
+}
+
+/* Windows IOCP: the I/O-thread read callback drained the watcher's completed
+ * read into the DATA message payload as ciphertext. Feed it into the SSL read
+ * memory BIO and pump SSL_read: OpenSSL drives the handshake internally and
+ * returns SSL_ERROR_WANT_READ (need more ciphertext) or SSL_ERROR_WANT_WRITE
+ * (handshake response / key-update records buffered in wbio — flush them to the
+ * socket and retry) until the handshake completes, then it returns decrypted
+ * application data. Each decrypted chunk is fed straight back through
+ * WS_CONNECTION_DATA, which reuses the existing upgrade + WebSocket frame-parsing
+ * logic (so the HTTP upgrade request and WS frames are parsed from plaintext
+ * exactly as on the plain path). This works for TLS 1.2 and 1.3 without any
+ * explicit SSL_do_handshake / SSL_is_init_complete gating. All SSL/BIO calls run
+ * on this worker thread — the I/O thread never touches SSL — so there is no
+ * cross-thread race on the BIO. */
+static void _connection_ssl_data_handle(ws_connection_t* connection,
+                                        buffer_t* data) {
+  if (connection->sock == NULL || connection->ssl == NULL) {
+    return;
+  }
+  BIO_write(connection->rbio, data->data, (int)data->size);
+
+  for (int batch = 0; batch < 16; batch++) {
+    if (connection->sock == NULL) {
+      return;
+    }
+    uint8_t buffer[READ_BUFFER_SIZE];
+    int bytes_read = SSL_read(connection->ssl, buffer, sizeof(buffer));
+    if (bytes_read > 0) {
+      /* Feed the decrypted bytes straight to the plaintext handler (upgrade
+         parsing + WebSocket framing). Not re-shipped as WS_CONNECTION_DATA:
+         that message would re-enter this SSL guard and treat the plaintext as
+         ciphertext. The helper takes ownership of the buffer. */
+      buffer_t* plain = buffer_create_from_pointer_copy(buffer, (size_t)bytes_read);
+      _ws_connection_feed_plaintext(connection, plain);
+      continue;  /* more decrypted application data may be available */
+    }
+    int ssl_err = SSL_get_error(connection->ssl, bytes_read);
+    if (ssl_err == SSL_ERROR_WANT_READ) {
+      /* Need more ciphertext — wait for the next DATA. Flush anything this turn
+       * emitted (handshake response, key-update ack) first. */
+      if (_connection_ssl_flush_wbio(connection) != 0) {
+        _connection_stop_watcher(connection);
+        _connection_close_fd(connection);
+      }
+      return;
+    }
+    if (ssl_err == SSL_ERROR_WANT_WRITE) {
+      /* wbio has pending output — flush it to the socket and retry SSL_read. */
+      if (_connection_ssl_flush_wbio(connection) != 0) {
+        _connection_stop_watcher(connection);
+        _connection_close_fd(connection);
+        return;
+      }
+      continue;
+    }
+    /* Peer close_notify (SSL_ERROR_ZERO_RETURN) or hard error. */
+    message_t msg;
+    msg.type = WS_CONNECTION_HANGUP;
+    msg.payload = NULL;
+    msg.payload_destroy = NULL;
+    actor_send(&connection->actor, &msg);
+    /* Stop via the deferred path so a completion-based backend doesn't free
+       the watcher's overlapped while a completion is still pending. */
+    _connection_stop_watcher(connection);
+    return;
+  }
+  /* The plaintext router (_ws_connection_feed_plaintext above) can close the
+     connection (freeing ssl + the BIOs). If that happens in the last batch the
+     for-loop exits here instead of hitting the sock==NULL guard at the top, so
+     re-check ssl before touching wbio. */
+  if (connection->ssl != NULL) {
+    (void)_connection_ssl_flush_wbio(connection);
+  }
 }
 #endif
 
@@ -1057,141 +1337,20 @@ void ws_connection_dispatch(void* state, message_t* msg) {
         DESTROY(data, buffer);
         break;
       }
-
-      if (connection->state == WS_STATE_UPGRADING) {
-        /* Accumulate data until we see \r\n\r\n (end of HTTP headers) */
-        if (connection->upgrade_buf == NULL) {
-          connection->upgrade_buf = buffer_create_with_capacity(0, data->size + WS_UPGRADE_BUFFER_INITIAL);
-          memcpy(connection->upgrade_buf->data, data->data, data->size);
-          connection->upgrade_buf->size = data->size;
-        } else {
-          buffer_ensure_capacity(connection->upgrade_buf, connection->upgrade_buf->size + data->size);
-          memcpy(connection->upgrade_buf->data + connection->upgrade_buf->size, data->data, data->size);
-          connection->upgrade_buf->size += data->size;
-        }
+#ifdef _WIN32
+      /* On Windows the I/O-thread read callback drains both plain and SSL
+         connections and ships the bytes here (plaintext for plain, ciphertext
+         for SSL). For SSL, feed the ciphertext into the memory read BIO and
+         decrypt on this worker, then hand the plaintext to
+         _ws_connection_feed_plaintext. On POSIX the SSL path goes through
+         READABLE -> _connection_do_reads against the kernel socket. */
+      if (connection->is_ssl && connection->ssl != NULL) {
+        _connection_ssl_data_handle(connection, data);
         DESTROY(data, buffer);
-
-        int headers_end = _find_headers_end(connection->upgrade_buf->data, connection->upgrade_buf->size);
-        if (headers_end > 0) {
-          /* Save remaining data (after headers) before _ws_handle_upgrade frees upgrade_buf */
-          size_t remaining = connection->upgrade_buf->size - (size_t)headers_end;
-          buffer_t* post_headers_data = NULL;
-          if (remaining > 0) {
-            post_headers_data = buffer_create_from_pointer_copy(
-              connection->upgrade_buf->data + headers_end, remaining);
-          }
-
-          /* We have a complete HTTP upgrade request — process it */
-          _ws_handle_upgrade(connection, connection->upgrade_buf->data, (size_t)headers_end);
-
-          /* _ws_handle_upgrade destroys upgrade_buf, so don't access it anymore */
-          connection->upgrade_buf = NULL;
-
-          /* Any data after the headers is WebSocket frame data */
-          if (post_headers_data != NULL && connection->state == WS_STATE_CONNECTED) {
-            connection->recv_buf = post_headers_data;
-            post_headers_data = NULL;
-          } else if (post_headers_data != NULL) {
-            DESTROY(post_headers_data, buffer);
-          }
-
-          /* Process any buffered recv data as WebSocket frames */
-          if (connection->recv_buf != NULL && connection->recv_buf->size > 0) {
-            size_t ws_offset = 0;
-            while (ws_offset < connection->recv_buf->size) {
-              ws_frame_t frame;
-              size_t needed = 0;
-              ssize_t consumed = ws_frame_parse(
-                connection->recv_buf->data + ws_offset,
-                connection->recv_buf->size - ws_offset,
-                &frame, &needed);
-              if (consumed == 0) {
-                /* Incomplete frame — stop parsing */
-                break;
-              } else if (consumed < 0) {
-                /* Protocol error */
-                DESTROY(connection->recv_buf, buffer);
-                connection->recv_buf = NULL;
-                _connection_stop_watcher(connection);
-                _connection_close_fd(connection);
-                break;
-              } else {
-                _ws_handle_frame(connection, &frame);
-                ws_frame_destroy(&frame);
-                ws_offset += (size_t)consumed;
-              }
-            }
-            /* Compact recv_buf */
-            if (connection->recv_buf != NULL) {
-              if (ws_offset == 0) {
-                /* Nothing consumed — keep buffer as is */
-              } else if (ws_offset >= connection->recv_buf->size) {
-                DESTROY(connection->recv_buf, buffer);
-                connection->recv_buf = NULL;
-              } else {
-                size_t leftover = connection->recv_buf->size - ws_offset;
-                memmove(connection->recv_buf->data, connection->recv_buf->data + ws_offset, leftover);
-                connection->recv_buf->size = leftover;
-              }
-            }
-          }
-        }
-        /* If headers not complete yet, we'll accumulate more data on next read */
         break;
       }
-
-      /* WS_STATE_CONNECTED: buffer data and parse WebSocket frames */
-      if (connection->recv_buf == NULL) {
-        connection->recv_buf = buffer_create_with_capacity(0, data->size);
-        memcpy(connection->recv_buf->data, data->data, data->size);
-        connection->recv_buf->size = data->size;
-      } else {
-        buffer_ensure_capacity(connection->recv_buf, connection->recv_buf->size + data->size);
-        memcpy(connection->recv_buf->data + connection->recv_buf->size, data->data, data->size);
-        connection->recv_buf->size += data->size;
-      }
-      DESTROY(data, buffer);
-
-      /* Parse as many complete WebSocket frames as possible */
-      size_t offset = 0;
-      while (offset < connection->recv_buf->size) {
-        ws_frame_t frame;
-        size_t needed = 0;
-        ssize_t consumed = ws_frame_parse(
-          connection->recv_buf->data + offset,
-          connection->recv_buf->size - offset,
-          &frame, &needed);
-        if (consumed == 0) {
-          /* Incomplete frame — stop parsing, keep remaining bytes */
-          break;
-        } else if (consumed < 0) {
-          /* Protocol error — close the connection */
-          DESTROY(connection->recv_buf, buffer);
-          connection->recv_buf = NULL;
-          _connection_stop_watcher(connection);
-          _connection_close_fd(connection);
-          break;
-        } else {
-          _ws_handle_frame(connection, &frame);
-          ws_frame_destroy(&frame);
-          offset += (size_t)consumed;
-        }
-      }
-      /* Compact recv_buf: shift any remaining bytes to the front */
-      if (connection->recv_buf != NULL) {
-        if (offset == 0) {
-          /* Nothing consumed — keep buffer as is (incomplete frame) */
-        } else if (offset >= connection->recv_buf->size) {
-          /* All data consumed — free the buffer */
-          DESTROY(connection->recv_buf, buffer);
-          connection->recv_buf = NULL;
-        } else {
-          /* Partial consumption — shift remaining data to front */
-          size_t leftover = connection->recv_buf->size - offset;
-          memmove(connection->recv_buf->data, connection->recv_buf->data + offset, leftover);
-          connection->recv_buf->size = leftover;
-        }
-      }
+#endif
+      _ws_connection_feed_plaintext(connection, data);
       break;
     }
 
@@ -1206,12 +1365,16 @@ void ws_connection_dispatch(void* state, message_t* msg) {
       /* ASIO-style: the I/O thread notified us (SSL only) that data is
          available. SSL_read + feed the decrypted bytes back through the
          WS_CONNECTION_DATA path (which handles upgrade parsing and WS frame
-         parsing). */
+         parsing). POSIX-only: on Windows SSL reads arrive as ciphertext DATA
+         messages handled by _connection_ssl_data_handle, so this case is a
+         no-op there. */
       atomic_store(&connection->read_pending, 0);
       if (connection->sock == NULL) {
         break;
       }
+#ifndef _WIN32
       _connection_do_reads(connection);
+#endif
       break;
     }
 
@@ -1462,13 +1625,11 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   }
 
   if (events & PD_EVENT_READ) {
+#ifndef _WIN32
     if (connection->is_ssl && connection->ssl != NULL) {
-      /* SSL: decryption must happen on the worker via SSL_read, so just
-         notify. One READABLE in flight at a time backpressures via the TCP
-         window. (SSL over Windows IOCP is a pre-existing gap: SSL_read on the
-         worker hits the same empty-socket EAGAIN as a plain recv would.
-         Wiring it up needs a memory BIO fed from the watcher drain — tracked
-         as a follow-up, not handled here.) */
+      /* POSIX: SSL decryption runs on the worker via SSL_read against the
+         socket, which still holds the bytes on epoll/kqueue, so just notify.
+         One READABLE in flight at a time backpressures via the TCP window. */
       if (atomic_load(&connection->read_pending) == 0) {
         atomic_store(&connection->read_pending, 1);
         message_t msg;
@@ -1479,10 +1640,13 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
       }
       return;
     }
+#endif
 
-    /* Plain WS: drain the watcher's completed read buffer here, then send the
-       bytes to the actor as DATA. Loop in case more than one buffer's worth
-       completed. */
+    /* Plain WS (POSIX), or every read on Windows (plain plaintext + SSL
+       ciphertext): drain the watcher's completed read buffer here and ship the
+       bytes to the actor as DATA. On Windows the SSL DATA is fed into the
+       memory read BIO on the worker by _connection_ssl_data_handle. Loop in
+       case more than one buffer's worth completed. */
     uint8_t buffer[READ_BUFFER_SIZE];
     size_t total_read = 0;
     size_t n = pd_watcher_drain_read(watcher, buffer, sizeof(buffer));
@@ -1527,17 +1691,17 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   }
 }
 
+#ifndef _WIN32
 /* Perform a batch of SSL reads. Called from the connection actor dispatch
    (WS_CONNECTION_READABLE) on scheduler worker threads. The I/O-thread read
    callback sends READABLE only for SSL connections — plain WS is drained in the
    callback and shipped as a DATA message — so this path is SSL-only: SSL_read
-   must run on the worker to decrypt the ciphertext. Each decrypted chunk is fed
+   must run on the worker to decrypt the ciphertext against the kernel socket
+   (which still holds the bytes on epoll/kqueue). Each decrypted chunk is fed
    straight back through WS_CONNECTION_DATA, which reuses the existing upgrade
-   and frame-parsing logic. (SSL over Windows IOCP is a pre-existing gap tracked
-   separately: on IOCP the read bytes land in the watcher's overlapped buffer, so
-   SSL_read on the worker sees an empty socket and returns WANT_READ; wiring it
-   needs a memory BIO fed from the watcher drain. On epoll/kqueue this path works
-   as-is.) */
+   and frame-parsing logic. On Windows the SSL path instead feeds IOCP-drained
+   ciphertext into the memory read BIO via _connection_ssl_data_handle, so this
+   function is unused there. */
 static void _connection_do_reads(ws_connection_t* connection) {
   if (!connection->is_ssl || connection->ssl == NULL) {
     return;
@@ -1575,6 +1739,7 @@ static void _connection_do_reads(ws_connection_t* connection) {
     actor_send(&connection->actor, &msg);
   }
 }
+#endif
 
 /* --- Create / Destroy --- */
 
@@ -1594,6 +1759,8 @@ ws_connection_t* ws_connection_create(ws_transport_t* transport, platform_socket
   connection->is_ssl = 0;
   connection->is_authenticated = (transport->api_key_hash == NULL) ? 1 : 0;
   connection->ssl = NULL;
+  connection->rbio = NULL;
+  connection->wbio = NULL;
   connection->state = WS_STATE_UPGRADING;
   connection->upgrade_buf = NULL;
   connection->recv_buf = NULL;
@@ -1614,11 +1781,38 @@ ws_connection_t* ws_connection_create(ws_transport_t* transport, platform_socket
   /* Set up SSL if the transport has an SSL_CTX */
   if (transport->ssl_ctx != NULL) {
     connection->ssl = SSL_new(transport->ssl_ctx);
+#ifdef _WIN32
+    /* IOCP completes a server-side read into a watcher-owned buffer that the
+     * worker can't recv() from (the kernel socket is empty by then), so decouple
+     * OpenSSL from the socket: a memory-BIO pair is fed ciphertext drained by the
+     * I/O thread (WS_CONNECTION_DATA) and SSL_read decrypts it on the worker.
+     * See _connection_ssl_data_handle below. */
+    connection->rbio = BIO_new(BIO_s_mem());
+    connection->wbio = BIO_new(BIO_s_mem());
+    if (connection->ssl != NULL && connection->rbio != NULL && connection->wbio != NULL) {
+      SSL_set_bio(connection->ssl, connection->rbio, connection->wbio);
+      SSL_set_accept_state(connection->ssl);
+      connection->is_ssl = 1;
+    } else {
+      /* OOM during accept — free partials and leave is_ssl=0 so the first bytes
+       * fail upgrade parsing and close the connection cleanly rather than crash.
+       * SSL owns the BIOs only after SSL_set_bio, so free them by hand here. */
+      if (connection->rbio != NULL) BIO_free(connection->rbio);
+      if (connection->wbio != NULL) BIO_free(connection->wbio);
+      connection->rbio = NULL;
+      connection->wbio = NULL;
+      if (connection->ssl != NULL) {
+        SSL_free(connection->ssl);
+        connection->ssl = NULL;
+      }
+    }
+#else
     if (connection->ssl != NULL) {
       SSL_set_fd(connection->ssl, platform_socket_fd(sock));
       SSL_set_accept_state(connection->ssl);
       connection->is_ssl = 1;
     }
+#endif
   }
 
   connection->block_ctx.conn = (block_connection_t*)connection;

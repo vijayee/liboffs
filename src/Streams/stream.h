@@ -148,6 +148,11 @@ struct stream_t {
   stream_type_e type;
   stream_force_e force;
   ATOMIC(size_t) next_handler_id;
+  /* The handler lists are owned by the stream's actor: stream_subscribe,
+     stream_unsubscribe, stream_once and stream_notify all route through actor
+     messages, so the lists are only ever read and mutated on the actor thread
+     — no lock is needed. next_handler_id is atomically incremented by the
+     caller so the subscribe id can be returned synchronously. */
   stream_event_handler_list_t* handlers[STREAM_HANDLER_COUNT];
   uint8_t readable;
   uint8_t is_piped;
@@ -222,6 +227,22 @@ void stream_unsubscribe(stream_t* stream, stream_event_e event, size_t id);
 void writeable_stream_data_handler(stream_t* stream, void (*on_data)(stream_t*, void*));
 void readable_stream_push_handler(stream_t* stream, void (*on_push)(stream_t*));
 void readable_push_stream_pipe(stream_t* rs, stream_t* ws);
+/* Notifies a stream's handlers of an event with an optional payload.
+ *
+ * This is the PUBLIC entry point: it does NOT dispatch synchronously. It wraps
+ * the payload in a STREAM_NOTIFY message and hands it to the stream's actor,
+ * which dispatches it to the handlers on the actor thread. This keeps the
+ * handler list touched by exactly one thread (the actor), so subscribe /
+ * unsubscribe / once / notify never race on the list.
+ *
+ * Ownership: stream_notify TAKES OWNERSHIP of the payload (and the caller's
+ * reference, if any). The message owns the payload until the actor dispatches
+ * it: handlers that keep the payload take their own reference, and the
+ * no-handler path destroys it. If the stream is destroyed before the message is
+ * dispatched, the message's payload_destroy releases it. Callers that pass a
+ * freshly-created, unowned payload (e.g. the inline OFFS_ERROR(...) "No X
+ * Handler Defined" notifications) transfer that unowned payload here; callers
+ * that pass a referenced payload (CONSUME(...)) transfer their reference here. */
 void stream_notify(stream_t* stream, stream_event_e event, void* payload, void (*payload_destroy)(void*));
 void readable_push_stream_push(stream_t* stream);
 void readable_stream_read(stream_t* stream, size_t size, void* ctx, void (*cb)(void*, void*));

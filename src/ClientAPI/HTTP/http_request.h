@@ -13,7 +13,6 @@
 #include <http_parser.h>
 
 typedef struct http_request_t {
-  refcounter_t refcounter;
   stream_t stream;
   int method;
   char* url;

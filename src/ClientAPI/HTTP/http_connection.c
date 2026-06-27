@@ -36,7 +36,12 @@ static int _on_message_complete(http_parser* parser);
 
 static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                        pd_event_t events, void* user_data);
+#ifndef _WIN32
+/* POSIX-only: SSL_read runs against the kernel socket, which still holds the
+ * bytes on epoll/kqueue. On Windows the worker instead decrypts ciphertext fed
+ * into the memory read BIO by _connection_ssl_data_handle. */
 static void _connection_do_reads(http_connection_t* connection);
+#endif
 
 static http_parser_settings _parser_settings = {
   .on_message_begin = _on_message_begin,
@@ -318,51 +323,181 @@ static void _connection_close_fd(http_connection_t* connection) {
 }
 
 #ifdef _WIN32
-/* poll-dancer's IOCP backend never delivers PD_EVENT_WRITE (only READ is driven
- * through overlapped I/O), so the buffer-then-arm-WRITE strategy used on POSIX
- * can't flush a partial send on Windows — a large response body stalls once the
- * kernel send buffer fills (observed: OFF content GET hangs after ~384KB, exactly
- * when the first platform_socket_send returns EAGAIN). On loopback the peer drains
- * continuously, so a bounded synchronous retry completes the send without blocking
- * the connection actor for long. Handles both plain and TLS connections: SSL_write
- * is retried with the same buffer on SSL_ERROR_WANT_WRITE/WANT_READ (the OpenSSL
- * nonblocking contract). Returns 0 = fully sent, 1 = partial (cap exhausted, caller
- * buffers the remainder), -1 = peer closed, -2 = hard error. *out_sent receives the
- * bytes accepted. Mirrors tcp_connection.c:_connection_send_all_blocking. */
-static int _connection_send_all_blocking(http_connection_t* connection,
-                                         buffer_t* combined, size_t* out_sent) {
+/* poll-dancer's IOCP backend never delivers PD_EVENT_WRITE for the server (it
+ * issues no overlapped writes of its own), so the buffer-then-arm-WRITE strategy
+ * used on POSIX can't flush a partial send on Windows — a large response body
+ * stalls once the kernel send buffer fills. On loopback the peer drains
+ * continuously, so a bounded synchronous retry completes the send. Returns
+ * 0 = fully sent, 1 = partial (cap exhausted), -1 = peer closed, -2 = hard
+ * error. *out_sent receives the bytes accepted. Mirrors
+ * tcp_connection.c:_connection_send_all_blocking for the plain case. */
+static int _connection_send_raw_blocking(http_connection_t* connection,
+                                          const uint8_t* data, size_t len,
+                                          size_t* out_sent) {
   size_t sent_total = 0;
-  for (int attempts = 0; attempts < 2000 && sent_total < combined->size; attempts++) {
-    ssize_t sent;
-    if (connection->is_ssl && connection->ssl != NULL) {
-      sent = SSL_write(connection->ssl, combined->data + sent_total,
-                       (int)(combined->size - sent_total));
-    } else {
-      sent = platform_socket_send(connection->sock, combined->data + sent_total,
-                                   combined->size - sent_total);
-    }
+  for (int attempts = 0; attempts < 2000 && sent_total < len; attempts++) {
+    ssize_t sent = platform_socket_send(connection->sock, data + sent_total,
+                                         len - sent_total);
     if (sent > 0) {
       sent_total += (size_t)sent;
     } else if (sent == 0) {
       *out_sent = sent_total;
       return -1;  /* peer closed */
     } else {
-      int retry;
-      if (connection->is_ssl && connection->ssl != NULL) {
-        int ssl_err = SSL_get_error(connection->ssl, (int)sent);
-        retry = (ssl_err == SSL_ERROR_WANT_WRITE || ssl_err == SSL_ERROR_WANT_READ);
-      } else {
-        retry = (errno == EAGAIN || errno == EWOULDBLOCK);
-      }
-      if (!retry) {
+      if (errno != EAGAIN && errno != EWOULDBLOCK) {
         *out_sent = sent_total;
         return -2;  /* hard error */
       }
-      platform_sleep_ms(1);  /* EAGAIN/WANT_WRITE: back off and retry */
+      platform_sleep_ms(1);  /* EAGAIN: back off and retry */
     }
   }
   *out_sent = sent_total;
-  return (sent_total == combined->size) ? 0 : 1;
+  return (sent_total == len) ? 0 : 1;
+}
+
+/* Drain ciphertext OpenSSL emitted into the write BIO (handshake response
+ * records, key-update records, or SSL_write output) and send it with bounded
+ * retry. Returns 0 on success, -1 if a record could not be fully flushed — the
+ * caller must close the connection, since TLS records are session-ordered and
+ * must not be partially dropped. */
+static int _connection_ssl_flush_wbio(http_connection_t* connection) {
+  uint8_t cipher[READ_BUFFER_SIZE];
+  for (;;) {
+    int n = BIO_read(connection->wbio, cipher, sizeof(cipher));
+    if (n <= 0) break;
+    size_t sent = 0;
+    if (_connection_send_raw_blocking(connection, cipher, (size_t)n, &sent) != 0) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
+/* Send plaintext over TLS via the memory write BIO. SSL_write emits TLS records
+ * into wbio — a memory BIO never blocks, so the full plaintext slice is always
+ * accepted in one call — then we drain wbio and raw-send the ciphertext. wbio is
+ * always drained to completion before returning, so a ciphertext send that can't
+ * finish within the bounded retry is fatal for the connection (returns -2; the
+ * caller closes). *out_sent receives the plaintext bytes accepted into the BIO. */
+static int _connection_ssl_send_blocking(http_connection_t* connection,
+                                          const uint8_t* plaintext, size_t len,
+                                          size_t* out_sent) {
+  size_t sent_total = 0;
+  uint8_t cipher[READ_BUFFER_SIZE];
+  while (sent_total < len) {
+    int n = SSL_write(connection->ssl, plaintext + sent_total,
+                      (int)(len - sent_total));
+    if (n <= 0) {
+      /* A memory write BIO never blocks, so WANT_WRITE/WANT_READ should not
+       * happen here; any non-success is a hard error. Flush whatever was already
+       * emitted, then fail. */
+      (void)_connection_ssl_flush_wbio(connection);
+      *out_sent = sent_total;
+      _connection_stop_watcher(connection);
+      _connection_close_fd(connection);
+      return -2;
+    }
+    sent_total += (size_t)n;
+    for (;;) {
+      int c = BIO_read(connection->wbio, cipher, sizeof(cipher));
+      if (c <= 0) break;
+      size_t csent = 0;
+      if (_connection_send_raw_blocking(connection, cipher, (size_t)c, &csent) != 0) {
+        *out_sent = sent_total;
+        _connection_stop_watcher(connection);
+        _connection_close_fd(connection);
+        return -2;
+      }
+    }
+  }
+  *out_sent = sent_total;
+  return 0;
+}
+
+static int _connection_send_all_blocking(http_connection_t* connection,
+                                         buffer_t* combined, size_t* out_sent) {
+  if (connection->is_ssl && connection->ssl != NULL) {
+    return _connection_ssl_send_blocking(connection, combined->data,
+                                         combined->size, out_sent);
+  }
+  return _connection_send_raw_blocking(connection, combined->data,
+                                       combined->size, out_sent);
+}
+
+/* Windows IOCP: the I/O-thread read callback drained the watcher's completed
+ * read into the DATA message payload as ciphertext. Feed it into the SSL read
+ * memory BIO and pump SSL_read: OpenSSL drives the handshake internally and
+ * returns SSL_ERROR_WANT_READ (need more ciphertext) or SSL_ERROR_WANT_WRITE
+ * (handshake response / key-update records buffered in wbio — flush them to the
+ * socket and retry) until the handshake completes, then it returns decrypted
+ * application data, which is routed through http_parser. This works for TLS 1.2
+ * and 1.3 (SSL_read processes the client Finished + early data in 1.3) without
+ * any explicit SSL_do_handshake / SSL_is_init_complete gating. All SSL/BIO calls
+ * run on this worker thread — the I/O thread never touches SSL — so there is no
+ * cross-thread race on the BIO. */
+static void _connection_ssl_data_handle(http_connection_t* connection,
+                                        buffer_t* data) {
+  if (connection->sock == NULL || connection->ssl == NULL) {
+    return;
+  }
+  BIO_write(connection->rbio, data->data, (int)data->size);
+
+  for (int batch = 0; batch < 16; batch++) {
+    if (connection->sock == NULL) {
+      return;
+    }
+    char buffer[READ_BUFFER_SIZE];
+    int bytes_read = SSL_read(connection->ssl, buffer, sizeof(buffer));
+    if (bytes_read > 0) {
+      buffer_t* plain = buffer_create_from_pointer_copy((uint8_t*)buffer, (size_t)bytes_read);
+      size_t nparsed = http_parser_execute(&connection->parser, &_parser_settings,
+                                            (const char*)plain->data, plain->size);
+      (void)nparsed;
+      DESTROY(plain, buffer);
+      if (connection->parser.http_errno != HPE_OK) {
+        /* Parse error — close the connection */
+        if (connection->piped_pending) {
+          if (connection->streaming_route != NULL && connection->request != NULL) {
+            stream_deactivate((stream_t*)connection->request,
+                              OFFS_ERROR("Connection closed during streaming upload"));
+            connection->streaming_route = NULL;
+          }
+        }
+        _connection_stop_watcher(connection);
+        _connection_close_fd(connection);
+        return;
+      }
+      continue;  /* more decrypted application data may be available */
+    }
+    int ssl_err = SSL_get_error(connection->ssl, bytes_read);
+    if (ssl_err == SSL_ERROR_WANT_READ) {
+      /* Need more ciphertext — wait for the next DATA. Flush anything this turn
+       * emitted (handshake response, key-update ack) first. */
+      if (_connection_ssl_flush_wbio(connection) != 0) {
+        _connection_stop_watcher(connection);
+        _connection_close_fd(connection);
+      }
+      return;
+    }
+    if (ssl_err == SSL_ERROR_WANT_WRITE) {
+      /* wbio has pending output — flush it to the socket and retry SSL_read. */
+      if (_connection_ssl_flush_wbio(connection) != 0) {
+        _connection_stop_watcher(connection);
+        _connection_close_fd(connection);
+        return;
+      }
+      continue;
+    }
+    /* Peer close_notify (SSL_ERROR_ZERO_RETURN) or hard error. */
+    message_t msg;
+    msg.type = HTTP_CONNECTION_HANGUP;
+    msg.payload = NULL;
+    msg.payload_destroy = NULL;
+    actor_send(&connection->actor, &msg);
+    _connection_stop_watcher(connection);
+    return;
+  }
+  (void)_connection_ssl_flush_wbio(connection);
 }
 #endif
 
@@ -382,19 +517,30 @@ void http_connection_dispatch(void* state, message_t* msg) {
       if (connection->sock == NULL) {
         break;
       }
+#ifndef _WIN32
       _connection_do_reads(connection);
+#endif
       break;
     }
 
     case HTTP_CONNECTION_DATA: {
-      /* Legacy path — kept for safety in case a test or other code sends
-         pre-read data directly. Normal I/O now goes through READABLE. */
+      /* On Windows the I/O-thread read callback drains both plain and SSL
+         connections and ships the bytes here (plaintext for plain, ciphertext
+         for SSL). On POSIX this is the legacy pre-read path; normal SSL I/O
+         goes through READABLE -> _connection_do_reads. */
       buffer_t* data = (buffer_t*)msg->payload;
       msg->payload = NULL; /* Take ownership — actor_run won't destroy it */
       if (connection->sock == NULL) {
         DESTROY(data, buffer);
         break;
       }
+#ifdef _WIN32
+      if (connection->is_ssl && connection->ssl != NULL) {
+        _connection_ssl_data_handle(connection, data);
+        DESTROY(data, buffer);
+        break;
+      }
+#endif
       size_t nparsed = http_parser_execute(&connection->parser, &_parser_settings,
                                             (const char*)data->data, data->size);
       (void)nparsed;
@@ -628,13 +774,11 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   }
 
   if (events & PD_EVENT_READ) {
+#ifndef _WIN32
     if (connection->is_ssl && connection->ssl != NULL) {
-      /* SSL: decryption must happen on the worker via SSL_read, so just
-         notify. One READABLE in flight at a time backpressures via the TCP
-         window. (SSL over Windows IOCP is a pre-existing gap: SSL_read on
-         the worker hits the same empty-socket EAGAIN as a plain recv would.
-         Wiring it up needs a memory BIO fed from the watcher drain — tracked
-         as a follow-up, not handled here.) */
+      /* POSIX: SSL decryption runs on the worker via SSL_read against the
+         socket, which still holds the bytes on epoll/kqueue, so just notify.
+         One READABLE in flight at a time backpressures via the TCP window. */
       if (atomic_load(&connection->read_pending) == 0) {
         atomic_store(&connection->read_pending, 1);
         message_t msg;
@@ -645,10 +789,13 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
       }
       return;
     }
+#endif
 
-    /* Plain HTTP: drain the watcher's completed read buffer here, then send
-       the bytes to the actor as DATA. Loop in case more than one buffer's
-       worth completed. */
+    /* Plain HTTP (POSIX), or every read on Windows (plain plaintext + SSL
+       ciphertext): drain the watcher's completed read buffer here and ship the
+       bytes to the actor as DATA. On Windows the SSL DATA is fed into the
+       memory read BIO on the worker by _connection_ssl_data_handle. Loop in
+       case more than one buffer's worth completed. */
     uint8_t buffer[READ_BUFFER_SIZE];
     size_t total_read = 0;
     size_t n = pd_watcher_drain_read(watcher, buffer, sizeof(buffer));
@@ -691,15 +838,15 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   }
 }
 
+#ifndef _WIN32
 /* Perform a batch of SSL reads and HTTP parsing. Called from the connection
    actor dispatch (HTTP_CONNECTION_READABLE) on scheduler worker threads. The
    I/O-thread read callback sends READABLE only for SSL connections — plain HTTP
    is drained in the callback and shipped as a DATA message — so this path is
-   SSL-only: SSL_read must run on the worker to decrypt the ciphertext. (SSL
-   over Windows IOCP is a pre-existing gap tracked separately: on IOCP the read
-   bytes land in the watcher's overlapped buffer, so SSL_read on the worker sees
-   an empty socket and returns WANT_READ; wiring it needs a memory BIO fed from
-   the watcher drain. On epoll/kqueue this path works as-is.) */
+   SSL-only: SSL_read must run on the worker to decrypt the ciphertext against
+   the kernel socket (which still holds the bytes on epoll/kqueue). On Windows
+   the SSL path instead feeds IOCP-drained ciphertext into the memory read BIO
+   via _connection_ssl_data_handle, so this function is unused there. */
 static void _connection_do_reads(http_connection_t* connection) {
   if (!connection->is_ssl || connection->ssl == NULL) {
     return;
@@ -747,6 +894,7 @@ static void _connection_do_reads(http_connection_t* connection) {
     }
   }
 }
+#endif
 
 http_connection_t* http_connection_create(http_server_t* server, platform_socket_t* sock) {
   http_connection_t* connection = get_clear_memory(sizeof(http_connection_t));
@@ -754,6 +902,8 @@ http_connection_t* http_connection_create(http_server_t* server, platform_socket
   connection->server = server;
   connection->sock = sock;
   connection->ssl = NULL;
+  connection->rbio = NULL;
+  connection->wbio = NULL;
   connection->is_ssl = 0;
   connection->headers_complete = 0;
   connection->request_complete = 0;

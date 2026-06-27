@@ -54,6 +54,14 @@ typedef struct tcp_connection_t {
   uint8_t is_ssl;
   uint8_t is_authenticated;
   SSL* ssl;
+  /* Windows IOCP only: memory BIO pair decoupling OpenSSL from the socket so
+   * the worker can decrypt ciphertext the I/O thread drained from the watcher
+   * (the kernel socket is already empty by the time the worker runs). rbio is
+   * the ciphertext ingress (fed by _connection_ssl_data_handle); wbio captures
+   * TLS records SSL_write/the handshake emit for the socket send path. SSL_free
+   * owns and frees both. NULL/unused on POSIX, where SSL_set_fd is used. */
+  BIO* rbio;
+  BIO* wbio;
   tcp_transport_t* transport;
   scheduler_pool_t* pool;
   block_cache_t* bc;
