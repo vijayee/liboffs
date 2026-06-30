@@ -17,7 +17,6 @@
 #include <chrono>
 #include <sstream>
 #include <filesystem>
-#include <cstdlib>
 
 #include "test_control_protocol.h"
 
