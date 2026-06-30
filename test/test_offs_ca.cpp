@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <filesystem>
 
 extern "C" {
 #include "../../tools/offs-ca/ca_ops.h"
@@ -26,8 +27,8 @@ protected:
   }
 
   void TearDown() override {
-    std::string cmd = "rm -rf " + tmp_dir;
-    (void)system(cmd.c_str());
+    std::error_code ec;
+    std::filesystem::remove_all(tmp_dir, ec);
   }
 
   std::string path(const char* name) const {
