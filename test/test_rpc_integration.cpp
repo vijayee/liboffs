@@ -21,6 +21,10 @@
 
 #include "test_control_protocol.h"
 
+extern "C" {
+#include "../tools/offs-ca/ca_ops.h"
+}
+
 extern "C" int node_main(int argc, char* argv[]);
 
 /* Wire message type constants (must match src/Network/wire.h) */
@@ -196,10 +200,9 @@ protected:
   void generate_test_certs() {
     cert_path = test_dir + "/test_cert.pem";
     key_path = test_dir + "/test_key.pem";
-    std::string cmd = "openssl req -x509 -newkey rsa:2048 -keyout " + key_path +
-                      " -out " + cert_path +
-                      " -days 1 -nodes -subj '/CN=liboffs-test' 2>/dev/null";
-    ASSERT_EQ(system(cmd.c_str()), 0) << "Failed to generate test certificates";
+    int rc = ca_generate("/CN=liboffs-test", 1, "rsa",
+                         cert_path.c_str(), key_path.c_str());
+    ASSERT_EQ(rc, 0) << "Failed to generate test certificates";
   }
 
   void start_relay(uint16_t port) {
@@ -222,10 +225,9 @@ protected:
     /* Generate unique key pair per node so each has a distinct identity */
     std::string node_cert = cache_dir + "/node_cert.pem";
     std::string node_key = cache_dir + "/node_key.pem";
-    std::string cmd = "openssl req -x509 -newkey rsa:2048 -keyout " + node_key +
-                      " -out " + node_cert +
-                      " -days 1 -nodes -subj '/CN=liboffs-test-node' 2>/dev/null";
-    ASSERT_EQ(system(cmd.c_str()), 0) << "Failed to generate node certificate";
+    int rc = ca_generate("/CN=liboffs-test-node", 1, "rsa",
+                         node_cert.c_str(), node_key.c_str());
+    ASSERT_EQ(rc, 0) << "Failed to generate node certificate";
 
     pid_t pid = fork();
     ASSERT_NE(pid, -1) << "fork failed: " << strerror(errno);
@@ -270,10 +272,9 @@ protected:
     /* Generate unique key pair per node so each has a distinct identity */
     std::string node_cert = cache_dir + "/node_cert.pem";
     std::string node_key = cache_dir + "/node_key.pem";
-    std::string cmd = "openssl req -x509 -newkey rsa:2048 -keyout " + node_key +
-                      " -out " + node_cert +
-                      " -days 1 -nodes -subj '/CN=liboffs-test-node' 2>/dev/null";
-    ASSERT_EQ(system(cmd.c_str()), 0) << "Failed to generate node certificate";
+    int rc = ca_generate("/CN=liboffs-test-node", 1, "rsa",
+                         node_cert.c_str(), node_key.c_str());
+    ASSERT_EQ(rc, 0) << "Failed to generate node certificate";
 
     pid_t pid = fork();
     ASSERT_NE(pid, -1) << "fork failed: " << strerror(errno);
