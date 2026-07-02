@@ -452,18 +452,6 @@ static void _unix_handle_put(unix_connection_t* conn, cbor_item_t* frame) {
     return;
   }
 
-  /* Create pipeline context */
-  unix_put_pipeline_t* pipeline = get_clear_memory(sizeof(unix_put_pipeline_t));
-  refcounter_init((refcounter_t*)pipeline);
-  pipeline->connection = conn;
-  pipeline->content_type = msg.content_type;
-  pipeline->file_name = msg.file_name;
-  pipeline->stream_length = msg.stream_length;
-  pipeline->server_address = msg.server_address;
-  pipeline->file_hash = NULL;
-  pipeline->descriptor_hash = NULL;
-  pipeline->file_hash_offset = 0;
-
   /* Resolve tuple_size from the wire frame (Task 3), default 3 when absent */
   size_t tuple_size = msg.has_tuple_size ? msg.tuple_size : 3;
 
@@ -491,6 +479,18 @@ static void _unix_handle_put(unix_connection_t* conn, cbor_item_t* frame) {
     client_api_put_request_destroy(&msg);
     return;
   }
+
+  /* Create pipeline context */
+  unix_put_pipeline_t* pipeline = get_clear_memory(sizeof(unix_put_pipeline_t));
+  refcounter_init((refcounter_t*)pipeline);
+  pipeline->connection = conn;
+  pipeline->content_type = msg.content_type;
+  pipeline->file_name = msg.file_name;
+  pipeline->stream_length = msg.stream_length;
+  pipeline->server_address = msg.server_address;
+  pipeline->file_hash = NULL;
+  pipeline->descriptor_hash = NULL;
+  pipeline->file_hash_offset = 0;
 
   /* Create writeable streams */
   block_size_e block_type = standard;

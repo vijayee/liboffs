@@ -381,17 +381,6 @@ static void _wt_handle_put(wt_connection_t* conn, cbor_item_t* frame) {
     return;
   }
 
-  wt_put_pipeline_t* pipeline = get_clear_memory(sizeof(wt_put_pipeline_t));
-  refcounter_init((refcounter_t*)pipeline);
-  pipeline->connection = conn;
-  pipeline->content_type = msg.content_type;
-  pipeline->file_name = msg.file_name;
-  pipeline->stream_length = msg.stream_length;
-  pipeline->server_address = msg.server_address;
-  pipeline->file_hash = NULL;
-  pipeline->descriptor_hash = NULL;
-  pipeline->file_hash_offset = 0;
-
   /* Resolve tuple_size from the wire frame (Task 3), default 3 when absent.
    * The TCP/WS/WT transports do not carry a config pointer in their connection
    * structs (only Unix does), so the max_tuple_size bound check is not enforced
@@ -407,6 +396,17 @@ static void _wt_handle_put(wt_connection_t* conn, cbor_item_t* frame) {
     client_api_put_request_destroy(&msg);
     return;
   }
+
+  wt_put_pipeline_t* pipeline = get_clear_memory(sizeof(wt_put_pipeline_t));
+  refcounter_init((refcounter_t*)pipeline);
+  pipeline->connection = conn;
+  pipeline->content_type = msg.content_type;
+  pipeline->file_name = msg.file_name;
+  pipeline->stream_length = msg.stream_length;
+  pipeline->server_address = msg.server_address;
+  pipeline->file_hash = NULL;
+  pipeline->descriptor_hash = NULL;
+  pipeline->file_hash_offset = 0;
 
   block_size_e block_type = standard;
   size_t descriptor_pad = 32;
