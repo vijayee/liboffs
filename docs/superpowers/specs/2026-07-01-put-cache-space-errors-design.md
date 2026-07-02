@@ -100,28 +100,33 @@ size_t writeable_off_stream_estimate_required_bytes(
 ```
 
 Returns the total cache bytes a PUT of `stream_length` bytes will require,
-given `tuple_size` (replication factor) and `descriptor_pad` (per-tuple
-overhead). The formula:
+given `tuple_size` (erasure-coding width — blocks per tuple) and
+`descriptor_pad` (per-hash overhead in the descriptor). Each block is
+stored once via `block_cache_put` (which writes to one section slot, not
+`tuple_size` replicas). The formula:
 
 ```
 block_size       = 128000  /* standard */
 data_blocks      = ceil(stream_length / block_size)
-descriptor_bytes = <descriptor footprint per the stream's layout>
-required_bytes   = data_blocks * block_size * tuple_size
-                 + descriptor_bytes * tuple_size
+tuple_blocks     = data_blocks * tuple_size          /* random + off per tuple */
+tuple_metadata   = data_blocks * tuple_size * descriptor_pad
+cut_point        = (block_size / descriptor_pad) * descriptor_pad
+chunk_data_size  = cut_point - descriptor_pad
+descriptor_blocks = ceil(tuple_metadata / chunk_data_size)
+required_bytes   = (tuple_blocks + descriptor_blocks) * block_size
 ```
 
-The descriptor footprint is derived from the same chunking logic
-`writeable_descriptor.c:35-67` uses when it writes: the descriptor buffer
-(tuple metadata) is sliced into chunks of `block_size`, each chunk padded
-to `block_size` and chained with the prior chunk's hash, producing
-`ceil(tuple_metadata_size / block_size)` descriptor blocks. The plan pins
-down the exact `tuple_metadata_size` per data block from
-`writeable_descriptor_write`'s tuple serialization. This is the one piece
-of the formula requiring implementation-time investigation; the estimator
-function's signature and location are fixed by this spec, only the
-internal arithmetic is filled in during implementation. This function does
-not touch the cache; it is pure arithmetic over the layout parameters.
+`tuple_blocks` counts the erasure-coded blocks (each data block produces
+one tuple of `tuple_size` blocks: `tuple_size - 1` random blocks plus one
+off block, all stored once). `tuple_metadata` is the descriptor buffer
+size: each tuple appends `tuple_size * descriptor_pad` bytes to the
+descriptor (`writeable_descriptor.c:152`). The descriptor buffer is
+chunked into blocks of `chunk_data_size` bytes of payload (plus
+`descriptor_pad` for the prior-hash chain), yielding `descriptor_blocks`
+blocks. All blocks are `block_size` bytes in the cache.
+
+This function does not touch the cache; it is pure arithmetic over the
+layout parameters.
 
 ### 3. `client_api_wire` — optional `tuple_size` on PUT_REQUEST
 
