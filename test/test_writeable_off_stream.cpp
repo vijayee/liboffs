@@ -72,12 +72,3 @@ TEST(WriteableOffStreamEstimate, PartialBlock) {
    * required = (3 + 1) * 128000 = 512000. */
   EXPECT_EQ(writeable_off_stream_estimate_required_bytes(100, 3, 32), 512000u);
 }
-TEST(WriteableOffStreamCachePutError, FiresErrorEventOnCachePutFull) {
-  /* The error-event propagation requires an actor scheduler running and a
-   * subscriber to error_event. The existing test patterns in this file
-   * do not provide a convenient harness for injecting a CACHE_PUT_RESULT
-   * message and polling for the error_event callback, so this test is
-   * skipped and the behavior is verified end-to-end by the integration
-   * test in Task 7 (pre-flight rejection and mid-stream error). */
-  GTEST_SKIP() << "Error-event injection requires harness not yet available; verified via integration test in Task 10";
-}

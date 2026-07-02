@@ -171,9 +171,15 @@ void writeable_descriptor_dispatch(void* state, message_t* msg) {
          * the freshly-made error so stream_notify adopts the single
          * reference and releases it via error_destroy. */
         desc->stream.is_deactivated = 1;
-        stream_notify((stream_t*)desc, error_event,
-                      OFFS_ERROR_TRANSFER("cache full during put: configure larger max_capacity_bytes"),
-                      (void (*)(void*))error_destroy);
+        if (result->result == CACHE_PUT_FULL) {
+          stream_notify((stream_t*)desc, error_event,
+                        OFFS_ERROR_TRANSFER("cache full during put: configure larger max_capacity_bytes"),
+                        (void (*)(void*))error_destroy);
+        } else {
+          stream_notify((stream_t*)desc, error_event,
+                        OFFS_ERROR_TRANSFER("cache write error during put"),
+                        (void (*)(void*))error_destroy);
+        }
         break;
       }
       if (result->result == CACHE_PUT_NEW && desc->network != NULL) {

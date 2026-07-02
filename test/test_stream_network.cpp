@@ -574,6 +574,40 @@ TEST_F(WriteableOffStreamNetworkTest, CachePutErrorNoCrash) {
   DESTROY(hash, buffer);
 }
 
+// Test: CACHE_PUT_RESULT with CACHE_PUT_FULL does NOT crash and deactivates
+TEST_F(WriteableOffStreamNetworkTest, CachePutFullNoCrash) {
+  uint8_t hash_data[] = {0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,0x00,0x11,
+                          0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,
+                          0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,0x00,0x11,
+                          0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99};
+  buffer_t* hash = make_hash(hash_data, 32);
+
+  // Craft CACHE_PUT_RESULT with CACHE_PUT_FULL
+  cache_put_result_payload_t result;
+  result.result = CACHE_PUT_FULL;
+  result.fib = 0;
+  result.hash = REFERENCE(hash, buffer_t);
+  result.reply_to = nullptr;
+
+  message_t msg;
+  msg.type = CACHE_PUT_RESULT;
+  msg.payload = &result;
+  msg.payload_destroy = nullptr;
+
+  // Dispatch should not crash. A FULL result deactivates the stream and
+  // fires error_event (which has no subscriber here, so it is logged and
+  // the payload freed by the no-handler path). Verify the new behavior:
+  // the stream is deactivated, but the call returns without crashing.
+  writeable_off_stream_dispatch(stream, &msg);
+
+  // Stream should now be deactivated on cache-put full
+  EXPECT_EQ(stream->stream.is_deactivated, 1);
+
+  // Clean up — release the reference from REFERENCE(hash, buffer_t)
+  DESTROY(result.hash, buffer);
+  DESTROY(hash, buffer);
+}
+
 // Test: WriteableOffStream with network=NULL handles CACHE_PUT_NEW without crash
 // (no NETWORK_LOCAL_STORE_BLOCK sent, just falls through)
 TEST_F(WriteableOffStreamNetworkTest, CachePutNewLocalOnlyNoCrash) {
