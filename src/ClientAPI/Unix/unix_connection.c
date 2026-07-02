@@ -322,9 +322,15 @@ static void _unix_put_on_stream_data(void* ctx, void* data) {
 }
 
 static void _unix_put_on_stream_error(void* ctx, void* error) {
-  (void)error;
   unix_put_pipeline_t* pipeline = (unix_put_pipeline_t*)ctx;
-  _unix_connection_send_error(pipeline->connection, CLIENT_API_STATUS_INTERNAL_ERROR, "PUT stream error");
+  const char* message = "PUT stream error";  /* fallback */
+  if (error != NULL) {
+    async_error_t* async_error = (async_error_t*)error;
+    if (async_error->message != NULL) {
+      message = async_error->message;
+    }
+  }
+  _unix_connection_send_error(pipeline->connection, CLIENT_API_STATUS_INTERNAL_ERROR, message);
   stream_deactivate((stream_t*)pipeline->ws, NULL);
 }
 
