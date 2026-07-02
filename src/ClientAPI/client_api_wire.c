@@ -68,10 +68,10 @@ uint8_t client_api_wire_get_type(cbor_item_t* item) {
 }
 
 // --- PUT Request ---
-// [type, content_type, file_name, stream_length, server_address, data, recycler_urls, temporary]
+// [type, content_type, file_name, stream_length, server_address, data, recycler_urls, temporary, tuple_size?]
 
 cbor_item_t* client_api_put_request_encode(const client_api_put_request_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(8);
+  cbor_item_t* array = cbor_new_definite_array(msg->has_tuple_size ? 9 : 8);
   cbor_item_t* item;
 
   item = cbor_build_uint8(CLIENT_API_PUT_REQUEST);
@@ -119,6 +119,13 @@ cbor_item_t* client_api_put_request_encode(const client_api_put_request_t* msg) 
   item = cbor_build_uint8(msg->temporary ? 1 : 0);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
+
+  /* Index 8: tuple_size (optional, present only when has_tuple_size != 0) */
+  if (msg->has_tuple_size) {
+    cbor_item_t* tuple_size_item = cbor_build_uint64(msg->tuple_size);
+    (void)cbor_array_push(array, tuple_size_item);
+    cbor_decref(&tuple_size_item);
+  }
 
   return array;
 }
@@ -221,6 +228,18 @@ int client_api_put_request_decode(cbor_item_t* item, client_api_put_request_t* m
       msg->temporary = cbor_get_uint8(temp_item);
     }
     cbor_decref(&temp_item);
+  }
+
+  /* Index 8: tuple_size (optional uint). has_tuple_size stays 0 when absent
+   * because memset above zeroed the struct. */
+  if (cbor_array_size(item) >= 9) {
+    cbor_item_t* tuple_size_item = cbor_array_get(item, 8);
+    if (tuple_size_item != NULL && !cbor_is_null(tuple_size_item)
+        && cbor_isa_uint(tuple_size_item)) {
+      msg->has_tuple_size = 1;
+      msg->tuple_size = _decode_size(tuple_size_item);
+    }
+    cbor_decref(&tuple_size_item);
   }
 
   return 0;

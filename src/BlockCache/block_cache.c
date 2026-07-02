@@ -820,6 +820,19 @@ void block_cache_remove(block_cache_t* block_cache, buffer_t* hash, actor_t* rep
   actor_send(&block_cache->actor, &msg);
 }
 
+int block_cache_can_fit(block_cache_t* block_cache, size_t required_bytes) {
+  if (block_cache == NULL) {
+    return CACHE_FIT_OK;
+  }
+  if (block_cache->max_capacity_bytes == 0) {
+    return CACHE_FIT_OK;
+  }
+  if (block_cache->current_bytes + required_bytes > block_cache->max_capacity_bytes) {
+    return CACHE_FIT_FULL;
+  }
+  return CACHE_FIT_OK;
+}
+
 void block_cache_defragment(block_cache_t* block_cache, float occupancy_threshold, actor_t* reply_to) {
   cache_defragment_payload_t* payload = get_clear_memory(sizeof(cache_defragment_payload_t));
   payload->occupancy_threshold = occupancy_threshold;

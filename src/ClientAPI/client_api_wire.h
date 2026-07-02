@@ -56,8 +56,10 @@
 #define CLIENT_API_STATUS_UNAUTHORIZED      5
 
 // --- PUT Request ---
-// [type, content_type, file_name, stream_length, server_address, data, recycler_urls, temporary]
+// [type, content_type, file_name, stream_length, server_address, data, recycler_urls, temporary, tuple_size?]
 // data is NULL/empty for streaming uploads; subsequent PUT_DATA frames carry the body
+// tuple_size is optional: present (9-element array) when has_tuple_size != 0,
+// absent (8-element array) otherwise for backward compatibility.
 typedef struct {
   char* content_type;
   char* file_name;
@@ -68,6 +70,8 @@ typedef struct {
   char** recycler_urls;   // NULL or array of URL strings
   size_t recycler_count;  // 0 if no recycler
   uint8_t temporary;      // 0 or 1
+  uint8_t has_tuple_size; // 0 if tuple_size field absent on the wire
+  size_t tuple_size;      // requested erasure-coding width (when has_tuple_size)
 } client_api_put_request_t;
 
 // --- PUT Data (streaming upload chunk) ---

@@ -45,6 +45,10 @@ index_entry_t* block_lru_cache_peek_entry(block_lru_cache_t* lru, buffer_t* hash
 #define CACHE_PUT_ERROR      -1   /* sections_write failed */
 #define CACHE_PUT_FULL       -2   /* Cache at capacity, cannot store */
 
+/* CACHE_FIT result codes for block_cache_can_fit */
+#define CACHE_FIT_OK    0   /* Required bytes fit within capacity */
+#define CACHE_FIT_FULL 1   /* Required bytes exceed capacity */
+
 /* Payload for CACHE_PUT message.
    When reply_to is NULL (sync), result is filled by dispatch.
    When reply_to is set (async), a completion message is sent back.
@@ -154,6 +158,15 @@ void block_cache_dispatch(void* state, message_t* msg);
 void block_cache_get(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
 void block_cache_put(block_cache_t* block_cache, block_t* block, uint32_t incoming_fib, actor_t* reply_to);
 void block_cache_remove(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
+
+/* Advisory capacity check (unsynchronized): returns CACHE_FIT_OK if
+ * current_bytes + required_bytes <= max_capacity_bytes, else CACHE_FIT_FULL.
+ * When max_capacity_bytes == 0 (disabled), always returns CACHE_FIT_OK.
+ * Reads current_bytes/max_capacity_bytes without locking — those fields are
+ * mutated on the cache actor thread. Callers use this as a best-effort
+ * pre-flight reject before enqueuing a PUT; the authoritative capacity
+ * decision is still made inside block_cache_dispatch on the actor thread. */
+int block_cache_can_fit(block_cache_t* block_cache, size_t required_bytes);
 void block_cache_defragment(block_cache_t* block_cache, float occupancy_threshold, actor_t* reply_to);
 
 #endif //OFFS_BLOCK_CACHE_H

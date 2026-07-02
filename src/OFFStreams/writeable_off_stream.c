@@ -22,6 +22,32 @@ static size_t _block_size_for_type(block_size_e type) {
   return 128000;
 }
 
+size_t writeable_off_stream_estimate_required_bytes(
+    size_t stream_length, size_t tuple_size, size_t descriptor_pad) {
+  if (descriptor_pad == 0 || tuple_size == 0) {
+    return 0;
+  }
+  const size_t block_size = 128000;  /* standard */
+  /* data_blocks = ceil(stream_length / block_size) */
+  size_t data_blocks = (stream_length + block_size - 1) / block_size;
+  if (data_blocks == 0) {
+    return 0;
+  }
+  /* Each data block produces one tuple of tuple_size blocks (random + off),
+   * all stored once via block_cache_put. */
+  size_t tuple_blocks = data_blocks * tuple_size;
+  /* Descriptor buffer: each tuple appends tuple_size * descriptor_pad bytes
+   * (writeable_descriptor.c:152). */
+  size_t tuple_metadata = data_blocks * tuple_size * descriptor_pad;
+  /* Descriptor buffer is chunked into blocks of chunk_data_size payload bytes
+   * (writeable_descriptor.c:32,39,45). */
+  size_t cut_point = (block_size / descriptor_pad) * descriptor_pad;
+  size_t chunk_data_size = cut_point - descriptor_pad;
+  size_t descriptor_blocks = (tuple_metadata + chunk_data_size - 1) / chunk_data_size;
+  /* Each block (tuple or descriptor) occupies block_size bytes in the cache. */
+  return (tuple_blocks + descriptor_blocks) * block_size;
+}
+
 static off_stream_tuple_entry_t* _entry_create(block_t* origin, size_t tuple_size) {
   off_stream_tuple_entry_t* entry = get_clear_memory(sizeof(off_stream_tuple_entry_t));
   entry->origin = (block_t*)refcounter_reference((refcounter_t*)origin);
@@ -88,7 +114,7 @@ static void _create_tuple(writeable_off_stream_t* stream, off_stream_tuple_entry
   tuple_push(tuple, off_block->hash);
 
   /* Store blocks in cache — announce to network if this is a new block */
-  actor_t* reply_to = (stream->network != NULL) ? &stream->stream.actor : NULL;
+  actor_t* reply_to = &stream->stream.actor;
   for (int i = 0; i < entry->random_blocks.length; i++) {
     block_cache_put(stream->bc, entry->random_blocks.data[i], 0, reply_to);
   }
@@ -305,6 +331,24 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
     }
     case CACHE_PUT_RESULT: {
       cache_put_result_payload_t* result = (cache_put_result_payload_t*)msg->payload;
+      if (result->result == CACHE_PUT_ERROR || result->result == CACHE_PUT_FULL) {
+        /* Cache full or write error: abort the stream and notify the
+         * error subscriber (the daemon's pipe handler forwards this
+         * to the client as CLIENT_API_ERROR). OFFS_ERROR_TRANSFER yields
+         * the freshly-made error so stream_notify adopts the single
+         * reference and releases it via error_destroy. */
+        stream->stream.is_deactivated = 1;
+        if (result->result == CACHE_PUT_FULL) {
+          stream_notify((stream_t*)stream, error_event,
+                        OFFS_ERROR_TRANSFER("cache full during put: configure larger max_capacity_bytes"),
+                        (void (*)(void*))error_destroy);
+        } else {
+          stream_notify((stream_t*)stream, error_event,
+                        OFFS_ERROR_TRANSFER("cache write error during put"),
+                        (void (*)(void*))error_destroy);
+        }
+        break;
+      }
       if (result->result == CACHE_PUT_NEW && stream->network != NULL) {
         /* New block stored — announce to network */
         network_local_store_block_payload_t* net_payload = get_clear_memory(sizeof(network_local_store_block_payload_t));

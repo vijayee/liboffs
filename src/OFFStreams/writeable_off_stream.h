@@ -52,4 +52,11 @@ void writeable_off_stream_dispatch(void* state, message_t* msg);
 void writeable_off_stream_write(writeable_off_stream_t* stream, buffer_t* data);
 void writeable_off_stream_finalize(writeable_off_stream_t* stream);
 
+/* Pure-compute estimate of the total cache bytes a PUT of stream_length
+ * will require, given the erasure-coding tuple_size and descriptor_pad.
+ * block_type is assumed standard (128 KB) per OFFS convention.
+ * Does not touch the cache. */
+size_t writeable_off_stream_estimate_required_bytes(
+    size_t stream_length, size_t tuple_size, size_t descriptor_pad);
+
 #endif //OFFS_WRITEABLE_OFF_STREAM_H

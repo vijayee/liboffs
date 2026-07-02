@@ -563,3 +563,58 @@ TEST_F(TestBlockCacheIntegration, TestMiniBlocks) {
     block_destroy(mini_block);
   }
 }
+
+/* ---- block_cache_can_fit tests ---- */
+
+class BlockCacheCanFit : public testing::Test {
+public:
+  char* location;
+  timer_actor_t* timer_actor;
+  scheduler_pool_t* pool;
+  block_cache_t* block_cache;
+  config_t config;
+  void SetUp() override {
+    location = path_join(bc_tmp_base(), "BlockCacheCanFitTest");
+    rm_rf(location);
+    pool = scheduler_pool_create(4);
+    scheduler_pool_start(pool);
+    timer_actor = timer_actor_create(pool);
+    mkdir_p(location);
+    config = config_default();
+    config.index_wait = 60000;
+    config.index_max_wait = 60000;
+    block_cache = NULL;
+  }
+  void TearDown() override {
+    scheduler_pool_wait_for_idle(pool);
+    if (block_cache != NULL) {
+      block_cache_sync(block_cache);
+    }
+    block_cache_destroy(block_cache);
+    timer_actor_destroy(timer_actor);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
+    free(location);
+  }
+};
+
+TEST_F(BlockCacheCanFit, ReturnsOkWhenSpaceAvailable) {
+  /* 1 MB cap, empty cache, 500 KB required: fits. */
+  block_cache = block_cache_create(config, location, standard, timer_actor, pool, NULL, 1000000);
+  ASSERT_NE(block_cache, nullptr);
+  EXPECT_EQ(block_cache_can_fit(block_cache, 500000), CACHE_FIT_OK);
+}
+
+TEST_F(BlockCacheCanFit, ReturnsFullWhenExceedsCapacity) {
+  /* 1 MB cap, empty cache, 2 MB required: exceeds cap. */
+  block_cache = block_cache_create(config, location, standard, timer_actor, pool, NULL, 1000000);
+  ASSERT_NE(block_cache, nullptr);
+  EXPECT_EQ(block_cache_can_fit(block_cache, 2000000), CACHE_FIT_FULL);
+}
+
+TEST_F(BlockCacheCanFit, ReturnsOkWhenMaxCapacityZero) {
+  /* max_capacity_bytes = 0 means disabled; always OK. */
+  block_cache = block_cache_create(config, location, standard, timer_actor, pool, NULL, 0);
+  ASSERT_NE(block_cache, nullptr);
+  EXPECT_EQ(block_cache_can_fit(block_cache, 999999999ULL), CACHE_FIT_OK);
+}

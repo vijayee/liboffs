@@ -322,9 +322,15 @@ static void _unix_put_on_stream_data(void* ctx, void* data) {
 }
 
 static void _unix_put_on_stream_error(void* ctx, void* error) {
-  (void)error;
   unix_put_pipeline_t* pipeline = (unix_put_pipeline_t*)ctx;
-  _unix_connection_send_error(pipeline->connection, CLIENT_API_STATUS_INTERNAL_ERROR, "PUT stream error");
+  const char* message = "PUT stream error";  /* fallback */
+  if (error != NULL) {
+    async_error_t* async_error = (async_error_t*)error;
+    if (async_error->message != NULL) {
+      message = async_error->message;
+    }
+  }
+  _unix_connection_send_error(pipeline->connection, CLIENT_API_STATUS_INTERNAL_ERROR, message);
   stream_deactivate((stream_t*)pipeline->ws, NULL);
 }
 
@@ -446,6 +452,34 @@ static void _unix_handle_put(unix_connection_t* conn, cbor_item_t* frame) {
     return;
   }
 
+  /* Resolve tuple_size from the wire frame (Task 3), default 3 when absent */
+  size_t tuple_size = msg.has_tuple_size ? msg.tuple_size : 3;
+
+  /* Pre-flight bound check: reject oversized tuple_size before allocating streams.
+   * When config_node is NULL (standalone/test transports without a full node) or
+   * max_tuple_size is 0 (disabled), the bound is not enforced. */
+  if (conn->config_ctx.node != NULL && conn->config_ctx.node->config != NULL &&
+      conn->config_ctx.node->config->max_tuple_size != 0 &&
+      tuple_size > conn->config_ctx.node->config->max_tuple_size) {
+    char error_buf[128];
+    snprintf(error_buf, sizeof(error_buf),
+             "tuple_size %zu exceeds max_tuple_size %zu",
+             tuple_size, conn->config_ctx.node->config->max_tuple_size);
+    _unix_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, error_buf);
+    client_api_put_request_destroy(&msg);
+    return;
+  }
+
+  /* Pre-flight space check: reject if the cache cannot fit the estimated bytes */
+  size_t required = writeable_off_stream_estimate_required_bytes(
+      msg.stream_length, tuple_size, /*descriptor_pad=*/32);
+  if (block_cache_can_fit(conn->bc, required) != CACHE_FIT_OK) {
+    _unix_connection_send_error(conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                                "cache full: configure larger max_capacity_bytes");
+    client_api_put_request_destroy(&msg);
+    return;
+  }
+
   /* Create pipeline context */
   unix_put_pipeline_t* pipeline = get_clear_memory(sizeof(unix_put_pipeline_t));
   refcounter_init((refcounter_t*)pipeline);
@@ -460,7 +494,6 @@ static void _unix_handle_put(unix_connection_t* conn, cbor_item_t* frame) {
 
   /* Create writeable streams */
   block_size_e block_type = standard;
-  size_t tuple_size = 3;
   size_t descriptor_pad = 32;
 
   new_blocks_recipe_t* recipe = new_blocks_recipe_create(conn->pool, conn->bc, block_type);
