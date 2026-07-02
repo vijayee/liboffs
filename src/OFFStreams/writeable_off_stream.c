@@ -114,7 +114,7 @@ static void _create_tuple(writeable_off_stream_t* stream, off_stream_tuple_entry
   tuple_push(tuple, off_block->hash);
 
   /* Store blocks in cache — announce to network if this is a new block */
-  actor_t* reply_to = (stream->network != NULL) ? &stream->stream.actor : NULL;
+  actor_t* reply_to = &stream->stream.actor;
   for (int i = 0; i < entry->random_blocks.length; i++) {
     block_cache_put(stream->bc, entry->random_blocks.data[i], 0, reply_to);
   }

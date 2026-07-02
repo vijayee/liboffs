@@ -98,7 +98,7 @@ static void _build_descriptor_blocks(writeable_descriptor_t* desc) {
     }
 
     /* Store block in cache — announce to network if this is a new block */
-    actor_t* reply_to = (desc->network != NULL) ? &desc->stream.actor : NULL;
+    actor_t* reply_to = &desc->stream.actor;
     block_cache_put(desc->bc, block, 0, reply_to);
     if (prior_hash != NULL) {
       DESTROY(prior_hash, buffer);
