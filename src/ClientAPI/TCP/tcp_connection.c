@@ -26,6 +26,7 @@
 #include "../../RefCounter/refcounter.h"
 #include "../../Streams/stream.h"
 #include "../../Util/allocator.h"
+#include "../../Util/error.h"
 #include "../../Util/vec.h"
 #include <cbor.h>
 #include <string.h>
@@ -319,9 +320,15 @@ static void _tcp_put_on_stream_data(void* ctx, void* data) {
 }
 
 static void _tcp_put_on_stream_error(void* ctx, void* error) {
-  (void)error;
   tcp_put_pipeline_t* pipeline = (tcp_put_pipeline_t*)ctx;
-  _tcp_connection_send_error(pipeline->connection, CLIENT_API_STATUS_INTERNAL_ERROR, "PUT stream error");
+  const char* message = "PUT stream error";  /* fallback */
+  if (error != NULL) {
+    async_error_t* async_error = (async_error_t*)error;
+    if (async_error->message != NULL) {
+      message = async_error->message;
+    }
+  }
+  _tcp_connection_send_error(pipeline->connection, CLIENT_API_STATUS_INTERNAL_ERROR, message);
   stream_deactivate((stream_t*)pipeline->ws, NULL);
 }
 
@@ -455,9 +462,24 @@ static void _tcp_handle_put(tcp_connection_t* conn, cbor_item_t* frame) {
   pipeline->descriptor_hash = NULL;
   pipeline->file_hash_offset = 0;
 
+  /* Resolve tuple_size from the wire frame (Task 3), default 3 when absent.
+   * The TCP/WS/WT transports do not carry a config pointer in their connection
+   * structs (only Unix does), so the max_tuple_size bound check is not enforced
+   * here — the space check below still catches oversized uploads. */
+  size_t tuple_size = msg.has_tuple_size ? msg.tuple_size : 3;
+
+  /* Pre-flight space check: reject if the cache cannot fit the estimated bytes */
+  size_t required = writeable_off_stream_estimate_required_bytes(
+      msg.stream_length, tuple_size, /*descriptor_pad=*/32);
+  if (block_cache_can_fit(conn->bc, required) != CACHE_FIT_OK) {
+    _tcp_connection_send_error(conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                               "cache full: configure larger max_capacity_bytes");
+    client_api_put_request_destroy(&msg);
+    return;
+  }
+
   /* Create writeable streams */
   block_size_e block_type = standard;
-  size_t tuple_size = 3;
   size_t descriptor_pad = 32;
 
   new_blocks_recipe_t* recipe = new_blocks_recipe_create(conn->pool, conn->bc, block_type);

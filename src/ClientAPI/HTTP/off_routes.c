@@ -768,6 +768,32 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
     const char* temporary_header = http_request_header(request, "temporary");
     uint8_t is_temporary = (temporary_header != NULL && strcmp(temporary_header, "true") == 0);
 
+    /* Resolve tuple_size from the optional `tuple-size` header, default 3.
+     * The HTTP off_routes context does not carry a config pointer, so the
+     * max_tuple_size bound check is not enforced here — the space check
+     * below still catches oversized uploads. */
+    const char* tuple_size_header = http_request_header(request, "tuple-size");
+    size_t tuple_size = 3;
+    if (tuple_size_header != NULL) {
+        long parsed = atol(tuple_size_header);
+        if (parsed > 0) {
+            tuple_size = (size_t)parsed;
+        }
+    }
+
+    /* Pre-flight space check: reject if the cache cannot fit the estimated bytes */
+    size_t required = writeable_off_stream_estimate_required_bytes(
+        stream_length, tuple_size, /*descriptor_pad=*/32);
+    if (block_cache_can_fit(ctx->bc, required) != CACHE_FIT_OK) {
+        http_response_set_status(response, 500);
+        http_response_write(response, "cache full: configure larger max_capacity_bytes", 48);
+        http_response_end(response);
+        if (upload_data != NULL) {
+            buffer_destroy(upload_data);
+        }
+        return;
+    }
+
     vec_block_recipe_t recipes;
     vec_init(&recipes);
 
@@ -783,10 +809,10 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
     vec_push(&recipes, (block_recipe_t*)recipe);
 
     writeable_off_stream_t* ws = writeable_off_stream_create(
-        ctx->pool, ctx->bc, ctx->tc, standard, 3, 32, recipes, NULL);
+        ctx->pool, ctx->bc, ctx->tc, standard, tuple_size, 32, recipes, NULL);
 
     writeable_descriptor_t* desc = writeable_descriptor_create(
-        ctx->pool, ctx->bc, standard, 32, 3, stream_length, NULL);
+        ctx->pool, ctx->bc, standard, 32, tuple_size, stream_length, NULL);
 
     put_context_t* put_ctx = get_clear_memory(sizeof(put_context_t));
     put_ctx->response = response;
@@ -889,6 +915,27 @@ static int _off_put_headers_complete(http_connection_t* connection,
     const char* temporary_header = http_request_header(request, "temporary");
     uint8_t is_temporary = (temporary_header != NULL && strcmp(temporary_header, "true") == 0);
 
+    /* Resolve tuple_size from the optional `tuple-size` header, default 3.
+     * The HTTP off_routes context does not carry a config pointer, so the
+     * max_tuple_size bound check is not enforced here. */
+    const char* tuple_size_header = http_request_header(request, "tuple-size");
+    size_t tuple_size = 3;
+    if (tuple_size_header != NULL) {
+        long parsed = atol(tuple_size_header);
+        if (parsed > 0) {
+            tuple_size = (size_t)parsed;
+        }
+    }
+
+    /* Pre-flight space check: reject if the cache cannot fit the estimated bytes.
+     * On failure, fall back to the buffered path (return 0) — the buffered
+     * _off_put_handler re-runs the same check and sends the 500 response. */
+    size_t required = writeable_off_stream_estimate_required_bytes(
+        stream_length, tuple_size, /*descriptor_pad=*/32);
+    if (block_cache_can_fit(routes_ctx->bc, required) != CACHE_FIT_OK) {
+        return 0;
+    }
+
     vec_block_recipe_t recipes;
     vec_init(&recipes);
 
@@ -904,10 +951,10 @@ static int _off_put_headers_complete(http_connection_t* connection,
     vec_push(&recipes, (block_recipe_t*)recipe);
 
     writeable_off_stream_t* ws = writeable_off_stream_create(
-        routes_ctx->pool, routes_ctx->bc, routes_ctx->tc, standard, 3, 32, recipes, NULL);
+        routes_ctx->pool, routes_ctx->bc, routes_ctx->tc, standard, tuple_size, 32, recipes, NULL);
 
     writeable_descriptor_t* desc = writeable_descriptor_create(
-        routes_ctx->pool, routes_ctx->bc, standard, 32, 3, stream_length, NULL);
+        routes_ctx->pool, routes_ctx->bc, standard, 32, tuple_size, stream_length, NULL);
 
     put_context_t* put_ctx = get_clear_memory(sizeof(put_context_t));
     put_ctx->response = response;
