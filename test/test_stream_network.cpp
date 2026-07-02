@@ -559,11 +559,15 @@ TEST_F(WriteableOffStreamNetworkTest, CachePutErrorNoCrash) {
   msg.payload = &result;
   msg.payload_destroy = nullptr;
 
-  // Dispatch should not crash
+  // Dispatch should not crash. With the cache-put error propagation in
+  // place, an ERROR/FULL result deactivates the stream and fires
+  // error_event (which has no subscriber here, so it is logged and the
+  // payload freed by the no-handler path). Verify the new behavior:
+  // the stream is deactivated, but the call returns without crashing.
   writeable_off_stream_dispatch(stream, &msg);
 
-  // Stream should still be valid (not deactivated)
-  EXPECT_EQ(stream->stream.is_deactivated, 0);
+  // Stream should now be deactivated on cache-put error
+  EXPECT_EQ(stream->stream.is_deactivated, 1);
 
   // Clean up — release the reference from REFERENCE(hash, buffer_t)
   DESTROY(result.hash, buffer);

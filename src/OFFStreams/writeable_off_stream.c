@@ -331,6 +331,18 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
     }
     case CACHE_PUT_RESULT: {
       cache_put_result_payload_t* result = (cache_put_result_payload_t*)msg->payload;
+      if (result->result == CACHE_PUT_ERROR || result->result == CACHE_PUT_FULL) {
+        /* Cache full or write error: abort the stream and notify the
+         * error subscriber (the daemon's pipe handler forwards this
+         * to the client as CLIENT_API_ERROR). OFFS_ERROR_TRANSFER yields
+         * the freshly-made error so stream_notify adopts the single
+         * reference and releases it via error_destroy. */
+        stream->stream.is_deactivated = 1;
+        stream_notify((stream_t*)stream, error_event,
+                      OFFS_ERROR_TRANSFER("cache full during put: configure larger max_capacity_bytes"),
+                      (void (*)(void*))error_destroy);
+        break;
+      }
       if (result->result == CACHE_PUT_NEW && stream->network != NULL) {
         /* New block stored — announce to network */
         network_local_store_block_payload_t* net_payload = get_clear_memory(sizeof(network_local_store_block_payload_t));
