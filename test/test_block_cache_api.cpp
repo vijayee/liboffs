@@ -261,3 +261,56 @@ TEST(BlockCacheAPIWire, HashBase58RoundTrip) {
   EXPECT_EQ(decoded_len, 32u);
   EXPECT_EQ(memcmp(original_hash, decoded, 32), 0);
 }
+
+/* --- PUT_REQUEST wire frame: optional tuple_size --- */
+
+TEST(ClientApiPutRequestWire, TupleSizeAbsentDefaultsToZero) {
+  client_api_put_request_t msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.content_type = (char*)"application/octet-stream";
+  msg.file_name = (char*)"test.bin";
+  msg.stream_length = 1024;
+  msg.data = NULL;
+  msg.data_size = 0;
+  msg.temporary = 0;
+  /* has_tuple_size = 0 -> 8-element array (backward compatible) */
+
+  cbor_item_t* encoded = client_api_put_request_encode(&msg);
+  ASSERT_NE(encoded, nullptr);
+
+  client_api_put_request_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  int ret = client_api_put_request_decode(encoded, &decoded);
+  ASSERT_EQ(ret, 0);
+  EXPECT_EQ(decoded.has_tuple_size, 0u);
+  EXPECT_EQ(decoded.stream_length, 1024u);
+
+  client_api_put_request_destroy(&decoded);
+  cbor_decref(&encoded);
+}
+
+TEST(ClientApiPutRequestWire, TupleSizePresentRoundTrips) {
+  client_api_put_request_t msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.content_type = (char*)"application/octet-stream";
+  msg.file_name = (char*)"test.bin";
+  msg.stream_length = 1024;
+  msg.data = NULL;
+  msg.data_size = 0;
+  msg.temporary = 0;
+  msg.has_tuple_size = 1;
+  msg.tuple_size = 5;
+
+  cbor_item_t* encoded = client_api_put_request_encode(&msg);
+  ASSERT_NE(encoded, nullptr);
+
+  client_api_put_request_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  int ret = client_api_put_request_decode(encoded, &decoded);
+  ASSERT_EQ(ret, 0);
+  EXPECT_EQ(decoded.has_tuple_size, 1u);
+  EXPECT_EQ(decoded.tuple_size, 5u);
+
+  client_api_put_request_destroy(&decoded);
+  cbor_decref(&encoded);
+}
