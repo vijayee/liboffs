@@ -22,6 +22,32 @@ static size_t _block_size_for_type(block_size_e type) {
   return 128000;
 }
 
+size_t writeable_off_stream_estimate_required_bytes(
+    size_t stream_length, size_t tuple_size, size_t descriptor_pad) {
+  if (descriptor_pad == 0 || tuple_size == 0) {
+    return 0;
+  }
+  const size_t block_size = 128000;  /* standard */
+  /* data_blocks = ceil(stream_length / block_size) */
+  size_t data_blocks = (stream_length + block_size - 1) / block_size;
+  if (data_blocks == 0) {
+    return 0;
+  }
+  /* Each data block produces one tuple of tuple_size blocks (random + off),
+   * all stored once via block_cache_put. */
+  size_t tuple_blocks = data_blocks * tuple_size;
+  /* Descriptor buffer: each tuple appends tuple_size * descriptor_pad bytes
+   * (writeable_descriptor.c:152). */
+  size_t tuple_metadata = data_blocks * tuple_size * descriptor_pad;
+  /* Descriptor buffer is chunked into blocks of chunk_data_size payload bytes
+   * (writeable_descriptor.c:32,39,45). */
+  size_t cut_point = (block_size / descriptor_pad) * descriptor_pad;
+  size_t chunk_data_size = cut_point - descriptor_pad;
+  size_t descriptor_blocks = (tuple_metadata + chunk_data_size - 1) / chunk_data_size;
+  /* Each block (tuple or descriptor) occupies block_size bytes in the cache. */
+  return (tuple_blocks + descriptor_blocks) * block_size;
+}
+
 static off_stream_tuple_entry_t* _entry_create(block_t* origin, size_t tuple_size) {
   off_stream_tuple_entry_t* entry = get_clear_memory(sizeof(off_stream_tuple_entry_t));
   entry->origin = (block_t*)refcounter_reference((refcounter_t*)origin);

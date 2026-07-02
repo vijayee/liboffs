@@ -37,3 +37,38 @@ TEST(WriteableOffStream, TestCreateDestroy) {
   new_blocks_recipe_destroy(recipe);
   scheduler_pool_destroy(pool);
 }
+
+TEST(WriteableOffStreamEstimate, ZeroStreamLength) {
+  /* Zero-byte stream: no data blocks, no descriptor blocks. */
+  EXPECT_EQ(writeable_off_stream_estimate_required_bytes(0, 3, 32), 0u);
+}
+
+TEST(WriteableOffStreamEstimate, OneBlockStandard) {
+  /* stream_length = 128000 (one standard block), tuple_size = 3, pad = 32.
+   * data_blocks = 1, tuple_blocks = 1 * 3 = 3.
+   * tuple_metadata = 1 * 3 * 32 = 96 bytes.
+   * cut_point = (128000 / 32) * 32 = 128000.
+   * chunk_data_size = 128000 - 32 = 127968.
+   * descriptor_blocks = ceil(96 / 127968) = 1.
+   * required = (3 + 1) * 128000 = 512000. */
+  EXPECT_EQ(writeable_off_stream_estimate_required_bytes(128000, 3, 32), 512000u);
+}
+
+TEST(WriteableOffStreamEstimate, LargeStreamTupleSize5) {
+  /* stream_length = 1280000 (10 blocks), tuple_size = 5, pad = 32.
+   * data_blocks = 10, tuple_blocks = 10 * 5 = 50.
+   * tuple_metadata = 10 * 5 * 32 = 1600 bytes.
+   * chunk_data_size = 127968.
+   * descriptor_blocks = ceil(1600 / 127968) = 1.
+   * required = (50 + 1) * 128000 = 6528000. */
+  EXPECT_EQ(writeable_off_stream_estimate_required_bytes(1280000, 5, 32), 6528000u);
+}
+
+TEST(WriteableOffStreamEstimate, PartialBlock) {
+  /* stream_length = 100 (less than one block), tuple_size = 3, pad = 32.
+   * data_blocks = ceil(100 / 128000) = 1, tuple_blocks = 3.
+   * tuple_metadata = 1 * 3 * 32 = 96 bytes.
+   * descriptor_blocks = ceil(96 / 127968) = 1.
+   * required = (3 + 1) * 128000 = 512000. */
+  EXPECT_EQ(writeable_off_stream_estimate_required_bytes(100, 3, 32), 512000u);
+}
