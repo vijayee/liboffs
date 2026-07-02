@@ -342,3 +342,33 @@ prefixed with `"Error: "` per the existing `cmd_put` error path.
 - No resumable uploads.
 - No change to other CLI commands.
 - No change to the GET path.
+
+## Known limitations (implemented vs. spec)
+
+- **HTTP pre-flight defers rejection.** In `_off_put_headers_complete`, a
+  cache-full result returns `0` (falls back to the buffered upload path),
+  so the client uploads the full body before `_off_put_handler` re-runs the
+  check and sends HTTP 500. Goal 1 ("reject before any `PUT_DATA` is
+  accepted") is fully met for Unix/TCP/WS/WT but only partially met for
+  HTTP. Fixing this requires sending the 500 directly in
+  `_off_put_headers_complete` and verifying the streaming-mode response
+  lifecycle can handle an early-ended response — tracked as a follow-up.
+- **`max_tuple_size` bound check is Unix-only.** TCP/WS/WT/HTTP connection
+  structs don't carry a config pointer, so the `tuple_size > max_tuple_size`
+  bound check is not enforced for those transports. The pre-flight space
+  check (the primary gate) catches oversized `tuple_size` indirectly via
+  the estimator, so an out-of-range tuple_size is still rejected — just
+  via the space check rather than the explicit bound. Adding the bound to
+  the other transports would require plumbing `config_handler_ctx_t` into
+  their connection structs.
+- **HTTP mid-stream error forwarding not implemented.** HTTP has no
+  existing `_put_on_stream_error` subscriber. A mid-stream `CACHE_PUT_FULL`
+  after the pre-flight passes would deactivate the stream but the client
+  would not receive an explicit error frame. The pre-flight check covers
+  the common case; mid-stream HTTP failures surface as a dropped
+  connection.
+- **Status code is `CLIENT_API_STATUS_INTERNAL_ERROR` for cache-full.**
+  `CLIENT_API_STATUS_INSUFFICIENT_STORAGE` does not exist in the wire
+  protocol. Clients must parse the message string to distinguish cache-full
+  from other internal errors. A future wire-version bump could add the
+  distinct status code.
