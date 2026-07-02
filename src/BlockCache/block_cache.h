@@ -159,9 +159,13 @@ void block_cache_get(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_
 void block_cache_put(block_cache_t* block_cache, block_t* block, uint32_t incoming_fib, actor_t* reply_to);
 void block_cache_remove(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
 
-/* Pure-read capacity check: returns CACHE_FIT_OK if
+/* Advisory capacity check (unsynchronized): returns CACHE_FIT_OK if
  * current_bytes + required_bytes <= max_capacity_bytes, else CACHE_FIT_FULL.
- * When max_capacity_bytes == 0 (disabled), always returns CACHE_FIT_OK. */
+ * When max_capacity_bytes == 0 (disabled), always returns CACHE_FIT_OK.
+ * Reads current_bytes/max_capacity_bytes without locking — those fields are
+ * mutated on the cache actor thread. Callers use this as a best-effort
+ * pre-flight reject before enqueuing a PUT; the authoritative capacity
+ * decision is still made inside block_cache_dispatch on the actor thread. */
 int block_cache_can_fit(block_cache_t* block_cache, size_t required_bytes);
 void block_cache_defragment(block_cache_t* block_cache, float occupancy_threshold, actor_t* reply_to);
 

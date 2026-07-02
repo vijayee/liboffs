@@ -68,7 +68,7 @@ uint8_t client_api_wire_get_type(cbor_item_t* item) {
 }
 
 // --- PUT Request ---
-// [type, content_type, file_name, stream_length, server_address, data, recycler_urls, temporary]
+// [type, content_type, file_name, stream_length, server_address, data, recycler_urls, temporary, tuple_size?]
 
 cbor_item_t* client_api_put_request_encode(const client_api_put_request_t* msg) {
   cbor_item_t* array = cbor_new_definite_array(msg->has_tuple_size ? 9 : 8);
