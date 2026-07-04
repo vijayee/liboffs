@@ -51,16 +51,6 @@ static void network_handle_measure_nodes_response(network_t* network, message_t*
 static void network_handle_closest_nodes_progress(network_t* network, message_t* msg);
 static void network_handle_local_closest_nodes(network_t* network, message_t* msg);
 
-// --- Payload destroy for cache PUT from network ---
-static void network_cache_put_payload_destroy(void* ptr) {
-  cache_put_payload_t* payload = (cache_put_payload_t*)ptr;
-  if (payload == NULL) return;
-  if (payload->block != NULL) {
-    block_destroy(payload->block);
-  }
-  free(payload);
-}
-
 // --- Local FindBlock payload destroy ---
 // Frees the heap-allocated payload and releases the hash buffer reference.
 
@@ -1721,12 +1711,14 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
       }
     }
 
-    // If the response includes block data, insert it into the local cache
-    // before notifying requesters (so block_cache_get will find it)
+    // If the response includes block data, build a block_t and best-effort
+    // store it in the local cache. The block is also attached directly to the
+    // NETWORK_FIND_BLOCK_RESULT payload below so the consumer can use it
+    // without re-fetching from the cache (cache-full no longer stalls GET).
+    block_t* block = NULL;
     if (response->block_data != NULL && response->block_data_len > 0 && network->block_cache != NULL) {
       buffer_t* data_buf = buffer_create_from_pointer_copy(response->block_data, response->block_data_len);
       buffer_t* hash_buf = buffer_create_from_pointer_copy(response->block_hash, 32);
-      block_t* block = NULL;
       if (data_buf != NULL && hash_buf != NULL) {
         block_size_e block_type = network->block_cache->type;
         if (response->block_data_len == mega) block_type = mega;
@@ -1736,8 +1728,7 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
         block = block_create_existing_data_hash_by_type(data_buf, hash_buf, block_type);
       }
       if (block != NULL) {
-        block_cache_put(network->block_cache, block, response->block_fib, NULL);
-        DESTROY(block, block);
+        block_cache_put(network->block_cache, block, response->block_fib, &network->actor);
         DESTROY(data_buf, buffer);
         DESTROY(hash_buf, buffer);
       } else {
@@ -1746,7 +1737,11 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
       }
     }
 
-    // Check wanted_list — notify any local requesters waiting for this block
+    // Check wanted_list — notify any local requesters waiting for this block.
+    // The block is attached directly to the result so the consumer can use it
+    // without re-fetching from the cache. DESTROY(block, block) is deferred
+    // until after the result is constructed so the payload's reference keeps
+    // the block alive.
     {
       buffer_t* hash_buf = buffer_create_from_pointer_copy(response->block_hash, 32);
       if (hash_buf != NULL) {
@@ -1758,6 +1753,7 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
                 get_clear_memory(sizeof(network_find_block_result_payload_t));
             result->hash = REFERENCE(hash_buf, buffer_t);
             result->found = 1;
+            result->block = (block != NULL) ? (block_t*)refcounter_reference((refcounter_t*)block) : NULL;
             message_t result_msg = {0};
             result_msg.type = NETWORK_FIND_BLOCK_RESULT;
             result_msg.payload = result;
@@ -1769,6 +1765,10 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
         }
         buffer_destroy(hash_buf);
       }
+    }
+
+    if (block != NULL) {
+      DESTROY(block, block);
     }
   } else {
     // Block not found — subscribe block_hash in EABFs as negative info
@@ -1875,36 +1875,30 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
         state.replicas_needed--;
       }
 
-      // Store block in block_cache via actor_send
+      // Build a block_t from the pushed block data and best-effort store it in
+      // block_cache via block_cache_put (which references the block internally,
+      // so the network retains its own ref). The block is also attached
+      // directly to the NETWORK_FIND_BLOCK_RESULT payload below so the
+      // consumer can use it without re-fetching from the cache (cache-full no
+      // longer stalls GET). The block_t* is hoisted to the case scope so it is
+      // visible at the wanted_list notification below; DESTROY(block, block)
+      // is deferred until after the result is constructed so the payload's
+      // reference keeps the block alive.
+      block_t* block = NULL;
       if (store->block_data != NULL && store->block_data_len > 0) {
         buffer_t* hash_buf = buffer_create_from_pointer_copy(store->block_hash, 32);
         buffer_t* data_buf = buffer_create_from_pointer_copy(store->block_data, store->block_data_len);
         if (hash_buf != NULL && data_buf != NULL) {
-          block_t* block = block_create_existing_data_hash_by_type(
+          block = block_create_existing_data_hash_by_type(
               data_buf, hash_buf, network->block_cache->type);
-          if (block != NULL) {
-            cache_put_payload_t* put_payload = get_clear_memory(sizeof(cache_put_payload_t));
-            if (put_payload != NULL) {
-              put_payload->block = block;
-              put_payload->reply_to = NULL;  // fire-and-forget
-              put_payload->incoming_fib = store->block_fib;
-              put_payload->result = 0;
-              message_t put_msg = {0};
-              put_msg.type = CACHE_PUT;
-              put_msg.payload = put_payload;
-              put_msg.payload_destroy = network_cache_put_payload_destroy;
-              actor_send(&network->block_cache->actor, &put_msg);
-            } else {
-              DESTROY(hash_buf, buffer);
-              DESTROY(data_buf, buffer);
-            }
-          } else {
-            DESTROY(hash_buf, buffer);
-            DESTROY(data_buf, buffer);
-          }
+        }
+        if (block != NULL) {
+          block_cache_put(network->block_cache, block, store->block_fib, &network->actor);
+          DESTROY(data_buf, buffer);
+          DESTROY(hash_buf, buffer);
         } else {
-          if (hash_buf != NULL) buffer_destroy(hash_buf);
-          if (data_buf != NULL) buffer_destroy(data_buf);
+          if (data_buf != NULL) DESTROY(data_buf, buffer);
+          if (hash_buf != NULL) DESTROY(hash_buf, buffer);
         }
       }
 
@@ -1949,7 +1943,13 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
         }
       }
 
-      // Check wanted_list — notify any local requesters waiting for this block
+      // Check wanted_list — notify any local requesters waiting for this block.
+      // The block is attached directly to the result so the consumer can use it
+      // without re-fetching from the cache. block_cache_put already added a
+      // reference for the cache actor; the result gets its own reference via
+      // refcounter_reference. DESTROY(block, block) is deferred until after
+      // the result is constructed so the payload's reference keeps the block
+      // alive.
       {
         buffer_t* hash_buf = buffer_create_from_pointer_copy(store->block_hash, 32);
         if (hash_buf != NULL) {
@@ -1961,6 +1961,7 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
                   get_clear_memory(sizeof(network_find_block_result_payload_t));
               result->hash = REFERENCE(hash_buf, buffer_t);
               result->found = 1;
+              result->block = (block != NULL) ? (block_t*)refcounter_reference((refcounter_t*)block) : NULL;
               message_t result_msg = {0};
               result_msg.type = NETWORK_FIND_BLOCK_RESULT;
               result_msg.payload = result;
@@ -1972,6 +1973,10 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
           }
           buffer_destroy(hash_buf);
         }
+      }
+
+      if (block != NULL) {
+        DESTROY(block, block);
       }
 
       // Apply Hebbian learning: the accepting node strengthens weight toward
@@ -2505,9 +2510,44 @@ static void network_handle_recall_accept(network_t* network, message_t* msg) {
                        0, &network->hebbian);
   }
 
+  // If the accept message carries block data, build a block_t and best-effort
+  // store it in the local block_cache. The block is also attached directly to
+  // the NETWORK_FIND_BLOCK_RESULT payload below so the consumer can use it
+  // without re-fetching from the cache (cache-full no longer stalls GET).
+  // The block_t* is hoisted to the function scope so it is visible at the
+  // wanted_list notification below; DESTROY(block, block) is deferred until
+  // after the result is constructed so the payload's reference keeps the
+  // block alive.
+  block_t* block = NULL;
+  if (accept->block_data != NULL && accept->block_data_len > 0 && network->block_cache != NULL) {
+    buffer_t* data_buf = buffer_create_from_pointer_copy(accept->block_data, accept->block_data_len);
+    buffer_t* block_hash_buf = buffer_create_from_pointer_copy(accept->block_hash, 32);
+    if (data_buf != NULL && block_hash_buf != NULL) {
+      block_size_e block_type = network->block_cache->type;
+      if (accept->block_data_len == mega) block_type = mega;
+      else if (accept->block_data_len == standard) block_type = standard;
+      else if (accept->block_data_len == mini) block_type = mini;
+      else if (accept->block_data_len == nano) block_type = nano;
+      block = block_create_existing_data_hash_by_type(data_buf, block_hash_buf, block_type);
+    }
+    if (block != NULL) {
+      block_cache_put(network->block_cache, block, accept->block_fib, &network->actor);
+      DESTROY(data_buf, buffer);
+      DESTROY(block_hash_buf, buffer);
+    } else {
+      if (data_buf != NULL) DESTROY(data_buf, buffer);
+      if (block_hash_buf != NULL) DESTROY(block_hash_buf, buffer);
+    }
+  }
+
   // Look up the block by hash in the local block_cache index
   buffer_t* hash_buf = buffer_create_from_pointer_copy(accept->block_hash, 32);
-  if (hash_buf == NULL) return;
+  if (hash_buf == NULL) {
+    if (block != NULL) {
+      DESTROY(block, block);
+    }
+    return;
+  }
 
   index_entry_t* entry = index_peek(network->block_cache->index, hash_buf);
   if (entry != NULL) {
@@ -2538,10 +2578,12 @@ static void network_handle_recall_accept(network_t* network, message_t* msg) {
   }
   buffer_destroy(hash_buf);
 
-  // After the block is stored (or once we know it's arriving via RECALL),
-  // check wanted_list and notify any local requesters waiting for this block.
-  // Block storage persistence is handled separately; wanted_list is checked here
-  // so the integration is in place for when storage is implemented.
+  // Check wanted_list — notify any local requesters waiting for this block.
+  // The block is attached directly to the result so the consumer can use it
+  // without re-fetching from the cache. block_cache_put already added a
+  // reference for the cache actor; the result gets its own reference via
+  // refcounter_reference. DESTROY(block, block) is deferred until after the
+  // result is constructed so the payload's reference keeps the block alive.
   {
     buffer_t* hash_buf = buffer_create_from_pointer_copy(accept->block_hash, 32);
     if (hash_buf != NULL) {
@@ -2553,6 +2595,7 @@ static void network_handle_recall_accept(network_t* network, message_t* msg) {
               get_clear_memory(sizeof(network_find_block_result_payload_t));
           result->hash = REFERENCE(hash_buf, buffer_t);
           result->found = 1;
+          result->block = (block != NULL) ? (block_t*)refcounter_reference((refcounter_t*)block) : NULL;
           message_t result_msg = {0};
           result_msg.type = NETWORK_FIND_BLOCK_RESULT;
           result_msg.payload = result;
@@ -2564,6 +2607,10 @@ static void network_handle_recall_accept(network_t* network, message_t* msg) {
       }
       buffer_destroy(hash_buf);
     }
+  }
+
+  if (block != NULL) {
+    DESTROY(block, block);
   }
 }
 
