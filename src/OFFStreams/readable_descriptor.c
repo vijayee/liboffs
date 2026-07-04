@@ -274,11 +274,30 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
     case NETWORK_FIND_BLOCK_RESULT: {
       network_find_block_result_payload_t* result = (network_find_block_result_payload_t*)msg->payload;
       if (result->found) {
-        /* Block found on network — re-issue cache_get with the result's hash */
-        if (result->hash != NULL) {
-          block_cache_get(desc->bc, result->hash, &desc->stream.actor);
+        if (result->block != NULL) {
+          /* Direct-return: network provided the block. Process it the same
+           * way as CACHE_GET_RESULT success (lines 256-272). */
+          buffer_t* block_data = result->block->data;
+          int need_more = _process_descriptor(desc, block_data);
+          DESTROY(result->block, block);
+          result->block = NULL;
+          if (result->hash != NULL) {
+            DESTROY(result->hash, buffer);
+            result->hash = NULL;
+          }
+          if (need_more && desc->next_descriptor_hash != NULL && !desc->stream.is_deactivated) {
+            buffer_t* hash = desc->next_descriptor_hash;
+            desc->next_descriptor_hash = NULL;
+            _fetch_descriptor_block(desc, hash);
+            DESTROY(hash, buffer);
+          }
+        } else {
+          /* Local path: block is in the cache. Re-fetch as before. */
+          if (result->hash != NULL) {
+            block_cache_get(desc->bc, result->hash, &desc->stream.actor);
+          }
+          desc->state = DESCRIPTOR_FETCHING_BLOCK;
         }
-        desc->state = DESCRIPTOR_FETCHING_BLOCK;
       } else {
         /* Block not found on network — deactivate */
         stream_deactivate((stream_t*)desc, OFFS_ERROR("Descriptor block not found on network"));
