@@ -1753,7 +1753,7 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
                 get_clear_memory(sizeof(network_find_block_result_payload_t));
             result->hash = REFERENCE(hash_buf, buffer_t);
             result->found = 1;
-            result->block = (block != NULL) ? (block_t*)refcounter_reference((refcounter_t*)block) : NULL;
+            result->block = (block != NULL) ? REFERENCE(block, block_t) : NULL;
             message_t result_msg = {0};
             result_msg.type = NETWORK_FIND_BLOCK_RESULT;
             result_msg.payload = result;
@@ -1961,7 +1961,7 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
                   get_clear_memory(sizeof(network_find_block_result_payload_t));
               result->hash = REFERENCE(hash_buf, buffer_t);
               result->found = 1;
-              result->block = (block != NULL) ? (block_t*)refcounter_reference((refcounter_t*)block) : NULL;
+              result->block = (block != NULL) ? REFERENCE(block, block_t) : NULL;
               message_t result_msg = {0};
               result_msg.type = NETWORK_FIND_BLOCK_RESULT;
               result_msg.payload = result;
@@ -2595,7 +2595,7 @@ static void network_handle_recall_accept(network_t* network, message_t* msg) {
               get_clear_memory(sizeof(network_find_block_result_payload_t));
           result->hash = REFERENCE(hash_buf, buffer_t);
           result->found = 1;
-          result->block = (block != NULL) ? (block_t*)refcounter_reference((refcounter_t*)block) : NULL;
+          result->block = (block != NULL) ? REFERENCE(block, block_t) : NULL;
           message_t result_msg = {0};
           result_msg.type = NETWORK_FIND_BLOCK_RESULT;
           result_msg.payload = result;

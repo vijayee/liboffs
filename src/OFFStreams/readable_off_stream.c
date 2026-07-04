@@ -295,7 +295,6 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
         DESTROY(stream->pending_tuple, tuple);
         stream->pending_tuple = NULL;
         stream_deactivate((stream_t*)stream, OFFS_ERROR("Block not found on network"));
-        stream->stream.is_deactivated = 1;
       }
       break;
     }

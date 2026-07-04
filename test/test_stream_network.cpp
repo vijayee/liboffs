@@ -290,7 +290,7 @@ TEST_F(ReadableOffStreamNetworkTest, FindBlockResultDirectReturnUsesBlockDirectl
   memset(&result, 0, sizeof(result));
   result.found = 1;
   result.hash = NULL;
-  result.block = (block_t*)refcounter_reference((refcounter_t*)block);
+  result.block = REFERENCE(block, block_t);
 
   message_t msg;
   msg.type = NETWORK_FIND_BLOCK_RESULT;
@@ -838,7 +838,7 @@ TEST(NetworkFindBlockResultPayload, DestroyHandlesAttachedBlock) {
           sizeof(network_find_block_result_payload_t));
   result->hash = buffer_create_from_pointer_copy((uint8_t*)"hashcontent", 11);
   result->found = 1;
-  result->block = (block_t*)refcounter_reference((refcounter_t*)block);
+  result->block = REFERENCE(block, block_t);
 
   network_find_block_result_destroy(result);
   block_destroy(block);  /* release our local reference */
