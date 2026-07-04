@@ -83,13 +83,18 @@ void network_local_store_block_payload_destroy(void* ptr) {
 }
 
 // --- FindBlock result payload destroy ---
-// Frees the heap-allocated result payload and releases the hash buffer reference.
+// Frees the heap-allocated result payload, releases the hash buffer reference,
+// and destroys any attached block (remote-receipt path). When the result came
+// from a local cache hit, block is NULL and only the hash is released.
 
-static void network_find_block_result_destroy(void* ptr) {
+void network_find_block_result_destroy(void* ptr) {
   if (ptr == NULL) return;
   network_find_block_result_payload_t* result = (network_find_block_result_payload_t*)ptr;
   if (result->hash != NULL) {
     buffer_destroy(result->hash);
+  }
+  if (result->block != NULL) {
+    block_destroy(result->block);
   }
   free(ptr);
 }

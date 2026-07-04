@@ -733,3 +733,34 @@ TEST(StreamNetwork, WantedListDifferentHashesAreIndependent) {
   buffer_destroy(hash_a);
   buffer_destroy(hash_b);
 }
+
+// ========================================================================
+// network_find_block_result_payload_t destroy function
+// ========================================================================
+
+TEST(NetworkFindBlockResultPayload, DestroyHandlesNullBlock) {
+  network_find_block_result_payload_t* result =
+      (network_find_block_result_payload_t*)get_clear_memory(
+          sizeof(network_find_block_result_payload_t));
+  result->hash = buffer_create_from_pointer_copy((uint8_t*)"hashcontent", 11);
+  result->found = 1;
+  result->block = NULL;  /* local-cache-hit path: no block attached */
+
+  network_find_block_result_destroy(result);
+  SUCCEED();
+}
+
+TEST(NetworkFindBlockResultPayload, DestroyHandlesAttachedBlock) {
+  block_t* block = block_create_random_block_by_type(nano);
+
+  network_find_block_result_payload_t* result =
+      (network_find_block_result_payload_t*)get_clear_memory(
+          sizeof(network_find_block_result_payload_t));
+  result->hash = buffer_create_from_pointer_copy((uint8_t*)"hashcontent", 11);
+  result->found = 1;
+  result->block = (block_t*)refcounter_reference((refcounter_t*)block);
+
+  network_find_block_result_destroy(result);
+  block_destroy(block);  /* release our local reference */
+  SUCCEED();
+}
