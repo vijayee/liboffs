@@ -255,6 +255,82 @@ TEST_F(ReadableOffStreamNetworkTest, FindBlockResultFoundReissuesCacheGet) {
   DESTROY(hash, buffer);
 }
 
+// Test: NETWORK_FIND_BLOCK_RESULT with found=1 and block != NULL uses the
+// block directly (XOR-accumulates it) instead of re-fetching from the cache.
+// This exercises the direct-return branch added by the network direct-return
+// block design. The block is NOT placed in the cache, so a re-fetch would
+// miss; the direct path must use the attached block's data without calling
+// block_cache_get.
+TEST_F(ReadableOffStreamNetworkTest, FindBlockResultDirectReturnUsesBlockDirectly) {
+  // Build a random block that is NOT in the cache. The direct-return path
+  // must use this block's data directly (XOR-accumulate) without calling
+  // block_cache_get.
+  block_t* block = block_create_random_block_by_type(standard);
+  ASSERT_NE(block, nullptr);
+  // Sanity: block is not in the cache. block_cache_get is async, so we
+  // cannot easily assert a miss here; instead we rely on the fact that we
+  // never inserted this block.
+
+  // Set up state expected by the handler: blocks_expected > blocks_received
+  // so _finish_decode_and_render is NOT triggered (we want to observe the
+  // accumulator and blocks_received before the stream completes). The
+  // direct path does not transition state, so seed AWAITING_NETWORK and
+  // confirm it stays put (a local-refetch path would set FETCHING_BLOCKS).
+  stream->blocks_expected = 2;
+  stream->blocks_received = 0;
+  stream->state = OFF_STREAM_AWAITING_NETWORK;
+  // Ensure no accumulator carried over from a prior dispatch.
+  if (stream->xor_accumulator != NULL) {
+    DESTROY(stream->xor_accumulator, buffer);
+    stream->xor_accumulator = NULL;
+  }
+
+  // Craft and dispatch NETWORK_FIND_BLOCK_RESULT with found=1 and block != NULL.
+  network_find_block_result_payload_t result;
+  memset(&result, 0, sizeof(result));
+  result.found = 1;
+  result.hash = NULL;
+  result.block = (block_t*)refcounter_reference((refcounter_t*)block);
+
+  message_t msg;
+  msg.type = NETWORK_FIND_BLOCK_RESULT;
+  msg.payload = &result;
+  msg.payload_destroy = nullptr;
+
+  readable_off_stream_dispatch(stream, &msg);
+
+  // Verify: the block was used directly — the XOR accumulator is a copy of
+  // the block's data (no cache re-fetch occurred).
+  ASSERT_NE(stream->xor_accumulator, nullptr);
+  ASSERT_NE(block->data, nullptr);
+  EXPECT_EQ(stream->xor_accumulator->size, block->data->size);
+  EXPECT_EQ(memcmp(stream->xor_accumulator->data,
+                   block->data->data,
+                   block->data->size), 0);
+
+  // Verify: blocks_received advanced — the direct-return branch was taken.
+  EXPECT_EQ(stream->blocks_received, 1);
+
+  // Verify: state was NOT transitioned to FETCHING_BLOCKS. The direct path
+  // does not re-fetch from the cache; the local-refetch path (block == NULL)
+  // would have set state = FETCHING_BLOCKS. Leaving state unchanged is the
+  // signature of the direct-return branch.
+  EXPECT_NE(stream->state, OFF_STREAM_FETCHING_BLOCKS);
+
+  // Clean up: the handler does not take ownership of result.block (it only
+  // copies the data via buffer_copy), so release the reference we added on
+  // result.block, then release our local block reference.
+  DESTROY(result.block, block);
+  DESTROY(block, block);
+
+  // The accumulator is allocated by the handler but readable_off_stream_destroy
+  // does not free it; clean it up here to avoid leaking across the test.
+  if (stream->xor_accumulator != NULL) {
+    DESTROY(stream->xor_accumulator, buffer);
+    stream->xor_accumulator = NULL;
+  }
+}
+
 // Test: NETWORK_FIND_BLOCK_RESULT with found=0 deactivates the stream
 TEST_F(ReadableOffStreamNetworkTest, FindBlockResultNotFoundDeactivates) {
   uint8_t hash_data[] = {0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,0x00,0x11,
