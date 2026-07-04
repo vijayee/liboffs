@@ -3940,6 +3940,18 @@ void network_dispatch(void* state, message_t* msg) {
       }
       break;
     }
+    case CACHE_PUT_RESULT: {
+      cache_put_result_payload_t* result = (cache_put_result_payload_t*)msg->payload;
+      if (result->result == CACHE_PUT_ERROR || result->result == CACHE_PUT_FULL) {
+        /* Best-effort cache store failed. The block was already delivered
+         * directly to the requesting stream via NETWORK_FIND_BLOCK_RESULT,
+         * so this failure does not affect the current GET. No action needed. */
+      }
+      /* CACHE_PUT_NEW / CACHE_PUT_EXISTS: the block is in the cache for
+       * future GETs. Network announce for CACHE_PUT_NEW is handled by the
+       * writable_off_stream path during PUT, not here. */
+      break;
+    }
     default:
       break;
   }
