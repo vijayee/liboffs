@@ -220,8 +220,11 @@ TEST_F(ReadableOffStreamNetworkTest, FindBlockResultFoundReissuesCacheGet) {
   // Simulate the stream being in AWAITING_NETWORK state
   stream->state = OFF_STREAM_AWAITING_NETWORK;
 
-  // Craft and dispatch NETWORK_FIND_BLOCK_RESULT with found=1
+  // Craft and dispatch NETWORK_FIND_BLOCK_RESULT with found=1.
+  // block=NULL means the network did not attach the block directly, so the
+  // handler takes the local-cache-hit re-fetch path (re-issues block_cache_get).
   network_find_block_result_payload_t result;
+  memset(&result, 0, sizeof(result));
   result.hash = REFERENCE(hash, buffer_t);
   result.found = 1;
 
@@ -272,6 +275,7 @@ TEST_F(ReadableOffStreamNetworkTest, FindBlockResultNotFoundDeactivates) {
 
   // Craft and dispatch NETWORK_FIND_BLOCK_RESULT with found=0
   network_find_block_result_payload_t result;
+  memset(&result, 0, sizeof(result));
   result.hash = REFERENCE(hash, buffer_t);
   result.found = 0;
 
