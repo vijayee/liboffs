@@ -6,6 +6,7 @@
 #define OFFS_MESSAGE_H
 
 #include <stdint.h>
+#include "../BlockCache/block.h"
 #include "../Network/node_id.h"
 
 /* Maximum ring samples included in ClosestNodes results */
@@ -234,8 +235,15 @@ void network_local_find_block_payload_destroy(void* ptr);
 /* Network-to-stream: result of FindBlock */
 typedef struct {
   buffer_t* hash;       /* same hash from the request */
-  int       found;      /* 1 = found (block now in cache), 0 = not found */
+  int       found;      /* 1 = found, 0 = not found */
+  block_t*  block;      /* the retrieved block, when found via remote path.
+                         * NULL when found=0, or when found via local-cache-hit
+                         * (the consumer re-fetches from cache in that case). */
 } network_find_block_result_payload_t;
+
+/* Destroy function for network_find_block_result_payload_t — releases the
+ * hash buffer reference and the attached block (if any). */
+void network_find_block_result_destroy(void* ptr);
 
 /* Stream-to-network: announce new block to peers */
 typedef struct {

@@ -264,13 +264,28 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
     case NETWORK_FIND_BLOCK_RESULT: {
       network_find_block_result_payload_t* result = (network_find_block_result_payload_t*)msg->payload;
       if (result->found) {
-        /* Block found on network — re-issue cache_get with the result's hash.
-         * Find the matching pending_fetch entry and use its hash. */
-        buffer_t* fetch_hash = result->hash;
-        if (fetch_hash != NULL) {
-          block_cache_get(stream->bc, fetch_hash, &stream->stream.actor);
+        if (result->block != NULL) {
+          /* Direct-return: network provided the block. XOR-accumulate it
+           * directly instead of re-fetching from the cache. */
+          if (stream->xor_accumulator == NULL) {
+            stream->xor_accumulator = buffer_copy(result->block->data);
+          } else {
+            buffer_t* xored = buffer_xor(stream->xor_accumulator, result->block->data);
+            DESTROY(stream->xor_accumulator, buffer);
+            stream->xor_accumulator = xored;
+          }
+          stream->blocks_received++;
+          if (stream->blocks_received >= stream->blocks_expected) {
+            _finish_decode_and_render(stream);
+          }
+        } else {
+          /* Local path: block is in the cache. Re-fetch as before. */
+          buffer_t* fetch_hash = result->hash;
+          if (fetch_hash != NULL) {
+            block_cache_get(stream->bc, fetch_hash, &stream->stream.actor);
+          }
+          stream->state = OFF_STREAM_FETCHING_BLOCKS;
         }
-        stream->state = OFF_STREAM_FETCHING_BLOCKS;
       } else {
         /* Block not found on network — deactivate */
         if (stream->xor_accumulator != NULL) {

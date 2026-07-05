@@ -392,9 +392,37 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
     case NETWORK_FIND_BLOCK_RESULT: {
       network_find_block_result_payload_t* result = (network_find_block_result_payload_t*)msg->payload;
       if (result->found) {
-        /* Block found on network — re-issue cache_get */
-        block_cache_get(recipe->recipe.bc, recipe->pending_fetch_hash, &recipe->recipe.stream.actor);
-        recipe->state = RECIPE_FETCHING_BLOCK;
+        if (result->block != NULL) {
+          /* Direct-return: network provided the block. Process it the same
+           * way as CACHE_GET_RESULT success (two branches: descriptor vs data). */
+          if (recipe->loading_descriptor) {
+            /* Descriptor block: process it (mirror CACHE_GET_RESULT lines 328-345) */
+            buffer_t* block_data = result->block->data;
+            int need_more = _process_descriptor_block(recipe, block_data);
+            DESTROY(result->block, block);
+            result->block = NULL;
+            if (need_more && recipe->next_descriptor_hash != NULL) {
+              buffer_t* hash = recipe->next_descriptor_hash;
+              recipe->next_descriptor_hash = NULL;
+              block_cache_get(recipe->recipe.bc, hash, &recipe->recipe.stream.actor);
+            } else {
+              _finish_descriptor_load(recipe);
+              if (recipe->pending_pull > 0 && !recipe->recipe.stream.is_deactivated) {
+                _try_fetch_next(recipe);
+              }
+            }
+          } else {
+            /* Data block: transfer ownership to stream_notify (mirror CACHE_GET_RESULT lines 350-354) */
+            stream_notify((stream_t*)recipe, data_event,
+                          CONSUME(result->block, block_t), (void (*)(void*))block_destroy);
+            recipe->pending_pull--;
+            result->block = NULL;  /* ownership transferred via CONSUME; null to prevent destroy double-free */
+          }
+        } else {
+          /* Local path: block is in the cache. Re-fetch as before. */
+          block_cache_get(recipe->recipe.bc, recipe->pending_fetch_hash, &recipe->recipe.stream.actor);
+          recipe->state = RECIPE_FETCHING_BLOCK;
+        }
       } else {
         /* Block not found on network */
         if (recipe->loading_descriptor) {
