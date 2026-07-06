@@ -336,7 +336,16 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
          * error subscriber (the daemon's pipe handler forwards this
          * to the client as CLIENT_API_ERROR). OFFS_ERROR_TRANSFER yields
          * the freshly-made error so stream_notify adopts the single
-         * reference and releases it via error_destroy. */
+         * reference and releases it via error_destroy.
+         *
+         * Guard: multiple blocks can fail in the same PUT (e.g. sections
+         * full up across many tuples). Only fire error_event once — the
+         * first failure deactivates the stream and notifies the client;
+         * subsequent failures are dropped here to avoid repeated
+         * stream_deactivate / connection send calls that crash the daemon. */
+        if (stream->stream.is_deactivated) {
+          break;
+        }
         stream->stream.is_deactivated = 1;
         if (result->result == CACHE_PUT_FULL) {
           stream_notify((stream_t*)stream, error_event,
