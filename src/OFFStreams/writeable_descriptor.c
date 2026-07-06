@@ -169,7 +169,14 @@ void writeable_descriptor_dispatch(void* state, message_t* msg) {
          * error subscriber (the daemon's pipe handler forwards this
          * to the client as CLIENT_API_ERROR). OFFS_ERROR_TRANSFER yields
          * the freshly-made error so stream_notify adopts the single
-         * reference and releases it via error_destroy. */
+         * reference and releases it via error_destroy.
+         *
+         * Guard: only fire error_event once — the first failure deactivates
+         * and notifies; subsequent failures are dropped to avoid repeated
+         * stream_deactivate / connection send calls that crash the daemon. */
+        if (desc->stream.is_deactivated) {
+          break;
+        }
         desc->stream.is_deactivated = 1;
         if (result->result == CACHE_PUT_FULL) {
           stream_notify((stream_t*)desc, error_event,
