@@ -1711,7 +1711,11 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         }
       }
 
-      // Send NOT_FOUND response back along the path
+      // Send NOT_FOUND response back along the path. Include the incoming
+      // path so each intermediate hop can find itself (self_index > 0) and
+      // relay the not-found further upstream (audit #5). The previous code
+      // set path_len=0, so the predecessor couldn't tell where it was in the
+      // path and the not-found died one hop from the terminal.
       {
         wire_find_block_response_t not_found;
         memset(&not_found, 0, sizeof(not_found));
@@ -1719,7 +1723,8 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         memcpy(not_found.block_hash, state.block_hash, 32);
         not_found.found = 0;
         memcpy(&not_found.holder, &network->authority->local_id, sizeof(node_id_t));
-        not_found.path_len = 0;
+        memcpy(not_found.path, state.path, state.path_len * sizeof(node_id_t));
+        not_found.path_len = (uint8_t)state.path_len;
         not_found.latency_ms = 0;
         // Reply to the sender: last node in the path, or original_source
         const node_id_t* reply_to = &state.original_source;
@@ -1754,6 +1759,15 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         if (peer != NULL) {
           peer_eabf_subscribe(peer, state.block_hash, 32);
         }
+      }
+      // Save the predecessor and incoming path length BEFORE adding self to
+      // the path. The not-found reply (if every forward fails) goes to the
+      // predecessor, and the not-found's path is the incoming path (without
+      // self) so intermediate hops can find themselves and relay upstream.
+      const node_id_t* predecessor = &state.original_source;
+      size_t incoming_path_len = state.path_len;
+      if (state.path_len > 0) {
+        predecessor = &state.path[state.path_len - 1];
       }
       // Add self to visited bloom and path
       find_block_add_visited(state.visited_bloom, &state.visited_count, network->authority->local_id.hash);
@@ -1802,26 +1816,25 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
       if (reachable_hops == 0) {
         // No reachable next hop — send a NOT_FOUND back along the path so
         // the origin's found==0 handler accounts for this branch. See #9.
+        // Include the incoming path (without self) so intermediate hops can
+        // find themselves and relay the not-found further upstream (#5).
         wire_find_block_response_t not_found;
         memset(&not_found, 0, sizeof(not_found));
         not_found.message_id = state.message_id;
         memcpy(not_found.block_hash, state.block_hash, 32);
         not_found.found = 0;
         memcpy(&not_found.holder, &network->authority->local_id, sizeof(node_id_t));
-        not_found.path_len = 0;
+        memcpy(not_found.path, state.path, incoming_path_len * sizeof(node_id_t));
+        not_found.path_len = (uint8_t)incoming_path_len;
         not_found.latency_ms = 0;
-        const node_id_t* reply_to = &state.original_source;
-        if (state.path_len > 0) {
-          reply_to = &state.path[state.path_len - 1];
-        }
-        peer_connection_t* reply_peer = connection_manager_lookup(&network->conn_mgr, reply_to);
+        peer_connection_t* reply_peer = connection_manager_lookup(&network->conn_mgr, predecessor);
         if (reply_peer != NULL) {
           cbor_item_t* cbor = wire_find_block_response_encode(&not_found);
           conn_state_send(network, reply_peer, cbor);
           cbor_decref(&cbor);
           if (network->log != NULL) {
             message_log_record(network->log, WIRE_FIND_BLOCK_RESPONSE, MSG_DIRECTION_SENT,
-                               reply_to, state.message_id, state.block_hash,
+                               predecessor, state.message_id, state.block_hash,
                                2, &network->hebbian);
           }
         }
@@ -1983,28 +1996,49 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
       }
     }
 
-    // Check wanted_list — notify any local requesters that the block was not found.
-    // At an intermediate hop there is no local wanted_list entry (only the origin
-    // registers one), so this is a no-op there. At the origin it fails the request.
-    {
+    // Only at the origin do we account for the not-found and possibly fail
+    // the request. is_origin: self is path[0] (origin is the first node),
+    // or self is not in the path (path_len 0 — defensive; after the fix to
+    // network_handle_find_block's NOT_FOUND responses to include the path,
+    // this only happens if the terminal sent a pathless not-found directly
+    // back to us, which means we're the origin). At an intermediate hop
+    // (self_index > 0) the relay above already forwarded the not-found;
+    // there is no local wanted_list entry to account against.
+    bool is_origin = (self_index <= 0);
+    if (is_origin) {
       buffer_t* hash_buf = buffer_create_from_pointer_copy(response->block_hash, 32);
       if (hash_buf != NULL) {
-        wanted_requester_t* requesters = wanted_list_clear_requesters(network->wanted_list, hash_buf);
-        if (requesters != NULL) {
-          wanted_requester_t* req = requesters;
-          while (req != NULL) {
-            network_find_block_result_payload_t* result =
-                get_clear_memory(sizeof(network_find_block_result_payload_t));
-            result->hash = REFERENCE(hash_buf, buffer_t);
-            result->found = 0;
-            message_t result_msg = {0};
-            result_msg.type = NETWORK_FIND_BLOCK_RESULT;
-            result_msg.payload = result;
-            result_msg.payload_destroy = network_find_block_result_destroy;
-            actor_send(req->actor, &result_msg);
-            req = req->next;
+        wanted_entry_t* entry = wanted_list_get(network->wanted_list, hash_buf);
+        if (entry != NULL) {
+          entry->not_found_count++;
+          // Fail only after all branches report not-found (or the timeout
+          // sweep expires). A dead-end neighbor's not-found no longer
+          // aborts a still-live search before a live branch's found=1
+          // arrives (audit #10). fanout_count was set by the forwarding
+          // loop to the reachable hop count (audit #9), so the threshold
+          // is achievable. If fanout_count is 0 (e.g., the entry was added
+          // but the forwarding case didn't set it — defensively), the
+          // first not-found fails immediately, matching the old behavior.
+          if (entry->not_found_count >= entry->fanout_count) {
+            wanted_requester_t* requesters = wanted_list_clear_requesters(network->wanted_list, hash_buf);
+            if (requesters != NULL) {
+              wanted_requester_t* req = requesters;
+              while (req != NULL) {
+                wanted_requester_t* next = req->next;
+                network_find_block_result_payload_t* result =
+                    get_clear_memory(sizeof(network_find_block_result_payload_t));
+                result->hash = REFERENCE(hash_buf, buffer_t);
+                result->found = 0;
+                message_t result_msg = {0};
+                result_msg.type = NETWORK_FIND_BLOCK_RESULT;
+                result_msg.payload = result;
+                result_msg.payload_destroy = network_find_block_result_destroy;
+                actor_send(req->actor, &result_msg);
+                free(req);
+                req = next;
+              }
+            }
           }
-          wanted_requester_list_destroy(requesters);
         }
         buffer_destroy(hash_buf);
       }

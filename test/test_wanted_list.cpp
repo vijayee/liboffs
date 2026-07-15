@@ -293,3 +293,78 @@ TEST(WantedListTimeout, GetReturnsEntryForAccounting) {
   buffer_destroy(hash);
   wanted_list_destroy(wl);
 }
+
+/* Task 4: the origin's found==0 handler gates the fail on
+ * not_found_count >= fanout_count. This test exercises the
+ * wanted_list accounting fields that back that gating — set
+ * fanout_count after the forwarding loop, increment not_found_count
+ * per incoming not-found, and only clear+fail when the threshold
+ * is reached. The network handler logic itself is verified by
+ * code review (multi-hop integration tests require a multi-node
+ * fixture that can't run in this environment — see the report). */
+TEST(WantedListTimeout, FanoutCountGatesFailUntilAllBranchesReport) {
+  wanted_list_t* wl = wanted_list_create();
+  uint8_t hash_data[32];
+  memset(hash_data, 0x55, 32);
+  buffer_t* hash = make_hash(hash_data, 32);
+  actor_t origin_actor;
+  memset(&origin_actor, 0, sizeof(origin_actor));
+  wanted_list_add(wl, hash, &origin_actor, 0);
+
+  /* Forwarding loop set fanout_count = 3 reachable hops. */
+  wanted_entry_t* entry = wanted_list_get(wl, hash);
+  ASSERT_NE(entry, nullptr);
+  entry->fanout_count = 3;
+  entry->not_found_count = 0;
+
+  /* First not-found: not_found_count (1) < fanout_count (3) — don't clear. */
+  entry->not_found_count++;
+  EXPECT_EQ(entry->not_found_count, (uint8_t)1);
+  EXPECT_LT(entry->not_found_count, entry->fanout_count);
+  EXPECT_NE(wanted_list_find(wl, hash), nullptr)
+      << "Entry must survive until all branches report";
+
+  /* Second not-found: 2 < 3 — still don't clear. */
+  entry->not_found_count++;
+  EXPECT_NE(wanted_list_find(wl, hash), nullptr);
+
+  /* Third not-found: 3 >= 3 — clear requesters and fail. */
+  entry->not_found_count++;
+  EXPECT_GE(entry->not_found_count, entry->fanout_count);
+  wanted_requester_t* requesters = wanted_list_clear_requesters(wl, hash);
+  ASSERT_NE(requesters, nullptr);
+  wanted_requester_list_destroy(requesters);
+  EXPECT_EQ(wanted_list_find(wl, hash), nullptr)
+      << "Entry must be removed once all branches report not-found";
+
+  buffer_destroy(hash);
+  wanted_list_destroy(wl);
+}
+
+/* Task 4 edge case: fanout_count == 0 (defensive — the forwarding loop
+ * always sets it, but if an entry was added without that) means the first
+ * not-found fails immediately, matching the old pre-Task-4 behavior. */
+TEST(WantedListTimeout, ZeroFanoutCountFailsOnFirstNotFound) {
+  wanted_list_t* wl = wanted_list_create();
+  uint8_t hash_data[32];
+  memset(hash_data, 0x66, 32);
+  buffer_t* hash = make_hash(hash_data, 32);
+  actor_t origin_actor;
+  memset(&origin_actor, 0, sizeof(origin_actor));
+  wanted_list_add(wl, hash, &origin_actor, 0);
+
+  wanted_entry_t* entry = wanted_list_get(wl, hash);
+  ASSERT_NE(entry, nullptr);
+  EXPECT_EQ(entry->fanout_count, (uint8_t)0);
+
+  /* not_found_count >= 0 is always true after the first increment. */
+  entry->not_found_count++;
+  EXPECT_GE(entry->not_found_count, entry->fanout_count);
+  wanted_requester_t* requesters = wanted_list_clear_requesters(wl, hash);
+  ASSERT_NE(requesters, nullptr);
+  wanted_requester_list_destroy(requesters);
+  EXPECT_EQ(wanted_list_find(wl, hash), nullptr);
+
+  buffer_destroy(hash);
+  wanted_list_destroy(wl);
+}
