@@ -94,16 +94,13 @@ uint8_t* stream_framer_next(stream_framer_t* framer, size_t* out_len) {
                     (uint32_t)framer->buffer[3];
 
   /* Reject any declared length above the cap. Without this, a peer can pin
-     arbitrarily large allocations by advertising 4 GiB and slow-dripping. */
+     arbitrarily large allocations by advertising 4 GiB and slow-dripping.
+     The cap also closes the 32-bit overflow on total_message_size = 4 + length
+     (length <= 2 MB => total < 4 GiB, no wrap). See audit #3. */
   if ((size_t)length > STREAM_FRAMER_MAX_FRAME_SIZE) {
     return NULL;
   }
 
-  /* Overflow-checked total size. On 32-bit, 4 + length can wrap near UINT32_MAX
-     and bypass the completeness guard. */
-  if (length > SIZE_MAX - STREAM_FRAMER_LENGTH_PREFIX_SIZE) {
-    return NULL;
-  }
   size_t total_message_size = STREAM_FRAMER_LENGTH_PREFIX_SIZE + (size_t)length;
 
   if (framer->used < total_message_size) return NULL;

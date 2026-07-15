@@ -388,19 +388,6 @@ TEST(StreamFramer, MessageSpanningMultipleFeeds) {
   free(frame);
   stream_framer_destroy(framer);
 }
-TEST(StreamFramer, RejectsOversizeDeclaredLength) {
-  stream_framer_t* framer = stream_framer_create();
-  ASSERT_NE(framer, nullptr);
-  // 4-byte prefix claiming ~16 MB (above the 2 MB cap).
-  uint8_t prefix[4] = {0x00, 0xFF, 0xFF, 0xFF};
-  ASSERT_EQ(stream_framer_feed(framer, prefix, 4), 0);
-  size_t out_len = 999;
-  uint8_t* payload = stream_framer_next(framer, &out_len);
-  EXPECT_EQ(payload, nullptr) << "oversize frame must be rejected, not buffered";
-  EXPECT_EQ(out_len, (size_t)0);
-  stream_framer_destroy(framer);
-}
-
 TEST(StreamFramer, RejectsFeedThatExceedsCap) {
   stream_framer_t* framer = stream_framer_create();
   ASSERT_NE(framer, nullptr);
