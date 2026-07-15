@@ -1956,10 +1956,36 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
       DESTROY(block, block);
     }
   } else {
-    // Block not found — subscribe block_hash in EABFs as negative info
-    // This is handled by TTL_EXPIRED in the forwarding path
+    // Block not found. Relay the not-found upstream so the origin learns.
+    // The old code only notified local requesters, which exist only at the
+    // origin — so an intermediate hop's not-found died there and the origin
+    // hung forever (audit #5). Mirrors the found==1 upstream relay above.
 
-    // Check wanted_list — notify any local requesters that the block was not found
+    int self_index = -1;
+    for (int index = 0; index < (int)response->path_len; index++) {
+      if (node_id_equals(&response->path[index], &network->authority->local_id)) {
+        self_index = index;
+        break;
+      }
+    }
+    if (self_index > 0) {
+      const node_id_t* predecessor = &response->path[self_index - 1];
+      peer_connection_t* relay_peer = connection_manager_lookup(&network->conn_mgr, predecessor);
+      if (relay_peer != NULL) {
+        cbor_item_t* cbor = wire_find_block_response_encode(response);
+        conn_state_send(network, relay_peer, cbor);
+        cbor_decref(&cbor);
+        if (network->log != NULL) {
+          message_log_record(network->log, WIRE_FIND_BLOCK_RESPONSE, MSG_DIRECTION_FORWARDED,
+                             predecessor, response->message_id, response->block_hash,
+                             2, &network->hebbian);
+        }
+      }
+    }
+
+    // Check wanted_list — notify any local requesters that the block was not found.
+    // At an intermediate hop there is no local wanted_list entry (only the origin
+    // registers one), so this is a no-op there. At the origin it fails the request.
     {
       buffer_t* hash_buf = buffer_create_from_pointer_copy(response->block_hash, 32);
       if (hash_buf != NULL) {
