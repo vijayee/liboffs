@@ -552,6 +552,12 @@ void relay_server_destroy(relay_server_t* server) {
     relay_server_stop(server);
   }
 
+  /* Take clients_lock defensively during the residual cleanup. After
+     relay_server_stop awaited quiesce, all SHUTDOWN_COMPLETE handlers
+     should have run, so clients[index].active == 0 for all entries and
+     this loop is a no-op. The lock guards against a late callback that
+     raced the quiesce poll. See concurrency-pass.md F6. */
+  platform_mutex_lock(server->clients_lock);
   for (size_t index = 0; index < RELAY_MAX_CLIENTS; index++) {
     if (server->clients[index].active) {
       if (server->clients[index].stream != NULL && server->msquic != NULL) {
@@ -560,6 +566,7 @@ void relay_server_destroy(relay_server_t* server) {
       _relay_remove_client(server, &server->clients[index]);
     }
   }
+  platform_mutex_unlock(server->clients_lock);
 
   if (server->listener != NULL) {
     server->msquic->ListenerClose(server->listener);
@@ -713,6 +720,44 @@ void relay_server_stop(relay_server_t* server) {
   platform_thread_join(server->thread);
   if (server->listener != NULL) {
     server->msquic->ListenerStop(server->listener);
+  }
+
+  /* Shut down all client connections and await SHUTDOWN_COMPLETE quiesce
+     before relay_server_destroy frees the client table. Without this,
+     MsQuic callbacks (_relay_stream_callback RECEIVE reading client->framer
+     via stream_framer_feed, and _relay_connection_callback SHUTDOWN_COMPLETE
+     calling StreamClose + _relay_remove_client) still fire on MsQuic threads
+     during destroy and touch freed state, or double StreamClose (destroy's
+     loop vs the callback's SHUTDOWN_COMPLETE handler). See concurrency-pass.md
+     F6. */
+  platform_mutex_lock(server->clients_lock);
+  for (size_t index = 0; index < RELAY_MAX_CLIENTS; index++) {
+    if (server->clients[index].active &&
+        server->clients[index].connection != NULL) {
+      server->msquic->ConnectionShutdown(
+          (HQUIC)server->clients[index].connection,
+          QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
+          0);
+    }
+  }
+  size_t remaining = server->num_clients;
+  platform_mutex_unlock(server->clients_lock);
+
+  /* Await quiesce: poll num_clients until 0 or a 5s timeout. The
+     _relay_connection_callback SHUTDOWN_COMPLETE handler decrements
+     num_clients and calls _relay_remove_client + ConnectionClose under
+     clients_lock. Do NOT null clients[index].connection here — the
+     SHUTDOWN_COMPLETE handler matches its connection handle against
+     clients[index].connection and will null it via _relay_remove_client. */
+  for (int wait_ms = 0; wait_ms < 5000 && remaining > 0; wait_ms += 10) {
+    platform_sleep_ms(10);
+    platform_mutex_lock(server->clients_lock);
+    remaining = server->num_clients;
+    platform_mutex_unlock(server->clients_lock);
+  }
+  if (remaining > 0) {
+    log_error("relay: shutdown timed out with %zu clients still active",
+              remaining);
   }
 }
 
