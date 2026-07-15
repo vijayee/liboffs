@@ -221,17 +221,46 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
 void network_shutdown_connections(network_t* network) {
   if (network == NULL) return;
 
+  /* Route the shutdown loop through the network actor so ConnectionShutdown,
+     connection_manager_remove, and ConnectionClose all run on the same thread.
+     The old code iterated conn_mgr.peers on the main thread while the network
+     actor's worker ran connection_manager_remove (freed peers + memmove) on
+     SHUTDOWN_COMPLETE -> UAF on the peers array and a race on the HQUIC
+     lifecycle. See concurrency-pass.md F3. */
 #ifdef HAS_MSQUIC
   if (network->msquic != NULL) {
-    for (size_t i = 0; i < network->conn_mgr.peer_count; i++) {
-      peer_connection_t* peer = network->conn_mgr.peers[i];
-      if (peer != NULL && peer->quic_connection != NULL) {
-        network->msquic->ConnectionShutdown(
-            peer->quic_connection,
-            QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
-            0);
-        peer->quic_connection = NULL;
-        peer->quic_stream = NULL;
+    network_shutdown_payload_t* payload = get_clear_memory(sizeof(network_shutdown_payload_t));
+    if (payload != NULL) {
+      payload->lock = platform_mutex_create();
+      payload->done = platform_condvar_create();
+      atomic_store(&payload->done_flag, false);
+      if (payload->lock != NULL && payload->done != NULL) {
+        message_t msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.type = NETWORK_SHUTDOWN_CONNECTIONS;
+        msg.payload = payload;
+        /* payload_destroy = NULL: the main thread frees the payload after the
+           wait; the network actor only signals the condvar. */
+        msg.payload_destroy = NULL;
+        actor_send(&network->actor, &msg);
+
+        /* Wait for the network actor to post done_flag. The network actor's
+           worker is live during offs_node_stop phase 5 (joins in phase 7), so
+           it can process the message and the subsequent NETWORK_QUIC_DISCONNECT
+           callbacks from SHUTDOWN_COMPLETE. */
+        platform_mutex_lock(payload->lock);
+        while (!atomic_load(&payload->done_flag)) {
+          platform_condvar_wait(payload->done, payload->lock);
+        }
+        platform_mutex_unlock(payload->lock);
+
+        platform_condvar_destroy(payload->done);
+        platform_mutex_destroy(payload->lock);
+        free(payload);
+      } else {
+        if (payload->lock != NULL) platform_mutex_destroy(payload->lock);
+        if (payload->done != NULL) platform_condvar_destroy(payload->done);
+        free(payload);
       }
     }
   }
@@ -3442,6 +3471,42 @@ void network_dispatch(void* state, message_t* msg) {
           network->msquic->ConnectionClose(quic_conn->connection);
         }
 #endif
+      }
+      break;
+    }
+    case NETWORK_SHUTDOWN_CONNECTIONS: {
+      network_shutdown_payload_t* payload = (network_shutdown_payload_t*)msg->payload;
+#ifdef HAS_MSQUIC
+      if (network->msquic != NULL) {
+        /* We're on the network actor — the sole owner of conn_mgr + the HQUIC
+           lifecycle. ConnectionShutdown is safe here because
+           connection_manager_remove + ConnectionClose also run on this actor
+           (in the NETWORK_QUIC_DISCONNECTED handler). The subsequent
+           SHUTDOWN_COMPLETE callbacks will actor_send NETWORK_QUIC_DISCONNECT
+           back to this actor's mailbox and be processed as the worker drains. */
+        for (size_t index = 0; index < network->conn_mgr.peer_count; index++) {
+          peer_connection_t* peer = network->conn_mgr.peers[index];
+          if (peer != NULL && peer->quic_connection != NULL) {
+            network->msquic->ConnectionShutdown(
+                peer->quic_connection,
+                QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
+                0);
+            peer->quic_connection = NULL;
+            peer->quic_stream = NULL;
+          }
+        }
+      }
+#endif
+      /* Signal the main thread that the shutdown loop is done. The
+         SHUTDOWN_COMPLETE -> remove -> ConnectionClose sequence continues
+         on this actor as the worker drains its mailbox; the main thread
+         proceeds to phase 6 and the workers join in phase 7. The payload
+         is owned (and freed) by the main thread after this wait. */
+      if (payload != NULL && payload->lock != NULL && payload->done != NULL) {
+        platform_mutex_lock(payload->lock);
+        atomic_store(&payload->done_flag, true);
+        platform_condvar_signal(payload->done);
+        platform_mutex_unlock(payload->lock);
       }
       break;
     }
