@@ -2,6 +2,9 @@
 #include <future>
 #include <chrono>
 #include <cstdlib>
+#include <atomic>
+#include <thread>
+#include <vector>
 
 /* The block_cache fixtures below hardcode a temp location under "/tmp". Two
    problems flow from that: (1) parallel test processes (or `ctest -j`) collide
@@ -16,6 +19,7 @@ static const char* bc_tmp_base() {
 extern "C" {
 #include "../src/BlockCache/block.h"
 #include "../src/BlockCache/block_cache.h"
+#include "../src/BlockCache/sections.h"
 #include "../src/Util/path_join.h"
 #include "../src/Util/mkdir_p.h"
 #include "../src/Util/rm_rf.h"
@@ -617,4 +621,88 @@ TEST_F(BlockCacheCanFit, ReturnsOkWhenMaxCapacityZero) {
   block_cache = block_cache_create(config, location, standard, timer_actor, pool, NULL, 0);
   ASSERT_NE(block_cache, nullptr);
   EXPECT_EQ(block_cache_can_fit(block_cache, 999999999ULL), CACHE_FIT_OK);
+}
+
+/* ---- sections_dispatch concurrency stress ----
+ *
+ * sections_dispatch runs on two actor threads concurrently in production: the
+ * block_cache actor calls it synchronously (CACHE_PUT / sync CACHE_GET /
+ * CACHE_DEALLOCATE) while the sections actor's worker calls it for async
+ * sections_read/write/deallocate. Both mutate sections->lru and sections->robin
+ * -> list/hashmap corruption, double section_create, concurrent
+ * section_dispatch on one section -> on-disk corruption. This stress test
+ * hammers the sync path from multiple threads at once; before the dispatch_lock
+ * mutex this races and intermittently crashes/corrupts. With the mutex it must
+ * pass 10/10. See docs/concurrency-pass.md F2. */
+TEST(SectionsConcurrency, SyncDispatchFromMultipleThreadsDoesNotCorrupt) {
+  const char* base = bc_tmp_base();
+  char* location = path_join(base, "SectionsConcurrencyTest");
+  rm_rf(location);
+  mkdir_p(location);
+
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+  timer_actor_t* timer_actor = timer_actor_create(pool);
+  ASSERT_NE(timer_actor, nullptr);
+
+  /* mini blocks are 64000 bytes; sections expects data->size == block_size. */
+  const size_t block_data_size = (size_t)mini;
+  const size_t cache_size = 8;
+  const size_t section_size = 8;
+  const size_t max_tuple_size = 8;
+  sections_t* sections = sections_create(location, section_size, cache_size,
+                                          max_tuple_size, mini, timer_actor,
+                                          pool, /*wait=*/5, /*max_wait=*/5000);
+  ASSERT_NE(sections, nullptr);
+
+  const int thread_count = 4;
+  std::atomic<bool> stop{false};
+  std::atomic<long> sync_ops{0};
+
+  auto worker = [&]() {
+    /* Each thread owns its own buffer (read-only by section_dispatch, which
+       pwrites from p->data->data; the buffer is not consumed). */
+    buffer_t* data = buffer_create(block_data_size);
+    ASSERT_NE(data, nullptr);
+    memset(data->data, 0xAA, block_data_size);
+    sections_write_payload_t payload;
+    memset(&payload, 0, sizeof(payload));
+    payload.data = data;
+    payload.reply_to = NULL;  /* sync: no reply dispatched */
+    message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.type = SECTIONS_WRITE;
+    msg.payload = &payload;
+    msg.payload_destroy = NULL;
+    while (!stop.load(std::memory_order_acquire)) {
+      payload.result = -1;
+      payload.section_id = 0;
+      payload.section_index = 0;
+      sections_dispatch(sections, &msg);
+      sync_ops.fetch_add(1, std::memory_order_relaxed);
+    }
+    buffer_destroy(data);
+  };
+
+  std::vector<std::thread> threads;
+  for (int thread_index = 0; thread_index < thread_count; thread_index++) {
+    threads.emplace_back(worker);
+  }
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  stop.store(true, std::memory_order_release);
+
+  for (auto& thread : threads) thread.join();
+
+  EXPECT_GT(sync_ops.load(), 0);
+
+  scheduler_pool_wait_for_idle(pool);
+  sections_destroy(sections);
+  timer_actor_destroy(timer_actor);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
+  rm_rf(location);
+  free(location);
 }
