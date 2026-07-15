@@ -4,25 +4,7 @@
 #include "refcounter.h"
 #include <stdint.h>
 #include <limits.h>
-
-#if defined(_MSC_VER)
-  #include <stdatomic.h>
-  /* MSVC doesn't expose GCC's __atomic_* builtins; map the patterns we use
-     onto C11 atomics. Under MSVC the refcounter struct members are
-     _Atomic(uint16_t)/_Atomic(uint8_t), so &(p) is already the right
-     atomic-qualified pointer. */
-  #define OFFS_ATOMIC_LOAD_N(p, order)    atomic_load_explicit(&(p), (memory_order)(order))
-  #define OFFS_ATOMIC_FETCH_ADD(p, v, order) atomic_fetch_add_explicit(&(p), (v), (memory_order)(order))
-  #define OFFS_ATOMIC_FETCH_SUB(p, v, order) atomic_fetch_sub_explicit(&(p), (v), (memory_order)(order))
-  #define OFFS_MO_RELAXED   memory_order_relaxed
-  #define OFFS_MO_ACQ_REL   memory_order_acq_rel
-#else
-  #define OFFS_ATOMIC_LOAD_N(p, order)    __atomic_load_n(&(p), (order))
-  #define OFFS_ATOMIC_FETCH_ADD(p, v, order) __atomic_fetch_add(&(p), (v), (order))
-  #define OFFS_ATOMIC_FETCH_SUB(p, v, order) __atomic_fetch_sub(&(p), (v), (order))
-  #define OFFS_MO_RELAXED   __ATOMIC_RELAXED
-  #define OFFS_MO_ACQ_REL   __ATOMIC_ACQ_REL
-#endif
+#include <stdatomic.h>
 
 void refcounter_init(refcounter_t* refcounter) {
 #ifndef OFFS_ATOMIC
@@ -32,9 +14,8 @@ void refcounter_init(refcounter_t* refcounter) {
   refcounter->pending_deref = 0;
   platform_mutex_unlock(refcounter->lock);
 #else
-  refcounter->count = 1;
-  refcounter->yield = 0;
-  refcounter->pending_deref = 0;
+  atomic_store_explicit((_Atomic uint32_t*)&refcounter->packed_state,
+                        refcounter_pack(1, 0, 0), memory_order_release);
   refcounter->is_actor = 0;
 #endif
 }
@@ -43,9 +24,8 @@ void refcounter_init_actor(refcounter_t* refcounter) {
 #ifndef OFFS_ATOMIC
   refcounter_init(refcounter);
 #else
-  refcounter->count = 1;
-  refcounter->yield = 0;
-  refcounter->pending_deref = 0;
+  atomic_store_explicit((_Atomic uint32_t*)&refcounter->packed_state,
+                        refcounter_pack(1, 0, 0), memory_order_release);
   refcounter->is_actor = 1;
 #endif
 }
@@ -56,18 +36,21 @@ void refcounter_yield(refcounter_t* refcounter) {
   refcounter->yield++;
   platform_mutex_unlock(refcounter->lock);
 #else
-  if (refcounter->is_actor) {
-    refcounter->yield++;
-  } else {
-    OFFS_ATOMIC_FETCH_ADD(refcounter->yield, 1, OFFS_MO_RELAXED);
-  }
+  uint32_t state = atomic_load_explicit((_Atomic uint32_t*)&refcounter->packed_state, memory_order_relaxed);
+  uint32_t desired;
+  do {
+    uint8_t yield = refcounter_packed_yield(state);
+    if (yield == 0xFFu) return;  /* saturate; never wrap to 0 */
+    desired = refcounter_pack(refcounter_packed_count(state), (uint8_t)(yield + 1),
+                              refcounter_packed_pending(state));
+  } while (!atomic_compare_exchange_weak_explicit(
+      (_Atomic uint32_t*)&refcounter->packed_state, &state, desired,
+      memory_order_release, memory_order_relaxed));
 #endif
 }
 
 void* refcounter_reference(refcounter_t* refcounter) {
-  if (refcounter == NULL) {
-    return NULL;
-  }
+  if (refcounter == NULL) return NULL;
 #ifndef OFFS_ATOMIC
   platform_mutex_lock(refcounter->lock);
   if (refcounter->yield > 0) {
@@ -81,27 +64,29 @@ void* refcounter_reference(refcounter_t* refcounter) {
   }
   platform_mutex_unlock(refcounter->lock);
 #else
-  if (refcounter->is_actor) {
-    if (refcounter->yield > 0) {
-      refcounter->yield--;
-      if (refcounter->pending_deref > 0) {
-        refcounter->pending_deref--;
-        refcounter->count--;
+  uint32_t state = atomic_load_explicit((_Atomic uint32_t*)&refcounter->packed_state, memory_order_relaxed);
+  uint32_t desired;
+  do {
+    uint16_t count = refcounter_packed_count(state);
+    uint8_t  yield = refcounter_packed_yield(state);
+    uint8_t  pending = refcounter_packed_pending(state);
+    if (yield > 0) {
+      uint8_t new_yield = (uint8_t)(yield - 1);
+      uint16_t new_count = count;
+      uint8_t new_pending = pending;
+      if (pending > 0) {
+        new_pending = (uint8_t)(pending - 1);
+        new_count = (uint16_t)(count - 1);
       }
-    } else if (refcounter->count < USHRT_MAX) {
-      refcounter->count++;
+      desired = refcounter_pack(new_count, new_yield, new_pending);
+    } else if (count < USHRT_MAX) {
+      desired = refcounter_pack((uint16_t)(count + 1), yield, pending);
+    } else {
+      desired = state;
     }
-  } else {
-    if (OFFS_ATOMIC_LOAD_N(refcounter->yield, OFFS_MO_RELAXED) > 0) {
-      OFFS_ATOMIC_FETCH_SUB(refcounter->yield, 1, OFFS_MO_RELAXED);
-      if (OFFS_ATOMIC_LOAD_N(refcounter->pending_deref, OFFS_MO_RELAXED) > 0) {
-        OFFS_ATOMIC_FETCH_SUB(refcounter->pending_deref, 1, OFFS_MO_RELAXED);
-        OFFS_ATOMIC_FETCH_SUB(refcounter->count, 1, OFFS_MO_RELAXED);
-      }
-    } else if (OFFS_ATOMIC_LOAD_N(refcounter->count, OFFS_MO_RELAXED) < USHRT_MAX) {
-      OFFS_ATOMIC_FETCH_ADD(refcounter->count, 1, OFFS_MO_RELAXED);
-    }
-  }
+  } while (!atomic_compare_exchange_weak_explicit(
+      (_Atomic uint32_t*)&refcounter->packed_state, &state, desired,
+      memory_order_release, memory_order_relaxed));
 #endif
   return refcounter;
 }
@@ -116,19 +101,23 @@ void refcounter_dereference(refcounter_t* refcounter) {
   }
   platform_mutex_unlock(refcounter->lock);
 #else
-  if (refcounter->is_actor) {
-    if (refcounter->yield == 0 && refcounter->count > 0) {
-      refcounter->count--;
-    } else if (refcounter->yield > 0) {
-      refcounter->pending_deref++;
+  uint32_t state = atomic_load_explicit((_Atomic uint32_t*)&refcounter->packed_state, memory_order_relaxed);
+  uint32_t desired;
+  do {
+    uint16_t count = refcounter_packed_count(state);
+    uint8_t  yield = refcounter_packed_yield(state);
+    uint8_t  pending = refcounter_packed_pending(state);
+    if (yield > 0) {
+      if (pending == 0xFFu) return;  /* saturate */
+      desired = refcounter_pack(count, yield, (uint8_t)(pending + 1));
+    } else if (count > 0) {
+      desired = refcounter_pack((uint16_t)(count - 1), yield, pending);
+    } else {
+      desired = state;
     }
-  } else {
-    if (OFFS_ATOMIC_LOAD_N(refcounter->yield, OFFS_MO_RELAXED) > 0) {
-      OFFS_ATOMIC_FETCH_ADD(refcounter->pending_deref, 1, OFFS_MO_RELAXED);
-    } else if (OFFS_ATOMIC_LOAD_N(refcounter->count, OFFS_MO_RELAXED) > 0) {
-      OFFS_ATOMIC_FETCH_SUB(refcounter->count, 1, OFFS_MO_ACQ_REL);
-    }
-  }
+  } while (!atomic_compare_exchange_weak_explicit(
+      (_Atomic uint32_t*)&refcounter->packed_state, &state, desired,
+      memory_order_acq_rel, memory_order_relaxed));
 #endif
 }
 
@@ -144,22 +133,28 @@ bool refcounter_dereference_is_zero(refcounter_t* refcounter) {
   platform_mutex_unlock(refcounter->lock);
   return is_zero;
 #else
-  if (refcounter->is_actor) {
-    if (refcounter->yield == 0 && refcounter->count > 0) {
-      refcounter->count--;
-    } else if (refcounter->yield > 0) {
-      refcounter->pending_deref++;
-    }
-    return (refcounter->count == 0 && refcounter->pending_deref == 0);
-  } else {
-    if (OFFS_ATOMIC_LOAD_N(refcounter->yield, OFFS_MO_RELAXED) > 0) {
-      OFFS_ATOMIC_FETCH_ADD(refcounter->pending_deref, 1, OFFS_MO_ACQ_REL);
-      return false;
+  uint32_t state = atomic_load_explicit((_Atomic uint32_t*)&refcounter->packed_state, memory_order_relaxed);
+  uint32_t desired;
+  bool is_zero;
+  do {
+    uint16_t count = refcounter_packed_count(state);
+    uint8_t  yield = refcounter_packed_yield(state);
+    uint8_t  pending = refcounter_packed_pending(state);
+    if (yield > 0) {
+      if (pending == 0xFFu) return false;  /* saturate; not zero */
+      desired = refcounter_pack(count, yield, (uint8_t)(pending + 1));
+      is_zero = false;
+    } else if (count > 0) {
+      desired = refcounter_pack((uint16_t)(count - 1), yield, pending);
+      is_zero = (count == 1) && (pending == 0);
     } else {
-      uint16_t old_count = OFFS_ATOMIC_FETCH_SUB(refcounter->count, 1, OFFS_MO_ACQ_REL);
-      return old_count == 1;
+      desired = state;
+      is_zero = (pending == 0);
     }
-  }
+  } while (!atomic_compare_exchange_weak_explicit(
+      (_Atomic uint32_t*)&refcounter->packed_state, &state, desired,
+      memory_order_acq_rel, memory_order_relaxed));
+  return is_zero;
 #endif
 }
 
@@ -170,11 +165,8 @@ uint16_t refcounter_count(refcounter_t* refcounter) {
   platform_mutex_unlock(refcounter->lock);
   return count;
 #else
-  if (refcounter->is_actor) {
-    return refcounter->count;
-  } else {
-    return OFFS_ATOMIC_LOAD_N(refcounter->count, OFFS_MO_RELAXED);
-  }
+  uint32_t state = atomic_load_explicit((_Atomic uint32_t*)&refcounter->packed_state, memory_order_relaxed);
+  return refcounter_packed_count(state);
 #endif
 }
 
@@ -185,11 +177,8 @@ uint8_t refcounter_pending_derefs(refcounter_t* refcounter) {
   platform_mutex_unlock(refcounter->lock);
   return pending;
 #else
-  if (refcounter->is_actor) {
-    return refcounter->pending_deref;
-  } else {
-    return OFFS_ATOMIC_LOAD_N(refcounter->pending_deref, OFFS_MO_RELAXED);
-  }
+  uint32_t state = atomic_load_explicit((_Atomic uint32_t*)&refcounter->packed_state, memory_order_relaxed);
+  return refcounter_packed_pending(state);
 #endif
 }
 

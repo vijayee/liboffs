@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 #include <cstring>
+#include <vector>
 
 extern "C" {
 #include "Network/stream_framer.h"
@@ -386,4 +387,47 @@ TEST(StreamFramer, MessageSpanningMultipleFeeds) {
   free(msg);
   free(frame);
   stream_framer_destroy(framer);
+}
+TEST(StreamFramer, RejectsFeedThatExceedsCap) {
+  stream_framer_t* framer = stream_framer_create();
+  ASSERT_NE(framer, nullptr);
+  // Length prefix claiming 2 MB exactly (at the cap).
+  uint8_t prefix[4] = {0x00, 0x20, 0x00, 0x00};  // 0x200000 = 2 MB
+  ASSERT_EQ(stream_framer_feed(framer, prefix, 4), 0);
+  // Now feed one byte more than the cap allows — feed must return -1.
+  std::vector<uint8_t> big(STREAM_FRAMER_MAX_FRAME_SIZE + 1, 0x41);
+  EXPECT_EQ(stream_framer_feed(framer, big.data(), big.size()), -1);
+  stream_framer_destroy(framer);
+}
+
+TEST(StreamFramer, AcceptsFrameAtExactlyTheCap) {
+  stream_framer_t* framer = stream_framer_create();
+  ASSERT_NE(framer, nullptr);
+  size_t cap = STREAM_FRAMER_MAX_FRAME_SIZE;
+  uint8_t prefix[4] = {
+    (uint8_t)((cap >> 24) & 0xFF),
+    (uint8_t)((cap >> 16) & 0xFF),
+    (uint8_t)((cap >> 8) & 0xFF),
+    (uint8_t)(cap & 0xFF)
+  };
+  ASSERT_EQ(stream_framer_feed(framer, prefix, 4), 0);
+  std::vector<uint8_t> body(cap, 0x42);
+  ASSERT_EQ(stream_framer_feed(framer, body.data(), cap), 0);
+  size_t out_len = 0;
+  uint8_t* payload = stream_framer_next(framer, &out_len);
+  ASSERT_NE(payload, nullptr);
+  EXPECT_EQ(out_len, cap);
+  free(payload);
+  stream_framer_destroy(framer);
+}
+
+TEST(StreamFramer, EncodeRejectsOversizeDataLen) {
+  /* The cap check fires before any allocation or data deref, so a non-NULL
+     pointer with an oversize data_len returns NULL without touching it.
+     See audit #3 and the sender-side cap. */
+  uint8_t dummy = 0;
+  size_t out_len = 999;
+  uint8_t* frame = stream_frame_encode(&dummy, STREAM_FRAMER_MAX_FRAME_SIZE + 1, &out_len);
+  EXPECT_EQ(frame, nullptr);
+  EXPECT_EQ(out_len, (size_t)0);
 }

@@ -221,22 +221,25 @@ TEST(TestActor, TestBackpressureMutesSenderWhenTargetPressured) {
   /* Mark target as pressured */
   backpressure_apply(&target);
 
-  /* Send a message from the scheduler context (simulating a sender) */
+  /* Stop the pool before sending so no worker drains the mailbox before
+     the assertion. The test verifies the send reaches the queue, not that
+     the worker processes it — backpressure mutes senders to the target,
+     not the target's own drain. (Previously asserted size == 1 with the
+     pool live, which raced the worker draining it to 0.) */
+  scheduler_pool_stop(pool);
+
+  /* Send a message from outside the scheduler context (simulating a sender).
+     Since we're not in a scheduler worker, scheduler_get_current() returns
+     NULL, so the sender won't be muted — the message reaches the queue. */
   message_t msg;
   msg.type = 1;
   msg.payload = NULL;
   msg.payload_destroy = NULL;
-
-  /* Since we're not in a scheduler worker, scheduler_get_current() returns NULL,
-     so the sender won't be muted. We need to test this differently. */
   actor_send(&target, &msg);
 
-  /* The message should still be in the queue (target is pressured but not destroyed) */
   EXPECT_EQ(atomic_load(&target.queue.size), 1u);
 
   actor_destroy(&target);
-  scheduler_pool_wait_for_idle(pool);
-  scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }
 

@@ -90,6 +90,18 @@ static void _conn_track_init(quic_listener_t* listener) {
 
 static void _conn_track_add(quic_listener_t* listener, HQUIC connection) {
   platform_mutex_lock(listener->conn_lock);
+  /* Idempotent: CONNECTED can fire after quic_listener_connect already added
+     the same HQUIC, and a duplicate would leave a stale slot after
+     _conn_track_remove (which only removes the first match) -> the
+     DISCONNECTED handler frees the HQUIC and the stale slot later gets
+     ConnectionShutdown on a freed handle. Scan for an existing entry first.
+     See docs/liboffs-audit-report.md #4. */
+  for (size_t index = 0; index < listener->connection_count; index++) {
+    if (listener->connections[index] == connection) {
+      platform_mutex_unlock(listener->conn_lock);
+      return;
+    }
+  }
   if (listener->connection_count >= listener->connection_capacity) {
     size_t new_cap = listener->connection_capacity == 0 ? 8 : listener->connection_capacity * 2;
     HQUIC* new_arr = get_clear_memory(new_cap * sizeof(HQUIC));
@@ -157,6 +169,31 @@ static void _conn_track_destroy(quic_listener_t* listener) {
   listener->connection_count = 0;
   listener->connection_capacity = 0;
 }
+
+#ifndef NDEBUG
+// Test-only accessors for _conn_track_* — exposed so unit tests can drive
+// the connection tracking array without spinning up a full msquic
+// registration. See test_quic_integration.cpp ConnTrackAddIsIdempotent.
+void quic_listener__conn_track_init_for_test(quic_listener_t* listener) {
+  _conn_track_init(listener);
+}
+
+void quic_listener__conn_track_destroy_for_test(quic_listener_t* listener) {
+  _conn_track_destroy(listener);
+}
+
+void quic_listener__conn_track_add_for_test(quic_listener_t* listener,
+                                              HQUIC connection) {
+  _conn_track_add(listener, connection);
+}
+
+size_t quic_listener__conn_track_count_for_test(quic_listener_t* listener) {
+  platform_mutex_lock(listener->conn_lock);
+  size_t count = listener->connection_count;
+  platform_mutex_unlock(listener->conn_lock);
+  return count;
+}
+#endif // NDEBUG
 
 // Per-stream context carrying the parent connection handle and a framer
 // for deframing received data into complete messages.

@@ -655,8 +655,9 @@ int wire_recall_accept_decode(cbor_item_t* item, wire_recall_accept_t* msg) {
       }
     }
     cbor_decref(&data);
+    /* Discard the attacker-controlled declared length at index 6; the
+       bytestring length is the single source of truth. See audit #1. */
     cbor_item_t* data_len = cbor_array_get(item, 6);
-    msg->block_data_len = (size_t)cbor_get_int(data_len);
     cbor_decref(&data_len);
     cbor_item_t* bfib = cbor_array_get(item, 7);
     msg->block_fib = cbor_get_uint32(bfib);
@@ -1175,8 +1176,12 @@ int wire_find_block_response_decode(cbor_item_t* item, wire_find_block_response_
       }
     }
     cbor_decref(&data);
+    /* The wire format also carries an explicit block_data_len at array index 10
+       for symmetry with the encoder, but it is attacker-controlled and must NOT
+       override the bytestring length we already used to size the buffer (a
+       mismatch caused a heap over-read; see docs/liboffs-audit-report.md #1).
+       Consume the item to release the refcount, then discard the value. */
     cbor_item_t* data_len = cbor_array_get(item, 10);
-    msg->block_data_len = (size_t)cbor_get_int(data_len);
     cbor_decref(&data_len);
     cbor_item_t* bfib = cbor_array_get(item, 11);
     msg->block_fib = cbor_get_uint32(bfib);

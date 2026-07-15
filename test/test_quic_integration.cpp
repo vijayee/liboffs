@@ -805,3 +805,48 @@ TEST(QuicIntegration, QuicListenerStartStop) {
   cleanup_msquic(msquic);
 #endif
 }
+
+// =====================================================================
+// F. _conn_track_add idempotence (no real QUIC lifecycle — test-only
+//    accessors under #ifndef NDEBUG). Audit #4: outbound connections were
+//    added twice (once in quic_listener_connect, once on CONNECTED), and
+//    _conn_track_remove only deletes the first match, leaving a stale slot
+//    that got ConnectionShutdown on a freed handle at destroy -> UAF.
+// =====================================================================
+TEST(QuicIntegration, ConnTrackAddIsIdempotent) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+#ifndef NDEBUG
+  // Allocate a listener struct without going through quic_listener_create
+  // (which opens a real msquic registration). We only need the conn_track
+  // fields initialized for this test.
+  quic_listener_t* listener =
+      (quic_listener_t*)get_clear_memory(sizeof(quic_listener_t));
+  ASSERT_NE(listener, nullptr);
+  quic_listener__conn_track_init_for_test(listener);
+
+  // Fake HQUIC handles — the tracking array just stores pointers.
+  HQUIC fake_conn = (HQUIC)0x1234;
+  HQUIC fake_conn_other = (HQUIC)0x5678;
+
+  // First add: count goes to 1.
+  quic_listener__conn_track_add_for_test(listener, fake_conn);
+  EXPECT_EQ(quic_listener__conn_track_count_for_test(listener), (size_t)1);
+
+  // Second add of the SAME handle must be a no-op (idempotent). Before the
+  // fix this bumped the count to 2, leaving a stale slot after remove().
+  quic_listener__conn_track_add_for_test(listener, fake_conn);
+  EXPECT_EQ(quic_listener__conn_track_count_for_test(listener), (size_t)1);
+
+  // A different handle still gets tracked normally.
+  quic_listener__conn_track_add_for_test(listener, fake_conn_other);
+  EXPECT_EQ(quic_listener__conn_track_count_for_test(listener), (size_t)2);
+
+  quic_listener__conn_track_destroy_for_test(listener);
+  free(listener);
+#else
+  GTEST_SKIP() << "test-only accessors require NDEBUG unset";
+#endif
+#endif
+}

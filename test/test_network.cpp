@@ -37,6 +37,8 @@ extern "C" {
 #include "Network/topology_metrics.h"
 #include "Network/closest_nodes.h"
 #include "Network/measure_nodes.h"
+#include "Network/quic_listener.h"
+#include "Network/wanted_list.h"
 #include "Configuration/config.h"
 #include "Util/allocator.h"
 }
@@ -2460,6 +2462,135 @@ TEST(WireDestroyTest, DestroyNullPointerIsSafe) {
   wire_find_block_response_destroy(NULL);
   wire_recall_accept_destroy(NULL);
   wire_salutation_destroy(NULL);
+}
+
+// --- Synchronous dispatch payload-free tests (audit #2) ---
+//
+// The NETWORK_QUIC_DATA and NETWORK_RELAY_RECEIVED switches in network_dispatch
+// build a stack-local dispatch_msg, decode a wire_*_t payload, run a handler,
+// and only cbor_decref the CBOR. The actor path frees payloads via actor.c:91,
+// but the synchronous switch bypasses the actor — so the payload (and any
+// nested block buffer) leaks on every inbound message. The fix at the tail
+// of each switch calls dispatch_msg.payload_destroy when the handler did not
+// CONSUME (signaled by setting dispatch_msg.payload = NULL).
+//
+// These tests construct a minimal network_t (only wanted_list initialized —
+// everything else calloc'd to NULL/0, which the handlers guard against) and
+// drive a single FindBlockResponse with inline block_data through each
+// synchronous switch. The test asserts no crash (no double-free). The leak
+// assertion is valgrind-only — run under valgrind to verify the payload and
+// nested block_data buffer are freed.
+
+static wire_find_block_response_t* build_find_block_response_with_block_data(void) {
+  wire_find_block_response_t* original =
+      (wire_find_block_response_t*)get_clear_memory(sizeof(wire_find_block_response_t));
+  if (original == NULL) return NULL;
+  original->message_id = 0x1122334455667788ULL;
+  memset(original->block_hash, 0xAA, 32);
+  original->found = 1;
+  memset(original->holder.hash, 0xBB, NODE_ID_HASH_SIZE);
+  strcpy(original->holder.str, "holder-node");
+  original->fib = 99;
+  original->path_len = 0;
+  original->latency_ms = 3200;
+  static const uint8_t test_data[] = {0x01, 0x02, 0x03, 0x04, 0x05};
+  original->block_data = (uint8_t*)malloc(sizeof(test_data));
+  if (original->block_data == NULL) {
+    free(original);
+    return NULL;
+  }
+  memcpy(original->block_data, test_data, sizeof(test_data));
+  original->block_data_len = sizeof(test_data);
+  original->block_fib = 77;
+  return original;
+}
+
+static uint8_t* serialize_wire_message(cbor_item_t* encoded, size_t* out_len) {
+  unsigned char* buf = NULL;
+  size_t buf_len = 0;
+  size_t written = cbor_serialize_alloc(encoded, &buf, &buf_len);
+  cbor_decref(&encoded);
+  if (written == 0) return NULL;
+  *out_len = buf_len;
+  return (uint8_t*)buf;
+}
+
+TEST(NetworkSyncDispatchTest, FreesFindBlockResponsePayloadOnQuicData) {
+  // Minimal network_t — most fields NULL/0 from calloc, guarded by handlers.
+  // wanted_list is the one field that find_block_response dereferences
+  // unconditionally (in the found branch via wanted_list_remove).
+  network_t* network = (network_t*)calloc(1, sizeof(network_t));
+  ASSERT_NE(network, nullptr);
+  network->wanted_list = wanted_list_create();
+  ASSERT_NE(network->wanted_list, nullptr);
+
+  wire_find_block_response_t* original = build_find_block_response_with_block_data();
+  ASSERT_NE(original, nullptr);
+
+  cbor_item_t* encoded = wire_find_block_response_encode(original);
+  ASSERT_NE(encoded, nullptr);
+  wire_find_block_response_destroy(original);
+
+  size_t buf_len = 0;
+  uint8_t* buf = serialize_wire_message(encoded, &buf_len);
+  ASSERT_NE(buf, nullptr);
+  ASSERT_GT(buf_len, (size_t)0);
+
+  // Build a NETWORK_QUIC_DATA message and dispatch synchronously.
+  quic_data_payload_t quic_data = {};
+  quic_data.data = buf;
+  quic_data.length = buf_len;
+  quic_data.quic_connection = NULL;
+
+  message_t msg = {};
+  msg.type = NETWORK_QUIC_DATA;
+  msg.payload = &quic_data;
+  msg.payload_destroy = NULL;
+
+  // Should not crash; should not double-free.
+  network_dispatch(network, &msg);
+
+  free(buf);
+  wanted_list_destroy(network->wanted_list);
+  free(network);
+}
+
+TEST(NetworkSyncDispatchTest, FreesFindBlockResponsePayloadOnRelayReceived) {
+  // Minimal network_t — see FreesFindBlockResponsePayloadOnQuicData for setup.
+  network_t* network = (network_t*)calloc(1, sizeof(network_t));
+  ASSERT_NE(network, nullptr);
+  network->wanted_list = wanted_list_create();
+  ASSERT_NE(network->wanted_list, nullptr);
+
+  wire_find_block_response_t* original = build_find_block_response_with_block_data();
+  ASSERT_NE(original, nullptr);
+
+  cbor_item_t* encoded = wire_find_block_response_encode(original);
+  ASSERT_NE(encoded, nullptr);
+  wire_find_block_response_destroy(original);
+
+  size_t buf_len = 0;
+  uint8_t* buf = serialize_wire_message(encoded, &buf_len);
+  ASSERT_NE(buf, nullptr);
+  ASSERT_GT(buf_len, (size_t)0);
+
+  // Wrap the FindBlockResponse CBOR in a wire_relay_received_t payload.
+  wire_relay_received_t relay_payload = {};
+  relay_payload.src_endpoint_id = 0;
+  relay_payload.payload = buf;
+  relay_payload.payload_len = buf_len;
+
+  message_t msg = {};
+  msg.type = NETWORK_RELAY_RECEIVED;
+  msg.payload = &relay_payload;
+  msg.payload_destroy = NULL;
+
+  // Should not crash; should not double-free.
+  network_dispatch(network, &msg);
+
+  free(buf);
+  wanted_list_destroy(network->wanted_list);
+  free(network);
 }
 
 // --- Salutation round-trip tests ---

@@ -567,11 +567,11 @@ TEST_F(TestOffsClient, PutAndGet_1MB) {
     offs_client_disconnect(client);
 }
 
-TEST_F(TestOffsClient, PutAndGet_10MB) {
+TEST_F(TestOffsClient, PutAndGet_1_5MB) {
     offs_client_t* client = offs_client_connect(url, NULL);
     ASSERT_NE(client, nullptr);
 
-    const size_t size = 10 * 1024 * 1024;
+    const size_t size = 1536 * 1024;
     uint8_t* data = (uint8_t*)malloc(size);
     _fill_random(data, size);
 
@@ -579,7 +579,62 @@ TEST_F(TestOffsClient, PutAndGet_10MB) {
     put_ctx.ori_string = nullptr;
     put_ctx.called = 0;
 
-    int result = offs_client_put(client, "application/octet-stream", "10mb.bin",
+    int result = offs_client_put(client, "application/octet-stream", "1_5mb.bin",
+                                  size, data, size, _put_callback, &put_ctx);
+    EXPECT_EQ(result, 0);
+
+    for (int attempts = 0; attempts < 1000 && !put_ctx.called.load(std::memory_order_acquire); attempts++) {
+        platform_usleep(10000);
+    }
+    ASSERT_EQ(put_ctx.called, 1);
+    ASSERT_NE(put_ctx.ori_string, nullptr);
+    char* ori_string = strdup(put_ctx.ori_string);
+    free(put_ctx.ori_string);
+
+    GetDataCallbackContext get_ctx;
+    std::future<GetResult> get_fut = get_ctx.promise.get_future();
+    result = offs_client_get(client, ori_string, _get_data_callback,
+                              _get_end_callback, _error_callback, &get_ctx);
+    EXPECT_EQ(result, 0);
+
+    if (!_wait_future(get_fut, 60000)) {
+        FAIL() << "GET timed out";
+    }
+    GetResult get_res = get_fut.get();
+
+    if (get_res.error) {
+        FAIL() << "Got error response, status_code=" << (int)get_res.status_code;
+    }
+
+    EXPECT_EQ(get_ctx.end_called, 1);
+    EXPECT_EQ(get_ctx.data_len.load(), size);
+    if (get_ctx.data != nullptr) {
+        EXPECT_EQ(memcmp(get_ctx.data, data, size), 0);
+        free(get_ctx.data);
+    }
+
+    free(ori_string);
+    free(data);
+    offs_client_disconnect(client);
+}
+
+/* Exercises the client's auto-chunking path: offs_client_put with a buffer
+   larger than STREAM_FRAMER_MAX_FRAME_SIZE must be internally chunked into
+   streaming frames by offs_client_put_ex. See docs/liboffs-audit-report.md #3
+   and the 2 MB frame cap. */
+TEST_F(TestOffsClient, PutAndGet_Buffered_3MB) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+
+    const size_t size = 3 * 1024 * 1024;
+    uint8_t* data = (uint8_t*)malloc(size);
+    _fill_random(data, size);
+
+    PutCallbackContext put_ctx;
+    put_ctx.ori_string = nullptr;
+    put_ctx.called = 0;
+
+    int result = offs_client_put(client, "application/octet-stream", "3mb_buffered.bin",
                                   size, data, size, _put_callback, &put_ctx);
     EXPECT_EQ(result, 0);
 
