@@ -114,6 +114,12 @@ static void _relay_send_complete(void* client_context) {
 static QUIC_STATUS _relay_send_on_stream(
     relay_server_t* server, HQUIC stream, const uint8_t* data, size_t data_len) {
   size_t framed_len = 0;
+  /* stream_frame_encode rejects data_len > STREAM_FRAMER_MAX_FRAME_SIZE (2 MB).
+     The relay re-wraps the received message in a RELAY_RECEIVED envelope
+     (~10 bytes of CBOR overhead) before this call, so a received payload at
+     exactly the 2 MB cap would be rejected here after re-wrapping. Blocks are
+     <= 128 KB, so this is a boundary edge case only; the failure is logged
+     below as QUIC_STATUS_OUT_OF_MEMORY. See audit #3. */
   uint8_t* framed = stream_frame_encode(data, data_len, &framed_len);
   if (framed == NULL) {
     log_error("relay: failed to frame message for stream send");
