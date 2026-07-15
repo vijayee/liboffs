@@ -111,4 +111,17 @@ int quic_listener_connect(quic_listener_t* listener, const char* host, uint16_t 
 
 void quic_listener_dispatch(void* state, message_t* msg);
 
+// Test-only accessors for the connection tracking array. Defined only in
+// debug builds (NDEBUG unset) so they cannot be relied on in production.
+// Used by test_quic_integration.cpp ConnTrackAddIsIdempotent to verify
+// _conn_track_add is idempotent without spinning up a full msquic
+// registration. See docs/liboffs-audit-report.md #4.
+#ifndef NDEBUG
+void quic_listener__conn_track_init_for_test(quic_listener_t* listener);
+void quic_listener__conn_track_destroy_for_test(quic_listener_t* listener);
+void quic_listener__conn_track_add_for_test(quic_listener_t* listener,
+                                              HQUIC connection);
+size_t quic_listener__conn_track_count_for_test(quic_listener_t* listener);
+#endif
+
 #endif // OFFS_QUIC_LISTENER_H
