@@ -95,7 +95,14 @@ bool actor_send(actor_t* actor, message_t* msg) {
   }
   message_node_t* node = get_clear_memory(sizeof(message_node_t));
   node->msg = *msg;
-  bool was_empty = message_queue_push(&actor->queue, node, node);
+  bool was_empty_local = false;
+  bool pushed = message_queue_push(&actor->queue, node, node, &was_empty_local);
+  if (!pushed) {
+    /* The queue was destroyed while we were pushing; message_queue_push
+       already freed the node and the payload. */
+    return false;
+  }
+  bool was_empty = was_empty_local;
 
   /* Backpressure: if target is pressured, mute the sender. */
   if (atomic_load(&actor->flags) & ACTOR_FLAG_PRESSURED) {
