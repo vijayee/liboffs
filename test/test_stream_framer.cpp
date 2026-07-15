@@ -420,3 +420,14 @@ TEST(StreamFramer, AcceptsFrameAtExactlyTheCap) {
   free(payload);
   stream_framer_destroy(framer);
 }
+
+TEST(StreamFramer, EncodeRejectsOversizeDataLen) {
+  /* The cap check fires before any allocation or data deref, so a non-NULL
+     pointer with an oversize data_len returns NULL without touching it.
+     See audit #3 and the sender-side cap. */
+  uint8_t dummy = 0;
+  size_t out_len = 999;
+  uint8_t* frame = stream_frame_encode(&dummy, STREAM_FRAMER_MAX_FRAME_SIZE + 1, &out_len);
+  EXPECT_EQ(frame, nullptr);
+  EXPECT_EQ(out_len, (size_t)0);
+}
