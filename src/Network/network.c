@@ -231,37 +231,42 @@ void network_shutdown_connections(network_t* network) {
   if (network->msquic != NULL) {
     network_shutdown_payload_t* payload = get_clear_memory(sizeof(network_shutdown_payload_t));
     if (payload != NULL) {
-      payload->lock = platform_mutex_create();
-      payload->done = platform_condvar_create();
       atomic_store(&payload->done_flag, false);
-      if (payload->lock != NULL && payload->done != NULL) {
-        message_t msg;
-        memset(&msg, 0, sizeof(msg));
-        msg.type = NETWORK_SHUTDOWN_CONNECTIONS;
-        msg.payload = payload;
-        /* payload_destroy = NULL: the main thread frees the payload after the
-           wait; the network actor only signals the condvar. */
-        msg.payload_destroy = NULL;
-        actor_send(&network->actor, &msg);
+      message_t msg;
+      memset(&msg, 0, sizeof(msg));
+      msg.type = NETWORK_SHUTDOWN_CONNECTIONS;
+      msg.payload = payload;
+      /* payload_destroy = NULL: the main thread frees the payload after the
+         wait; the network actor only sets done_flag — it must NOT free it. */
+      msg.payload_destroy = NULL;
+      bool sent = actor_send(&network->actor, &msg);
 
-        /* Wait for the network actor to post done_flag. The network actor's
-           worker is live during offs_node_stop phase 5 (joins in phase 7), so
-           it can process the message and the subsequent NETWORK_QUIC_DISCONNECT
-           callbacks from SHUTDOWN_COMPLETE. */
-        platform_mutex_lock(payload->lock);
-        while (!atomic_load(&payload->done_flag)) {
-          platform_condvar_wait(payload->done, payload->lock);
+      if (sent) {
+        /* Bounded poll for done_flag (10ms sleep, 5s cap) — consistent with
+           the F6/F7 quiesce pattern. The network actor's worker is live during
+           offs_node_stop phase 5 (joins in phase 7), so it processes the message
+           and sets done_flag when the ConnectionShutdown loop completes. The
+           subsequent SHUTDOWN_COMPLETE -> remove -> ConnectionClose sequence
+           continues on the actor as the worker drains. A 5s timeout indicates
+           a stuck actor and is logged, not fatal — network_destroy will
+           forcibly close any remaining connections. */
+        for (int wait_ms = 0;
+             wait_ms < 5000 && !atomic_load(&payload->done_flag);
+             wait_ms += 10) {
+          platform_sleep_ms(10);
         }
-        platform_mutex_unlock(payload->lock);
-
-        platform_condvar_destroy(payload->done);
-        platform_mutex_destroy(payload->lock);
-        free(payload);
+        if (!atomic_load(&payload->done_flag)) {
+          log_error("network: shutdown timed out (actor did not complete "
+                    "ConnectionShutdown loop within 5s)");
+        }
       } else {
-        if (payload->lock != NULL) platform_mutex_destroy(payload->lock);
-        if (payload->done != NULL) platform_condvar_destroy(payload->done);
-        free(payload);
+        /* The network actor is destroyed — the message was dropped. No worker
+           is running connection_manager_remove, so graceful shutdown is not
+           possible; network_destroy will forcibly close the connections when
+           it closes the registration. */
+        log_warn("network: actor unavailable for graceful connection shutdown");
       }
+      free(payload);
     }
   }
 #endif
@@ -3501,12 +3506,9 @@ void network_dispatch(void* state, message_t* msg) {
          SHUTDOWN_COMPLETE -> remove -> ConnectionClose sequence continues
          on this actor as the worker drains its mailbox; the main thread
          proceeds to phase 6 and the workers join in phase 7. The payload
-         is owned (and freed) by the main thread after this wait. */
-      if (payload != NULL && payload->lock != NULL && payload->done != NULL) {
-        platform_mutex_lock(payload->lock);
+         is owned (and freed) by the main thread after its bounded poll. */
+      if (payload != NULL) {
         atomic_store(&payload->done_flag, true);
-        platform_condvar_signal(payload->done);
-        platform_mutex_unlock(payload->lock);
       }
       break;
     }
