@@ -94,6 +94,11 @@ typedef struct network_t {
   // Friend peer reconnect state
   ATOMIC(uint64_t) friend_reconnect_timer_id;
 
+  ATOMIC(uint64_t) next_message_id;  /* monotonic per-node counter; avoids the
+                                         time(NULL)*1000 second-granularity
+                                         collisions that cross-delivered
+                                         closest_pending entries. See audit #6. */
+
   closest_nodes_pending_t closest_pending[CLOSEST_NODES_PENDING_MAX];
   size_t closest_pending_count;
 
@@ -124,5 +129,11 @@ void network_shutdown_connections(network_t* network);
 
 // Start connections to bootstrap and friend peers. Called after node start.
 void network_start_connections(network_t* network);
+
+#ifndef NDEBUG
+/* Test-only accessor for the per-node monotonic message ID counter. Used to
+   verify the counter yields unique IDs across rapid calls (audit #6). */
+uint64_t network_next_message_id_for_test(network_t* network);
+#endif
 
 #endif // OFFS_NETWORK_H

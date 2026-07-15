@@ -51,6 +51,23 @@ static void network_handle_measure_nodes_response(network_t* network, message_t*
 static void network_handle_closest_nodes_progress(network_t* network, message_t* msg);
 static void network_handle_local_closest_nodes(network_t* network, message_t* msg);
 
+// Monotonic per-node message ID counter. message_id was previously
+// time(NULL) * 1000, which is second-granularity: two queries issued in the
+// same wall-clock second collided. closest_pending is keyed on message_id
+// and the remove returns the first match, so colliding queries cross-delivered
+// and orphaned an entry. The counter is seeded from the wall clock in
+// network_create and incremented monotonically here. See audit #6.
+static uint64_t network_next_message_id(network_t* network) {
+  return atomic_fetch_add_explicit(&network->next_message_id, 1,
+                                   memory_order_relaxed);
+}
+
+#ifndef NDEBUG
+uint64_t network_next_message_id_for_test(network_t* network) {
+  return network_next_message_id(network);
+}
+#endif
+
 // --- Local FindBlock payload destroy ---
 // Frees the heap-allocated payload and releases the hash buffer reference.
 
@@ -138,6 +155,9 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   network->metrics_push_timer_id = 0;
   network->ping_capacity_timer_id = 0;
   network->friend_reconnect_timer_id = 0;
+  /* Seed the monotonic message ID counter from the wall clock so the first
+     ID is roughly time-aligned, then increments monotonically. See audit #6. */
+  atomic_store(&network->next_message_id, (uint64_t)time(NULL) * 1000);
   network->relay = NULL;
   network->nat_detect = NULL;
   network->local_nat_type = NAT_TYPE_UNKNOWN;
@@ -1235,7 +1255,7 @@ static void network_handle_local_closest_nodes(network_t* network, message_t* ms
   wire_closest_nodes_t wire_query;
   memset(&wire_query, 0, sizeof(wire_query));
   uint64_t now_ts = (uint64_t)time(NULL) * 1000;
-  wire_query.message_id = now_ts;
+  wire_query.message_id = network_next_message_id(network);
   memcpy(&wire_query.sender_id, &network->authority->local_id, sizeof(node_id_t));
   memcpy(&wire_query.target_id, &payload->target_id, sizeof(node_id_t));
   wire_query.count = payload->count;
@@ -2404,7 +2424,7 @@ static void network_handle_rank_block(network_t* network, message_t* msg) {
     wire_find_block_t* find = get_clear_memory(sizeof(wire_find_block_t));
     if (find != NULL) {
       uint64_t now_ts = (uint64_t)time(NULL) * 1000;
-      find->message_id = now_ts + rank->count;
+      find->message_id = network_next_message_id(network);
       memcpy(find->block_hash, rank->block_hash, 32);
       find->ttl = FIND_BLOCK_FORWARD_FANOUT;
       memset(find->visited_bloom, 0, WIRE_MAX_VISITED_BLOOM);
@@ -2784,7 +2804,7 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
   find_block_state_t state;
   memset(&state, 0, sizeof(state));
   uint64_t now_ts = (uint64_t)time(NULL) * 1000;
-  state.message_id = now_ts;
+  state.message_id = network_next_message_id(network);
   memcpy(state.block_hash, payload->hash->data, 32);
   state.ttl = FIND_BLOCK_FORWARD_FANOUT;
   state.start_time_ms = now_ts;
@@ -3548,7 +3568,7 @@ void network_dispatch(void* state, message_t* msg) {
         store_block_state_t state;
         memset(&state, 0, sizeof(state));
         uint64_t now_ts = (uint64_t)time(NULL) * 1000;
-        state.message_id = now_ts;
+        state.message_id = network_next_message_id(network);
         memcpy(state.block_hash, payload->hash->data, 32);
         state.block_fib = payload->fib;
         state.replicas_needed = STORE_BLOCK_FORWARD_FANOUT;
@@ -3638,7 +3658,7 @@ void network_dispatch(void* state, message_t* msg) {
       /* Build a FindNode wire message and send to each connected peer */
       wire_find_node_t find;
       memset(&find, 0, sizeof(find));
-      find.message_id = (uint64_t)time(NULL) ^ ((uint64_t)rand() << 32);
+      find.message_id = network_next_message_id(network);
       memcpy(&find.sender_id, &network->authority->local_id, sizeof(node_id_t));
       memcpy(&find.target_id, &payload->target_id, sizeof(node_id_t));
 
