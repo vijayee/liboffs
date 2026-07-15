@@ -39,6 +39,7 @@ typedef struct quic_listener_t quic_listener_t;
 typedef struct closest_nodes_pending_t {
   uint64_t message_id;
   actor_t* reply_to;
+  uint64_t deadline_ms;   /* 0 = no deadline (back-compat; never swept) */
 } closest_nodes_pending_t;
 
 // Pending QUIC connections awaiting salutation identity handshake
@@ -72,6 +73,9 @@ typedef struct network_t {
   uint64_t hebbian_decay_timer_id;
   ATOMIC(uint64_t) metrics_push_timer_id;
   ATOMIC(uint64_t) ping_capacity_timer_id;
+  ATOMIC(uint64_t) request_timer_id;  /* 1s sweep tick for wanted_list +
+                                         closest_pending expiry (#5/#6/#9) */
+  uint32_t request_timeout_ms;        /* per-pending-request deadline; default 30s */
   ATOMIC(uint8_t) running;
   uint32_t gossip_init_interval_s;
   size_t gossip_init_count;

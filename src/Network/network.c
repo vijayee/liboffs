@@ -155,6 +155,8 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   network->metrics_push_timer_id = 0;
   network->ping_capacity_timer_id = 0;
   network->friend_reconnect_timer_id = 0;
+  network->request_timer_id = 0;
+  network->request_timeout_ms = 30000;  /* 30s default per-pending-request timeout */
   /* Seed the monotonic message ID counter from the wall clock so the first
      ID is roughly time-aligned, then increments monotonically. See audit #6. */
   atomic_store(&network->next_message_id, (uint64_t)time(NULL) * 1000);
@@ -234,6 +236,19 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
       &network->actor,
       NETWORK_FRIEND_RECONNECT_TICK,
       &network->friend_reconnect_timer_id);
+
+  // Request timeout sweep: 1s recurring tick that sweeps wanted_list and
+  // closest_pending for entries whose deadline_ms has passed. Each expired
+  // wanted_list entry's requesters are notified with a found=0
+  // NETWORK_FIND_BLOCK_RESULT; each expired closest_pending entry's reply_to
+  // gets a found=0 NETWORK_CLOSEST_NODES_RESULT. See audit #5/#6/#9.
+  network->request_timer_id = 0;
+  timer_actor_set(timer,
+      1000,
+      1000,
+      &network->actor,
+      NETWORK_REQUEST_TIMEOUT_TICK,
+      &network->request_timer_id);
 
   return network;
 }
@@ -327,6 +342,10 @@ void network_destroy(network_t* network) {
   if (atomic_load(&network->friend_reconnect_timer_id) != 0) {
     timer_actor_cancel(network->timer, atomic_load(&network->friend_reconnect_timer_id));
     atomic_store(&network->friend_reconnect_timer_id, 0);
+  }
+  if (atomic_load(&network->request_timer_id) != 0) {
+    timer_actor_cancel(network->timer, atomic_load(&network->request_timer_id));
+    atomic_store(&network->request_timer_id, 0);
   }
   if (network->relay != NULL) {
     relay_client_destroy(network->relay);
@@ -765,6 +784,83 @@ static void network_add_node_to_ring(network_t* network,
   }
 }
 
+// --- Request timeout sweep callback + handler (audit #5, #6, #9) ---
+
+// Callback for wanted_list_sweep: notify each expired requester with a
+// found=0 NETWORK_FIND_BLOCK_RESULT. Takes ownership of `requesters` (frees
+// each requester). REFERENCES `hash` for the result payload — the sweep
+// calls buffer_destroy(entry->hash) after the callback returns, so the
+// REFERENCE bumps the refcount and the sweep's buffer_destroy decrements it
+// (net +1 for the result). See audit #5/#9.
+static void network_wanted_list_timeout_cb(buffer_t* hash,
+                                            wanted_requester_t* requesters,
+                                            void* user_data) {
+  wanted_requester_t* req = requesters;
+  while (req != NULL) {
+    wanted_requester_t* next = req->next;
+    network_find_block_result_payload_t* result =
+        get_clear_memory(sizeof(network_find_block_result_payload_t));
+    if (result != NULL) {
+      result->hash = (hash != NULL) ? REFERENCE(hash, buffer_t) : NULL;
+      result->found = 0;  /* timeout */
+      result->block = NULL;
+      message_t result_msg = {0};
+      result_msg.type = NETWORK_FIND_BLOCK_RESULT;
+      result_msg.payload = result;
+      result_msg.payload_destroy = network_find_block_result_destroy;
+      actor_send(req->actor, &result_msg);
+    }
+    free(req);
+    req = next;
+  }
+  (void)user_data;
+}
+
+static void network_handle_request_timeout_tick(network_t* network,
+                                                 message_t* msg) {
+  (void)msg;
+  uint64_t now_ms = (uint64_t)time(NULL) * 1000;
+
+  // Sweep wanted_list — the callback notifies each expired requester with a
+  // found=0 result and frees the requester list.
+  wanted_list_sweep(network->wanted_list, now_ms,
+                    network_wanted_list_timeout_cb, network);
+
+  // Sweep closest_pending — signal expired reply_to actors with a found=0
+  // NETWORK_CLOSEST_NODES_RESULT. Walk in place with the swap-with-last trick
+  // so we don't skip the entry that moves into the evicted slot.
+  size_t idx = 0;
+  while (idx < network->closest_pending_count) {
+    closest_nodes_pending_t* pending = &network->closest_pending[idx];
+    if (pending->deadline_ms != 0 && pending->deadline_ms <= now_ms) {
+      actor_t* reply_to = pending->reply_to;
+      /* Remove (swap with last). */
+      network->closest_pending[idx] =
+          network->closest_pending[network->closest_pending_count - 1];
+      network->closest_pending_count--;
+      /* Send a timeout result (found=0) to the reply_to. */
+      if (reply_to != NULL) {
+        network_closest_nodes_result_payload_t* result =
+            get_clear_memory(sizeof(network_closest_nodes_result_payload_t));
+        if (result != NULL) {
+          result->found = 0;
+          result->ring_count = 0;
+          result->reply_to = NULL;
+          message_t result_msg = {0};
+          result_msg.type = NETWORK_CLOSEST_NODES_RESULT;
+          result_msg.payload = result;
+          result_msg.payload_destroy =
+              network_closest_nodes_result_payload_destroy;
+          actor_send(reply_to, &result_msg);
+        }
+      }
+      /* Don't advance idx — the swap moved a new entry into this slot. */
+    } else {
+      idx++;
+    }
+  }
+}
+
 // --- Gossip tick handler (Meridian algorithm) ---
 
 static void network_handle_gossip_tick(network_t* network, message_t* msg) {
@@ -1199,6 +1295,7 @@ static void network_handle_closest_nodes_progress(network_t* network, message_t*
 
 static void network_closest_pending_add(network_t* network, uint64_t message_id,
                                          actor_t* reply_to) {
+  uint64_t deadline_ms = (uint64_t)time(NULL) * 1000 + network->request_timeout_ms;
   if (network->closest_pending_count >= CLOSEST_NODES_PENDING_MAX) {
     size_t oldest = 0;
     for (size_t idx = 1; idx < network->closest_pending_count; idx++) {
@@ -1224,10 +1321,12 @@ static void network_closest_pending_add(network_t* network, uint64_t message_id,
     }
     network->closest_pending[oldest].message_id = message_id;
     network->closest_pending[oldest].reply_to = reply_to;
+    network->closest_pending[oldest].deadline_ms = deadline_ms;
     return;
   }
   network->closest_pending[network->closest_pending_count].message_id = message_id;
   network->closest_pending[network->closest_pending_count].reply_to = reply_to;
+  network->closest_pending[network->closest_pending_count].deadline_ms = deadline_ms;
   network->closest_pending_count++;
 }
 
@@ -2797,8 +2896,13 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
     return;
   }
 
-  // Step 3: New request — add to wanted list
-  wanted_list_add(network->wanted_list, payload->hash, payload->reply_to);
+  // Step 3: New request — add to wanted list with a per-request timeout.
+  // The 1s NETWORK_REQUEST_TIMEOUT_TICK sweep will deliver a found=0 result
+  // to reply_to if no response arrives within request_timeout_ms. See #5/#9.
+  uint64_t find_block_deadline_ms =
+      (uint64_t)time(NULL) * 1000 + network->request_timeout_ms;
+  wanted_list_add(network->wanted_list, payload->hash, payload->reply_to,
+                  find_block_deadline_ms);
 
   // Step 4: Execute FindBlock routing
   find_block_state_t state;
@@ -3050,6 +3154,9 @@ void network_dispatch(void* state, message_t* msg) {
       break;
     case NETWORK_GOSSIP_TICK:
       network_handle_gossip_tick(network, msg);
+      break;
+    case NETWORK_REQUEST_TIMEOUT_TICK:
+      network_handle_request_timeout_tick(network, msg);
       break;
     case NETWORK_GOSSIP_EXPIRE:
       network_handle_gossip_expire(network, msg);

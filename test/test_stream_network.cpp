@@ -73,8 +73,8 @@ TEST(StreamNetwork, WantedListDedupTwoStreamSameHash) {
   actor_t actor2;
   memset(&actor2, 0, sizeof(actor2));
 
-  wanted_list_add(wl, hash, &actor1);
-  wanted_list_add(wl, hash, &actor2);
+  wanted_list_add(wl, hash, &actor1, 0);
+  wanted_list_add(wl, hash, &actor2, 0);
 
   // Only one entry should exist (dedup)
   wanted_entry_t* entry = wanted_list_find(wl, hash);
@@ -750,8 +750,8 @@ TEST(StreamNetwork, WantedListAddSameActorTwice) {
   memset(&actor1, 0, sizeof(actor1));
 
   // Add the same actor twice for the same hash — should dedup
-  wanted_list_add(wl, hash, &actor1);
-  wanted_list_add(wl, hash, &actor1);
+  wanted_list_add(wl, hash, &actor1, 0);
+  wanted_list_add(wl, hash, &actor1, 0);
 
   wanted_entry_t* entry = wanted_list_find(wl, hash);
   ASSERT_NE(entry, nullptr);
@@ -786,8 +786,8 @@ TEST(StreamNetwork, WantedListDifferentHashesAreIndependent) {
   actor_t actor2;
   memset(&actor2, 0, sizeof(actor2));
 
-  wanted_list_add(wl, hash_a, &actor1);
-  wanted_list_add(wl, hash_b, &actor2);
+  wanted_list_add(wl, hash_a, &actor1, 0);
+  wanted_list_add(wl, hash_b, &actor2, 0);
 
   // Each hash should have its own entry with 1 requester
   wanted_entry_t* entry_a = wanted_list_find(wl, hash_a);
