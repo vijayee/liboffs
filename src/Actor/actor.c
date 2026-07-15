@@ -11,6 +11,7 @@
 void actor_init(actor_t* actor, void* state, void (*dispatch)(void* state, message_t* msg), scheduler_pool_t* pool) {
   message_queue_init(&actor->queue);
   atomic_store(&actor->flags, 0);
+  atomic_store(&actor->queue_state, ACTOR_QUEUE_IDLE);
   atomic_store(&actor->pressured_senders, NULL);
   actor->pool = pool;
   actor->state = state;
@@ -53,6 +54,15 @@ void actor_detach_pool(actor_t* actor) {
 }
 
 void actor_destroy(actor_t* actor) {
+  /* Save the pool pointer before actor_detach_pool nulls actor->pool. We
+     need it below to check pool->stopped: an external thread (e.g. the
+     timer loop) can inject work after scheduler_pool_stop, leaving this
+     actor QUEUED with no live worker to transition it to IDLE — in that
+     case the queue_state wait must break out, because no worker will
+     dereference the actor (workers are joined; deque_destroy and
+     _inject_queue_destroy free their nodes without touching actor
+     pointers). */
+  scheduler_pool_t* pool = actor->pool;
   /* Mark the actor as destroyed so the scheduler skips it and actor_send
      drops new messages. */
   atomic_fetch_or(&actor->flags, ACTOR_FLAG_DESTROY);
@@ -79,6 +89,28 @@ void actor_destroy(actor_t* actor) {
   scheduler_t* self = scheduler_get_current();
   if (!(self != NULL && self->current == actor)) {
     while (atomic_load(&actor->flags) & ACTOR_FLAG_RUNNING) {
+      platform_sleep_ms(0);
+    }
+    /* Wait for the actor to be out of every scheduler deque. A worker that
+       just finished actor_run may be about to re-queue this actor; if we
+       freed now, that re-queue would push a freed pointer and the next pop
+       would read freed memory. The worker transitions queue_state to IDLE
+       (no re-queue) or QUEUED (re-queue) atomically with clearing RUNNING,
+       so once we observe IDLE the worker has committed to not re-queuing.
+       Skipped for self-destruction: the worker holds queue_state = RUNNING
+       on this stack and would deadlock waiting for itself; actor_run's
+       post-dispatch DESTROY check sets IDLE before returning, but the
+       self-destroy path bypasses message_queue_destroy entirely (the
+       worker still needs the queue to finish actor_run). Break out if the
+       pool is NULL (inline actor, or detached by an earlier
+       scheduler_pool_destroy — in both cases no live worker can touch the
+       actor) or stopped (workers joined): the actor may still be QUEUED
+       because an external thread injected work after stop, but no live
+       worker will dereference it, so freeing is safe. */
+    while (atomic_load(&actor->queue_state) != ACTOR_QUEUE_IDLE) {
+      if (pool == NULL || atomic_load(&pool->stopped)) {
+        break;
+      }
       platform_sleep_ms(0);
     }
   }
@@ -142,6 +174,12 @@ bool actor_send(actor_t* actor, message_t* msg) {
   if (was_empty) {
     atomic_fetch_or(&actor->flags, ACTOR_FLAG_SCHEDULED);
     if (actor->pool != NULL) {
+      /* Transition to QUEUED before injecting so actor_destroy's wait for
+         IDLE cannot complete while the actor is in flight to the inject
+         queue. Skipped when pool is NULL: the actor is not entering any
+         scheduler deque, so queue_state stays IDLE and actor_destroy's
+         wait completes immediately. */
+      atomic_store(&actor->queue_state, ACTOR_QUEUE_QUEUED);
       scheduler_inject(actor->pool, actor);
     }
   }
@@ -172,6 +210,12 @@ bool actor_run(actor_t* actor, size_t batch_size) {
        The caller (typically the scheduler) must check ACTOR_FLAG_DESTROY
        and skip further operations on this actor. */
     if (atomic_load(&actor->flags) & ACTOR_FLAG_DESTROY) {
+      /* Self-destruct path: the worker is returning false WITHOUT going
+         through the worker loop's re-queue/release decision, so it must
+         transition queue_state to IDLE here so a non-self destroyer's
+         wait completes. (A self-destroyer skipped the wait in
+         actor_destroy, so this store is harmless in that path.) */
+      atomic_store(&actor->queue_state, ACTOR_QUEUE_IDLE);
       if (payload_destroy != NULL && payload != NULL) {
         payload_destroy(payload);
       }
@@ -212,6 +256,10 @@ void backpressure_release(actor_t* actor) {
     atomic_fetch_and(&sender->flags, ~ACTOR_FLAG_MUTED);
     if (sender->pool != NULL && !(atomic_load(&sender->flags) & (ACTOR_FLAG_DESTROY | ACTOR_FLAG_SCHEDULED))) {
       atomic_fetch_or(&sender->flags, ACTOR_FLAG_SCHEDULED);
+      /* Unmuting a sender re-injects it into a worker deque: transition
+         its queue_state to QUEUED so a concurrent actor_destroy cannot
+         free it while it is in flight. */
+      atomic_store(&sender->queue_state, ACTOR_QUEUE_QUEUED);
       scheduler_inject(sender->pool, sender);
     }
     free(node);

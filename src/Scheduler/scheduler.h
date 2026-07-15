@@ -51,6 +51,16 @@ typedef struct scheduler_pool_t {
   ATOMIC(size_t) idle_count;
   ATOMIC(uint32_t) active_count;
   ATOMIC(uint8_t) terminate;
+  /* Set to 1 in scheduler_pool_stop AFTER the worker threads are joined.
+     Distinct from terminate (which is set BEFORE the join): terminate tells
+     workers to exit their loops, stopped tells actor_destroy that no worker
+     is alive to transition an actor out of a deque. actor_destroy's wait for
+     queue_state == IDLE breaks out when stopped is set, because the actor
+     may be QUEUED (an external thread like the timer loop can inject work
+     after stop) but no worker will dereference it — deque_destroy and
+     _inject_queue_destroy free their nodes without touching the actor
+     pointers. */
+  ATOMIC(uint8_t) stopped;
   platform_mutex_t* deref_lock;
   pending_deref_node_t* pending_derefs;
   /* Total undelivered messages across every actor on this pool. Incremented by

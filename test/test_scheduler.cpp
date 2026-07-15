@@ -7,6 +7,8 @@
 #include <thread>
 #include <vector>
 #include <cstdint>
+#include <chrono>
+#include <cstring>
 #include "../src/Platform/platform_time.h"
 
 extern "C" {
@@ -121,6 +123,61 @@ TEST(TestScheduler, TestActorScheduling) {
   scheduler_pool_stop(pool);
   actor_destroy(&actor);
   scheduler_pool_destroy(pool);
+}
+
+// A minimal actor whose dispatch sets a flag and (optionally) re-sends to
+// itself to keep has_more true.
+typedef struct {
+  std::atomic<int>* dispatched;
+  actor_t* self;
+} race_state_t;
+
+static void race_dispatch(void* state, message_t* msg) {
+  race_state_t* race = (race_state_t*)state;
+  (void)msg;
+  race->dispatched->fetch_add(1);
+}
+
+TEST(SchedulerDestroyRace, WorkerRequeueVsDestroyNoUAF) {
+  // Build a 2-worker pool, create an actor, queue a flood of messages, and
+  // destroy the actor mid-flight. Pre-fix, the worker can re-queue a freed
+  // pointer and the next pop reads freed memory. Post-fix, actor_destroy
+  // waits for queue_state == IDLE so the actor is out of all deques.
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  actor_t actor;
+  std::atomic<int> dispatched{0};
+  race_state_t state;
+  state.dispatched = &dispatched;
+  state.self = &actor;
+  actor_init(&actor, &state, race_dispatch, pool);
+
+  // Queue 1000 no-op messages.
+  for (int index = 0; index < 1000; index++) {
+    message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.type = 1;
+    msg.payload = NULL;
+    msg.payload_destroy = NULL;
+    actor_send(&actor, &msg);
+  }
+
+  // Let the workers drain some, then destroy mid-flight from another thread.
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  std::thread destroyer([&]() {
+    actor_destroy(&actor);
+  });
+
+  destroyer.join();
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
+
+  // The dispatched counter may be < 1000 (destroyed mid-flight) — that's
+  // fine. The assertion is that we did not crash / UAF. Valgrind at step 8
+  // asserts no invalid reads.
+  SUCCEED();
 }
 
 TEST(TestScheduler, TestActorBatchProcessing) {
