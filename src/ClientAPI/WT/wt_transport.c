@@ -7,6 +7,7 @@
 
 #include "../../Util/allocator.h"
 #include "../../Platform/platform.h"
+#include "../../Util/log.h"
 #include "../../Actor/message.h"
 #include "../../Actor/message_queue.h"
 #include <poll-dancer/poll-dancer.h>
@@ -332,12 +333,33 @@ void wt_transport_destroy(wt_transport_t* transport) {
   if (!atomic_load_explicit(&transport->pool->terminate, memory_order_acquire)) {
     scheduler_pool_wait_for_idle(transport->pool);
   }
+  /* Take conn_lock defensively during the residual free loop. After
+     wt_transport_stop awaited active_connections == 0, all SHUTDOWN_COMPLETE
+     handlers have run, so no MsQuic callback can fire on these connections
+     and the counter is already 0 — do NOT decrement here (the SHUTDOWN_COMPLETE
+     handler owns the decrement). The lock guards against a late callback
+     that raced the quiesce poll. See concurrency-pass.md F7. */
+  platform_mutex_lock(transport->conn_lock);
   for (int i = transport->connections.length - 1; i >= 0; i--) {
     wt_connection_t* conn = transport->connections.data[i];
     /* Detach from the pool registry before freeing conn, so no dangling
      * registry pointer remains for a recovery scan / pool-destroy detach. */
     actor_detach_pool(&conn->actor);
     message_queue_destroy(&conn->actor.queue);
+    /* Close the MsQuic stream + connection handles. wt_transport_stop already
+       shut down each connection and awaited SHUTDOWN_COMPLETE, so the
+       connection is fully quiesced — ConnectionClose/StreamClose just release
+       the HQUIC handles. Without this, RegistrationClose below blocks
+       indefinitely waiting for the still-open connection handles. See
+       concurrency-pass.md F7. */
+    if (conn->stream != NULL) {
+      transport->msquic->StreamClose(conn->stream);
+      conn->stream = NULL;
+    }
+    if (conn->connection != NULL) {
+      transport->msquic->ConnectionClose(conn->connection);
+      conn->connection = NULL;
+    }
     if (conn->framer != NULL) {
       stream_framer_destroy(conn->framer);
     }
@@ -365,10 +387,10 @@ void wt_transport_destroy(wt_transport_t* transport) {
     if (conn->resolve_path != NULL) {
       free(conn->resolve_path);
     }
-    atomic_fetch_sub(&transport->active_connections, 1);
     free(conn);
   }
   vec_deinit(&transport->connections);
+  platform_mutex_unlock(transport->conn_lock);
 
   if (transport->listener != NULL) {
     transport->msquic->ListenerStop(transport->listener);
@@ -415,6 +437,11 @@ static QUIC_STATUS QUIC_API _wt_listener_callback(
       HQUIC connection = event->NEW_CONNECTION.Connection;
       transport->msquic->SetCallbackHandler(connection, _wt_connection_callback, transport);
       transport->msquic->ConnectionSetConfiguration(connection, transport->configuration);
+      /* Count the connection as active as soon as it arrives so the
+         SHUTDOWN_COMPLETE handler (which fires for every connection,
+         including handshake failures and refused connections) has a
+         matching decrement and cannot underflow. See concurrency-pass.md F7. */
+      atomic_fetch_add(&transport->active_connections, 1);
       break;
     }
     default:
@@ -431,16 +458,25 @@ static QUIC_STATUS QUIC_API _wt_connection_callback(
 
   switch (event->Type) {
     case QUIC_CONNECTION_EVENT_CONNECTED: {
+      /* The connection was already counted at NEW_CONNECTION. Enforce the
+         max_connections cap here: the count includes this connection, so
+         use > (not >=). A refused connection is shut down by MsQuic and its
+         SHUTDOWN_COMPLETE handler decrements back. See concurrency-pass.md F7. */
       if (transport->max_connections > 0 &&
-          atomic_load(&transport->active_connections) >= transport->max_connections) {
+          atomic_load(&transport->active_connections) > transport->max_connections) {
         return QUIC_STATUS_CONNECTION_REFUSED;
       }
       /* Accept the connection — stream acceptance is handled separately */
       break;
     }
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
-      /* Connection fully closed — nothing to do here, connection cleanup
-       * is handled by the connection actor system. */
+      /* Connection fully closed — decrement the active counter (paired with
+         the increment at NEW_CONNECTION) so wt_transport_stop's quiesce poll
+         can observe shutdown completion. The wt_connection_t cleanup itself is
+         handled by wt_transport_destroy's free loop (the connection is
+         quiesced by then, so no callback can race the free). See
+         concurrency-pass.md F7. */
+      atomic_fetch_sub(&transport->active_connections, 1);
       break;
     }
     case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
@@ -454,7 +490,6 @@ static QUIC_STATUS QUIC_API _wt_connection_callback(
       platform_mutex_lock(transport->conn_lock);
       vec_push(&transport->connections, wt_conn);
       platform_mutex_unlock(transport->conn_lock);
-      atomic_fetch_add(&transport->active_connections, 1);
 
       /* Set stream callback to receive data */
       transport->msquic->SetCallbackHandler(stream, _wt_stream_callback, wt_conn);
@@ -649,9 +684,47 @@ void wt_transport_start(wt_transport_t* transport) {
 }
 
 void wt_transport_stop(wt_transport_t* transport) {
+  if (transport == NULL) {
+    return;
+  }
   atomic_store(&transport->running, 0);
   pd_loop_async_send(transport->loop, transport);
   platform_thread_join(transport->thread);
+
+  /* The server thread already called ListenerStop + ListenerClose on exit,
+     so no new connections can arrive. Shut down each existing connection so
+     MsQuic fires SHUTDOWN_COMPLETE (which decrements active_connections) and
+     no callback can deref a wt_connection_t after wt_transport_destroy frees
+     it. Without this, MsQuic worker threads still fire stream/connection
+     callbacks on the wt_connection_t objects during destroy's free loop ->
+     UAF, and RegistrationClose blocks indefinitely waiting for the
+     still-open connections. See concurrency-pass.md F7. */
+  platform_mutex_lock(transport->conn_lock);
+  for (int index = 0; index < transport->connections.length; index++) {
+    wt_connection_t* conn = transport->connections.data[index];
+    if (conn != NULL && conn->connection != NULL) {
+      transport->msquic->ConnectionShutdown(
+          conn->connection,
+          QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
+          0);
+    }
+  }
+  size_t remaining = atomic_load(&transport->active_connections);
+  platform_mutex_unlock(transport->conn_lock);
+
+  /* Await quiesce: poll active_connections until 0 or a 5s timeout. The
+     SHUTDOWN_COMPLETE handler (on a MsQuic worker thread) decrements the
+     counter for each connection that was shut down. Do NOT null
+     conn->connection here — the destroy free loop still needs it to have
+     been valid for the shutdown call above (it is now quiesced). */
+  for (int wait_ms = 0; wait_ms < 5000 && remaining > 0; wait_ms += 10) {
+    platform_sleep_ms(10);
+    remaining = atomic_load(&transport->active_connections);
+  }
+  if (remaining > 0) {
+    log_error("wt_transport: shutdown timed out with %zu connections active",
+              remaining);
+  }
 }
 
 #else /* !HAS_MSQUIC */

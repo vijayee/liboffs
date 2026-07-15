@@ -175,6 +175,10 @@ typedef struct {
   char* data_path;
   char* meta_path;
   char* robin_path;
+  platform_mutex_t* dispatch_lock;  /* serializes sections_dispatch across the
+                                       sync (block_cache worker) and async
+                                       (sections actor worker) paths. See
+                                       docs/concurrency-pass.md F2. */
 } sections_t;
 
 sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t max_tuple_size, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool, size_t wait, size_t max_wait);

@@ -1209,6 +1209,11 @@ protected:
     void TearDown() override {
         if (transport != nullptr) {
             wt_transport_stop(transport);
+            /* wt_transport_stop now shuts down all connections and awaits
+               SHUTDOWN_COMPLETE quiesce, so wt_transport_destroy no longer
+               hangs in RegistrationClose (connections are fully closed before
+               the registration closes). See concurrency-pass.md F7. */
+            wt_transport_destroy(transport);
         }
         scheduler_pool_wait_for_idle(pool);
         scheduler_pool_stop(pool);
@@ -1216,13 +1221,6 @@ protected:
         tuple_cache_destroy(tc);
         block_cache_destroy(bc);
         timer_actor_destroy(timer);
-        /*
-         * wt_transport_destroy calls MsQuic RegistrationClose which blocks
-         * indefinitely if server-side connections haven't fully shut down.
-         * Since the test process will clean up on exit, we skip
-         * wt_transport_destroy and let the OS reclaim resources.
-         * The server thread has already been stopped and joined above.
-         */
         scheduler_pool_destroy(pool);
         rm_rf(cache_dir);
         free(cache_dir);

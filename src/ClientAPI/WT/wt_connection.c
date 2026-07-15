@@ -749,7 +749,9 @@ void wt_connection_destroy(wt_connection_t* connection) {
   }
   if (refcounter_dereference_is_zero((refcounter_t*)connection)) {
     if (connection->transport != NULL) {
-      atomic_fetch_sub(&connection->transport->active_connections, 1);
+      /* active_connections is decremented by the SHUTDOWN_COMPLETE handler
+         in wt_transport.c, not here — do NOT decrement in this path or the
+         counter will double-decrement. See concurrency-pass.md F7. */
       platform_mutex_lock(connection->transport->conn_lock);
       vec_remove(&connection->transport->connections, connection);
       platform_mutex_unlock(connection->transport->conn_lock);

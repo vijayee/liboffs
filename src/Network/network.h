@@ -104,6 +104,17 @@ typedef struct network_t {
 #endif
 } network_t;
 
+/* Payload for NETWORK_SHUTDOWN_CONNECTIONS. The network actor does the
+   ConnectionShutdown loop and posts the condvar when done; the main thread
+   waits on (lock, done, done_flag). The main thread allocates and frees the
+   payload; the network actor only signals — it must NOT free it. See
+   concurrency-pass.md F3. */
+typedef struct {
+  platform_mutex_t* lock;
+  platform_condvar_t* done;
+  ATOMIC(bool) done_flag;
+} network_shutdown_payload_t;
+
 network_t* network_create(authority_t* authority, block_cache_t* block_cache,
                           timer_actor_t* timer, scheduler_pool_t* pool,
                           const config_t* config);
