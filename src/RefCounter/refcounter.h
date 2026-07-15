@@ -10,6 +10,9 @@
 #if defined(_MSC_VER) && !defined(__cplusplus)
   #include <stdatomic.h>
 #endif
+#if defined(__cplusplus)
+  #include <atomic>
+#endif
 #define REFERENCE(N,T) (T*) refcounter_reference((refcounter_t*) N)
 #define YIELD(N) refcounter_yield((refcounter_t*) N)
 #define DEREFERENCE(N) refcounter_dereference((refcounter_t*) N); N = NULL
@@ -25,6 +28,8 @@
    See docs/concurrency-pass.md F1. */
 #if defined(_MSC_VER) && !defined(__cplusplus)
   #define OFFS_ATOMIC_FIELD_STATE _Atomic(uint32_t) packed_state;
+#elif defined(__cplusplus)
+  #define OFFS_ATOMIC_FIELD_STATE std::atomic<uint32_t> packed_state;
 #else
   #define OFFS_ATOMIC_FIELD_STATE _Atomic uint32_t packed_state;
 #endif

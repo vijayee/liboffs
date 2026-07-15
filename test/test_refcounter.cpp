@@ -53,7 +53,7 @@ TEST(RefCounterEscrow, DoubleAdoptDoesNotUnderflowYield) {
   // Exactly one adopter should have consumed the yield. count must be 2
   // (the original 1 + one adopter that fell through to count++ because the
   // other took the yield), and yield must be 0 (no underflow to 0xFF).
-  uint32_t state = *((std::atomic<uint32_t>*)&refc->packed_state);
+  uint32_t state = refc->packed_state.load(std::memory_order_relaxed);
   EXPECT_EQ(rc_yield(state), (uint8_t)0) << "yield must not underflow to 0xFF";
   EXPECT_EQ(rc_count(state), (uint16_t)2);
   refcounter_destroy_lock(refc);
@@ -87,7 +87,7 @@ TEST(RefCounterEscrow, PendingDerefIsNotStranded) {
   // Both paths land at count=1, yield=0, pending=0. The pre-fix race
   // stranded the pending (count=2, pending=1) or under-applied the deref
   // (count=2, yield=0). The packed CAS observes both fields consistently.
-  uint32_t state = *((std::atomic<uint32_t>*)&refc->packed_state);
+  uint32_t state = refc->packed_state.load(std::memory_order_relaxed);
   EXPECT_EQ(rc_yield(state), (uint8_t)0);
   EXPECT_EQ(rc_pending(state), (uint8_t)0);
   EXPECT_EQ(rc_count(state), (uint16_t)1);
@@ -122,7 +122,7 @@ TEST(RefCounterEscrow, HighConcurrencyAdoptReleaseNoCorruption) {
   // 8000 derefs do count-- (-8000). Net: 1 (init) + 0 (adopt) + 7999 - 8000
   // = 0. The yield must be 0 (not 0xFF underflow) and count must be 0 (not
   // corrupted). Pre-fix, yield underflowed to 0xFF and count drifted.
-  uint32_t state = *((std::atomic<uint32_t>*)&refc->packed_state);
+  uint32_t state = refc->packed_state.load(std::memory_order_relaxed);
   EXPECT_EQ(rc_yield(state), (uint8_t)0);
   EXPECT_EQ(rc_count(state), (uint16_t)0);
   refcounter_destroy_lock(refc);
