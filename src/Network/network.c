@@ -2010,32 +2010,44 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
       if (hash_buf != NULL) {
         wanted_entry_t* entry = wanted_list_get(network->wanted_list, hash_buf);
         if (entry != NULL) {
-          entry->not_found_count++;
-          // Fail only after all branches report not-found (or the timeout
-          // sweep expires). A dead-end neighbor's not-found no longer
-          // aborts a still-live search before a live branch's found=1
-          // arrives (audit #10). fanout_count was set by the forwarding
-          // loop to the reachable hop count (audit #9), so the threshold
-          // is achievable. If fanout_count is 0 (e.g., the entry was added
-          // but the forwarding case didn't set it — defensively), the
-          // first not-found fails immediately, matching the old behavior.
-          if (entry->not_found_count >= entry->fanout_count) {
-            wanted_requester_t* requesters = wanted_list_clear_requesters(network->wanted_list, hash_buf);
-            if (requesters != NULL) {
-              wanted_requester_t* req = requesters;
-              while (req != NULL) {
-                wanted_requester_t* next = req->next;
-                network_find_block_result_payload_t* result =
-                    get_clear_memory(sizeof(network_find_block_result_payload_t));
-                result->hash = REFERENCE(hash_buf, buffer_t);
-                result->found = 0;
-                message_t result_msg = {0};
-                result_msg.type = NETWORK_FIND_BLOCK_RESULT;
-                result_msg.payload = result;
-                result_msg.payload_destroy = network_find_block_result_destroy;
-                actor_send(req->actor, &result_msg);
-                free(req);
-                req = next;
+          // Bind the not-found to the current request: a stale not-found from
+          // a previous FindBlock for the same block (different message_id)
+          // or a forged not-found with a random message_id must not count
+          // toward the current request's not_found_count. The wanted_list
+          // dedupes by hash (one FindBlock per hash at a time), so the entry
+          // stores one message_id. message_id 0 means unset (no check).
+          // See audit #10 (follow-up: per-request nonce binding).
+          if (entry->message_id != 0 && response->message_id != entry->message_id) {
+            // Stale or forged not-found — skip counting; fall through to
+            // buffer_destroy below. The search continues for other branches.
+          } else {
+            entry->not_found_count++;
+            // Fail only after all branches report not-found (or the timeout
+            // sweep expires). A dead-end neighbor's not-found no longer
+            // aborts a still-live search before a live branch's found=1
+            // arrives (audit #10). fanout_count was set by the forwarding
+            // loop to the reachable hop count (audit #9), so the threshold
+            // is achievable. If fanout_count is 0 (e.g., the entry was added
+            // but the forwarding case didn't set it — defensively), the
+            // first not-found fails immediately, matching the old behavior.
+            if (entry->not_found_count >= entry->fanout_count) {
+              wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, hash_buf);
+              if (requesters != NULL) {
+                wanted_requester_t* req = requesters;
+                while (req != NULL) {
+                  wanted_requester_t* next = req->next;
+                  network_find_block_result_payload_t* result =
+                      get_clear_memory(sizeof(network_find_block_result_payload_t));
+                  result->hash = REFERENCE(hash_buf, buffer_t);
+                  result->found = 0;
+                  message_t result_msg = {0};
+                  result_msg.type = NETWORK_FIND_BLOCK_RESULT;
+                  result_msg.payload = result;
+                  result_msg.payload_destroy = network_find_block_result_destroy;
+                  actor_send(req->actor, &result_msg);
+                  free(req);
+                  req = next;
+                }
               }
             }
           }
@@ -3001,6 +3013,13 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
   memset(&state, 0, sizeof(state));
   uint64_t now_ts = (uint64_t)time(NULL) * 1000;
   state.message_id = network_next_message_id(network);
+  // Bind the wanted_list entry to this request's message_id so a stale or
+  // forged not-found (different message_id) can't prematurely fail the
+  // search. See audit #10 (follow-up: per-request nonce binding).
+  wanted_entry_t* wanted_entry = wanted_list_get(network->wanted_list, payload->hash);
+  if (wanted_entry != NULL) {
+    wanted_entry->message_id = state.message_id;
+  }
   memcpy(state.block_hash, payload->hash->data, 32);
   state.ttl = FIND_BLOCK_FORWARD_FANOUT;
   state.start_time_ms = now_ts;
@@ -3055,7 +3074,7 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
       }
 
       // Block not found — notify all requesters
-      wanted_requester_t* requesters = wanted_list_clear_requesters(network->wanted_list, payload->hash);
+      wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, payload->hash);
       if (requesters != NULL) {
         wanted_requester_t* req = requesters;
         while (req != NULL) {

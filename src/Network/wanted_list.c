@@ -139,25 +139,6 @@ wanted_requester_t* wanted_list_remove(wanted_list_t* wl, buffer_t* hash) {
   return NULL;
 }
 
-wanted_requester_t* wanted_list_clear_requesters(wanted_list_t* wl, buffer_t* hash) {
-  wanted_entry_t** current = &wl->entries;
-  while (*current != NULL) {
-    if (buffer_compare((*current)->hash, hash) == 0) {
-      wanted_entry_t* entry = *current;
-      wanted_requester_t* requesters = entry->requesters;
-      entry->requesters = NULL;
-      /* Remove entry from list but keep bloom entry */
-      *current = entry->next;
-      wl->entry_count--;
-      buffer_destroy(entry->hash);
-      free(entry);
-      return requesters;
-    }
-    current = &(*current)->next;
-  }
-  return NULL;
-}
-
 void wanted_requester_list_destroy(wanted_requester_t* requesters) {
   while (requesters != NULL) {
     wanted_requester_t* next = requesters->next;

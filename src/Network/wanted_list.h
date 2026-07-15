@@ -23,6 +23,12 @@ typedef struct wanted_entry_t {
   buffer_t* hash;
   wanted_requester_t* requesters;
   uint64_t deadline_ms;       /* 0 = no deadline (back-compat; never swept) */
+  uint64_t message_id;        /* the FindBlock request's message_id; the origin
+                                 checks this against a not-found response's
+                                 message_id before counting it, so a stale or
+                                 forged not-found for a different request
+                                 can't prematurely fail the current search.
+                                 0 = unset (no message_id check). */
   uint8_t  fanout_count;      /* # of next-hops the origin fanned out to */
   uint8_t  not_found_count;   /* # of not-found responses received */
   struct wanted_entry_t* next;
@@ -62,7 +68,6 @@ void wanted_list_add(wanted_list_t* wl, buffer_t* hash, actor_t* actor,
                      uint64_t deadline_ms);
 
 wanted_requester_t* wanted_list_remove(wanted_list_t* wl, buffer_t* hash);
-wanted_requester_t* wanted_list_clear_requesters(wanted_list_t* wl, buffer_t* hash);
 void wanted_requester_list_destroy(wanted_requester_t* requesters);
 
 /* Walk the list, remove every entry whose deadline_ms != 0 and

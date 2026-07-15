@@ -119,7 +119,7 @@ TEST(TestWantedList, ClearRequestersKeepsBloom) {
   actor_t actor1;
   memset(&actor1, 0, sizeof(actor1));
   wanted_list_add(wl, hash, &actor1, 0);
-  wanted_requester_t* requesters = wanted_list_clear_requesters(wl, hash);
+  wanted_requester_t* requesters = wanted_list_remove(wl, hash);
   /* Bloom should still contain the hash */
   EXPECT_TRUE(wanted_list_check(wl, hash));
   /* But find should return NULL (no entry) */
@@ -145,7 +145,7 @@ TEST(TestWantedList, RetryAfterFailure) {
   /* First request */
   wanted_list_add(wl, hash, &actor1, 0);
   /* Fail: clear requesters but keep bloom */
-  wanted_requester_t* reqs = wanted_list_clear_requesters(wl, hash);
+  wanted_requester_t* reqs = wanted_list_remove(wl, hash);
   wanted_requester_list_destroy(reqs);
   /* Bloom hit but no entry -> fresh request */
   EXPECT_TRUE(wanted_list_check(wl, hash));
@@ -331,7 +331,7 @@ TEST(WantedListTimeout, FanoutCountGatesFailUntilAllBranchesReport) {
   /* Third not-found: 3 >= 3 — clear requesters and fail. */
   entry->not_found_count++;
   EXPECT_GE(entry->not_found_count, entry->fanout_count);
-  wanted_requester_t* requesters = wanted_list_clear_requesters(wl, hash);
+  wanted_requester_t* requesters = wanted_list_remove(wl, hash);
   ASSERT_NE(requesters, nullptr);
   wanted_requester_list_destroy(requesters);
   EXPECT_EQ(wanted_list_find(wl, hash), nullptr)
@@ -360,7 +360,7 @@ TEST(WantedListTimeout, ZeroFanoutCountFailsOnFirstNotFound) {
   /* not_found_count >= 0 is always true after the first increment. */
   entry->not_found_count++;
   EXPECT_GE(entry->not_found_count, entry->fanout_count);
-  wanted_requester_t* requesters = wanted_list_clear_requesters(wl, hash);
+  wanted_requester_t* requesters = wanted_list_remove(wl, hash);
   ASSERT_NE(requesters, nullptr);
   wanted_requester_list_destroy(requesters);
   EXPECT_EQ(wanted_list_find(wl, hash), nullptr);
