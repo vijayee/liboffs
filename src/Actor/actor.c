@@ -80,12 +80,15 @@ void actor_destroy(actor_t* actor) {
      DESTROY check in actor_send and completed the CAS append AFTER the first
      backpressure_release (line 71) but BEFORE the in-loop DESTROY check
      (added in actor_send) would have appended to a drained list. Drain again
-     to catch that residual. With the in-loop DESTROY check, no NEW appends
-     can happen (DESTROY is set since line 68), so this second drain is the
-     final one. See concurrency-pass.md F10. */
-  if (atomic_load(&actor->flags) & ACTOR_FLAG_PRESSURED) {
-    backpressure_release(actor);
-  }
+     unconditionally — backpressure_release is a no-op when pressured_senders
+     is NULL (atomic_exchange returns NULL, the walk loop doesn't run), so
+     this is cheap and safe. Don't gate on ACTOR_FLAG_PRESSURED: the first
+     drain already cleared it, and a sender muted via backpressure_apply()
+     (a public API that sets PRESSURED without mailbox overflow) wouldn't
+     re-set it, so the guard would skip the drain and leave the orphaned
+     node -> the sender muted forever (the exact livelock F10 fixes).
+     See concurrency-pass.md F10. */
+  backpressure_release(actor);
   /* A pool worker may still be inside actor_run on this actor, touching
      actor->queue (message_queue_pop / message_queue_markempty) after dispatch
      returns, so the queue cannot be torn down until that worker has cleared
