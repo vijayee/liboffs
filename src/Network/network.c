@@ -51,6 +51,23 @@ static void network_handle_measure_nodes_response(network_t* network, message_t*
 static void network_handle_closest_nodes_progress(network_t* network, message_t* msg);
 static void network_handle_local_closest_nodes(network_t* network, message_t* msg);
 
+// Monotonic per-node message ID counter. message_id was previously
+// time(NULL) * 1000, which is second-granularity: two queries issued in the
+// same wall-clock second collided. closest_pending is keyed on message_id
+// and the remove returns the first match, so colliding queries cross-delivered
+// and orphaned an entry. The counter is seeded from the wall clock in
+// network_create and incremented monotonically here. See audit #6.
+static uint64_t network_next_message_id(network_t* network) {
+  return atomic_fetch_add_explicit(&network->next_message_id, 1,
+                                   memory_order_relaxed);
+}
+
+#ifndef NDEBUG
+uint64_t network_next_message_id_for_test(network_t* network) {
+  return network_next_message_id(network);
+}
+#endif
+
 // --- Local FindBlock payload destroy ---
 // Frees the heap-allocated payload and releases the hash buffer reference.
 
@@ -138,6 +155,11 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   network->metrics_push_timer_id = 0;
   network->ping_capacity_timer_id = 0;
   network->friend_reconnect_timer_id = 0;
+  network->request_timer_id = 0;
+  network->request_timeout_ms = 30000;  /* 30s default per-pending-request timeout */
+  /* Seed the monotonic message ID counter from the wall clock so the first
+     ID is roughly time-aligned, then increments monotonically. See audit #6. */
+  atomic_store(&network->next_message_id, (uint64_t)time(NULL) * 1000);
   network->relay = NULL;
   network->nat_detect = NULL;
   network->local_nat_type = NAT_TYPE_UNKNOWN;
@@ -214,6 +236,19 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
       &network->actor,
       NETWORK_FRIEND_RECONNECT_TICK,
       &network->friend_reconnect_timer_id);
+
+  // Request timeout sweep: 1s recurring tick that sweeps wanted_list and
+  // closest_pending for entries whose deadline_ms has passed. Each expired
+  // wanted_list entry's requesters are notified with a found=0
+  // NETWORK_FIND_BLOCK_RESULT; each expired closest_pending entry's reply_to
+  // gets a found=0 NETWORK_CLOSEST_NODES_RESULT. See audit #5/#6/#9.
+  network->request_timer_id = 0;
+  timer_actor_set(timer,
+      1000,
+      1000,
+      &network->actor,
+      NETWORK_REQUEST_TIMEOUT_TICK,
+      &network->request_timer_id);
 
   return network;
 }
@@ -307,6 +342,10 @@ void network_destroy(network_t* network) {
   if (atomic_load(&network->friend_reconnect_timer_id) != 0) {
     timer_actor_cancel(network->timer, atomic_load(&network->friend_reconnect_timer_id));
     atomic_store(&network->friend_reconnect_timer_id, 0);
+  }
+  if (atomic_load(&network->request_timer_id) != 0) {
+    timer_actor_cancel(network->timer, atomic_load(&network->request_timer_id));
+    atomic_store(&network->request_timer_id, 0);
   }
   if (network->relay != NULL) {
     relay_client_destroy(network->relay);
@@ -745,6 +784,83 @@ static void network_add_node_to_ring(network_t* network,
   }
 }
 
+// --- Request timeout sweep callback + handler (audit #5, #6, #9) ---
+
+// Callback for wanted_list_sweep: notify each expired requester with a
+// found=0 NETWORK_FIND_BLOCK_RESULT. Takes ownership of `requesters` (frees
+// each requester). REFERENCES `hash` for the result payload — the sweep
+// calls buffer_destroy(entry->hash) after the callback returns, so the
+// REFERENCE bumps the refcount and the sweep's buffer_destroy decrements it
+// (net +1 for the result). See audit #5/#9.
+static void network_wanted_list_timeout_cb(buffer_t* hash,
+                                            wanted_requester_t* requesters,
+                                            void* user_data) {
+  wanted_requester_t* req = requesters;
+  while (req != NULL) {
+    wanted_requester_t* next = req->next;
+    network_find_block_result_payload_t* result =
+        get_clear_memory(sizeof(network_find_block_result_payload_t));
+    if (result != NULL) {
+      result->hash = (hash != NULL) ? REFERENCE(hash, buffer_t) : NULL;
+      result->found = 0;  /* timeout */
+      result->block = NULL;
+      message_t result_msg = {0};
+      result_msg.type = NETWORK_FIND_BLOCK_RESULT;
+      result_msg.payload = result;
+      result_msg.payload_destroy = network_find_block_result_destroy;
+      actor_send(req->actor, &result_msg);
+    }
+    free(req);
+    req = next;
+  }
+  (void)user_data;
+}
+
+static void network_handle_request_timeout_tick(network_t* network,
+                                                 message_t* msg) {
+  (void)msg;
+  uint64_t now_ms = (uint64_t)time(NULL) * 1000;
+
+  // Sweep wanted_list — the callback notifies each expired requester with a
+  // found=0 result and frees the requester list.
+  wanted_list_sweep(network->wanted_list, now_ms,
+                    network_wanted_list_timeout_cb, network);
+
+  // Sweep closest_pending — signal expired reply_to actors with a found=0
+  // NETWORK_CLOSEST_NODES_RESULT. Walk in place with the swap-with-last trick
+  // so we don't skip the entry that moves into the evicted slot.
+  size_t idx = 0;
+  while (idx < network->closest_pending_count) {
+    closest_nodes_pending_t* pending = &network->closest_pending[idx];
+    if (pending->deadline_ms != 0 && pending->deadline_ms <= now_ms) {
+      actor_t* reply_to = pending->reply_to;
+      /* Remove (swap with last). */
+      network->closest_pending[idx] =
+          network->closest_pending[network->closest_pending_count - 1];
+      network->closest_pending_count--;
+      /* Send a timeout result (found=0) to the reply_to. */
+      if (reply_to != NULL) {
+        network_closest_nodes_result_payload_t* result =
+            get_clear_memory(sizeof(network_closest_nodes_result_payload_t));
+        if (result != NULL) {
+          result->found = 0;
+          result->ring_count = 0;
+          result->reply_to = NULL;
+          message_t result_msg = {0};
+          result_msg.type = NETWORK_CLOSEST_NODES_RESULT;
+          result_msg.payload = result;
+          result_msg.payload_destroy =
+              network_closest_nodes_result_payload_destroy;
+          actor_send(reply_to, &result_msg);
+        }
+      }
+      /* Don't advance idx — the swap moved a new entry into this slot. */
+    } else {
+      idx++;
+    }
+  }
+}
+
 // --- Gossip tick handler (Meridian algorithm) ---
 
 static void network_handle_gossip_tick(network_t* network, message_t* msg) {
@@ -1179,6 +1295,7 @@ static void network_handle_closest_nodes_progress(network_t* network, message_t*
 
 static void network_closest_pending_add(network_t* network, uint64_t message_id,
                                          actor_t* reply_to) {
+  uint64_t deadline_ms = (uint64_t)time(NULL) * 1000 + network->request_timeout_ms;
   if (network->closest_pending_count >= CLOSEST_NODES_PENDING_MAX) {
     size_t oldest = 0;
     for (size_t idx = 1; idx < network->closest_pending_count; idx++) {
@@ -1204,10 +1321,12 @@ static void network_closest_pending_add(network_t* network, uint64_t message_id,
     }
     network->closest_pending[oldest].message_id = message_id;
     network->closest_pending[oldest].reply_to = reply_to;
+    network->closest_pending[oldest].deadline_ms = deadline_ms;
     return;
   }
   network->closest_pending[network->closest_pending_count].message_id = message_id;
   network->closest_pending[network->closest_pending_count].reply_to = reply_to;
+  network->closest_pending[network->closest_pending_count].deadline_ms = deadline_ms;
   network->closest_pending_count++;
 }
 
@@ -1235,7 +1354,7 @@ static void network_handle_local_closest_nodes(network_t* network, message_t* ms
   wire_closest_nodes_t wire_query;
   memset(&wire_query, 0, sizeof(wire_query));
   uint64_t now_ts = (uint64_t)time(NULL) * 1000;
-  wire_query.message_id = now_ts;
+  wire_query.message_id = network_next_message_id(network);
   memcpy(&wire_query.sender_id, &network->authority->local_id, sizeof(node_id_t));
   memcpy(&wire_query.target_id, &payload->target_id, sizeof(node_id_t));
   wire_query.count = payload->count;
@@ -1592,7 +1711,11 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         }
       }
 
-      // Send NOT_FOUND response back along the path
+      // Send NOT_FOUND response back along the path. Include the incoming
+      // path so each intermediate hop can find itself (self_index > 0) and
+      // relay the not-found further upstream (audit #5). The previous code
+      // set path_len=0, so the predecessor couldn't tell where it was in the
+      // path and the not-found died one hop from the terminal.
       {
         wire_find_block_response_t not_found;
         memset(&not_found, 0, sizeof(not_found));
@@ -1600,7 +1723,8 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         memcpy(not_found.block_hash, state.block_hash, 32);
         not_found.found = 0;
         memcpy(&not_found.holder, &network->authority->local_id, sizeof(node_id_t));
-        not_found.path_len = 0;
+        memcpy(not_found.path, state.path, state.path_len * sizeof(node_id_t));
+        not_found.path_len = (uint8_t)state.path_len;
         not_found.latency_ms = 0;
         // Reply to the sender: last node in the path, or original_source
         const node_id_t* reply_to = &state.original_source;
@@ -1636,6 +1760,15 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
           peer_eabf_subscribe(peer, state.block_hash, 32);
         }
       }
+      // Save the predecessor and incoming path length BEFORE adding self to
+      // the path. The not-found reply (if every forward fails) goes to the
+      // predecessor, and the not-found's path is the incoming path (without
+      // self) so intermediate hops can find themselves and relay upstream.
+      const node_id_t* predecessor = &state.original_source;
+      size_t incoming_path_len = state.path_len;
+      if (state.path_len > 0) {
+        predecessor = &state.path[state.path_len - 1];
+      }
       // Add self to visited bloom and path
       find_block_add_visited(state.visited_bloom, &state.visited_count, network->authority->local_id.hash);
       if (state.path_len < FIND_BLOCK_MAX_PATH) {
@@ -1645,7 +1778,11 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
       // Decrement TTL
       state.ttl--;
 
-      // Forward to each selected next-hop
+      // Forward to each selected next-hop, counting reachable hops.
+      // conn_state_send returns -1 when a peer's stream is gone (audit #9);
+      // if every forward fails, send a not-found back along the path so the
+      // origin learns sooner (rather than waiting for the 30s timeout).
+      size_t reachable_hops = 0;
       for (size_t hop = 0; hop < next_hop_count; hop++) {
         // Build forwarded FindBlock message
         wire_find_block_t* forward = get_clear_memory(sizeof(wire_find_block_t));
@@ -1664,16 +1801,43 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         cbor_item_t* cbor = wire_find_block_encode(forward);
         peer_connection_t* next_peer = connection_manager_lookup(
             &network->conn_mgr, &next_hops[hop]->id);
-        if (next_peer != NULL) {
-          conn_state_send(network, next_peer, cbor);
+        if (next_peer != NULL && conn_state_send(network, next_peer, cbor) == 0) {
+          reachable_hops++;
+          if (network->log != NULL) {
+            message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
+                               &next_hops[hop]->id, state.message_id, state.block_hash,
+                               1, &network->hebbian);
+          }
         }
         cbor_decref(&cbor);
-        if (network->log != NULL) {
-          message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
-                             &next_hops[hop]->id, state.message_id, state.block_hash,
-                             1, &network->hebbian);
-        }
         free(forward);
+      }
+
+      if (reachable_hops == 0) {
+        // No reachable next hop — send a NOT_FOUND back along the path so
+        // the origin's found==0 handler accounts for this branch. See #9.
+        // Include the incoming path (without self) so intermediate hops can
+        // find themselves and relay the not-found further upstream (#5).
+        wire_find_block_response_t not_found;
+        memset(&not_found, 0, sizeof(not_found));
+        not_found.message_id = state.message_id;
+        memcpy(not_found.block_hash, state.block_hash, 32);
+        not_found.found = 0;
+        memcpy(&not_found.holder, &network->authority->local_id, sizeof(node_id_t));
+        memcpy(not_found.path, state.path, incoming_path_len * sizeof(node_id_t));
+        not_found.path_len = (uint8_t)incoming_path_len;
+        not_found.latency_ms = 0;
+        peer_connection_t* reply_peer = connection_manager_lookup(&network->conn_mgr, predecessor);
+        if (reply_peer != NULL) {
+          cbor_item_t* cbor = wire_find_block_response_encode(&not_found);
+          conn_state_send(network, reply_peer, cbor);
+          cbor_decref(&cbor);
+          if (network->log != NULL) {
+            message_log_record(network->log, WIRE_FIND_BLOCK_RESPONSE, MSG_DIRECTION_SENT,
+                               predecessor, state.message_id, state.block_hash,
+                               2, &network->hebbian);
+          }
+        }
       }
       break;
     }
@@ -1805,29 +1969,88 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
       DESTROY(block, block);
     }
   } else {
-    // Block not found — subscribe block_hash in EABFs as negative info
-    // This is handled by TTL_EXPIRED in the forwarding path
+    // Block not found. Relay the not-found upstream so the origin learns.
+    // The old code only notified local requesters, which exist only at the
+    // origin — so an intermediate hop's not-found died there and the origin
+    // hung forever (audit #5). Mirrors the found==1 upstream relay above.
 
-    // Check wanted_list — notify any local requesters that the block was not found
-    {
+    int self_index = -1;
+    for (int index = 0; index < (int)response->path_len; index++) {
+      if (node_id_equals(&response->path[index], &network->authority->local_id)) {
+        self_index = index;
+        break;
+      }
+    }
+    if (self_index > 0) {
+      const node_id_t* predecessor = &response->path[self_index - 1];
+      peer_connection_t* relay_peer = connection_manager_lookup(&network->conn_mgr, predecessor);
+      if (relay_peer != NULL) {
+        cbor_item_t* cbor = wire_find_block_response_encode(response);
+        conn_state_send(network, relay_peer, cbor);
+        cbor_decref(&cbor);
+        if (network->log != NULL) {
+          message_log_record(network->log, WIRE_FIND_BLOCK_RESPONSE, MSG_DIRECTION_FORWARDED,
+                             predecessor, response->message_id, response->block_hash,
+                             2, &network->hebbian);
+        }
+      }
+    }
+
+    // Only at the origin do we account for the not-found and possibly fail
+    // the request. is_origin: self is path[0] (origin is the first node),
+    // or self is not in the path (path_len 0 — defensive; after the fix to
+    // network_handle_find_block's NOT_FOUND responses to include the path,
+    // this only happens if the terminal sent a pathless not-found directly
+    // back to us, which means we're the origin). At an intermediate hop
+    // (self_index > 0) the relay above already forwarded the not-found;
+    // there is no local wanted_list entry to account against.
+    bool is_origin = (self_index <= 0);
+    if (is_origin) {
       buffer_t* hash_buf = buffer_create_from_pointer_copy(response->block_hash, 32);
       if (hash_buf != NULL) {
-        wanted_requester_t* requesters = wanted_list_clear_requesters(network->wanted_list, hash_buf);
-        if (requesters != NULL) {
-          wanted_requester_t* req = requesters;
-          while (req != NULL) {
-            network_find_block_result_payload_t* result =
-                get_clear_memory(sizeof(network_find_block_result_payload_t));
-            result->hash = REFERENCE(hash_buf, buffer_t);
-            result->found = 0;
-            message_t result_msg = {0};
-            result_msg.type = NETWORK_FIND_BLOCK_RESULT;
-            result_msg.payload = result;
-            result_msg.payload_destroy = network_find_block_result_destroy;
-            actor_send(req->actor, &result_msg);
-            req = req->next;
+        wanted_entry_t* entry = wanted_list_get(network->wanted_list, hash_buf);
+        if (entry != NULL) {
+          // Bind the not-found to the current request: a stale not-found from
+          // a previous FindBlock for the same block (different message_id)
+          // or a forged not-found with a random message_id must not count
+          // toward the current request's not_found_count. The wanted_list
+          // dedupes by hash (one FindBlock per hash at a time), so the entry
+          // stores one message_id. message_id 0 means unset (no check).
+          // See audit #10 (follow-up: per-request nonce binding).
+          if (entry->message_id != 0 && response->message_id != entry->message_id) {
+            // Stale or forged not-found — skip counting; fall through to
+            // buffer_destroy below. The search continues for other branches.
+          } else {
+            entry->not_found_count++;
+            // Fail only after all branches report not-found (or the timeout
+            // sweep expires). A dead-end neighbor's not-found no longer
+            // aborts a still-live search before a live branch's found=1
+            // arrives (audit #10). fanout_count was set by the forwarding
+            // loop to the reachable hop count (audit #9), so the threshold
+            // is achievable. If fanout_count is 0 (e.g., the entry was added
+            // but the forwarding case didn't set it — defensively), the
+            // first not-found fails immediately, matching the old behavior.
+            if (entry->not_found_count >= entry->fanout_count) {
+              wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, hash_buf);
+              if (requesters != NULL) {
+                wanted_requester_t* req = requesters;
+                while (req != NULL) {
+                  wanted_requester_t* next = req->next;
+                  network_find_block_result_payload_t* result =
+                      get_clear_memory(sizeof(network_find_block_result_payload_t));
+                  result->hash = REFERENCE(hash_buf, buffer_t);
+                  result->found = 0;
+                  message_t result_msg = {0};
+                  result_msg.type = NETWORK_FIND_BLOCK_RESULT;
+                  result_msg.payload = result;
+                  result_msg.payload_destroy = network_find_block_result_destroy;
+                  actor_send(req->actor, &result_msg);
+                  free(req);
+                  req = next;
+                }
+              }
+            }
           }
-          wanted_requester_list_destroy(requesters);
         }
         buffer_destroy(hash_buf);
       }
@@ -2404,7 +2627,7 @@ static void network_handle_rank_block(network_t* network, message_t* msg) {
     wire_find_block_t* find = get_clear_memory(sizeof(wire_find_block_t));
     if (find != NULL) {
       uint64_t now_ts = (uint64_t)time(NULL) * 1000;
-      find->message_id = now_ts + rank->count;
+      find->message_id = network_next_message_id(network);
       memcpy(find->block_hash, rank->block_hash, 32);
       find->ttl = FIND_BLOCK_FORWARD_FANOUT;
       memset(find->visited_bloom, 0, WIRE_MAX_VISITED_BLOOM);
@@ -2777,14 +3000,26 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
     return;
   }
 
-  // Step 3: New request — add to wanted list
-  wanted_list_add(network->wanted_list, payload->hash, payload->reply_to);
+  // Step 3: New request — add to wanted list with a per-request timeout.
+  // The 1s NETWORK_REQUEST_TIMEOUT_TICK sweep will deliver a found=0 result
+  // to reply_to if no response arrives within request_timeout_ms. See #5/#9.
+  uint64_t find_block_deadline_ms =
+      (uint64_t)time(NULL) * 1000 + network->request_timeout_ms;
+  wanted_list_add(network->wanted_list, payload->hash, payload->reply_to,
+                  find_block_deadline_ms);
 
   // Step 4: Execute FindBlock routing
   find_block_state_t state;
   memset(&state, 0, sizeof(state));
   uint64_t now_ts = (uint64_t)time(NULL) * 1000;
-  state.message_id = now_ts;
+  state.message_id = network_next_message_id(network);
+  // Bind the wanted_list entry to this request's message_id so a stale or
+  // forged not-found (different message_id) can't prematurely fail the
+  // search. See audit #10 (follow-up: per-request nonce binding).
+  wanted_entry_t* wanted_entry = wanted_list_get(network->wanted_list, payload->hash);
+  if (wanted_entry != NULL) {
+    wanted_entry->message_id = state.message_id;
+  }
   memcpy(state.block_hash, payload->hash->data, 32);
   state.ttl = FIND_BLOCK_FORWARD_FANOUT;
   state.start_time_ms = now_ts;
@@ -2839,7 +3074,7 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
       }
 
       // Block not found — notify all requesters
-      wanted_requester_t* requesters = wanted_list_clear_requesters(network->wanted_list, payload->hash);
+      wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, payload->hash);
       if (requesters != NULL) {
         wanted_requester_t* req = requesters;
         while (req != NULL) {
@@ -2870,7 +3105,12 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
       // Decrement TTL
       state.ttl--;
 
-      // Forward to each selected next-hop
+      // Forward to each selected next-hop, counting reachable hops.
+      // conn_state_send returns -1 when a peer's stream is gone (audit #9);
+      // an unreachable hop won't send a not-found, so counting it in
+      // fanout_count would deadlock the request (not_found_count could never
+      // reach fanout_count). Instead, only count successful sends.
+      size_t reachable_hops = 0;
       for (size_t hop = 0; hop < next_hop_count; hop++) {
         wire_find_block_t* forward = get_clear_memory(sizeof(wire_find_block_t));
         if (forward == NULL) continue;
@@ -2888,11 +3128,50 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
         cbor_item_t* cbor = wire_find_block_encode(forward);
         peer_connection_t* next_peer = connection_manager_lookup(
             &network->conn_mgr, &next_hops[hop]->id);
-        if (next_peer != NULL) {
-          conn_state_send(network, next_peer, cbor);
+        if (next_peer != NULL && conn_state_send(network, next_peer, cbor) == 0) {
+          reachable_hops++;
+          if (network->log != NULL) {
+            message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
+                               &next_hops[hop]->id, state.message_id, state.block_hash,
+                               1, &network->hebbian);
+          }
         }
         cbor_decref(&cbor);
         free(forward);
+      }
+
+      if (reachable_hops == 0) {
+        // No reachable next hop — fail the request immediately rather
+        // than waiting for the 30s timeout sweep. See audit #9.
+        wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, payload->hash);
+        if (requesters != NULL) {
+          wanted_requester_t* req = requesters;
+          while (req != NULL) {
+            wanted_requester_t* next = req->next;
+            network_find_block_result_payload_t* fb_result =
+                get_clear_memory(sizeof(network_find_block_result_payload_t));
+            fb_result->hash = REFERENCE(payload->hash, buffer_t);
+            fb_result->found = 0;
+            message_t fb_msg = {0};
+            fb_msg.type = NETWORK_FIND_BLOCK_RESULT;
+            fb_msg.payload = fb_result;
+            fb_msg.payload_destroy = network_find_block_result_destroy;
+            actor_send(req->actor, &fb_msg);
+            free(req);
+            req = next;
+          }
+        }
+        break;
+      }
+
+      // Set fanout_count to the reachable hop count so the
+      // not_found_count >= fanout_count check (in the found==0 handler
+      // below) is achievable. Unreachable hops won't send not-founds, so
+      // counting them in fanout_count would deadlock the request. See #10.
+      wanted_entry_t* entry = wanted_list_get(network->wanted_list, payload->hash);
+      if (entry != NULL) {
+        entry->fanout_count = (uint8_t)reachable_hops;
+        entry->not_found_count = 0;
       }
       break;
     }
@@ -3030,6 +3309,9 @@ void network_dispatch(void* state, message_t* msg) {
       break;
     case NETWORK_GOSSIP_TICK:
       network_handle_gossip_tick(network, msg);
+      break;
+    case NETWORK_REQUEST_TIMEOUT_TICK:
+      network_handle_request_timeout_tick(network, msg);
       break;
     case NETWORK_GOSSIP_EXPIRE:
       network_handle_gossip_expire(network, msg);
@@ -3548,7 +3830,7 @@ void network_dispatch(void* state, message_t* msg) {
         store_block_state_t state;
         memset(&state, 0, sizeof(state));
         uint64_t now_ts = (uint64_t)time(NULL) * 1000;
-        state.message_id = now_ts;
+        state.message_id = network_next_message_id(network);
         memcpy(state.block_hash, payload->hash->data, 32);
         state.block_fib = payload->fib;
         state.replicas_needed = STORE_BLOCK_FORWARD_FANOUT;
@@ -3638,7 +3920,7 @@ void network_dispatch(void* state, message_t* msg) {
       /* Build a FindNode wire message and send to each connected peer */
       wire_find_node_t find;
       memset(&find, 0, sizeof(find));
-      find.message_id = (uint64_t)time(NULL) ^ ((uint64_t)rand() << 32);
+      find.message_id = network_next_message_id(network);
       memcpy(&find.sender_id, &network->authority->local_id, sizeof(node_id_t));
       memcpy(&find.target_id, &payload->target_id, sizeof(node_id_t));
 

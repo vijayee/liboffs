@@ -43,6 +43,78 @@ extern "C" {
 #include "Util/allocator.h"
 }
 
+#include <cstdint>
+#include <set>
+
+// === Monotonic message ID counter tests (audit #6) ===
+//
+// message_id was previously time(NULL) * 1000 — second-granularity, so two
+// queries issued in the same wall-clock second collided. closest_pending is
+// keyed on message_id and the remove returns the first match, so colliding
+// queries cross-delivered and orphaned an entry. The fix is a per-node
+// ATOMIC(uint64_t) counter seeded from the wall clock and incremented via
+// fetch_add. These tests verify the counter yields unique IDs across rapid
+// calls. We don't call network_create (which needs msquic + heavy
+// scaffolding); instead we allocate a minimal stub network_t, seed the
+// counter exactly as network_create does, and exercise the helper.
+
+namespace {
+struct MinimalNetworkDeleter {
+  void operator()(network_t* network) const {
+    if (network != nullptr) {
+      /* get_clear_memory returns malloc-backed zeroed memory; free directly.
+         We never initialized the actor or any subsystem, so no actor_destroy
+         / network_destroy is needed. */
+      free(network);
+    }
+  }
+};
+}  // namespace
+
+static network_t* make_minimal_network_for_message_id_test() {
+  network_t* network = (network_t*)get_clear_memory(sizeof(network_t));
+  if (network == nullptr) return nullptr;
+  /* Seed the counter exactly as network_create does, so the test exercises
+     the same path the production code uses after the seed. */
+  atomic_store(&network->next_message_id, (uint64_t)time(NULL) * 1000);
+  return network;
+}
+
+TEST(NetworkMessageId, MonotonicCounterNoCollisions) {
+  std::unique_ptr<network_t, MinimalNetworkDeleter> network(
+      make_minimal_network_for_message_id_test());
+  ASSERT_NE(network, nullptr);
+  std::set<uint64_t> ids;
+  for (int idx = 0; idx < 10000; idx++) {
+    ids.insert(network_next_message_id_for_test(network.get()));
+  }
+  EXPECT_EQ(ids.size(), (size_t)10000) << "message IDs must not collide";
+}
+
+TEST(NetworkMessageId, CounterIsMonotonicIncreasing) {
+  std::unique_ptr<network_t, MinimalNetworkDeleter> network(
+      make_minimal_network_for_message_id_test());
+  ASSERT_NE(network, nullptr);
+  uint64_t first_id = network_next_message_id_for_test(network.get());
+  uint64_t second_id = network_next_message_id_for_test(network.get());
+  uint64_t third_id = network_next_message_id_for_test(network.get());
+  EXPECT_GT(second_id, first_id);
+  EXPECT_GT(third_id, second_id);
+}
+
+TEST(NetworkMessageId, CounterSurvivesSameSecondCalls) {
+  /* Regression: time(NULL) * 1000 returned the same value for every call in
+     the same wall-clock second. The counter must produce distinct IDs even
+     when called rapidly (well under one second apart). */
+  std::unique_ptr<network_t, MinimalNetworkDeleter> network(
+      make_minimal_network_for_message_id_test());
+  ASSERT_NE(network, nullptr);
+  uint64_t first_id = network_next_message_id_for_test(network.get());
+  uint64_t second_id = network_next_message_id_for_test(network.get());
+  EXPECT_NE(first_id, second_id)
+      << "same-second queries must not share a message_id";
+}
+
 // === Query tests ===
 
 class QueryTest : public ::testing::Test {

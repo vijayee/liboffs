@@ -39,6 +39,7 @@ typedef struct quic_listener_t quic_listener_t;
 typedef struct closest_nodes_pending_t {
   uint64_t message_id;
   actor_t* reply_to;
+  uint64_t deadline_ms;   /* 0 = no deadline (back-compat; never swept) */
 } closest_nodes_pending_t;
 
 // Pending QUIC connections awaiting salutation identity handshake
@@ -72,6 +73,9 @@ typedef struct network_t {
   uint64_t hebbian_decay_timer_id;
   ATOMIC(uint64_t) metrics_push_timer_id;
   ATOMIC(uint64_t) ping_capacity_timer_id;
+  ATOMIC(uint64_t) request_timer_id;  /* 1s sweep tick for wanted_list +
+                                         closest_pending expiry (#5/#6/#9) */
+  uint32_t request_timeout_ms;        /* per-pending-request deadline; default 30s */
   ATOMIC(uint8_t) running;
   uint32_t gossip_init_interval_s;
   size_t gossip_init_count;
@@ -93,6 +97,11 @@ typedef struct network_t {
 
   // Friend peer reconnect state
   ATOMIC(uint64_t) friend_reconnect_timer_id;
+
+  ATOMIC(uint64_t) next_message_id;  /* monotonic per-node counter; avoids the
+                                         time(NULL)*1000 second-granularity
+                                         collisions that cross-delivered
+                                         closest_pending entries. See audit #6. */
 
   closest_nodes_pending_t closest_pending[CLOSEST_NODES_PENDING_MAX];
   size_t closest_pending_count;
@@ -124,5 +133,11 @@ void network_shutdown_connections(network_t* network);
 
 // Start connections to bootstrap and friend peers. Called after node start.
 void network_start_connections(network_t* network);
+
+#ifndef NDEBUG
+/* Test-only accessor for the per-node monotonic message ID counter. Used to
+   verify the counter yields unique IDs across rapid calls (audit #6). */
+uint64_t network_next_message_id_for_test(network_t* network);
+#endif
 
 #endif // OFFS_NETWORK_H
