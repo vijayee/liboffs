@@ -3233,6 +3233,7 @@ void network_dispatch(void* state, message_t* msg) {
           wire_find_block_response_t* payload = get_clear_memory(sizeof(wire_find_block_response_t));
           if (wire_find_block_response_decode(wire_msg, payload) == 0) {
             dispatch_msg.payload = payload;
+            dispatch_msg.payload_destroy = (void (*)(void*))wire_find_block_response_destroy;
             network_handle_find_block_response(network, &dispatch_msg);
           } else {
             free(payload);
@@ -3394,6 +3395,13 @@ void network_dispatch(void* state, message_t* msg) {
         }
         default:
           break;
+      }
+      /* The synchronous dispatch bypasses actor_run, so the framework does
+         not free the payload. Handlers that CONSUME the payload set
+         dispatch_msg.payload = NULL; respect that. See audit #2. */
+      if (dispatch_msg.payload != NULL && dispatch_msg.payload_destroy != NULL) {
+        dispatch_msg.payload_destroy(dispatch_msg.payload);
+        dispatch_msg.payload = NULL;
       }
       cbor_decref(&wire_msg);
       break;
@@ -3717,6 +3725,7 @@ void network_dispatch(void* state, message_t* msg) {
             if (payload != NULL) {
               if (wire_find_block_response_decode(wire_msg, payload) == 0) {
                 dispatch_msg.payload = payload;
+                dispatch_msg.payload_destroy = (void (*)(void*))wire_find_block_response_destroy;
                 network_handle_find_block_response(network, &dispatch_msg);
               } else {
                 free(payload);
@@ -3945,6 +3954,13 @@ void network_dispatch(void* state, message_t* msg) {
           }
           default:
             break;
+        }
+        /* The synchronous dispatch bypasses actor_run, so the framework does
+           not free the payload. Handlers that CONSUME the payload set
+           dispatch_msg.payload = NULL; respect that. See audit #2. */
+        if (dispatch_msg.payload != NULL && dispatch_msg.payload_destroy != NULL) {
+          dispatch_msg.payload_destroy(dispatch_msg.payload);
+          dispatch_msg.payload = NULL;
         }
       }
       cbor_decref(&wire_msg);
