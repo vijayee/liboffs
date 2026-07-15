@@ -7,12 +7,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "../Platform/platform.h"
-#if defined(_MSC_VER) && !defined(__cplusplus)
-  #include <stdatomic.h>
-#endif
-#if defined(__cplusplus)
-  #include <atomic>
-#endif
+#include "../Util/atomic_compat.h"
 #define REFERENCE(N,T) (T*) refcounter_reference((refcounter_t*) N)
 #define YIELD(N) refcounter_yield((refcounter_t*) N)
 #define DEREFERENCE(N) refcounter_dereference((refcounter_t*) N); N = NULL
@@ -26,16 +21,9 @@
    succeeds first try (single-threaded per actor). is_actor is kept for
    debug/introspection only and no longer branches behavior.
    See docs/concurrency-pass.md F1. */
-#if defined(_MSC_VER) && !defined(__cplusplus)
-  #define OFFS_ATOMIC_FIELD_STATE _Atomic(uint32_t) packed_state;
-#elif defined(__cplusplus)
-  #define OFFS_ATOMIC_FIELD_STATE std::atomic<uint32_t> packed_state;
-#else
-  #define OFFS_ATOMIC_FIELD_STATE _Atomic uint32_t packed_state;
-#endif
 typedef struct refcounter_t {
 #ifdef OFFS_ATOMIC
-  OFFS_ATOMIC_FIELD_STATE
+  ATOMIC(uint32_t) packed_state;
   uint8_t is_actor;
 #else
   uint16_t count;
