@@ -105,13 +105,11 @@ typedef struct network_t {
 } network_t;
 
 /* Payload for NETWORK_SHUTDOWN_CONNECTIONS. The network actor does the
-   ConnectionShutdown loop and posts the condvar when done; the main thread
-   waits on (lock, done, done_flag). The main thread allocates and frees the
-   payload; the network actor only signals — it must NOT free it. See
-   concurrency-pass.md F3. */
+   ConnectionShutdown loop and sets done_flag when done; the main thread polls
+   done_flag (10ms sleep, 5s cap) — consistent with the F6/F7 quiesce pattern.
+   The main thread allocates and frees the payload; the network actor only
+   sets the flag — it must NOT free it. See concurrency-pass.md F3. */
 typedef struct {
-  platform_mutex_t* lock;
-  platform_condvar_t* done;
   ATOMIC(bool) done_flag;
 } network_shutdown_payload_t;
 
