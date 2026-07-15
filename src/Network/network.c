@@ -1764,7 +1764,11 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
       // Decrement TTL
       state.ttl--;
 
-      // Forward to each selected next-hop
+      // Forward to each selected next-hop, counting reachable hops.
+      // conn_state_send returns -1 when a peer's stream is gone (audit #9);
+      // if every forward fails, send a not-found back along the path so the
+      // origin learns sooner (rather than waiting for the 30s timeout).
+      size_t reachable_hops = 0;
       for (size_t hop = 0; hop < next_hop_count; hop++) {
         // Build forwarded FindBlock message
         wire_find_block_t* forward = get_clear_memory(sizeof(wire_find_block_t));
@@ -1783,16 +1787,44 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         cbor_item_t* cbor = wire_find_block_encode(forward);
         peer_connection_t* next_peer = connection_manager_lookup(
             &network->conn_mgr, &next_hops[hop]->id);
-        if (next_peer != NULL) {
-          conn_state_send(network, next_peer, cbor);
+        if (next_peer != NULL && conn_state_send(network, next_peer, cbor) == 0) {
+          reachable_hops++;
+          if (network->log != NULL) {
+            message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
+                               &next_hops[hop]->id, state.message_id, state.block_hash,
+                               1, &network->hebbian);
+          }
         }
         cbor_decref(&cbor);
-        if (network->log != NULL) {
-          message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
-                             &next_hops[hop]->id, state.message_id, state.block_hash,
-                             1, &network->hebbian);
-        }
         free(forward);
+      }
+
+      if (reachable_hops == 0) {
+        // No reachable next hop — send a NOT_FOUND back along the path so
+        // the origin's found==0 handler accounts for this branch. See #9.
+        wire_find_block_response_t not_found;
+        memset(&not_found, 0, sizeof(not_found));
+        not_found.message_id = state.message_id;
+        memcpy(not_found.block_hash, state.block_hash, 32);
+        not_found.found = 0;
+        memcpy(&not_found.holder, &network->authority->local_id, sizeof(node_id_t));
+        not_found.path_len = 0;
+        not_found.latency_ms = 0;
+        const node_id_t* reply_to = &state.original_source;
+        if (state.path_len > 0) {
+          reply_to = &state.path[state.path_len - 1];
+        }
+        peer_connection_t* reply_peer = connection_manager_lookup(&network->conn_mgr, reply_to);
+        if (reply_peer != NULL) {
+          cbor_item_t* cbor = wire_find_block_response_encode(&not_found);
+          conn_state_send(network, reply_peer, cbor);
+          cbor_decref(&cbor);
+          if (network->log != NULL) {
+            message_log_record(network->log, WIRE_FIND_BLOCK_RESPONSE, MSG_DIRECTION_SENT,
+                               reply_to, state.message_id, state.block_hash,
+                               2, &network->hebbian);
+          }
+        }
       }
       break;
     }
@@ -2994,7 +3026,12 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
       // Decrement TTL
       state.ttl--;
 
-      // Forward to each selected next-hop
+      // Forward to each selected next-hop, counting reachable hops.
+      // conn_state_send returns -1 when a peer's stream is gone (audit #9);
+      // an unreachable hop won't send a not-found, so counting it in
+      // fanout_count would deadlock the request (not_found_count could never
+      // reach fanout_count). Instead, only count successful sends.
+      size_t reachable_hops = 0;
       for (size_t hop = 0; hop < next_hop_count; hop++) {
         wire_find_block_t* forward = get_clear_memory(sizeof(wire_find_block_t));
         if (forward == NULL) continue;
@@ -3012,11 +3049,50 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
         cbor_item_t* cbor = wire_find_block_encode(forward);
         peer_connection_t* next_peer = connection_manager_lookup(
             &network->conn_mgr, &next_hops[hop]->id);
-        if (next_peer != NULL) {
-          conn_state_send(network, next_peer, cbor);
+        if (next_peer != NULL && conn_state_send(network, next_peer, cbor) == 0) {
+          reachable_hops++;
+          if (network->log != NULL) {
+            message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
+                               &next_hops[hop]->id, state.message_id, state.block_hash,
+                               1, &network->hebbian);
+          }
         }
         cbor_decref(&cbor);
         free(forward);
+      }
+
+      if (reachable_hops == 0) {
+        // No reachable next hop — fail the request immediately rather
+        // than waiting for the 30s timeout sweep. See audit #9.
+        wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, payload->hash);
+        if (requesters != NULL) {
+          wanted_requester_t* req = requesters;
+          while (req != NULL) {
+            wanted_requester_t* next = req->next;
+            network_find_block_result_payload_t* fb_result =
+                get_clear_memory(sizeof(network_find_block_result_payload_t));
+            fb_result->hash = REFERENCE(payload->hash, buffer_t);
+            fb_result->found = 0;
+            message_t fb_msg = {0};
+            fb_msg.type = NETWORK_FIND_BLOCK_RESULT;
+            fb_msg.payload = fb_result;
+            fb_msg.payload_destroy = network_find_block_result_destroy;
+            actor_send(req->actor, &fb_msg);
+            free(req);
+            req = next;
+          }
+        }
+        break;
+      }
+
+      // Set fanout_count to the reachable hop count so the
+      // not_found_count >= fanout_count check (in the found==0 handler
+      // below) is achievable. Unreachable hops won't send not-founds, so
+      // counting them in fanout_count would deadlock the request. See #10.
+      wanted_entry_t* entry = wanted_list_get(network->wanted_list, payload->hash);
+      if (entry != NULL) {
+        entry->fanout_count = (uint8_t)reachable_hops;
+        entry->not_found_count = 0;
       }
       break;
     }
