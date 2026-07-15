@@ -76,6 +76,16 @@ void actor_destroy(actor_t* actor) {
      ACTOR_FLAG_DESTROY set above is the secondary guard for any scan already
      in flight on this actor. */
   actor_detach_pool(actor);
+  /* Second backpressure_release sweep: a sender that passed the outer
+     DESTROY check in actor_send and completed the CAS append AFTER the first
+     backpressure_release (line 71) but BEFORE the in-loop DESTROY check
+     (added in actor_send) would have appended to a drained list. Drain again
+     to catch that residual. With the in-loop DESTROY check, no NEW appends
+     can happen (DESTROY is set since line 68), so this second drain is the
+     final one. See concurrency-pass.md F10. */
+  if (atomic_load(&actor->flags) & ACTOR_FLAG_PRESSURED) {
+    backpressure_release(actor);
+  }
   /* A pool worker may still be inside actor_run on this actor, touching
      actor->queue (message_queue_pop / message_queue_markempty) after dispatch
      returns, so the queue cannot be torn down until that worker has cleared
@@ -155,10 +165,25 @@ bool actor_send(actor_t* actor, message_t* msg) {
         if (!(atomic_load(&actor->flags) & ACTOR_FLAG_DESTROY)) {
           muted_sender_node_t* msn = get_clear_memory(sizeof(muted_sender_node_t));
           msn->sender = sender;
+          bool appended = false;
           do {
+            /* Re-check DESTROY inside the loop: actor_destroy may have set
+               DESTROY + drained pressured_senders after our outer check. If
+               DESTROY is now set, abort the append (free msn) so it's never
+               orphaned in a drained list -> the sender isn't muted forever
+               (endlessly re-queued but never run). See concurrency-pass.md F10. */
+            if (atomic_load(&actor->flags) & ACTOR_FLAG_DESTROY) {
+              free(msn);
+              break;
+            }
             msn->next = atomic_load(&actor->pressured_senders);
-          } while (!atomic_compare_exchange_strong(&actor->pressured_senders, &msn->next, msn));
-          atomic_fetch_or(&sender->flags, ACTOR_FLAG_MUTED);
+            if (atomic_compare_exchange_strong(&actor->pressured_senders, &msn->next, msn)) {
+              appended = true;
+            }
+          } while (!appended);
+          if (appended) {
+            atomic_fetch_or(&sender->flags, ACTOR_FLAG_MUTED);
+          }
         }
       }
     }
