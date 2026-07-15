@@ -1590,18 +1590,42 @@ int offs_client_put_ex(offs_client_t* client,
                        void* ctx) {
   if (client == NULL || !client->connected || options == NULL) return -1;
 
-  platform_mutex_lock(client->lock);
-  client->put_cb = callback;
-  client->put_cb_ctx = ctx;
-  platform_mutex_unlock(client->lock);
+  /* If the data fits comfortably under the frame cap (with CBOR envelope
+     headroom), send it as a single buffered frame — the original fast path. */
+  if (data_len <= 1024 * 1024) {
+    platform_mutex_lock(client->lock);
+    client->put_cb = callback;
+    client->put_cb_ctx = ctx;
+    platform_mutex_unlock(client->lock);
 
-  client_api_put_request_t msg;
-  _fill_put_request(&msg, options, data, data_len);
+    client_api_put_request_t msg;
+    _fill_put_request(&msg, options, data, data_len);
 
-  cbor_item_t* frame = client_api_put_request_encode(&msg);
-  _send_frame(client, frame);
+    cbor_item_t* frame = client_api_put_request_encode(&msg);
+    _send_frame(client, frame);
+    return 0;
+  }
 
-  return 0;
+  /* Otherwise, auto-chunk via the streaming path: send the metadata frame
+     (data=NULL, stream_length=data_len), then the data in chunks, then
+     put_end with the callback. This keeps the non-streaming API working for
+     any buffer size while respecting STREAM_FRAMER_MAX_FRAME_SIZE. The
+     caller sees the same contract (callback fires on completion). */
+  offs_put_options_t local_options;
+  memcpy(&local_options, options, sizeof(local_options));
+  if (local_options.stream_length == 0) local_options.stream_length = data_len;
+
+  if (offs_client_put_stream_start_ex(client, &local_options) != 0) return -1;
+
+  const size_t chunk_size = 256 * 1024;  /* well under the 2 MB cap */
+  size_t offset = 0;
+  while (offset < data_len) {
+    size_t this_chunk = (offset + chunk_size <= data_len) ? chunk_size : (data_len - offset);
+    if (offs_client_put_stream_data(client, data + offset, this_chunk) != 0) return -1;
+    offset += this_chunk;
+  }
+
+  return offs_client_put_stream_end(client, callback, ctx);
 }
 
 int offs_client_put_stream_start_ex(offs_client_t* client,

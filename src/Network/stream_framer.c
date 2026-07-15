@@ -124,6 +124,10 @@ uint8_t* stream_framer_next(stream_framer_t* framer, size_t* out_len) {
 uint8_t* stream_frame_encode(const uint8_t* data, size_t data_len, size_t* out_len) {
   if (out_len != NULL) *out_len = 0;
   if (data == NULL && data_len > 0) return NULL;
+  /* Reject oversize frames symmetrically with stream_framer_next's cap, so
+     the sender fails clearly instead of the receiver silently dropping.
+     See docs/liboffs-audit-report.md #3. */
+  if (data_len > STREAM_FRAMER_MAX_FRAME_SIZE) return NULL;
 
   size_t total = STREAM_FRAMER_LENGTH_PREFIX_SIZE + data_len;
   uint8_t* frame = get_clear_memory(total);
