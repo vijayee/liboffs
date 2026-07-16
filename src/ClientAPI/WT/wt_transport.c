@@ -812,11 +812,12 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
                                       const char* cert_path,
                                       const char* key_path,
                                       const char* ca_path,
+                                      bool allow_insecure,
                                       size_t max_connections,
                                       const char* api_key_hash,
                                       health_context_t* health_ctx) {
   (void)pool; (void)bc; (void)ofd_cache; (void)tc;
-  (void)host; (void)port; (void)cert_path; (void)key_path; (void)ca_path; (void)max_connections; (void)api_key_hash; (void)health_ctx;
+  (void)host; (void)port; (void)cert_path; (void)key_path; (void)ca_path; (void)allow_insecure; (void)max_connections; (void)api_key_hash; (void)health_ctx;
   return NULL;
 }
 
