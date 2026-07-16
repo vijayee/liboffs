@@ -1343,6 +1343,68 @@ static void handle_command(int client_fd, char* line) {
     } else {
       send_response(client_fd, CTRL_RESP_ERROR " no network");
     }
+  } else if (strncmp(line, CTRL_START_NAT_DETECT " ",
+                      strlen(CTRL_START_NAT_DETECT) + 1) == 0) {
+    // START_NAT_DETECT <relay_a_host>:<relay_a_port> <relay_b_host>:<relay_b_port>
+    // Starts NAT type detection by connecting to two relays and comparing their
+    // reflexive addresses. See audit #18.
+    const char* args = line + strlen(CTRL_START_NAT_DETECT) + 1;
+    char a_host[256];
+    char b_host[256];
+    uint16_t a_port = 0;
+    uint16_t b_port = 0;
+    char* colon_a = strchr(args, ':');
+    if (colon_a == NULL) {
+      send_response(client_fd, CTRL_RESP_ERROR " invalid START_NAT_DETECT format");
+      return;
+    }
+    size_t a_host_len = (size_t)(colon_a - args);
+    if (a_host_len >= sizeof(a_host)) a_host_len = sizeof(a_host) - 1;
+    memcpy(a_host, args, a_host_len);
+    a_host[a_host_len] = '\0';
+    a_port = (uint16_t)atoi(colon_a + 1);
+    const char* space = strchr(colon_a + 1, ' ');
+    if (space == NULL) {
+      send_response(client_fd, CTRL_RESP_ERROR " invalid START_NAT_DETECT format");
+      return;
+    }
+    const char* b_args = space + 1;
+    char* colon_b = strchr(b_args, ':');
+    if (colon_b == NULL) {
+      send_response(client_fd, CTRL_RESP_ERROR " invalid START_NAT_DETECT format");
+      return;
+    }
+    size_t b_host_len = (size_t)(colon_b - b_args);
+    if (b_host_len >= sizeof(b_host)) b_host_len = sizeof(b_host) - 1;
+    memcpy(b_host, b_args, b_host_len);
+    b_host[b_host_len] = '\0';
+    b_port = (uint16_t)atoi(colon_b + 1);
+
+    if (g_node.network) {
+      int result = network_start_nat_detect(g_node.network, a_host, a_port,
+                                             b_host, b_port);
+      if (result == 0) {
+        send_response(client_fd, CTRL_RESP_OK);
+      } else {
+        send_response(client_fd, CTRL_RESP_ERROR " nat detect start failed");
+      }
+    } else {
+      send_response(client_fd, CTRL_RESP_ERROR " no network");
+    }
+  } else if (strncmp(line, CTRL_START_MDNS, strlen(CTRL_START_MDNS)) == 0 &&
+             (line[strlen(CTRL_START_MDNS)] == '\0' ||
+              line[strlen(CTRL_START_MDNS)] == '\n')) {
+    // START_MDNS — start the mDNS responder for same-LAN auto-discovery.
+    if (g_node.network) {
+      int result = network_start_mdns(g_node.network);
+      if (result == 0) {
+        send_response(client_fd, CTRL_RESP_OK);
+      } else {
+        send_response(client_fd, CTRL_RESP_ERROR " mdns start failed");
+      }
+    } else {
+      send_response(client_fd, CTRL_RESP_ERROR " no network");
+    }
   } else if (strncmp(line, CTRL_ADD_PEER " ", strlen(CTRL_ADD_PEER) + 1) == 0) {
     // ADD_PEER <node_id_hex> <relay_endpoint_id>
     // Creates a peer entry in the connection manager without a direct QUIC connection.

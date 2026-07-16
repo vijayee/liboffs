@@ -20,6 +20,7 @@
 #include "wanted_list.h"
 #include "relay_client.h"
 #include "nat_detect.h"
+#include "mdns.h"
 #include "conn_state.h"
 #include "closest_nodes.h"
 #include "measure_nodes.h"
@@ -38,10 +39,27 @@
 #include <time.h>
 #include <openssl/rand.h>
 #include "pem_key.h"
+#include <stdio.h>
 
 #define TOPOLOGY_METRICS_PUSH_INTERVAL_MS 300000  // 5 minutes
 #define PING_CAPACITY_INTERVAL_MS 900000  // 15 minutes
 #define FRIEND_RECONNECT_INTERVAL_MS 5000
+
+/* Format an IPv4 address (host byte order) as a dotted-quad string. Writes
+   into the caller-provided buffer of at least 16 bytes. Returns 0 on success,
+   -1 on error. Uses snprintf for portability (no inet_ntop dependency). */
+static int _ipv4_to_string(uint32_t addr, char* buf, size_t buf_len) {
+  if (buf == NULL || buf_len < 16) return -1;
+  uint8_t bytes[4];
+  bytes[0] = (uint8_t)((addr >> 24) & 0xFF);
+  bytes[1] = (uint8_t)((addr >> 16) & 0xFF);
+  bytes[2] = (uint8_t)((addr >> 8) & 0xFF);
+  bytes[3] = (uint8_t)(addr & 0xFF);
+  int written = snprintf(buf, buf_len, "%u.%u.%u.%u",
+                          bytes[0], bytes[1], bytes[2], bytes[3]);
+  if (written <= 0 || (size_t)written >= buf_len) return -1;
+  return 0;
+}
 
 // Forward declarations for internal handlers
 static void network_sync_hebbian_to_rings(network_t* network);
@@ -53,6 +71,15 @@ static void network_handle_measure_nodes(network_t* network, message_t* msg);
 static void network_handle_measure_nodes_response(network_t* network, message_t* msg);
 static void network_handle_closest_nodes_progress(network_t* network, message_t* msg);
 static void network_handle_local_closest_nodes(network_t* network, message_t* msg);
+
+/* Forward declarations for the PUNCH handlers (audit #18 — ICE simultaneous
+   open for symmetric NAT). Defined later in this file. */
+static void network_relay_send_punch(network_t* network,
+                                     const peer_connection_t* peer);
+static void network_handle_relay_punch(network_t* network,
+                                       const wire_relay_punch_t* punch);
+/* Forward declaration for the direct-upgrade tick helper. Defined later. */
+static void network_attempt_direct_upgrades(network_t* network);
 
 // Forward declarations for the static relay-challenge table helpers (defined
 // below; the test-only wrappers at the top of the file call them).
@@ -232,7 +259,11 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   atomic_store(&network->next_message_id, (uint64_t)time(NULL) * 1000);
   network->relay = NULL;
   network->nat_detect = NULL;
-  network->local_nat_type = NAT_TYPE_UNKNOWN;
+  /* Conservative default: assume PORT_RESTRICTED_CONE so peers start in
+     TRYING_DIRECT (try direct, fall back to relay). nat_detect_start, if
+     called, replaces this with the real classification. See audit #18. */
+  network->local_nat_type = NAT_TYPE_PORT_RESTRICTED_CONE;
+  network->mdns = NULL;
 
   // Store config values for downstream consumers
   network->gossip_init_interval_s = config->gossip_init_interval_s;
@@ -425,6 +456,10 @@ void network_destroy(network_t* network) {
     nat_detect_destroy(network->nat_detect);
     network->nat_detect = NULL;
   }
+  if (network->mdns != NULL) {
+    mdns_destroy(network->mdns);
+    network->mdns = NULL;
+  }
   respiration_actor_destroy(network->respiration);
   network->respiration = NULL;
 
@@ -526,6 +561,51 @@ int network_connect_relay(network_t* network, const char* host, uint16_t port) {
   return 0;
 }
 
+int network_start_nat_detect(network_t* network,
+                              const char* relay_a_host, uint16_t relay_a_port,
+                              const char* relay_b_host, uint16_t relay_b_port) {
+  if (network == NULL) return -1;
+  if (relay_a_host == NULL || relay_b_host == NULL) return -1;
+
+  /* nat_detect is created in network_connect_relay. If the caller did not
+     connect a relay first, nat_detect is NULL — create it on demand so
+     this API is usable standalone (e.g. in tests). */
+  if (network->nat_detect == NULL) {
+    network->nat_detect = nat_detect_create(network, network->pool);
+    if (network->nat_detect == NULL) {
+      log_error("network_start_nat_detect: failed to create nat_detect");
+      return -1;
+    }
+  }
+
+  return nat_detect_start(network->nat_detect,
+                          relay_a_host, relay_a_port,
+                          relay_b_host, relay_b_port);
+}
+
+int network_start_mdns(network_t* network) {
+  if (network == NULL) return -1;
+  if (network->mdns != NULL) return 0;  /* already running */
+  network->mdns = mdns_create(network, network->pool);
+  if (network->mdns == NULL) {
+    /* mdns_create logs a Windows-stub warning; treat as soft-fail. */
+    return -1;
+  }
+  if (mdns_start(network->mdns) != 0) {
+    mdns_destroy(network->mdns);
+    network->mdns = NULL;
+    return -1;
+  }
+  return 0;
+}
+
+void network_stop_mdns(network_t* network) {
+  if (network == NULL || network->mdns == NULL) return;
+  mdns_stop(network->mdns);
+  mdns_destroy(network->mdns);
+  network->mdns = NULL;
+}
+
 int network_connect_peer(network_t* network, const char* host, uint16_t port) {
   if (network == NULL || host == NULL) return -1;
 
@@ -559,11 +639,30 @@ int network_connect_peer_candidates(network_t* network, const node_id_t* remote_
   if (network == NULL || remote_id == NULL) return -1;
   if (addresses == NULL || address_count == 0) return -1;
 
+  /* Pre-scan for the SRFLX candidate so we can record it on the peer (used
+     by the periodic direct-upgrade tick). We pick the first SRFLX entry. */
+  const peer_address_t* srfx_candidate = NULL;
+  for (size_t scan_idx = 0; scan_idx < address_count; scan_idx++) {
+    if (addresses[scan_idx].type == PEER_ADDR_SRFLX) {
+      srfx_candidate = &addresses[scan_idx];
+      break;
+    }
+  }
+
   for (size_t index = 0; index < address_count; index++) {
     const peer_address_t* addr = &addresses[index];
     if (addr->type == PEER_ADDR_HOST || addr->type == PEER_ADDR_SRFLX ||
         addr->type == PEER_ADDR_DIRECT) {
       if (network_connect_peer(network, addr->host, addr->port) == 0) {
+        /* Direct connect succeeded — store the SRFLX candidate on the peer
+           (if any) so the periodic upgrade tick can re-establish direct if
+           the connection drops. */
+        peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr,
+                                                              remote_id);
+        if (peer != NULL && srfx_candidate != NULL) {
+          peer_connection_set_peer_reflexive(peer, srfx_candidate->host,
+                                              srfx_candidate->port);
+        }
         return 0;
       }
       /* Try the next candidate — keep iterating priority order. */
@@ -587,6 +686,21 @@ int network_connect_peer_candidates(network_t* network, const node_id_t* remote_
         peer->relay_endpoint_id = addr->relay_id;
       }
       if (peer != NULL) {
+        /* Record the peer's SRFLX address (if any) so the periodic
+           direct-upgrade tick can attempt a QUIC connect to it. Then
+           initialize conn_state from our local NAT type — for non-symmetric
+           local NAT this bumps the peer to TRYING_DIRECT. See audit #18. */
+        if (srfx_candidate != NULL) {
+          peer_connection_set_peer_reflexive(peer, srfx_candidate->host,
+                                              srfx_candidate->port);
+        }
+        if (peer->conn_state != CONN_STATE_DIRECT) {
+          conn_state_set_peer_nat_type(peer, network->local_nat_type);
+          if (network->local_nat_type != NAT_TYPE_SYMMETRIC &&
+              peer->conn_state == CONN_STATE_RELAY) {
+            conn_state_upgrade_to_direct(peer);
+          }
+        }
         log_info("network_connect_peer_candidates: relay candidate admitted "
                  "(endpoint=%u)", addr->relay_id);
         return 0;
@@ -730,6 +844,14 @@ static void network_handle_salutation(network_t* network, message_t* msg,
     // for a known sender_id, so this also upgrades a previously
     // relay-admitted peer to verified on first direct contact. See #8.
     peer->relay_verified = true;
+    /* Record our local NAT type on the peer. Call this BEFORE
+       conn_state_on_direct_connected: if local is symmetric, set_peer_nat_type
+       forces RELAY_ONLY, but the direct connection just succeeded so the
+       subsequent conn_state_on_direct_connected overrides to DIRECT. If the
+       direct path later fails, conn_state_on_direct_failed drops to RELAY
+       (the peer_nat_type=SYMMETRIC record lets the upgrade-to-direct path
+       avoid retrying). See audit #18. */
+    conn_state_set_peer_nat_type(peer, network->local_nat_type);
     conn_state_on_direct_connected(peer);
 
     // Insert the authenticated peer into the ring table so find_block_execute
@@ -1179,6 +1301,116 @@ static void network_relay_send_challenge(network_t* network,
   relay_msg.payload = relay_send;
   relay_msg.payload_destroy = (void (*)(void*))wire_relay_send_destroy;
   actor_send(&network->relay->actor, &relay_msg);
+}
+
+/* Send a WIRE_RELAY_PUNCH to peer via the relay with our SRFLX address.
+   Used by the symmetric-NAT direct-upgrade path: peer B receives the PUNCH
+   and immediately attempts quic_listener_connect to our SRFLX, creating the
+   simultaneous-open that opens NAT mappings on both sides. See audit #18. */
+static void network_relay_send_punch(network_t* network,
+                                     const peer_connection_t* peer) {
+  if (network == NULL || peer == NULL) return;
+  if (network->relay == NULL) {
+    log_warn("network: cannot send PUNCH — no relay client");
+    return;
+  }
+  if (network->relay->reflexive_addr == 0 || network->relay->reflexive_port == 0) {
+    log_warn("network: cannot send PUNCH — local SRFLX address unknown");
+    return;
+  }
+  if (peer->relay_endpoint_id == 0) {
+    log_warn("network: cannot send PUNCH — peer relay endpoint id unknown");
+    return;
+  }
+
+  wire_relay_punch_t punch;
+  memset(&punch, 0, sizeof(punch));
+  memcpy(&punch.sender_id, &network->authority->local_id, sizeof(node_id_t));
+  punch.reflexive_addr = network->relay->reflexive_addr;
+  punch.reflexive_port = network->relay->reflexive_port;
+
+  cbor_item_t* punch_cbor = wire_relay_punch_encode(&punch);
+  if (punch_cbor == NULL) {
+    log_error("network: wire_relay_punch_encode failed");
+    return;
+  }
+
+  size_t cbor_len = 0;
+  unsigned char* cbor_data = NULL;
+  size_t serialized = cbor_serialize_alloc(punch_cbor, &cbor_data, &cbor_len);
+  cbor_decref(&punch_cbor);
+  if (cbor_data == NULL || serialized == 0) {
+    log_error("network: failed to serialize WIRE_RELAY_PUNCH");
+    return;
+  }
+
+  wire_relay_send_t* relay_send = get_clear_memory(sizeof(wire_relay_send_t));
+  if (relay_send == NULL) {
+    free(cbor_data);
+    return;
+  }
+  relay_send->src_endpoint_id = network->relay->local_endpoint_id;
+  relay_send->dest_endpoint_id = peer->relay_endpoint_id;
+  relay_send->payload = cbor_data;
+  relay_send->payload_len = cbor_len;
+
+  message_t relay_msg;
+  memset(&relay_msg, 0, sizeof(relay_msg));
+  relay_msg.type = RELAY_CLIENT_SEND;
+  relay_msg.payload = relay_send;
+  relay_msg.payload_destroy = (void (*)(void*))wire_relay_send_destroy;
+  actor_send(&network->relay->actor, &relay_msg);
+}
+
+/* Handle a WIRE_RELAY_PUNCH arriving via the relay: the sender (peer A) is
+   attempting the ICE simultaneous-open. Immediately attempt a QUIC connect
+   to the sender's SRFLX address; on success the salutation handler will
+   transition the peer to DIRECT. We also record the sender's SRFLX on the
+   peer so the periodic upgrade tick can re-attempt if the connection drops.
+   See audit #18. */
+static void network_handle_relay_punch(network_t* network,
+                                       const wire_relay_punch_t* punch) {
+  if (network == NULL || punch == NULL) return;
+  if (network->quic_listener == NULL) return;  /* no QUIC support */
+
+  char host_str[16];
+  if (_ipv4_to_string(punch->reflexive_addr, host_str, sizeof(host_str)) != 0) {
+    log_error("network: PUNCH reflexive_addr 0x%08x failed to format",
+              punch->reflexive_addr);
+    return;
+  }
+
+  /* Find or admit the peer so we can record their SRFLX address. */
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr,
+                                                       &punch->sender_id);
+  if (peer == NULL) {
+    peer = connection_manager_add(&network->conn_mgr, &punch->sender_id,
+                                   NULL, network->pool);
+  }
+  if (peer == NULL) {
+    log_error("network: PUNCH — failed to admit peer for direct attempt");
+    return;
+  }
+
+  /* Record the sender's SRFLX so the periodic upgrade tick can retry. */
+  peer_connection_set_peer_reflexive(peer, host_str, punch->reflexive_port);
+  /* Mark the peer as TRYING_DIRECT so the connect (and any later retries via
+     the tick) are allowed. set_peer_nat_type with our local NAT type handles
+     the symmetric-→RELAY_ONLY override. */
+  conn_state_set_peer_nat_type(peer, network->local_nat_type);
+  if (network->local_nat_type != NAT_TYPE_SYMMETRIC &&
+      peer->conn_state == CONN_STATE_RELAY) {
+    conn_state_upgrade_to_direct(peer);
+  }
+
+  /* Attempt the simultaneous-open connect. */
+  peer->direct_attempts++;
+  int result = network_connect_peer(network, host_str, punch->reflexive_port);
+  if (result == 0) {
+    conn_state_on_direct_connected(peer);
+  } else {
+    conn_state_on_direct_failed(peer);
+  }
 }
 
 // Handle a WIRE_RELAY_CHALLENGE arriving via the relay: the responder signs
@@ -3917,6 +4149,65 @@ static void network_handle_friend_reconnect_tick(network_t* network, message_t* 
                                           friend_info->addresses,
                                           friend_info->address_count, true);
   }
+
+  /* Also attempt direct upgrades for any peer (friend or not) currently in
+     TRYING_DIRECT with a known SRFLX address. See audit #18. */
+  network_attempt_direct_upgrades(network);
+}
+
+/* Attempt a direct QUIC connect to each peer that is in TRYING_DIRECT state
+   and has a known peer SRFLX address. On success, transitions the peer to
+   DIRECT; on failure, transitions back to RELAY (so the next tick can
+   retry). Throttled by direct_attempts so we don't hammer the network
+   every tick.
+
+   For peers behind symmetric NAT (conn_state == RELAY_ONLY), send a
+   WIRE_RELAY_PUNCH via the relay to trigger the simultaneous-open on the
+   peer's side. Throttled to once per peer per tick window. See audit #18. */
+static void network_attempt_direct_upgrades(network_t* network) {
+  if (network == NULL) return;
+  if (network->quic_listener == NULL) return;  /* no QUIC support compiled in */
+
+  for (size_t index = 0; index < network->conn_mgr.peer_count; index++) {
+    peer_connection_t* peer = network->conn_mgr.peers[index];
+    if (peer == NULL) continue;
+    if (peer->conn_state == CONN_STATE_DIRECT) continue;
+
+    /* Symmetric NAT path: send PUNCH via the relay. The peer's simultaneous
+       connect to our SRFLX may succeed where our direct connect can't (our
+       NAT maps the outgoing connect port; the peer's connect creates the
+       mapping on its side). Throttle to one PUNCH per peer per tick window. */
+    if (peer->conn_state == CONN_STATE_RELAY_ONLY &&
+        peer->direct_attempts < 1) {
+      peer->direct_attempts++;
+      network_relay_send_punch(network, peer);
+      continue;
+    }
+
+    /* Cone NAT path: try a direct QUIC connect to the peer's SRFLX. */
+    if (!conn_state_should_try_direct(peer)) continue;
+    if (peer->peer_reflexive_host == NULL) continue;
+    /* Throttle: attempt at most 3 retries, then leave in RELAY until the
+       peer's next reconnect tick re-arms TRYING_DIRECT. */
+    if (peer->direct_attempts >= 3) {
+      conn_state_on_direct_failed(peer);
+      continue;
+    }
+    peer->direct_attempts++;
+    int result = network_connect_peer(network, peer->peer_reflexive_host,
+                                       peer->peer_reflexive_port);
+    if (result == 0) {
+      /* The QUIC listener will fire NETWORK_QUIC_CONNECTED, then the
+         salutation handler sets peer->conn_state = DIRECT. We also set
+         it here so conn_state_send immediately uses the direct path
+         before the salutation completes — but only the salutation
+         handler marks the peer relay_verified. */
+      conn_state_on_direct_connected(peer);
+      peer->direct_attempts = 0;
+    } else {
+      conn_state_on_direct_failed(peer);
+    }
+  }
 }
 
 // --- Start connections to bootstrap and friend peers ---
@@ -4777,6 +5068,36 @@ void network_dispatch(void* state, message_t* msg) {
       // Handled by stream actor — dispatch routes to reply_to
       break;
     }
+    case NETWORK_NAT_TYPE_DETECTED: {
+      /* nat_detect finished classification — update local_nat_type and
+         re-evaluate all existing peers' conn_state. Existing peers that
+         were admitted under the conservative PORT_RESTRICTED_CONE default
+         may need to drop to RELAY_ONLY if we are in fact behind symmetric
+         NAT, or stay in TRYING_DIRECT for cone types. See audit #18. */
+      network_nat_type_detected_payload_t* result =
+          (network_nat_type_detected_payload_t*)msg->payload;
+      if (result == NULL) break;
+      nat_type_e detected = (nat_type_e)result->nat_type;
+      network->local_nat_type = detected;
+      log_info("network: local NAT type detected — type=%d", (int)detected);
+
+      /* Re-evaluate each peer. Direct-connected peers stay DIRECT; the
+         detection only affects peers currently in RELAY/TRYING_DIRECT. */
+      for (size_t index = 0; index < network->conn_mgr.peer_count; index++) {
+        peer_connection_t* peer = network->conn_mgr.peers[index];
+        if (peer == NULL) continue;
+        if (peer->conn_state == CONN_STATE_DIRECT) continue;
+        conn_state_set_peer_nat_type(peer, detected);
+        /* If we just learned we're behind symmetric NAT, set_peer_nat_type
+           already forced RELAY_ONLY. Otherwise, ensure the peer is in
+           TRYING_DIRECT so we attempt a direct upgrade. */
+        if (detected != NAT_TYPE_SYMMETRIC &&
+            peer->conn_state == CONN_STATE_RELAY) {
+          conn_state_upgrade_to_direct(peer);
+        }
+      }
+      break;
+    }
     case NETWORK_RELAY_RECEIVED: {
       // Message received via relay — decode CBOR wire message and re-dispatch
       wire_relay_received_t* relay_payload = (wire_relay_received_t*)msg->payload;
@@ -4815,6 +5136,21 @@ void network_dispatch(void* state, message_t* msg) {
           // Store the relay endpoint ID so we can route messages back
           if (existing != NULL && relay_payload->src_endpoint_id != 0) {
             existing->relay_endpoint_id = relay_payload->src_endpoint_id;
+          }
+          /* Initialize the peer's conn_state based on our local NAT type.
+             New peers default to CONN_STATE_RELAY (peer_connection_create);
+             for non-symmetric local NAT we upgrade to TRYING_DIRECT so the
+             periodic direct-upgrade tick can attempt a QUIC connect to the
+             peer's SRFLX address. For symmetric local NAT, set_peer_nat_type
+             forces RELAY_ONLY. Skip if the peer is already DIRECT (was
+             directly connected before this relayed message arrived). See
+             audit #18. */
+          if (existing != NULL && existing->conn_state != CONN_STATE_DIRECT) {
+            conn_state_set_peer_nat_type(existing, network->local_nat_type);
+            if (network->local_nat_type != NAT_TYPE_SYMMETRIC &&
+                existing->conn_state == CONN_STATE_RELAY) {
+              conn_state_upgrade_to_direct(existing);
+            }
           }
           // Also ensure the sender is in the ring set for routing
           net_node_t* ring_node = ring_set_find_by_id(network->rings, &sender_id);
@@ -5193,6 +5529,26 @@ void network_dispatch(void* state, message_t* msg) {
             // The challenger verifies BLAKE3(public_key)==responder_id and the
             // signature, then sets peer->relay_verified=true.
             network_handle_relay_challenge_response(network, wire_msg);
+            break;
+          }
+          case WIRE_RELAY_PUNCH: {
+            /* ICE simultaneous-open signal (audit #18): peer A sent a PUNCH
+               via the relay with A's SRFLX address. Immediately attempt a
+               QUIC connect to A's SRFLX — both sides connect at the same
+               time, creating NAT mappings that allow the incoming connection.
+               On success, conn_state_send routes via the direct path. The
+               framework frees dispatch_msg.payload (= punch) via the
+               payload_destroy = free set at the top of the inner switch. */
+            wire_relay_punch_t* punch = get_clear_memory(sizeof(wire_relay_punch_t));
+            if (punch != NULL) {
+              if (wire_relay_punch_decode(wire_msg, punch) == 0) {
+                dispatch_msg.payload = punch;
+                network_handle_relay_punch(network, punch);
+              } else {
+                free(punch);
+                log_error("RELAY_RECEIVED: failed to decode WIRE_RELAY_PUNCH");
+              }
+            }
             break;
           }
           default:

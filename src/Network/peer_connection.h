@@ -63,6 +63,13 @@ typedef struct peer_connection_t {
   nat_type_e peer_nat_type;
   uint32_t direct_attempts;
 
+  /* Peer's server-reflexive address (learned from the peer's peer_info
+     SRFLX candidate). Used by the periodic direct-upgrade tick to attempt
+     a QUIC connect when conn_state is TRYING_DIRECT. Heap-allocated host
+     string; freed in peer_connection_destroy. NULL if unknown. See #18. */
+  char*    peer_reflexive_host;
+  uint16_t peer_reflexive_port;
+
   uint64_t rpc_count[PEER_RPC_TYPE_COUNT];
   uint64_t rpc_success[PEER_RPC_TYPE_COUNT];
   uint64_t rpc_failure[PEER_RPC_TYPE_COUNT];
@@ -93,6 +100,13 @@ peer_connection_t* peer_connection_create(const node_id_t* remote_id,
                                           scheduler_pool_t* pool);
 void peer_connection_destroy(peer_connection_t* peer);
 void peer_connection_dispatch(void* state, message_t* msg);
+
+/* Record the peer's server-reflexive address (learned from the peer's
+   peer_info SRFLX candidate). Copies host (strdup) so the caller keeps
+   ownership of its own buffer. Passing NULL host clears any previously
+   stored SRFLX address. See audit #18. */
+void peer_connection_set_peer_reflexive(peer_connection_t* peer,
+                                         const char* host, uint16_t port);
 
 bool peer_eabf_subscribe(peer_connection_t* peer, const uint8_t* topic, size_t topic_len);
 bool peer_eabf_check(const peer_connection_t* peer, const uint8_t* topic, size_t topic_len,

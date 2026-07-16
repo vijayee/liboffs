@@ -84,11 +84,38 @@ void peer_connection_destroy(peer_connection_t* peer) {
 
   timing_wheel_deinit(&peer->eabf_wheel);
 
+  /* Free the peer's SRFLX host string (heap-allocated from peer_info). NULL
+     when the peer was admitted without peer_info (e.g. relay-only). */
+  free(peer->peer_reflexive_host);
+  peer->peer_reflexive_host = NULL;
+
   if (peer->actor.pool != NULL) {
     actor_destroy(&peer->actor);
   }
 
   free(peer);
+}
+
+void peer_connection_set_peer_reflexive(peer_connection_t* peer,
+                                         const char* host, uint16_t port) {
+  if (peer == NULL) return;
+
+  /* Clear any previously stored SRFLX host. */
+  free(peer->peer_reflexive_host);
+  peer->peer_reflexive_host = NULL;
+  peer->peer_reflexive_port = 0;
+
+  if (host == NULL || host[0] == '\0') return;
+
+  /* strdup via get_clear_memory so the buffer is managed by the project
+     allocator wrappers (consistent with the rest of the codebase). */
+  size_t host_len = strlen(host);
+  char* host_copy = get_clear_memory(host_len + 1);
+  if (host_copy == NULL) return;
+  memcpy(host_copy, host, host_len);
+  host_copy[host_len] = '\0';
+  peer->peer_reflexive_host = host_copy;
+  peer->peer_reflexive_port = port;
 }
 
 void peer_connection_dispatch(void* state, message_t* msg) {
