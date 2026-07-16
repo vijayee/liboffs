@@ -280,6 +280,9 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
 
 #ifdef HAS_MSQUIC
   network->msquic = offs_msquic_open();
+  if (network->msquic != NULL) {
+    network->quic_listener = quic_listener_create(network, pool);
+  }
 #endif
 
   gossip_handle_init(&network->gossip,
