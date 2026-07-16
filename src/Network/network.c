@@ -212,7 +212,12 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   eabf_ttl_table_init(&network->eabf_ttl, 64);
   network->wanted_list = wanted_list_create();
   hebbian_table_init(&network->hebbian, 32, config->hebbian_decay_factor);
+  // Cap per-peer tables so a malicious peer can't mint fake node_ids and
+  // grow them unbounded. See audit #14.
+  hebbian_table_set_max_count(&network->hebbian, 1024);
   rate_limit_table_init(&network->rate_limits, 32);
+  rate_limit_table_set_max_count(&network->rate_limits, 1024);
+  eabf_table_set_max_count(&network->eabf_table, 256);
   network->log = NULL;
   network->topology_metrics = topology_metrics_create(pool);
   connection_manager_init(&network->conn_mgr, 16, NULL);
@@ -441,6 +446,20 @@ void network_destroy(network_t* network) {
     network->relay_challenges = NULL;
     network->relay_challenge_count = 0;
     network->relay_challenge_capacity = 0;
+  }
+
+  // Free the store_pending table (audit #21). Each entry holds a referenced
+  // hash buffer — release those before freeing the array.
+  if (network->store_pending != NULL) {
+    for (size_t index = 0; index < network->store_pending_count; index++) {
+      if (network->store_pending[index].hash != NULL) {
+        DESTROY(network->store_pending[index].hash, buffer);
+      }
+    }
+    free(network->store_pending);
+    network->store_pending = NULL;
+    network->store_pending_count = 0;
+    network->store_pending_capacity = 0;
   }
 #ifdef HAS_MSQUIC
   if (network->msquic != NULL) {
@@ -736,7 +755,7 @@ static void network_handle_ping_response(network_t* network, message_t* msg) {
     rtt_ms = now_ms - response->echo_time;
   }
   // Update latency cache with the measured RTT
-  latency_cache_insert(network->latency_cache, &response->sender_id, 0, 0, (float)rtt_ms);
+  latency_cache_insert(network->latency_cache, &response->sender_id, 0, 0, (float)rtt_ms, now_ms);
   // Update the peer's RTT in the connection manager
   peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &response->sender_id);
   if (peer != NULL) {
@@ -1286,6 +1305,85 @@ static void network_handle_relay_challenge_response(network_t* network,
   free(response.signature);
 }
 
+// --- StoreBlock pending aggregation (audit #21) ---
+
+// Append a new store_pending entry. Returns the entry on success, NULL on
+// allocation failure. The hash buffer is referenced by the caller (we
+// REFERENCE here for the table's ownership).
+static store_pending_t* network_store_pending_append(network_t* network,
+                                                     uint64_t message_id,
+                                                     actor_t* reply_to,
+                                                     buffer_t* hash,
+                                                     uint32_t fib,
+                                                     uint8_t replicas_needed,
+                                                     uint64_t deadline_ms) {
+  if (network->store_pending_count == network->store_pending_capacity) {
+    size_t new_capacity = network->store_pending_capacity == 0
+                          ? 8 : network->store_pending_capacity * 2;
+    store_pending_t* new_pending = realloc(network->store_pending,
+                                           sizeof(store_pending_t) * new_capacity);
+    if (new_pending == NULL) return NULL;
+    network->store_pending = new_pending;
+    network->store_pending_capacity = new_capacity;
+  }
+  store_pending_t* entry = &network->store_pending[network->store_pending_count++];
+  entry->message_id = message_id;
+  entry->reply_to = reply_to;
+  entry->hash = REFERENCE(hash, buffer_t);
+  entry->fib = fib;
+  entry->replicas_needed = replicas_needed;
+  entry->replicas_remaining = replicas_needed;
+  entry->accepted_count = 0;
+  entry->deadline_ms = deadline_ms;
+  return entry;
+}
+
+static store_pending_t* network_store_pending_find(network_t* network,
+                                                    uint64_t message_id) {
+  for (size_t index = 0; index < network->store_pending_count; index++) {
+    if (network->store_pending[index].message_id == message_id) {
+      return &network->store_pending[index];
+    }
+  }
+  return NULL;
+}
+
+static void network_store_pending_remove(network_t* network, size_t index) {
+  if (index >= network->store_pending_count) return;
+  if (network->store_pending[index].hash != NULL) {
+    DESTROY(network->store_pending[index].hash, buffer);
+  }
+  for (size_t shift = index; shift < network->store_pending_count - 1; shift++) {
+    network->store_pending[shift] = network->store_pending[shift + 1];
+  }
+  network->store_pending_count--;
+}
+
+// Send the aggregated StoreBlock result to reply_to and remove the entry.
+// `accepted` is 1 if at least one replica (local or remote) accepted.
+static void network_store_pending_finalize(network_t* network,
+                                            store_pending_t* entry,
+                                            size_t entry_index) {
+  if (entry == NULL || entry->reply_to == NULL) {
+    network_store_pending_remove(network, entry_index);
+    return;
+  }
+  network_store_block_result_payload_t* result_payload =
+      get_clear_memory(sizeof(network_store_block_result_payload_t));
+  if (result_payload != NULL) {
+    result_payload->accepted = entry->accepted_count > 0 ? 1 : 0;
+    result_payload->replicas = (uint32_t)entry->accepted_count;
+    result_payload->hash = REFERENCE(entry->hash, buffer_t);
+    result_payload->reply_to = NULL;
+    message_t result_msg = {0};
+    result_msg.type = NETWORK_STORE_BLOCK_RESULT;
+    result_msg.payload = result_payload;
+    result_msg.payload_destroy = free;
+    actor_send(entry->reply_to, &result_msg);
+  }
+  network_store_pending_remove(network, entry_index);
+}
+
 static void network_handle_request_timeout_tick(network_t* network,
                                                  message_t* msg) {
   (void)msg;
@@ -1343,6 +1441,21 @@ static void network_handle_request_timeout_tick(network_t* network,
       /* Don't advance — the swap moved a new entry into this slot. */
     } else {
       relay_idx++;
+    }
+  }
+
+  // Sweep store_pending — expired entries get a best-effort aggregated result
+  // with the current accepted_count, then are removed. The sweep walks in
+  // place with swap-with-last so we don't skip the entry that moves into the
+  // evicted slot. See audit #21.
+  size_t store_idx = 0;
+  while (store_idx < network->store_pending_count) {
+    store_pending_t* pending = &network->store_pending[store_idx];
+    if (pending->deadline_ms != 0 && pending->deadline_ms <= now_ms) {
+      network_store_pending_finalize(network, pending, store_idx);
+      /* Don't advance — the finalize removed the slot. */
+    } else {
+      store_idx++;
     }
   }
 }
@@ -1635,11 +1748,12 @@ static void network_handle_closest_nodes_response(network_t* network, message_t*
   }
 
   // Update latency cache with ring sample latencies
+  uint64_t now_ms = (uint64_t)time(NULL) * 1000;
   for (uint8_t index = 0; index < response->ring_count && index < CLOSEST_NODES_MAX_RING_SAMPLES; index++) {
     if (response->ring_latencies_us[index] > 0) {
       float latency_ms = (float)response->ring_latencies_us[index] / 1000.0f;
       latency_cache_insert(network->latency_cache, &response->ring_nodes[index],
-                           0, 0, latency_ms);
+                           0, 0, latency_ms, now_ms);
     }
   }
 
@@ -1647,7 +1761,7 @@ static void network_handle_closest_nodes_response(network_t* network, message_t*
     // Also update latency for the closest node
     float latency_ms = (float)response->closest_latency_us / 1000.0f;
     latency_cache_insert(network->latency_cache, &response->closest,
-                         0, 0, latency_ms);
+                         0, 0, latency_ms, now_ms);
   }
 
   // Forward response along the path (pop the last hop to route back)
@@ -1752,11 +1866,12 @@ static void network_handle_measure_nodes_response(network_t* network, message_t*
   }
 
   // Update latency cache with each target/latency pair
+  uint64_t now_ms = (uint64_t)time(NULL) * 1000;
   for (uint8_t index = 0; index < response->target_count && index < MEASURE_NODES_MAX_TARGETS; index++) {
     if (response->latencies_us[index] > 0) {
       float latency_ms = (float)response->latencies_us[index] / 1000.0f;
       latency_cache_insert(network->latency_cache, &response->targets[index],
-                           0, 0, latency_ms);
+                           0, 0, latency_ms, now_ms);
     }
   }
 }
@@ -2985,15 +3100,40 @@ static void network_handle_store_block_response(network_t* network, message_t* m
     } else {
       // Origin (self not in path, or self is path[0]): the decline reached the
       // origin. The receive log at the top of this handler already recorded
-      // the decline (direction code 3). The origin fires its StoreBlock
-      // result to the caller immediately on dispatch (NETWORK_LOCAL_STORE_BLOCK)
-      // based on the local store_block_execute decision, before any remote
-      // responses arrive — so there is no pending-request bookkeeping here to
-      // decrement. The decline is surfaced via the receive log so operators
-      // can see that a replica slot went unfilled. Aggregating per-message-id
-      // decline counts into the result_payload would require a pending-tracking
-      // structure (deferred — the fire-and-forget StoreBlock result contract
-      // is a separate, larger change).
+      // the decline (direction code 3). The pending-store tracker (audit #21)
+      // accounts for the unfilled slot below — see the store_pending tail.
+    }
+  }
+
+  // Origin aggregation: if this is our StoreBlock (we're the origin, not an
+  // intermediate hop), decrement replicas_remaining on the matching
+  // store_pending entry. When all replicas have responded (or the deadline
+  // passes — swept by NETWORK_REQUEST_TIMEOUT_TICK), send the aggregated
+  // result to reply_to. See audit #21.
+  {
+    int origin_self_index = -1;
+    for (int index = 0; index < (int)response->path_len; index++) {
+      if (node_id_equals(&response->path[index], &network->authority->local_id)) {
+        origin_self_index = index;
+        break;
+      }
+    }
+    // origin if self not in path (origin hasn't appended itself) or self is path[0]
+    if (origin_self_index <= 0) {
+      store_pending_t* pending = network_store_pending_find(network,
+                                                             response->message_id);
+      if (pending != NULL) {
+        if (response->accepted) {
+          pending->accepted_count++;
+        }
+        if (pending->replicas_remaining > 0) {
+          pending->replicas_remaining--;
+        }
+        if (pending->replicas_remaining == 0) {
+          size_t pending_index = (size_t)(pending - network->store_pending);
+          network_store_pending_finalize(network, pending, pending_index);
+        }
+      }
     }
   }
 }
@@ -3772,6 +3912,88 @@ void network_start_connections(network_t* network) {
 
 // --- Network dispatch ---
 
+// Map a wire type to the rate-limit RPC type. Returns RPC_TYPE_COUNT for
+// types we don't rate-limit (responses, salutation, control messages).
+// See audit #12.
+static rpc_type_e _wire_type_to_rpc_type(uint8_t wire_type) {
+  switch (wire_type) {
+    case WIRE_FIND_BLOCK:    return RPC_TYPE_FIND_BLOCK;
+    case WIRE_STORE_BLOCK:   return RPC_TYPE_STORE_BLOCK;
+    case WIRE_SEEKING_BLOCKS:return RPC_TYPE_SEEKING_BLOCKS;
+    case WIRE_PING_CAPACITY: return RPC_TYPE_PING_CAPACITY;
+    case WIRE_PING:          return RPC_TYPE_PING;
+    default:                 return RPC_TYPE_COUNT;
+  }
+}
+
+// Build and send a WIRE_RATE_LIMITED back to the peer so they know to back
+// off. Best-effort — if the send fails, we still drop the original message.
+// See audit #12.
+static void network_send_rate_limited(network_t* network,
+                                       peer_connection_t* peer,
+                                       const node_id_t* sender_id,
+                                       uint32_t relay_endpoint_id,
+                                       uint8_t wire_type, rpc_type_e rpc_type,
+                                       uint64_t now_ms) {
+  if (network == NULL || network->authority == NULL) return;
+  wire_rate_limited_t rl;
+  memset(&rl, 0, sizeof(rl));
+  rl.message_id = 0;
+  memcpy(&rl.sender_id, &network->authority->local_id, sizeof(node_id_t));
+  rl.type = wire_type;
+  rl.retry_after_ms = rate_limit_retry_after(&network->rate_limits,
+                                              sender_id, rpc_type, now_ms);
+  rl.current_limit = rate_limit_effective_rate(&network->rate_limits, rpc_type);
+  cbor_item_t* cbor = wire_rate_limited_encode(&rl);
+  if (cbor == NULL) return;
+  if (peer != NULL) {
+    conn_state_send(network, peer, cbor);
+  } else if (network->relay != NULL && relay_endpoint_id != 0) {
+    // Wrap in a relay envelope and dispatch via the relay client actor.
+    size_t cbor_len = 0;
+    unsigned char* cbor_data = NULL;
+    size_t serialized = cbor_serialize_alloc(cbor, &cbor_data, &cbor_len);
+    if (cbor_data != NULL && serialized > 0) {
+      wire_relay_send_t* relay_send =
+          get_clear_memory(sizeof(wire_relay_send_t));
+      if (relay_send != NULL) {
+        relay_send->src_endpoint_id = network->relay->local_endpoint_id;
+        relay_send->dest_endpoint_id = relay_endpoint_id;
+        relay_send->payload = cbor_data;
+        relay_send->payload_len = cbor_len;
+        message_t relay_msg;
+        memset(&relay_msg, 0, sizeof(relay_msg));
+        relay_msg.type = RELAY_CLIENT_SEND;
+        relay_msg.payload = relay_send;
+        relay_msg.payload_destroy = (void (*)(void*))wire_relay_send_destroy;
+        actor_send(&network->relay->actor, &relay_msg);
+      } else {
+        free(cbor_data);
+      }
+    } else if (cbor_data != NULL) {
+      free(cbor_data);
+    }
+  }
+  cbor_decref(&cbor);
+}
+
+// Returns true if the message is allowed, false if rate-limited (and sends
+// a WIRE_RATE_LIMITED back to the peer on reject). See audit #12.
+static bool network_rate_limit_check(network_t* network,
+                                     const node_id_t* sender_id,
+                                     peer_connection_t* peer,
+                                     uint32_t relay_endpoint_id,
+                                     uint8_t wire_type, uint64_t now_ms) {
+  rpc_type_e rpc = _wire_type_to_rpc_type(wire_type);
+  if (rpc == RPC_TYPE_COUNT) return true;
+  if (rate_limit_check(&network->rate_limits, sender_id, rpc, now_ms)) {
+    return true;
+  }
+  network_send_rate_limited(network, peer, sender_id, relay_endpoint_id,
+                            wire_type, rpc, now_ms);
+  return false;
+}
+
 void network_dispatch(void* state, message_t* msg) {
   network_t* network = (network_t*)state;
   switch (msg->type) {
@@ -3934,6 +4156,22 @@ void network_dispatch(void* state, message_t* msg) {
           pending_quic_find(network, quic_data->quic_connection) != NULL) {
         cbor_decref(&wire_msg);
         break;
+      }
+      // Inbound rate limiting — enforce after the salutation/auth check (so
+      // the sender is known) but before the message is dispatched. The key
+      // is the authenticated peer's remote_node_id (NOT the wire sender_id,
+      // which could be spoofed). See audit #12.
+      if (type != WIRE_SALUTATION && type != WIRE_RATE_LIMITED) {
+        peer_connection_t* auth_peer = connection_manager_lookup_by_quic(
+            &network->conn_mgr, quic_data->quic_connection);
+        if (auth_peer != NULL) {
+          uint64_t now_ms = (uint64_t)time(NULL) * 1000;
+          if (!network_rate_limit_check(network, &auth_peer->remote_node_id,
+                                        auth_peer, 0, type, now_ms)) {
+            cbor_decref(&wire_msg);
+            break;
+          }
+        }
       }
       message_t dispatch_msg;
       memset(&dispatch_msg, 0, sizeof(dispatch_msg));
@@ -4277,6 +4515,11 @@ void network_dispatch(void* state, message_t* msg) {
           peer->quic_connection = NULL;
           peer->quic_stream = NULL;
 #endif
+          // Drop per-peer state keyed on the disconnected peer's node_id so
+          // the tables don't accumulate stale entries. See audit #14.
+          hebbian_table_remove(&network->hebbian, &peer->remote_node_id);
+          eabf_table_remove(&network->eabf_table, &peer->remote_node_id);
+          rate_limit_table_remove(&network->rate_limits, &peer->remote_node_id);
           connection_manager_remove(&network->conn_mgr, &peer->remote_node_id);
         } else {
           // Unauthenticated — remove from pending list
@@ -4420,20 +4663,36 @@ void network_dispatch(void* state, message_t* msg) {
           }
         }
 
-        // Notify the stream actor if a reply_to was provided
+        // Aggregate the result if a reply_to was provided. The origin sends
+        // a single NETWORK_STORE_BLOCK_RESULT once all remote replicas respond
+        // (or the deadline passes — swept by NETWORK_REQUEST_TIMEOUT_TICK).
+        // The local decision counts as one acceptance if result == ACCEPTED.
+        // See audit #21.
         if (payload->reply_to != NULL) {
-          network_store_block_result_payload_t* result_payload =
-              get_clear_memory(sizeof(network_store_block_result_payload_t));
-          if (result_payload != NULL) {
-            result_payload->accepted = (result == STORE_BLOCK_ACCEPTED) ? 1 : 0;
-            result_payload->replicas = (result == STORE_BLOCK_ACCEPTED) ? (uint32_t)next_hop_count : 0;
-            result_payload->hash = REFERENCE(payload->hash, buffer_t);
-            result_payload->reply_to = NULL;
-            message_t result_msg = {0};
-            result_msg.type = NETWORK_STORE_BLOCK_RESULT;
-            result_msg.payload = result_payload;
-            result_msg.payload_destroy = free;
-            actor_send(payload->reply_to, &result_msg);
+          uint64_t deadline_ms =
+              now_ts + (uint64_t)network->request_timeout_ms;
+          store_pending_t* pending = network_store_pending_append(
+              network, state.message_id, payload->reply_to, payload->hash,
+              state.block_fib, state.replicas_needed, deadline_ms);
+          if (pending != NULL) {
+            // The local decision counts as one replica if we stored locally.
+            if (result == STORE_BLOCK_ACCEPTED) {
+              pending->accepted_count = 1;
+            }
+            // If we didn't forward (no next hops), the result is final — the
+            // origin can be notified immediately. Otherwise, replicas_remaining
+            // tracks the outstanding remote responses.
+            if (next_hop_count == 0) {
+              pending->replicas_remaining = 0;
+              // Finalize immediately (no remote responses to wait for).
+              // Find the entry again — append may have moved the array.
+              store_pending_t* fresh = network_store_pending_find(
+                  network, state.message_id);
+              if (fresh != NULL) {
+                size_t fresh_index = (size_t)(fresh - network->store_pending);
+                network_store_pending_finalize(network, fresh, fresh_index);
+              }
+            }
           }
         }
       }
@@ -4540,6 +4799,24 @@ void network_dispatch(void* state, message_t* msg) {
         }
 
         uint8_t type = wire_get_type(wire_msg);
+        // Inbound rate limiting for relayed messages — enforce after the
+        // sender_id is extracted (so we have a key) but before dispatch. The
+        // key is the wire sender_id (relay trust is a separate concern; the
+        // signed-nonce challenge gates admission). See audit #12.
+        if (type != WIRE_RATE_LIMITED && type != WIRE_RELAY_CHALLENGE &&
+            type != WIRE_RELAY_CHALLENGE_RESPONSE) {
+          node_id_t rl_sender;
+          memset(&rl_sender, 0, sizeof(rl_sender));
+          if (wire_extract_sender_id(wire_msg, &rl_sender) == 0) {
+            uint64_t now_ms = (uint64_t)time(NULL) * 1000;
+            if (!network_rate_limit_check(network, &rl_sender, NULL,
+                                          relay_payload->src_endpoint_id,
+                                          type, now_ms)) {
+              cbor_decref(&wire_msg);
+              break;
+            }
+          }
+        }
         message_t dispatch_msg;
         memset(&dispatch_msg, 0, sizeof(dispatch_msg));
         dispatch_msg.type = type;

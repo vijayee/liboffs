@@ -640,7 +640,7 @@ TEST(LatencyCacheTest, InsertAndGet) {
   node_id_t id = {};
   memset(id.hash, 0xAA, NODE_ID_HASH_SIZE);
 
-  latency_cache_insert(cache, &id, 0x0A000001, 8080, 15.5f);
+  latency_cache_insert(cache, &id, 0x0A000001, 8080, 15.5f, 1000);
 
   float latency_ms = 0;
   EXPECT_EQ(latency_cache_get(cache, &id, &latency_ms), 0);
@@ -654,8 +654,8 @@ TEST(LatencyCacheTest, UpdateInPlace) {
   node_id_t id = {};
   memset(id.hash, 0xBB, NODE_ID_HASH_SIZE);
 
-  latency_cache_insert(cache, &id, 0x0A000001, 8080, 10.0f);
-  latency_cache_insert(cache, &id, 0x0A000001, 8080, 20.0f);
+  latency_cache_insert(cache, &id, 0x0A000001, 8080, 10.0f, 1000);
+  latency_cache_insert(cache, &id, 0x0A000001, 8080, 20.0f, 1000);
 
   float latency_ms = 0;
   EXPECT_EQ(latency_cache_get(cache, &id, &latency_ms), 0);
@@ -674,12 +674,12 @@ TEST(LatencyCacheTest, Eviction) {
   node_id_t id3 = {};
   memset(id3.hash, 0x33, NODE_ID_HASH_SIZE);
 
-  latency_cache_insert(cache, &id1, 1, 8080, 10.0f);
-  latency_cache_insert(cache, &id2, 2, 8080, 20.0f);
+  latency_cache_insert(cache, &id1, 1, 8080, 10.0f, 1000);
+  latency_cache_insert(cache, &id2, 2, 8080, 20.0f, 1000);
   EXPECT_EQ(cache->count, 2u);
 
   // Third insert should evict oldest (id1)
-  latency_cache_insert(cache, &id3, 3, 8080, 30.0f);
+  latency_cache_insert(cache, &id3, 3, 8080, 30.0f, 1000);
   EXPECT_EQ(cache->count, 2u);
 
   // id1 should be gone
@@ -3554,7 +3554,7 @@ TEST_F(ClosestNodesExecuteTest, BetaConvergenceWhenLatencyCached) {
   // Insert target into latency cache with some latency
   node_id_t target_id;
   node_id_from_string("cn-beta-target", &target_id);
-  latency_cache_insert(latency_cache, &target_id, 0x0A000001, 8080, 10.0f);
+  latency_cache_insert(latency_cache, &target_id, 0x0A000001, 8080, 10.0f, 1000);
 
   // With beta 3/4, we converge when current * 4 <= best * 3
   // current = 10000us, best = 10000us => 10000*4=40000 <= 10000*3=30000 => FALSE (no convergence)
@@ -3583,7 +3583,7 @@ TEST_F(ClosestNodesExecuteTest, BetaConvergenceWithTightRatio) {
   // Insert target into latency cache with low latency
   node_id_t target_id;
   node_id_from_string("cn-converge-target", &target_id);
-  latency_cache_insert(latency_cache, &target_id, 0x0A000001, 8080, 10.0f);
+  latency_cache_insert(latency_cache, &target_id, 0x0A000001, 8080, 10.0f, 1000);
 
   // With beta 1/1, we converge when current * 1 <= best * 1 (i.e., exact match)
   // current = best = 10000us => 10000 <= 10000 => TRUE (convergence)
@@ -3653,8 +3653,8 @@ TEST_F(MeasureNodesExecuteTest, CachedLatencies) {
   node_id_t target_a = {}, target_b = {};
   memset(target_a.hash, 0xAA, NODE_ID_HASH_SIZE);
   memset(target_b.hash, 0xBB, NODE_ID_HASH_SIZE);
-  latency_cache_insert(latency_cache, &target_a, 0x0A000001, 8080, 15.5f);
-  latency_cache_insert(latency_cache, &target_b, 0x0A000002, 8081, 25.0f);
+  latency_cache_insert(latency_cache, &target_a, 0x0A000001, 8080, 15.5f, 1000);
+  latency_cache_insert(latency_cache, &target_b, 0x0A000002, 8081, 25.0f, 1000);
 
   wire_measure_nodes_t query = {};
   query.message_id = 1;

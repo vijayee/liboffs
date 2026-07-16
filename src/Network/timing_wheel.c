@@ -7,6 +7,12 @@
 #include <string.h>
 
 void timing_wheel_init(timing_wheel_t* wheel, size_t slot_count, uint64_t slot_duration_ms) {
+  // Guard against slot_count == 0 or slot_duration_ms == 0 — both would
+  // produce a divide-by-zero in timing_wheel_add (slots_ahead = ttl_ms /
+  // slot_duration_ms) and timing_wheel_advance (modulo slot_count). See
+  // audit #33.
+  if (slot_count == 0) slot_count = 1;
+  if (slot_duration_ms == 0) slot_duration_ms = 1;
   wheel->slots = get_clear_memory(slot_count * sizeof(timing_wheel_slot_t));
   wheel->slot_count = slot_count;
   wheel->slot_duration_ms = slot_duration_ms;

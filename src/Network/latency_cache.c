@@ -21,7 +21,8 @@ void latency_cache_destroy(latency_cache_t* cache) {
 }
 
 int latency_cache_insert(latency_cache_t* cache, const node_id_t* id,
-                         uint32_t addr, uint16_t port, float latency_ms) {
+                         uint32_t addr, uint16_t port, float latency_ms,
+                         uint64_t now_ms) {
   if (cache == NULL || id == NULL) return -1;
 
   // Check if entry exists — update in place
@@ -30,6 +31,7 @@ int latency_cache_insert(latency_cache_t* cache, const node_id_t* id,
       cache->entries[index].latency_ms = latency_ms;
       cache->entries[index].addr = addr;
       cache->entries[index].port = port;
+      cache->entries[index].timestamp_ms = now_ms;
       return 0;
     }
   }
@@ -47,7 +49,10 @@ int latency_cache_insert(latency_cache_t* cache, const node_id_t* id,
   entry->addr = addr;
   entry->port = port;
   entry->latency_ms = latency_ms;
-  entry->timestamp_ms = 0;  // Caller should set via external timer
+  // Stamp the entry with the current time so the eviction sweep computes a
+  // real age instead of `now - 0` (which would purge every entry on the first
+  // sweep). See audit #27.
+  entry->timestamp_ms = now_ms;
   cache->count++;
   return 0;
 }
