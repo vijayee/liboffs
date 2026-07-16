@@ -6,6 +6,7 @@
 #include "peer_info.h"
 #include "connection_manager.h"
 #include "wire.h"
+#include "peer_verify.h"
 #include "quic_listener.h"
 #include "find_block.h"
 #include "store_block.h"
@@ -362,6 +363,7 @@ void network_destroy(network_t* network) {
   pending_quic_t* pending = network->pending_connections;
   while (pending != NULL) {
     pending_quic_t* next = pending->next;
+    free(pending->peer_cert_der);
     free(pending);
     pending = next;
   }
@@ -454,16 +456,25 @@ static pending_quic_t* pending_quic_find(network_t* network, void* quic_connecti
 
 static void pending_quic_add(network_t* network, void* quic_connection,
                              void* quic_stream,
-                             const struct sockaddr_storage* peer_addr) {
-  // Avoid duplicates
-  if (pending_quic_find(network, quic_connection) != NULL) return;
+                             const struct sockaddr_storage* peer_addr,
+                             uint8_t* peer_cert_der, size_t peer_cert_der_len) {
+  // Avoid duplicates. On duplicate, free the cert — it isn't needed.
+  if (pending_quic_find(network, quic_connection) != NULL) {
+    free(peer_cert_der);
+    return;
+  }
   pending_quic_t* entry = get_clear_memory(sizeof(pending_quic_t));
-  if (entry == NULL) return;
+  if (entry == NULL) {
+    free(peer_cert_der);
+    return;
+  }
   entry->quic_connection = quic_connection;
   entry->quic_stream = quic_stream;
   if (peer_addr != NULL) {
     memcpy(&entry->peer_addr, peer_addr, sizeof(struct sockaddr_storage));
   }
+  entry->peer_cert_der = peer_cert_der;
+  entry->peer_cert_der_len = peer_cert_der_len;
   entry->next = network->pending_connections;
   network->pending_connections = entry;
 }
@@ -525,6 +536,37 @@ static void network_handle_salutation(network_t* network, message_t* msg,
     return;
   }
 
+  // Pin the salutation public_key to the TLS leaf-cert public key. The
+  // BLAKE3 check above only verifies self-consistency; without this pin,
+  // any CA-admitted node can lift a victim's public_key from gossip and
+  // impersonate them. See audit #8.
+  if (pending->peer_cert_der != NULL && pending->peer_cert_der_len > 0) {
+    uint8_t* cert_pubkey = NULL;
+    size_t cert_pubkey_len = 0;
+    if (peer_verify_extract_pubkey(pending->peer_cert_der,
+                                   pending->peer_cert_der_len,
+                                   &cert_pubkey, &cert_pubkey_len) != 0) {
+      log_error("salutation: failed to extract peer cert public key");
+      wire_salutation_destroy(salut);
+      free(pending->peer_cert_der);
+      free(pending);
+      return;
+    }
+    bool pubkey_matches = (cert_pubkey_len == salut->public_key_len &&
+                          memcmp(cert_pubkey, salut->public_key, cert_pubkey_len) == 0);
+    free(cert_pubkey);
+    if (!pubkey_matches) {
+      log_error("salutation: public_key does not match the TLS leaf-cert key "
+                "(impersonation attempt?)");
+      wire_salutation_destroy(salut);
+      free(pending->peer_cert_der);
+      free(pending);
+      return;
+    }
+  }
+  // If no peer cert (allow_insecure mode), the pin is a no-op; the BLAKE3
+  // check above is the only guard. This is the documented insecure-mode behavior.
+
   // Add peer to connection manager with verified identity
   peer_connection_t* peer = connection_manager_add(
       &network->conn_mgr, &salut->sender_id, &pending->peer_addr, network->pool);
@@ -561,6 +603,7 @@ static void network_handle_salutation(network_t* network, message_t* msg,
     }
   }
 
+  free(pending->peer_cert_der);
   free(pending);
 
   wire_salutation_destroy(salut);
@@ -3726,7 +3769,14 @@ void network_dispatch(void* state, message_t* msg) {
       // New QUIC connection — add to pending (salutation deferred via actor message)
       quic_connected_payload_t* quic_conn = (quic_connected_payload_t*)msg->payload;
       if (quic_conn != NULL) {
-        pending_quic_add(network, quic_conn->connection, quic_conn->stream, &quic_conn->peer_addr);
+        // Steal the peer cert so the pending entry owns it; the payload
+        // destroy won't free it after this. See audit #8.
+        uint8_t* cert_der = quic_conn->peer_cert_der;
+        size_t cert_der_len = quic_conn->peer_cert_der_len;
+        quic_conn->peer_cert_der = NULL;
+        quic_conn->peer_cert_der_len = 0;
+        pending_quic_add(network, quic_conn->connection, quic_conn->stream,
+                         &quic_conn->peer_addr, cert_der, cert_der_len);
       }
       break;
     }
@@ -3747,6 +3797,7 @@ void network_dispatch(void* state, message_t* msg) {
           // Unauthenticated — remove from pending list
           pending_quic_t* pending = pending_quic_remove(network, quic_conn->connection);
           if (pending != NULL) {
+            free(pending->peer_cert_der);
             free(pending);
           }
         }

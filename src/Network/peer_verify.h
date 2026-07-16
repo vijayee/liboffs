@@ -30,4 +30,14 @@ void peer_verify_ctx_destroy(peer_verify_ctx_t* ctx);
 // Returns the path to the temporary PEM file, or NULL if ctx is NULL.
 const char* peer_verify_ctx_path(const peer_verify_ctx_t* ctx);
 
+/* Extract the leaf-cert public key from a DER-encoded certificate, in the
+   same byte format the salutation carries (raw key bytes for Ed25519/X25519
+   via EVP_PKEY_get_raw_public_key; DER SubjectPublicKeyInfo for RSA/EC via
+   i2d_PUBKEY — mirrors pem_extract_public_key in pem_key.c). Returns 0 on
+   success and writes the key to *out_key / *out_len (caller frees out_key).
+   Returns -1 on failure. Used to pin the salutation public_key to the TLS
+   credential. See audit #8. */
+int peer_verify_extract_pubkey(const uint8_t* cert_der, size_t cert_len,
+                               uint8_t** out_key, size_t* out_len);
+
 #endif // OFFS_PEER_VERIFY_H

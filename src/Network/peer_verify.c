@@ -7,6 +7,7 @@
 #include "../Util/log.h"
 #include "../Platform/platform_file.h"
 #include <openssl/x509.h>
+#include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/bio.h>
 #include <openssl/crypto.h>
@@ -107,4 +108,69 @@ peer_verify_ctx_t* peer_verify_ctx_create_from_pem_file(const char* pem_path) {
 const char* peer_verify_ctx_path(const peer_verify_ctx_t* ctx) {
   if (ctx == NULL) return NULL;
   return ctx->temp_path;
+}
+
+int peer_verify_extract_pubkey(const uint8_t* cert_der, size_t cert_len,
+                               uint8_t** out_key, size_t* out_len) {
+  if (cert_der == NULL || cert_len == 0 || out_key == NULL || out_len == NULL) {
+    return -1;
+  }
+
+  *out_key = NULL;
+  *out_len = 0;
+
+  const unsigned char* cursor = cert_der;
+  X509* cert = d2i_X509(NULL, &cursor, (long)cert_len);
+  if (cert == NULL) {
+    log_error("peer_verify: failed to parse DER peer certificate");
+    return -1;
+  }
+
+  EVP_PKEY* pkey = X509_get_pubkey(cert);
+  X509_free(cert);
+  if (pkey == NULL) {
+    log_error("peer_verify: failed to get public key from peer certificate");
+    return -1;
+  }
+
+  // Mirror pem_extract_public_key: raw bytes first (Ed25519/X25519), then
+  // DER SubjectPublicKeyInfo (RSA/EC). The salutation public_key is built
+  // by pem_extract_public_key, so the extracted cert key must use the
+  // exact same encoding or the byte-compare in network_handle_salutation
+  // would always mismatch. Fall through to DER on raw second-call failure
+  // (matches pem_extract_public_key, which also falls through). See audit #8.
+  size_t raw_len = 0;
+  if (EVP_PKEY_get_raw_public_key(pkey, NULL, &raw_len) == 1 && raw_len > 0) {
+    uint8_t* raw_key = get_clear_memory(raw_len);
+    if (raw_key != NULL && EVP_PKEY_get_raw_public_key(pkey, raw_key, &raw_len) == 1) {
+      EVP_PKEY_free(pkey);
+      *out_key = raw_key;
+      *out_len = raw_len;
+      return 0;
+    }
+    free(raw_key);
+  }
+
+  int der_len = i2d_PUBKEY(pkey, NULL);
+  if (der_len > 0) {
+    uint8_t* der_buf = get_clear_memory((size_t)der_len);
+    if (der_buf != NULL) {
+      uint8_t* der_ptr = der_buf;
+      int written = i2d_PUBKEY(pkey, &der_ptr);
+      EVP_PKEY_free(pkey);
+      if (written > 0) {
+        *out_key = der_buf;
+        *out_len = (size_t)written;
+        return 0;
+      }
+      free(der_buf);
+    } else {
+      EVP_PKEY_free(pkey);
+    }
+  } else {
+    EVP_PKEY_free(pkey);
+  }
+
+  log_error("peer_verify: failed to extract public key bytes");
+  return -1;
 }
