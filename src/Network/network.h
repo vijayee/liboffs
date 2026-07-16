@@ -24,6 +24,7 @@
 #include "../Configuration/config.h"
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef HAS_MSQUIC
 #include <msquic.h>
@@ -178,6 +179,17 @@ void network_destroy(network_t* network);
 void network_dispatch(void* state, message_t* msg);
 int network_connect_relay(network_t* network, const char* host, uint16_t port);
 int network_connect_peer(network_t* network, const char* host, uint16_t port);
+
+/* Try a peer_info's candidate addresses in priority order (HOST -> SRFLX ->
+   DIRECT -> RELAY) and connect via the first that works. RELAY candidates
+   are admitted via the connection manager with relay_endpoint_id set (no
+   QUIC connection). is_friend controls friend pinning on admission.
+   Returns 0 if any candidate connected, -1 otherwise. See audit #18. */
+struct peer_address_t;  /* forward decl — peer_info.h */
+int network_connect_peer_candidates(network_t* network, const node_id_t* remote_id,
+                                    const struct peer_address_t* addresses,
+                                    size_t address_count, bool is_friend);
+
 void network_shutdown_connections(network_t* network);
 
 // Start connections to bootstrap and friend peers. Called after node start.

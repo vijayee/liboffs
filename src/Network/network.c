@@ -543,6 +543,60 @@ int network_connect_peer(network_t* network, const char* host, uint16_t port) {
 #endif
 }
 
+/* Try a peer_info's candidate addresses in priority order:
+   HOST (LAN) -> SRFLX (reflexive) -> DIRECT (back-compat) -> RELAY.
+   For HOST/SRFLX/DIRECT, attempts a QUIC connect via network_connect_peer
+   and returns 0 on the first success. For RELAY, no QUIC connection is
+   needed: the peer is admitted to the connection manager with
+   relay_endpoint_id set so conn_state_send routes via the relay (mirrors
+   the RELAY_RECEIVED admission at the NETWORK_RELAY_RECEIVED handler).
+   is_friend controls whether the peer is added via connection_manager_add
+   or connection_manager_add_friend (friend pinning). See audit #18.
+   Returns 0 if any candidate connected, -1 otherwise. */
+int network_connect_peer_candidates(network_t* network, const node_id_t* remote_id,
+                                    const peer_address_t* addresses,
+                                    size_t address_count, bool is_friend) {
+  if (network == NULL || remote_id == NULL) return -1;
+  if (addresses == NULL || address_count == 0) return -1;
+
+  for (size_t index = 0; index < address_count; index++) {
+    const peer_address_t* addr = &addresses[index];
+    if (addr->type == PEER_ADDR_HOST || addr->type == PEER_ADDR_SRFLX ||
+        addr->type == PEER_ADDR_DIRECT) {
+      if (network_connect_peer(network, addr->host, addr->port) == 0) {
+        return 0;
+      }
+      /* Try the next candidate — keep iterating priority order. */
+    } else if (addr->type == PEER_ADDR_RELAY) {
+      /* Admit the peer to the connection manager with the relay endpoint
+         id so conn_state_send routes outbound traffic via the relay. This
+         mirrors the RELAY_RECEIVED admission path (network.c around the
+         NETWORK_RELAY_RECEIVED handler). No QUIC connection is needed —
+         the relay proxies. */
+      peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, remote_id);
+      if (peer == NULL) {
+        if (is_friend) {
+          peer = connection_manager_add_friend(&network->conn_mgr, remote_id,
+                                               NULL, network->pool);
+        } else {
+          peer = connection_manager_add(&network->conn_mgr, remote_id,
+                                        NULL, network->pool);
+        }
+      }
+      if (peer != NULL && addr->relay_id != 0) {
+        peer->relay_endpoint_id = addr->relay_id;
+      }
+      if (peer != NULL) {
+        log_info("network_connect_peer_candidates: relay candidate admitted "
+                 "(endpoint=%u)", addr->relay_id);
+        return 0;
+      }
+      /* If admission failed, fall through to try the next candidate. */
+    }
+  }
+  return -1;
+}
+
 // --- Pending QUIC connection helpers ---
 
 static pending_quic_t* pending_quic_find(network_t* network, void* quic_connection);
@@ -3856,20 +3910,12 @@ static void network_handle_friend_reconnect_tick(network_t* network, message_t* 
     peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &friend_info->node_id);
     if (peer != NULL && peer->connected) continue;  // Already connected
 
-    // Attempt reconnect on first direct address
-    for (size_t addr_index = 0; addr_index < friend_info->address_count; addr_index++) {
-      peer_address_t* addr = &friend_info->addresses[addr_index];
-      if (addr->type == PEER_ADDR_DIRECT) {
-        if (peer == NULL) {
-          peer = connection_manager_add_friend(&network->conn_mgr,
-              &friend_info->node_id, NULL, network->pool);
-        }
-        if (peer != NULL && !peer->connected) {
-          network_connect_peer(network, addr->host, addr->port);
-        }
-        break;
-      }
-    }
+    // Try candidates in priority order (HOST -> SRFLX -> DIRECT -> RELAY).
+    // The helper admits the peer to conn_mgr (with friend pinning) and
+    // sets relay_endpoint_id for RELAY candidates. See audit #18.
+    (void)network_connect_peer_candidates(network, &friend_info->node_id,
+                                          friend_info->addresses,
+                                          friend_info->address_count, true);
   }
 }
 
@@ -3898,14 +3944,11 @@ void network_start_connections(network_t* network) {
       peer_info_t* friend_info = network->authority->friend_peers[index];
       peer_connection_t* existing = connection_manager_lookup(&network->conn_mgr, &friend_info->node_id);
       if (existing != NULL && existing->connected) continue;
-      for (size_t addr_index = 0; addr_index < friend_info->address_count; addr_index++) {
-        peer_address_t* addr = &friend_info->addresses[addr_index];
-        if (addr->type == PEER_ADDR_DIRECT) {
-          connection_manager_add_friend(&network->conn_mgr, &friend_info->node_id, NULL, network->pool);
-          network_connect_peer(network, addr->host, addr->port);
-          break;  // Use first direct address
-        }
-      }
+      // Try candidates in priority order (HOST -> SRFLX -> DIRECT -> RELAY).
+      // See audit #18.
+      (void)network_connect_peer_candidates(network, &friend_info->node_id,
+                                            friend_info->addresses,
+                                            friend_info->address_count, true);
     }
   }
 }

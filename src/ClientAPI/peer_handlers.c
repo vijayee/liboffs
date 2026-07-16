@@ -135,19 +135,15 @@ void peer_handle_connect(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     return;
   }
 
-  /* Find first direct address and connect */
-  int connected = 0;
-  for (size_t index = 0; index < remote_info.address_count; index++) {
-    if (remote_info.addresses[index].type == PEER_ADDR_DIRECT) {
-      int rc = network_connect_peer(ctx->network,
-                                    remote_info.addresses[index].host,
-                                    remote_info.addresses[index].port);
-      if (rc == 0) {
-        connected = 1;
-      }
-      break; /* only try the first direct address */
-    }
-  }
+  /* Try candidates in priority order: HOST (LAN) -> SRFLX (reflexive) ->
+     DIRECT (back-compat) -> RELAY. The first that connects wins. RELAY
+     candidates are admitted via the connection manager with
+     relay_endpoint_id set; no QUIC connection is needed. See audit #18. */
+  int connected = (network_connect_peer_candidates(ctx->network,
+                                                   &remote_info.node_id,
+                                                   remote_info.addresses,
+                                                   remote_info.address_count,
+                                                   false) == 0) ? 1 : 0;
 
   peer_info_destroy(&remote_info);
 
@@ -288,19 +284,14 @@ void peer_handle_friend_add(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
   auth->friend_peers[auth->friend_peer_count] = new_friend;
   auth->friend_peer_count = new_count;
 
-  /* Try to connect to the first direct address */
-  int connected = 0;
-  for (size_t index = 0; index < new_friend->address_count; index++) {
-    if (new_friend->addresses[index].type == PEER_ADDR_DIRECT) {
-      int rc = network_connect_peer(ctx->network,
-                                    new_friend->addresses[index].host,
-                                    new_friend->addresses[index].port);
-      if (rc == 0) {
-        connected = 1;
-      }
-      break;
-    }
-  }
+  /* Try candidates in priority order: HOST -> SRFLX -> DIRECT -> RELAY.
+     Friend peers are admitted via connection_manager_add_friend so they
+     skip Hebbian decay eviction. See audit #18. */
+  int connected = (network_connect_peer_candidates(ctx->network,
+                                                   &new_friend->node_id,
+                                                   new_friend->addresses,
+                                                   new_friend->address_count,
+                                                   true) == 0) ? 1 : 0;
 
   /* Report whether the best-effort connect to the first direct address
      succeeded, mirroring peer_handle_connect. The friend is added to the

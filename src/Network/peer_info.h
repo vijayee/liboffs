@@ -24,7 +24,7 @@ typedef enum {
   PEER_ADDR_SRFLX   = 3,  // Server-reflexive address (learned from relay)
 } peer_addr_type_e;
 
-typedef struct {
+typedef struct peer_address_t {
   peer_addr_type_e type;
   char* host;
   uint16_t port;
