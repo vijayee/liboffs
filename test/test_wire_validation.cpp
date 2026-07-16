@@ -199,3 +199,153 @@ TEST(TestWireValidation, RecallAcceptUsesBytestringLengthNotDeclared) {
   wire_recall_accept_destroy(msg);
   cbor_decref(&cbor);
 }
+
+// --- RelayChallenge / RelayChallengeResponse round-trip ---
+
+static void _fill_test_node_id(node_id_t* node_id, uint8_t hash_byte, const char* str) {
+  memset(node_id, 0, sizeof(*node_id));
+  memset(node_id->hash, hash_byte, NODE_ID_HASH_SIZE);
+  size_t str_len = strlen(str);
+  size_t copy_len = str_len < NODE_ID_STRING_SIZE - 1 ? str_len : NODE_ID_STRING_SIZE - 1;
+  memcpy(node_id->str, str, copy_len);
+  node_id->str[copy_len] = '\0';
+}
+
+TEST(TestWireValidation, RelayChallengeRoundTrip) {
+  wire_relay_challenge_t challenge;
+  memset(&challenge, 0, sizeof(challenge));
+  _fill_test_node_id(&challenge.challenger_id, 0xAB, "challenger-node");
+  challenge.challenger_endpoint_id = 0xCAFEBABEu;
+  for (size_t index = 0; index < 32; index++) {
+    challenge.nonce[index] = (uint8_t)(0x10 + index);
+  }
+
+  cbor_item_t* cbor = wire_relay_challenge_encode(&challenge);
+  ASSERT_NE(cbor, nullptr);
+  EXPECT_EQ(wire_get_type(cbor), WIRE_RELAY_CHALLENGE);
+
+  wire_relay_challenge_t* decoded =
+      (wire_relay_challenge_t*)get_clear_memory(sizeof(wire_relay_challenge_t));
+  ASSERT_NE(decoded, nullptr);
+  int rc = wire_relay_challenge_decode(cbor, decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(memcmp(decoded->challenger_id.hash, challenge.challenger_id.hash,
+                   NODE_ID_HASH_SIZE), 0);
+  EXPECT_STREQ(decoded->challenger_id.str, challenge.challenger_id.str);
+  EXPECT_EQ(decoded->challenger_endpoint_id, challenge.challenger_endpoint_id);
+  EXPECT_EQ(memcmp(decoded->nonce, challenge.nonce, 32), 0);
+
+  wire_relay_challenge_destroy(decoded);
+  cbor_decref(&cbor);
+}
+
+TEST(TestWireValidation, RelayChallengeResponseRoundTrip) {
+  wire_relay_challenge_response_t response;
+  memset(&response, 0, sizeof(response));
+  _fill_test_node_id(&response.responder_id, 0xCD, "responder-node");
+  for (size_t index = 0; index < 32; index++) {
+    response.nonce[index] = (uint8_t)(0x80 + index);
+  }
+  uint8_t public_key[32];
+  uint8_t signature[64];
+  for (size_t index = 0; index < 32; index++) public_key[index] = (uint8_t)(0x20 + index);
+  for (size_t index = 0; index < 64; index++) signature[index] = (uint8_t)(0x40 + index);
+  response.public_key = public_key;
+  response.public_key_len = 32;
+  response.signature = signature;
+  response.signature_len = 64;
+
+  cbor_item_t* cbor = wire_relay_challenge_response_encode(&response);
+  ASSERT_NE(cbor, nullptr);
+  EXPECT_EQ(wire_get_type(cbor), WIRE_RELAY_CHALLENGE_RESPONSE);
+
+  wire_relay_challenge_response_t* decoded =
+      (wire_relay_challenge_response_t*)get_clear_memory(sizeof(wire_relay_challenge_response_t));
+  ASSERT_NE(decoded, nullptr);
+  int rc = wire_relay_challenge_response_decode(cbor, decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(memcmp(decoded->responder_id.hash, response.responder_id.hash,
+                   NODE_ID_HASH_SIZE), 0);
+  EXPECT_STREQ(decoded->responder_id.str, response.responder_id.str);
+  EXPECT_EQ(memcmp(decoded->nonce, response.nonce, 32), 0);
+  ASSERT_NE(decoded->public_key, nullptr);
+  EXPECT_EQ(decoded->public_key_len, (size_t)32);
+  EXPECT_EQ(memcmp(decoded->public_key, public_key, 32), 0);
+  ASSERT_NE(decoded->signature, nullptr);
+  EXPECT_EQ(decoded->signature_len, (size_t)64);
+  EXPECT_EQ(memcmp(decoded->signature, signature, 64), 0);
+
+  wire_relay_challenge_response_destroy(decoded);
+  cbor_decref(&cbor);
+}
+
+TEST(TestWireValidation, RelayChallengeRejectsWrongType) {
+  cbor_item_t* cbor = cbor_new_definite_array(4);
+  cbor_item_t* entry;
+  entry = cbor_build_uint8(WIRE_PING); cbor_array_push(cbor, entry); cbor_decref(&entry);
+  entry = _build_node_id_array(); cbor_array_push(cbor, entry); cbor_decref(&entry);
+  entry = cbor_build_uint32(1); cbor_array_push(cbor, entry); cbor_decref(&entry);
+  uint8_t nonce[32] = {0};
+  entry = cbor_build_bytestring(nonce, 32); cbor_array_push(cbor, entry); cbor_decref(&entry);
+
+  wire_relay_challenge_t* decoded =
+      (wire_relay_challenge_t*)get_clear_memory(sizeof(wire_relay_challenge_t));
+  ASSERT_NE(decoded, nullptr);
+  int rc = wire_relay_challenge_decode(cbor, decoded);
+  EXPECT_NE(rc, 0);
+  wire_relay_challenge_destroy(decoded);
+  cbor_decref(&cbor);
+}
+
+TEST(TestWireValidation, RelayChallengeRejectsTooShortArray) {
+  cbor_item_t* cbor = cbor_new_definite_array(2);
+  cbor_item_t* entry;
+  entry = cbor_build_uint8(WIRE_RELAY_CHALLENGE); cbor_array_push(cbor, entry); cbor_decref(&entry);
+  entry = _build_node_id_array(); cbor_array_push(cbor, entry); cbor_decref(&entry);
+
+  wire_relay_challenge_t* decoded =
+      (wire_relay_challenge_t*)get_clear_memory(sizeof(wire_relay_challenge_t));
+  ASSERT_NE(decoded, nullptr);
+  int rc = wire_relay_challenge_decode(cbor, decoded);
+  EXPECT_NE(rc, 0);
+  wire_relay_challenge_destroy(decoded);
+  cbor_decref(&cbor);
+}
+
+TEST(TestWireValidation, RelayChallengeResponseRejectsWrongType) {
+  cbor_item_t* cbor = cbor_new_definite_array(5);
+  cbor_item_t* entry;
+  entry = cbor_build_uint8(WIRE_RELAY_RECEIVED); cbor_array_push(cbor, entry); cbor_decref(&entry);
+  entry = _build_node_id_array(); cbor_array_push(cbor, entry); cbor_decref(&entry);
+  uint8_t nonce[32] = {0};
+  entry = cbor_build_bytestring(nonce, 32); cbor_array_push(cbor, entry); cbor_decref(&entry);
+  entry = cbor_build_bytestring(nonce, 16); cbor_array_push(cbor, entry); cbor_decref(&entry);
+  entry = cbor_build_bytestring(nonce, 16); cbor_array_push(cbor, entry); cbor_decref(&entry);
+
+  wire_relay_challenge_response_t* decoded =
+      (wire_relay_challenge_response_t*)get_clear_memory(sizeof(wire_relay_challenge_response_t));
+  ASSERT_NE(decoded, nullptr);
+  int rc = wire_relay_challenge_response_decode(cbor, decoded);
+  EXPECT_NE(rc, 0);
+  wire_relay_challenge_response_destroy(decoded);
+  cbor_decref(&cbor);
+}
+
+TEST(TestWireValidation, RelayChallengeResponseRejectsTooShortArray) {
+  cbor_item_t* cbor = cbor_new_definite_array(3);
+  cbor_item_t* entry;
+  entry = cbor_build_uint8(WIRE_RELAY_CHALLENGE_RESPONSE); cbor_array_push(cbor, entry); cbor_decref(&entry);
+  entry = _build_node_id_array(); cbor_array_push(cbor, entry); cbor_decref(&entry);
+  uint8_t nonce[32] = {0};
+  entry = cbor_build_bytestring(nonce, 32); cbor_array_push(cbor, entry); cbor_decref(&entry);
+
+  wire_relay_challenge_response_t* decoded =
+      (wire_relay_challenge_response_t*)get_clear_memory(sizeof(wire_relay_challenge_response_t));
+  ASSERT_NE(decoded, nullptr);
+  int rc = wire_relay_challenge_response_decode(cbor, decoded);
+  EXPECT_NE(rc, 0);
+  wire_relay_challenge_response_destroy(decoded);
+  cbor_decref(&cbor);
+}

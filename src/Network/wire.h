@@ -37,6 +37,8 @@
 #define WIRE_RELAY_RECEIVED      31
 #define WIRE_ADDR_REQUEST        32
 #define WIRE_ADDR_RESPONSE       33
+#define WIRE_RELAY_CHALLENGE     34
+#define WIRE_RELAY_CHALLENGE_RESPONSE 35
 
 // Magic number for protocol identification
 #define WIRE_MAGIC 0x4F464653  // "OFFS"
@@ -296,6 +298,29 @@ typedef struct wire_relay_received_t {
   size_t payload_len;
 } wire_relay_received_t;
 
+// --- RelayChallenge / RelayChallengeResponse ---
+// Inner wire messages for the relay signed-nonce challenge (audit #8 relay).
+// The challenge carries a fresh nonce + the challenger's relay endpoint id
+// (so the responder can route the response back). The response carries the
+// nonce + the responder's public_key + a signature of the nonce under the
+// private key for public_key. The challenger verifies BLAKE3(public_key)
+// == responder_id and the signature.
+
+typedef struct wire_relay_challenge_t {
+  node_id_t challenger_id;         // the node sending the challenge
+  uint32_t challenger_endpoint_id; // the challenger's relay endpoint (route the response back)
+  uint8_t  nonce[32];              // a fresh random nonce
+} wire_relay_challenge_t;
+
+typedef struct wire_relay_challenge_response_t {
+  node_id_t responder_id;  // the node responding (the original relayed sender)
+  uint8_t  nonce[32];      // the nonce being responded to
+  uint8_t* public_key;     // the responder's public key (BLAKE3 of this must equal responder_id)
+  size_t   public_key_len;
+  uint8_t* signature;      // signature of the nonce under the private key for public_key
+  size_t   signature_len;
+} wire_relay_challenge_response_t;
+
 // --- AddrRequest ---
 
 typedef struct wire_addr_request_t {
@@ -420,6 +445,8 @@ cbor_item_t* wire_rate_limited_encode(const wire_rate_limited_t* msg);
 cbor_item_t* wire_salutation_encode(const wire_salutation_t* msg);
 cbor_item_t* wire_relay_send_encode(const wire_relay_send_t* msg);
 cbor_item_t* wire_relay_received_encode(const wire_relay_received_t* msg);
+cbor_item_t* wire_relay_challenge_encode(const wire_relay_challenge_t* msg);
+cbor_item_t* wire_relay_challenge_response_encode(const wire_relay_challenge_response_t* msg);
 cbor_item_t* wire_addr_request_encode(const wire_addr_request_t* msg);
 cbor_item_t* wire_addr_response_encode(const wire_addr_response_t* msg);
 cbor_item_t* wire_gossip_encode(const wire_gossip_t* msg);
@@ -453,6 +480,8 @@ int wire_rate_limited_decode(cbor_item_t* item, wire_rate_limited_t* msg);
 int wire_salutation_decode(cbor_item_t* item, wire_salutation_t* msg);
 int wire_relay_send_decode(cbor_item_t* item, wire_relay_send_t* msg);
 int wire_relay_received_decode(cbor_item_t* item, wire_relay_received_t* msg);
+int wire_relay_challenge_decode(cbor_item_t* item, wire_relay_challenge_t* msg);
+int wire_relay_challenge_response_decode(cbor_item_t* item, wire_relay_challenge_response_t* msg);
 int wire_addr_request_decode(cbor_item_t* item, wire_addr_request_t* msg);
 int wire_addr_response_decode(cbor_item_t* item, wire_addr_response_t* msg);
 int wire_gossip_decode(cbor_item_t* item, wire_gossip_t* msg);
@@ -482,5 +511,9 @@ void wire_relay_send_destroy(wire_relay_send_t* msg);
 void wire_salutation_destroy(wire_salutation_t* msg);
 // Frees payload and the struct itself
 void wire_relay_received_destroy(wire_relay_received_t* msg);
+// Frees public_key + signature and the struct itself
+void wire_relay_challenge_response_destroy(wire_relay_challenge_response_t* msg);
+// No nested allocations; frees the struct itself
+void wire_relay_challenge_destroy(wire_relay_challenge_t* msg);
 
 #endif // OFFS_WIRE_H

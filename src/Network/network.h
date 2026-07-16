@@ -52,6 +52,21 @@ typedef struct pending_quic_t {
   struct pending_quic_t* next;
 } pending_quic_t;
 
+// Relay signed-nonce challenge (audit #8 relay; tier-5b). When a relayed
+// message arrives from a peer admitted with relay_verified=false, the
+// receiver records a fresh challenge (nonce + deadline) and sends
+// WIRE_RELAY_CHALLENGE back via the relay. The responder signs the nonce
+// and returns WIRE_RELAY_CHALLENGE_RESPONSE; the challenger verifies
+// BLAKE3(public_key)==responder_id and the signature, then sets
+// relay_verified=true. Unanswered challenges are swept by the
+// NETWORK_REQUEST_TIMEOUT_TICK (reusing the tier-3 1s sweep).
+typedef struct relay_challenge_t {
+  node_id_t sender_id;         // the unverified relayed sender to challenge
+  uint8_t  nonce[32];          // fresh CSPRNG nonce
+  uint64_t deadline_ms;       // now_ms + network->request_timeout_ms
+  uint32_t relay_endpoint_id; // route the challenge back via the relay
+} relay_challenge_t;
+
 typedef struct network_t {
   actor_t actor;
   authority_t* authority;
@@ -108,6 +123,14 @@ typedef struct network_t {
   closest_nodes_pending_t closest_pending[CLOSEST_NODES_PENDING_MAX];
   size_t closest_pending_count;
 
+  // Pending relay signed-nonce challenges (audit #8 relay; tier-5b). Grown
+  // on demand; swept by network_handle_request_timeout_tick. The array is
+  // a flat array of relay_challenge_t (no per-entry allocations), so add and
+  // remove are memmove/swap-with-last; the sweep just compacts in place.
+  relay_challenge_t* relay_challenges;
+  size_t            relay_challenge_count;
+  size_t            relay_challenge_capacity;
+
   quic_listener_t* quic_listener;      /* QUIC listener for direct P2P connections */
 
 #ifdef HAS_MSQUIC
@@ -140,6 +163,27 @@ void network_start_connections(network_t* network);
 /* Test-only accessor for the per-node monotonic message ID counter. Used to
    verify the counter yields unique IDs across rapid calls (audit #6). */
 uint64_t network_next_message_id_for_test(network_t* network);
+
+/* Test-only accessors for the relay challenge table (audit #8 relay;
+   tier-5b). These wrap the static table helpers so the unit tests can
+   exercise add/find/remove/sweep without a full network + relay fixture.
+   The nonce parameter is 32 bytes. */
+int network_relay_challenge_find_for_test(network_t* network,
+                                          const node_id_t* sender_id);
+int network_relay_challenge_append_for_test(network_t* network,
+                                            const node_id_t* sender_id,
+                                            const uint8_t nonce[32],
+                                            uint64_t deadline_ms,
+                                            uint32_t relay_endpoint_id);
+void network_relay_challenge_remove_for_test(network_t* network,
+                                             const node_id_t* sender_id);
+size_t network_relay_challenge_count_for_test(network_t* network);
+void network_relay_challenge_sweep_for_test(network_t* network,
+                                            uint64_t now_ms);
+/* Copy the challenge at the given index into *out. Returns 0 on success,
+   -1 if the index is out of range. */
+int network_relay_challenge_get_for_test(network_t* network, size_t index,
+                                          relay_challenge_t* out);
 #endif
 
 #endif // OFFS_NETWORK_H

@@ -60,6 +60,7 @@ void authority_destroy(authority_t* authority) {
   if (authority->relay_url != NULL) free(authority->relay_url);
   if (authority->metrics_server_url != NULL) free(authority->metrics_server_url);
   if (authority->public_key != NULL) free(authority->public_key);
+  if (authority->node_private_key != NULL) EVP_PKEY_free(authority->node_private_key);
   if (authority->friend_peers != NULL) {
     for (size_t index = 0; index < authority->friend_peer_count; index++) {
       peer_info_destroy(authority->friend_peers[index]);
@@ -91,6 +92,25 @@ int authority_init_local_id(authority_t* authority) {
       if (rc == 0) {
         authority->public_key = public_key;
         authority->public_key_len = key_len;
+        /* Also cache the private key (if a node_key_path is set) so the
+         * relay responder can sign nonce challenges without re-reading
+         * the PEM file on every signature. See audit #8. */
+        if (authority->node_key_path != NULL && authority->node_private_key == NULL) {
+          BIO* bio = BIO_new_file(authority->node_key_path, "r");
+          if (bio != NULL) {
+            EVP_PKEY* pkey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+            BIO_free(bio);
+            if (pkey != NULL) {
+              authority->node_private_key = pkey;
+            } else {
+              log_error("authority_init_local_id: failed to load private key from: %s",
+                        authority->node_key_path);
+            }
+          } else {
+            log_error("authority_init_local_id: failed to open private key file: %s",
+                      authority->node_key_path);
+          }
+        }
         return 0;
       }
       free(public_key);
@@ -102,6 +122,79 @@ int authority_init_local_id(authority_t* authority) {
   authority->public_key = NULL;
   authority->public_key_len = 0;
   node_id_generate(&authority->local_id);
+  return 0;
+}
+
+int authority_sign_nonce(authority_t* authority, const uint8_t nonce[32],
+                         uint8_t** out_sig, size_t* out_sig_len) {
+  if (authority == NULL || nonce == NULL || out_sig == NULL || out_sig_len == NULL) {
+    return -1;
+  }
+
+  *out_sig = NULL;
+  *out_sig_len = 0;
+
+  /* Use the cached private key when available (the hot path — the responder
+   * signs each challenge and a disk read per signature would be wasteful). */
+  EVP_PKEY* pkey = authority->node_private_key;
+  EVP_PKEY* loaded_pkey = NULL;
+  if (pkey == NULL && authority->node_key_path != NULL) {
+    /* Fallback: load on demand if authority_init_local_id did not run or the
+     * cert path was not set. Cache the result so subsequent calls reuse it. */
+    BIO* bio = BIO_new_file(authority->node_key_path, "r");
+    if (bio == NULL) {
+      log_error("authority_sign_nonce: failed to open key file: %s", authority->node_key_path);
+      return -1;
+    }
+    loaded_pkey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+    BIO_free(bio);
+    if (loaded_pkey == NULL) {
+      log_error("authority_sign_nonce: failed to parse private key: %s", authority->node_key_path);
+      return -1;
+    }
+    pkey = loaded_pkey;
+    authority->node_private_key = loaded_pkey;  /* cache for next call */
+  }
+  if (pkey == NULL) {
+    log_error("authority_sign_nonce: no private key available (no node_key_path and no cached key)");
+    return -1;
+  }
+
+  EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+  if (ctx == NULL) {
+    log_error("authority_sign_nonce: EVP_MD_CTX_new failed");
+    return -1;
+  }
+
+  if (EVP_DigestSignInit(ctx, NULL, NULL, NULL, pkey) != 1) {
+    log_error("authority_sign_nonce: EVP_DigestSignInit failed");
+    EVP_MD_CTX_free(ctx);
+    return -1;
+  }
+
+  size_t sig_len = 0;
+  if (EVP_DigestSign(ctx, NULL, &sig_len, nonce, 32) != 1 || sig_len == 0) {
+    log_error("authority_sign_nonce: EVP_DigestSign length probe failed");
+    EVP_MD_CTX_free(ctx);
+    return -1;
+  }
+
+  uint8_t* sig = get_clear_memory(sig_len);
+  if (sig == NULL) {
+    EVP_MD_CTX_free(ctx);
+    return -1;
+  }
+
+  if (EVP_DigestSign(ctx, sig, &sig_len, nonce, 32) != 1) {
+    log_error("authority_sign_nonce: EVP_DigestSign failed");
+    free(sig);
+    EVP_MD_CTX_free(ctx);
+    return -1;
+  }
+
+  EVP_MD_CTX_free(ctx);
+  *out_sig = sig;
+  *out_sig_len = sig_len;
   return 0;
 }
 
