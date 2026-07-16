@@ -3,10 +3,27 @@
 //
 
 #include "peer_info.h"
+#include "network.h"
+#include "relay_client.h"
+#include "quic_listener.h"
 #include "../Util/allocator.h"
 #include "../Util/base58.h"
+#include "../Util/log.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
+#else
+#include <sys/types.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#endif
 
 // CBOR keys for peer_info map
 #define PI_KEY_NODE_ID    1
@@ -275,4 +292,180 @@ int peer_info_from_base58(const char* b58, peer_info_t* info) {
 bool peer_info_equals(const peer_info_t* left, const peer_info_t* right) {
   if (left == NULL || right == NULL) return false;
   return node_id_equals(&left->node_id, &right->node_id);
+}
+
+/* --- peer_info_from_node helpers (audit #18) --- */
+
+/* Append a candidate address to info->addresses, growing the array via
+   get_clear_memory. Returns 0 on success, -1 on failure. On success the
+   host string is owned by the address slot. */
+static int _peer_info_append_address(peer_info_t* info, peer_addr_type_e type,
+                                     const char* host, uint16_t port,
+                                     uint32_t relay_id) {
+  if (info == NULL || host == NULL) return -1;
+  if (info->address_count >= PEER_INFO_MAX_ADDRESSES) return -1;
+
+  size_t new_count = info->address_count + 1;
+  peer_address_t* grown = get_clear_memory(new_count * sizeof(peer_address_t));
+  if (grown == NULL) return -1;
+  if (info->addresses != NULL) {
+    memcpy(grown, info->addresses, info->address_count * sizeof(peer_address_t));
+    free(info->addresses);
+  }
+  info->addresses = grown;
+
+  peer_address_t* slot = &info->addresses[info->address_count];
+  slot->type = type;
+  size_t host_len = strlen(host);
+  slot->host = get_clear_memory(host_len + 1);
+  if (slot->host == NULL) {
+    /* Leave the slot zeroed; don't advance count so the caller sees no
+       partial entry. The grown array still holds prior valid slots. */
+    return -1;
+  }
+  memcpy(slot->host, host, host_len);
+  slot->host[host_len] = '\0';
+  slot->port = port;
+  slot->relay_id = relay_id;
+  info->address_count = new_count;
+  return 0;
+}
+
+/* Return true if the IPv4 octets describe a private/link-local address worth
+   advertising as a HOST candidate: RFC1918 (10.x, 172.16-31.x, 192.168.x) or
+   link-local (169.254.x). Loopback (127.x) is excluded. */
+static bool _peer_info_is_lan_ipv4(uint8_t octet0, uint8_t octet1) {
+  if (octet0 == 10) return true;
+  if (octet0 == 172 && (octet1 >= 16 && octet1 <= 31)) return true;
+  if (octet0 == 192 && octet1 == 168) return true;
+  if (octet0 == 169 && octet1 == 254) return true;
+  return false;
+}
+
+/* Convert a host-byte-order IPv4 address to dotted-quad string. */
+static void _peer_info_ipv4_to_string(uint32_t addr_host_order, char* out, size_t out_size) {
+  uint8_t octet0 = (uint8_t)((addr_host_order >> 24) & 0xFF);
+  uint8_t octet1 = (uint8_t)((addr_host_order >> 16) & 0xFF);
+  uint8_t octet2 = (uint8_t)((addr_host_order >> 8) & 0xFF);
+  uint8_t octet3 = (uint8_t)(addr_host_order & 0xFF);
+  snprintf(out, out_size, "%u.%u.%u.%u", octet0, octet1, octet2, octet3);
+}
+
+#ifdef _WIN32
+static int _peer_info_collect_host_addresses(peer_info_t* info, uint16_t port) {
+  ULONG buffer_size = 15000;
+  ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                GAA_FLAG_SKIP_DNS_SERVER;
+  PIP_ADAPTER_ADDRESSES adapters = (PIP_ADAPTER_ADDRESSES)get_clear_memory(buffer_size);
+  if (adapters == NULL) return -1;
+
+  DWORD rc = GetAdaptersAddresses(AF_INET, flags, NULL, adapters, &buffer_size);
+  if (rc == ERROR_BUFFER_OVERFLOW) {
+    free(adapters);
+    adapters = (PIP_ADAPTER_ADDRESSES)get_clear_memory(buffer_size);
+    if (adapters == NULL) return -1;
+    rc = GetAdaptersAddresses(AF_INET, flags, NULL, adapters, &buffer_size);
+  }
+  if (rc != NO_ERROR) {
+    free(adapters);
+    log_warn("peer_info_from_node: GetAdaptersAddresses failed: %lu", (unsigned long)rc);
+    return -1;
+  }
+
+  int added = 0;
+  for (PIP_ADAPTER_ADDRESSES adapter = adapters; adapter != NULL; adapter = adapter->Next) {
+    if (adapter->OperStatus != IfOperStatusUp) continue;
+    for (PIP_ADAPTER_UNICAST_ADDRESS_LH addr = adapter->FirstUnicastAddress;
+         addr != NULL; addr = addr->Next) {
+      SOCKADDR* sock_addr = addr->Address.lpSockaddr;
+      if (sock_addr == NULL || sock_addr->sa_family != AF_INET) continue;
+      struct sockaddr_in* sin = (struct sockaddr_in*)sock_addr;
+      uint32_t ip_host = ntohl(sin->sin_addr.s_addr);
+      uint8_t octet0 = (uint8_t)((ip_host >> 24) & 0xFF);
+      uint8_t octet1 = (uint8_t)((ip_host >> 16) & 0xFF);
+      if (octet0 == 127) continue;  /* loopback */
+      if (!_peer_info_is_lan_ipv4(octet0, octet1)) continue;
+      char ip_str[INET_ADDRSTRLEN];
+      _peer_info_ipv4_to_string(ip_host, ip_str, sizeof(ip_str));
+      if (_peer_info_append_address(info, PEER_ADDR_HOST, ip_str, port, 0) == 0) {
+        added++;
+      }
+    }
+  }
+  free(adapters);
+  return added;
+}
+#else
+static int _peer_info_collect_host_addresses(peer_info_t* info, uint16_t port) {
+  struct ifaddrs* interfaces = NULL;
+  if (getifaddrs(&interfaces) != 0) {
+    log_warn("peer_info_from_node: getifaddrs failed");
+    return -1;
+  }
+
+  int added = 0;
+  for (struct ifaddrs* interface = interfaces; interface != NULL;
+       interface = interface->ifa_next) {
+    if (interface->ifa_addr == NULL) continue;
+    if (interface->ifa_addr->sa_family != AF_INET) continue;
+    if ((interface->ifa_flags & IFF_UP) == 0) continue;
+    if ((interface->ifa_flags & IFF_LOOPBACK) != 0) continue;
+
+    struct sockaddr_in* sin = (struct sockaddr_in*)interface->ifa_addr;
+    uint32_t ip_host = ntohl(sin->sin_addr.s_addr);
+    uint8_t octet0 = (uint8_t)((ip_host >> 24) & 0xFF);
+    uint8_t octet1 = (uint8_t)((ip_host >> 16) & 0xFF);
+    if (!_peer_info_is_lan_ipv4(octet0, octet1)) continue;
+
+    char ip_str[INET_ADDRSTRLEN];
+    _peer_info_ipv4_to_string(ip_host, ip_str, sizeof(ip_str));
+    if (_peer_info_append_address(info, PEER_ADDR_HOST, ip_str, port, 0) == 0) {
+      added++;
+    }
+  }
+  freeifaddrs(interfaces);
+  return added;
+}
+#endif
+
+int peer_info_from_node(peer_info_t* info, const struct network_t* network,
+                        bool include_lan) {
+  if (info == NULL || network == NULL) return -1;
+
+  /* HOST candidates (LAN addresses). Gated on include_lan for privacy —
+     never broadcast internal IPs to arbitrary peers or in DHT gossip. */
+  if (include_lan && network->quic_listener != NULL) {
+    uint16_t listen_port = network->quic_listener->listen_port;
+    if (listen_port > 0) {
+      (void)_peer_info_collect_host_addresses(info, listen_port);
+    }
+  }
+
+  /* SRFLX candidate: the relay-learned reflexive address. The relay emits
+     the address in host byte order (see relay_server.c), so we convert via
+     _peer_info_ipv4_to_string rather than inet_ntop. */
+  if (network->relay != NULL && network->relay->reflexive_port != 0 &&
+      network->relay->reflexive_addr != 0) {
+    char ip_str[INET_ADDRSTRLEN];
+    _peer_info_ipv4_to_string(network->relay->reflexive_addr,
+                              ip_str, sizeof(ip_str));
+    if (_peer_info_append_address(info, PEER_ADDR_SRFLX, ip_str,
+                                  network->relay->reflexive_port, 0) != 0) {
+      log_warn("peer_info_from_node: failed to append SRFLX candidate");
+    }
+  }
+
+  /* RELAY candidate: the relay endpoint. The relay_id carries this node's
+     local_endpoint_id so peers can route via the relay. */
+  if (network->relay != NULL && network->relay->local_endpoint_id != 0 &&
+      network->relay->relay_host != NULL && network->relay->relay_port != 0) {
+    if (_peer_info_append_address(info, PEER_ADDR_RELAY,
+                                  network->relay->relay_host,
+                                  network->relay->relay_port,
+                                  network->relay->local_endpoint_id) != 0) {
+      log_warn("peer_info_from_node: failed to append RELAY candidate");
+    }
+  }
+
+  return 0;
 }
