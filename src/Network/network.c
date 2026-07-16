@@ -3779,6 +3779,88 @@ void network_start_connections(network_t* network) {
 
 // --- Network dispatch ---
 
+// Map a wire type to the rate-limit RPC type. Returns RPC_TYPE_COUNT for
+// types we don't rate-limit (responses, salutation, control messages).
+// See audit #12.
+static rpc_type_e _wire_type_to_rpc_type(uint8_t wire_type) {
+  switch (wire_type) {
+    case WIRE_FIND_BLOCK:    return RPC_TYPE_FIND_BLOCK;
+    case WIRE_STORE_BLOCK:   return RPC_TYPE_STORE_BLOCK;
+    case WIRE_SEEKING_BLOCKS:return RPC_TYPE_SEEKING_BLOCKS;
+    case WIRE_PING_CAPACITY: return RPC_TYPE_PING_CAPACITY;
+    case WIRE_PING:          return RPC_TYPE_PING;
+    default:                 return RPC_TYPE_COUNT;
+  }
+}
+
+// Build and send a WIRE_RATE_LIMITED back to the peer so they know to back
+// off. Best-effort — if the send fails, we still drop the original message.
+// See audit #12.
+static void network_send_rate_limited(network_t* network,
+                                       peer_connection_t* peer,
+                                       const node_id_t* sender_id,
+                                       uint32_t relay_endpoint_id,
+                                       uint8_t wire_type, rpc_type_e rpc_type,
+                                       uint64_t now_ms) {
+  if (network == NULL || network->authority == NULL) return;
+  wire_rate_limited_t rl;
+  memset(&rl, 0, sizeof(rl));
+  rl.message_id = 0;
+  memcpy(&rl.sender_id, &network->authority->local_id, sizeof(node_id_t));
+  rl.type = wire_type;
+  rl.retry_after_ms = rate_limit_retry_after(&network->rate_limits,
+                                              sender_id, rpc_type, now_ms);
+  rl.current_limit = rate_limit_effective_rate(&network->rate_limits, rpc_type);
+  cbor_item_t* cbor = wire_rate_limited_encode(&rl);
+  if (cbor == NULL) return;
+  if (peer != NULL) {
+    conn_state_send(network, peer, cbor);
+  } else if (network->relay != NULL && relay_endpoint_id != 0) {
+    // Wrap in a relay envelope and dispatch via the relay client actor.
+    size_t cbor_len = 0;
+    unsigned char* cbor_data = NULL;
+    size_t serialized = cbor_serialize_alloc(cbor, &cbor_data, &cbor_len);
+    if (cbor_data != NULL && serialized > 0) {
+      wire_relay_send_t* relay_send =
+          get_clear_memory(sizeof(wire_relay_send_t));
+      if (relay_send != NULL) {
+        relay_send->src_endpoint_id = network->relay->local_endpoint_id;
+        relay_send->dest_endpoint_id = relay_endpoint_id;
+        relay_send->payload = cbor_data;
+        relay_send->payload_len = cbor_len;
+        message_t relay_msg;
+        memset(&relay_msg, 0, sizeof(relay_msg));
+        relay_msg.type = RELAY_CLIENT_SEND;
+        relay_msg.payload = relay_send;
+        relay_msg.payload_destroy = (void (*)(void*))wire_relay_send_destroy;
+        actor_send(&network->relay->actor, &relay_msg);
+      } else {
+        free(cbor_data);
+      }
+    } else if (cbor_data != NULL) {
+      free(cbor_data);
+    }
+  }
+  cbor_decref(&cbor);
+}
+
+// Returns true if the message is allowed, false if rate-limited (and sends
+// a WIRE_RATE_LIMITED back to the peer on reject). See audit #12.
+static bool network_rate_limit_check(network_t* network,
+                                     const node_id_t* sender_id,
+                                     peer_connection_t* peer,
+                                     uint32_t relay_endpoint_id,
+                                     uint8_t wire_type, uint64_t now_ms) {
+  rpc_type_e rpc = _wire_type_to_rpc_type(wire_type);
+  if (rpc == RPC_TYPE_COUNT) return true;
+  if (rate_limit_check(&network->rate_limits, sender_id, rpc, now_ms)) {
+    return true;
+  }
+  network_send_rate_limited(network, peer, sender_id, relay_endpoint_id,
+                            wire_type, rpc, now_ms);
+  return false;
+}
+
 void network_dispatch(void* state, message_t* msg) {
   network_t* network = (network_t*)state;
   switch (msg->type) {
@@ -3941,6 +4023,22 @@ void network_dispatch(void* state, message_t* msg) {
           pending_quic_find(network, quic_data->quic_connection) != NULL) {
         cbor_decref(&wire_msg);
         break;
+      }
+      // Inbound rate limiting — enforce after the salutation/auth check (so
+      // the sender is known) but before the message is dispatched. The key
+      // is the authenticated peer's remote_node_id (NOT the wire sender_id,
+      // which could be spoofed). See audit #12.
+      if (type != WIRE_SALUTATION && type != WIRE_RATE_LIMITED) {
+        peer_connection_t* auth_peer = connection_manager_lookup_by_quic(
+            &network->conn_mgr, quic_data->quic_connection);
+        if (auth_peer != NULL) {
+          uint64_t now_ms = (uint64_t)time(NULL) * 1000;
+          if (!network_rate_limit_check(network, &auth_peer->remote_node_id,
+                                        auth_peer, 0, type, now_ms)) {
+            cbor_decref(&wire_msg);
+            break;
+          }
+        }
       }
       message_t dispatch_msg;
       memset(&dispatch_msg, 0, sizeof(dispatch_msg));
@@ -4552,6 +4650,24 @@ void network_dispatch(void* state, message_t* msg) {
         }
 
         uint8_t type = wire_get_type(wire_msg);
+        // Inbound rate limiting for relayed messages — enforce after the
+        // sender_id is extracted (so we have a key) but before dispatch. The
+        // key is the wire sender_id (relay trust is a separate concern; the
+        // signed-nonce challenge gates admission). See audit #12.
+        if (type != WIRE_RATE_LIMITED && type != WIRE_RELAY_CHALLENGE &&
+            type != WIRE_RELAY_CHALLENGE_RESPONSE) {
+          node_id_t rl_sender;
+          memset(&rl_sender, 0, sizeof(rl_sender));
+          if (wire_extract_sender_id(wire_msg, &rl_sender) == 0) {
+            uint64_t now_ms = (uint64_t)time(NULL) * 1000;
+            if (!network_rate_limit_check(network, &rl_sender, NULL,
+                                          relay_payload->src_endpoint_id,
+                                          type, now_ms)) {
+              cbor_decref(&wire_msg);
+              break;
+            }
+          }
+        }
         message_t dispatch_msg;
         memset(&dispatch_msg, 0, sizeof(dispatch_msg));
         dispatch_msg.type = type;
