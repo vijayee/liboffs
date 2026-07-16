@@ -248,26 +248,47 @@ int nat_detect_start(nat_detect_t* detect, const char* relay_a_host, uint16_t re
      reports connected via NETWORK_QUIC_CONNECTED. For initial detection,
      the caller should send ADDR_REQUEST messages after observing
      successful connection establishment. */
-  wire_addr_request_t addr_request_a;
-  memset(&addr_request_a, 0, sizeof(addr_request_a));
-  addr_request_a.message_id = 1;
+  /* Heap-allocate each payload with a freeing payload_destroy. The struct
+     must outlive this stack frame — actor_send shallow-copies the message_t
+     (keeping the pointer) and enqueues for another thread; the relay client
+     actor dereferences it long after nat_detect_start has returned. A stack
+     payload here is use-after-return. See docs/liboffs-audit-report.md #7. */
+  wire_addr_request_t* addr_request_a = get_clear_memory(sizeof(wire_addr_request_t));
+  if (addr_request_a == NULL) {
+    relay_client_destroy(detect->relay_b);
+    detect->relay_b = NULL;
+    relay_client_destroy(detect->relay_a);
+    detect->relay_a = NULL;
+    free(detect->relay_a_host);
+    detect->relay_a_host = NULL;
+    free(detect->relay_b_host);
+    detect->relay_b_host = NULL;
+    return -1;
+  }
+  addr_request_a->message_id = 1;
 
   message_t msg_a;
   memset(&msg_a, 0, sizeof(msg_a));
   msg_a.type = RELAY_CLIENT_ADDR_REQUEST;
-  msg_a.payload = &addr_request_a;
-  msg_a.payload_destroy = NULL;
+  msg_a.payload = addr_request_a;
+  msg_a.payload_destroy = free;
   actor_send(&detect->relay_a->actor, &msg_a);
 
-  wire_addr_request_t addr_request_b;
-  memset(&addr_request_b, 0, sizeof(addr_request_b));
-  addr_request_b.message_id = 2;
+  wire_addr_request_t* addr_request_b = get_clear_memory(sizeof(wire_addr_request_t));
+  if (addr_request_b == NULL) {
+    /* addr_request_a is now owned by relay_a's mailbox (actor_send
+       transferred ownership via payload_destroy = free); do not free it
+       here — relay_a's dispatch (or mailbox destroy) will. */
+    log_error("nat_detect: failed to allocate addr_request_b");
+    return -1;
+  }
+  addr_request_b->message_id = 2;
 
   message_t msg_b;
   memset(&msg_b, 0, sizeof(msg_b));
   msg_b.type = RELAY_CLIENT_ADDR_REQUEST;
-  msg_b.payload = &addr_request_b;
-  msg_b.payload_destroy = NULL;
+  msg_b.payload = addr_request_b;
+  msg_b.payload_destroy = free;
   actor_send(&detect->relay_b->actor, &msg_b);
 
   log_info("nat_detect: sent ADDR_REQUEST to both relays");

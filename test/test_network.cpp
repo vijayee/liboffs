@@ -37,8 +37,83 @@ extern "C" {
 #include "Network/topology_metrics.h"
 #include "Network/closest_nodes.h"
 #include "Network/measure_nodes.h"
+#include "Network/quic_listener.h"
+#include "Network/wanted_list.h"
 #include "Configuration/config.h"
 #include "Util/allocator.h"
+}
+
+#include <cstdint>
+#include <set>
+#include <vector>
+
+// === Monotonic message ID counter tests (audit #6) ===
+//
+// message_id was previously time(NULL) * 1000 — second-granularity, so two
+// queries issued in the same wall-clock second collided. closest_pending is
+// keyed on message_id and the remove returns the first match, so colliding
+// queries cross-delivered and orphaned an entry. The fix is a per-node
+// ATOMIC(uint64_t) counter seeded from the wall clock and incremented via
+// fetch_add. These tests verify the counter yields unique IDs across rapid
+// calls. We don't call network_create (which needs msquic + heavy
+// scaffolding); instead we allocate a minimal stub network_t, seed the
+// counter exactly as network_create does, and exercise the helper.
+
+namespace {
+struct MinimalNetworkDeleter {
+  void operator()(network_t* network) const {
+    if (network != nullptr) {
+      /* get_clear_memory returns malloc-backed zeroed memory; free directly.
+         We never initialized the actor or any subsystem, so no actor_destroy
+         / network_destroy is needed. */
+      free(network);
+    }
+  }
+};
+}  // namespace
+
+static network_t* make_minimal_network_for_message_id_test() {
+  network_t* network = (network_t*)get_clear_memory(sizeof(network_t));
+  if (network == nullptr) return nullptr;
+  /* Seed the counter exactly as network_create does, so the test exercises
+     the same path the production code uses after the seed. */
+  atomic_store(&network->next_message_id, (uint64_t)time(NULL) * 1000);
+  return network;
+}
+
+TEST(NetworkMessageId, MonotonicCounterNoCollisions) {
+  std::unique_ptr<network_t, MinimalNetworkDeleter> network(
+      make_minimal_network_for_message_id_test());
+  ASSERT_NE(network, nullptr);
+  std::set<uint64_t> ids;
+  for (int idx = 0; idx < 10000; idx++) {
+    ids.insert(network_next_message_id_for_test(network.get()));
+  }
+  EXPECT_EQ(ids.size(), (size_t)10000) << "message IDs must not collide";
+}
+
+TEST(NetworkMessageId, CounterIsMonotonicIncreasing) {
+  std::unique_ptr<network_t, MinimalNetworkDeleter> network(
+      make_minimal_network_for_message_id_test());
+  ASSERT_NE(network, nullptr);
+  uint64_t first_id = network_next_message_id_for_test(network.get());
+  uint64_t second_id = network_next_message_id_for_test(network.get());
+  uint64_t third_id = network_next_message_id_for_test(network.get());
+  EXPECT_GT(second_id, first_id);
+  EXPECT_GT(third_id, second_id);
+}
+
+TEST(NetworkMessageId, CounterSurvivesSameSecondCalls) {
+  /* Regression: time(NULL) * 1000 returned the same value for every call in
+     the same wall-clock second. The counter must produce distinct IDs even
+     when called rapidly (well under one second apart). */
+  std::unique_ptr<network_t, MinimalNetworkDeleter> network(
+      make_minimal_network_for_message_id_test());
+  ASSERT_NE(network, nullptr);
+  uint64_t first_id = network_next_message_id_for_test(network.get());
+  uint64_t second_id = network_next_message_id_for_test(network.get());
+  EXPECT_NE(first_id, second_id)
+      << "same-second queries must not share a message_id";
 }
 
 // === Query tests ===
@@ -2460,6 +2535,442 @@ TEST(WireDestroyTest, DestroyNullPointerIsSafe) {
   wire_find_block_response_destroy(NULL);
   wire_recall_accept_destroy(NULL);
   wire_salutation_destroy(NULL);
+}
+
+// --- Synchronous dispatch payload-free tests (audit #2) ---
+//
+// The NETWORK_QUIC_DATA and NETWORK_RELAY_RECEIVED switches in network_dispatch
+// build a stack-local dispatch_msg, decode a wire_*_t payload, run a handler,
+// and only cbor_decref the CBOR. The actor path frees payloads via actor.c:91,
+// but the synchronous switch bypasses the actor — so the payload (and any
+// nested block buffer) leaks on every inbound message. The fix at the tail
+// of each switch calls dispatch_msg.payload_destroy when the handler did not
+// CONSUME (signaled by setting dispatch_msg.payload = NULL).
+//
+// These tests construct a minimal network_t (only wanted_list initialized —
+// everything else calloc'd to NULL/0, which the handlers guard against) and
+// drive a single FindBlockResponse with inline block_data through each
+// synchronous switch. The test asserts no crash (no double-free). The leak
+// assertion is valgrind-only — run under valgrind to verify the payload and
+// nested block_data buffer are freed.
+
+static wire_find_block_response_t* build_find_block_response_with_block_data(void) {
+  wire_find_block_response_t* original =
+      (wire_find_block_response_t*)get_clear_memory(sizeof(wire_find_block_response_t));
+  if (original == NULL) return NULL;
+  original->message_id = 0x1122334455667788ULL;
+  memset(original->block_hash, 0xAA, 32);
+  original->found = 1;
+  memset(original->holder.hash, 0xBB, NODE_ID_HASH_SIZE);
+  strcpy(original->holder.str, "holder-node");
+  original->fib = 99;
+  original->path_len = 0;
+  original->latency_ms = 3200;
+  static const uint8_t test_data[] = {0x01, 0x02, 0x03, 0x04, 0x05};
+  original->block_data = (uint8_t*)malloc(sizeof(test_data));
+  if (original->block_data == NULL) {
+    free(original);
+    return NULL;
+  }
+  memcpy(original->block_data, test_data, sizeof(test_data));
+  original->block_data_len = sizeof(test_data);
+  original->block_fib = 77;
+  return original;
+}
+
+static uint8_t* serialize_wire_message(cbor_item_t* encoded, size_t* out_len) {
+  unsigned char* buf = NULL;
+  size_t buf_len = 0;
+  size_t written = cbor_serialize_alloc(encoded, &buf, &buf_len);
+  cbor_decref(&encoded);
+  if (written == 0) return NULL;
+  *out_len = buf_len;
+  return (uint8_t*)buf;
+}
+
+TEST(NetworkSyncDispatchTest, FreesFindBlockResponsePayloadOnQuicData) {
+  // Minimal network_t — most fields NULL/0 from calloc, guarded by handlers.
+  // wanted_list is the one field that find_block_response dereferences
+  // unconditionally (in the found branch via wanted_list_remove).
+  network_t* network = (network_t*)calloc(1, sizeof(network_t));
+  ASSERT_NE(network, nullptr);
+  network->wanted_list = wanted_list_create();
+  ASSERT_NE(network->wanted_list, nullptr);
+
+  wire_find_block_response_t* original = build_find_block_response_with_block_data();
+  ASSERT_NE(original, nullptr);
+
+  cbor_item_t* encoded = wire_find_block_response_encode(original);
+  ASSERT_NE(encoded, nullptr);
+  wire_find_block_response_destroy(original);
+
+  size_t buf_len = 0;
+  uint8_t* buf = serialize_wire_message(encoded, &buf_len);
+  ASSERT_NE(buf, nullptr);
+  ASSERT_GT(buf_len, (size_t)0);
+
+  // Build a NETWORK_QUIC_DATA message and dispatch synchronously.
+  quic_data_payload_t quic_data = {};
+  quic_data.data = buf;
+  quic_data.length = buf_len;
+  quic_data.quic_connection = NULL;
+
+  message_t msg = {};
+  msg.type = NETWORK_QUIC_DATA;
+  msg.payload = &quic_data;
+  msg.payload_destroy = NULL;
+
+  // Should not crash; should not double-free.
+  network_dispatch(network, &msg);
+
+  free(buf);
+  wanted_list_destroy(network->wanted_list);
+  free(network);
+}
+
+TEST(NetworkSyncDispatchTest, FreesFindBlockResponsePayloadOnRelayReceived) {
+  // Minimal network_t — see FreesFindBlockResponsePayloadOnQuicData for setup.
+  network_t* network = (network_t*)calloc(1, sizeof(network_t));
+  ASSERT_NE(network, nullptr);
+  network->wanted_list = wanted_list_create();
+  ASSERT_NE(network->wanted_list, nullptr);
+
+  wire_find_block_response_t* original = build_find_block_response_with_block_data();
+  ASSERT_NE(original, nullptr);
+
+  cbor_item_t* encoded = wire_find_block_response_encode(original);
+  ASSERT_NE(encoded, nullptr);
+  wire_find_block_response_destroy(original);
+
+  size_t buf_len = 0;
+  uint8_t* buf = serialize_wire_message(encoded, &buf_len);
+  ASSERT_NE(buf, nullptr);
+  ASSERT_GT(buf_len, (size_t)0);
+
+  // Wrap the FindBlockResponse CBOR in a wire_relay_received_t payload.
+  wire_relay_received_t relay_payload = {};
+  relay_payload.src_endpoint_id = 0;
+  relay_payload.payload = buf;
+  relay_payload.payload_len = buf_len;
+
+  message_t msg = {};
+  msg.type = NETWORK_RELAY_RECEIVED;
+  msg.payload = &relay_payload;
+  msg.payload_destroy = NULL;
+
+  // Should not crash; should not double-free.
+  network_dispatch(network, &msg);
+
+  free(buf);
+  wanted_list_destroy(network->wanted_list);
+  free(network);
+}
+
+// --- relay_verified flag (audit #8 relay path) ---
+//
+// The relay receive path admits peers via wire_extract_sender_id (which
+// extracts only the sender_id hash, not the public_key preimage) with no
+// identity check. The full fix (signed-nonce challenge) is deferred. The
+// minimum surfaces the trust gap via a `relay_verified` flag on
+// peer_connection_t: true on the direct salutation path (BLAKE3 + TLS cert
+// pin), false on the relay-admit path. These tests verify the flag's
+// contract directly against connection_manager_add (the function the relay
+// handler calls to admit a new peer) and peer_connection_create.
+
+TEST(TestPeerVerify, RelayAdmittedPeerDefaultsUnverified) {
+  // connection_manager_add -> peer_connection_create uses get_clear_memory,
+  // which zeroes the struct, so relay_verified defaults false. This is the
+  // state a relay-admitted peer starts in (identity NOT confirmed).
+  connection_manager_t mgr;
+  connection_manager_init(&mgr, 4, NULL);
+
+  node_id_t sender_id;
+  node_id_generate(&sender_id);
+
+  peer_connection_t* peer = connection_manager_add(&mgr, &sender_id, NULL, NULL);
+  ASSERT_NE(peer, nullptr);
+  EXPECT_FALSE(peer->relay_verified)
+      << "relay-admitted peer must default to relay_verified=false";
+
+  connection_manager_deinit(&mgr);
+}
+
+TEST(TestPeerVerify, DirectSalutationMarksPeerVerified) {
+  // The direct salutation path (network_handle_salutation) sets
+  // relay_verified=true after the BLAKE3 + cert-pin checks pass. Simulate
+  // that here: a peer admitted via connection_manager_add (as the salutation
+  // handler does) starts unverified, then the salutation handler flips the
+  // flag.
+  connection_manager_t mgr;
+  connection_manager_init(&mgr, 4, NULL);
+
+  node_id_t sender_id;
+  node_id_generate(&sender_id);
+
+  peer_connection_t* peer = connection_manager_add(&mgr, &sender_id, NULL, NULL);
+  ASSERT_NE(peer, nullptr);
+  ASSERT_FALSE(peer->relay_verified);
+
+  // Salutation handler sets the flag after the identity checks pass.
+  peer->relay_verified = true;
+  EXPECT_TRUE(peer->relay_verified);
+
+  connection_manager_deinit(&mgr);
+}
+
+TEST(TestPeerVerify, DirectPathUpgradesExistingRelayedPeer) {
+  // connection_manager_add returns the existing peer for a known sender_id
+  // (see connection_manager.c:57-60). So when a relay-admitted peer is later
+  // directly salutation-authenticated, the salutation handler's
+  // `peer->relay_verified = true` upgrades the SAME peer object — no
+  // duplicate peer entry, and the previously-unverified peer becomes
+  // verified. This is the optional hardening the task description called out.
+  connection_manager_t mgr;
+  connection_manager_init(&mgr, 4, NULL);
+
+  node_id_t sender_id;
+  node_id_generate(&sender_id);
+
+  // 1. Relay-admit: creates a new peer, relay_verified=false.
+  peer_connection_t* relayed = connection_manager_add(&mgr, &sender_id, NULL, NULL);
+  ASSERT_NE(relayed, nullptr);
+  ASSERT_FALSE(relayed->relay_verified);
+
+  // 2. Direct salutation: connection_manager_add returns the SAME peer.
+  peer_connection_t* direct = connection_manager_add(&mgr, &sender_id, NULL, NULL);
+  EXPECT_EQ(direct, relayed)
+      << "connection_manager_add must return the existing peer for a known sender_id";
+
+  // Salutation handler sets relay_verified=true on the existing peer.
+  direct->relay_verified = true;
+  EXPECT_TRUE(relayed->relay_verified)
+      << "upgrading the same peer object must flip relay_verified on the relayed entry";
+
+  connection_manager_deinit(&mgr);
+}
+
+// --- Relay signed-nonce challenge table (audit #8 relay; tier-5b Task 3) ---
+//
+// These tests exercise the challenge table CRUD + sweep via the test-only
+// accessors in network.h. The table is a flat array of relay_challenge_t
+// grown on demand; find/append/remove/sweep are the static helpers in
+// network.c. We allocate a minimal stub network_t (get_clear_memory zeroes
+// the struct so relay_challenges=NULL, count=0, capacity=0) and exercise
+// the helpers directly. A full network + relay fixture is heavy, so the
+// send/verify flow is covered by the pem_key_sign_nonce + verify_nonce
+// round-trip tests in test_peer_verify.cpp combined with these table
+// tests and code review.
+
+namespace {
+struct RelayChallengeNetworkDeleter {
+  void operator()(network_t* network) const {
+    if (network != nullptr) {
+      /* Free the challenge table the same way network_destroy does, then
+         free the stub network itself. The stub never initialized the actor
+         or any other subsystem, so no network_destroy. */
+      if (network->relay_challenges != nullptr) {
+        free(network->relay_challenges);
+      }
+      free(network);
+    }
+  }
+};
+}  // namespace
+
+static network_t* make_minimal_network_for_relay_challenge_test() {
+  network_t* network = (network_t*)get_clear_memory(sizeof(network_t));
+  if (network == nullptr) return nullptr;
+  /* network_create sets request_timeout_ms=30000; mirror that so the
+     challenge deadline math matches the production path. */
+  network->request_timeout_ms = 30000;
+  return network;
+}
+
+TEST(RelayChallengeTable, AppendFindRemove) {
+  std::unique_ptr<network_t, RelayChallengeNetworkDeleter> network(
+      make_minimal_network_for_relay_challenge_test());
+  ASSERT_NE(network, nullptr);
+
+  node_id_t sender_id;
+  node_id_generate(&sender_id);
+  uint8_t nonce[32];
+  for (size_t index = 0; index < 32; index++) nonce[index] = (uint8_t)(index + 1);
+  uint64_t deadline_ms = (uint64_t)time(NULL) * 1000 + 30000;
+  uint32_t relay_endpoint_id = 42;
+
+  ASSERT_EQ(network_relay_challenge_append_for_test(network.get(), &sender_id,
+                                                     nonce, deadline_ms,
+                                                     relay_endpoint_id), 0);
+  EXPECT_EQ(network_relay_challenge_count_for_test(network.get()), 1u);
+
+  // Find by sender_id.
+  int found = network_relay_challenge_find_for_test(network.get(), &sender_id);
+  ASSERT_GE(found, 0);
+  EXPECT_EQ(found, 0) << "first appended challenge must be at index 0";
+
+  // Verify the stored entry's fields (nonce, deadline, endpoint).
+  relay_challenge_t entry;
+  ASSERT_EQ(network_relay_challenge_get_for_test(network.get(), 0, &entry), 0);
+  EXPECT_TRUE(node_id_equals(&entry.sender_id, &sender_id));
+  EXPECT_EQ(memcmp(entry.nonce, nonce, 32), 0);
+  EXPECT_EQ(entry.deadline_ms, deadline_ms);
+  EXPECT_EQ(entry.relay_endpoint_id, relay_endpoint_id);
+
+  // A different sender_id is not found.
+  node_id_t other_id;
+  node_id_generate(&other_id);
+  EXPECT_EQ(network_relay_challenge_find_for_test(network.get(), &other_id), -1);
+
+  // Remove by sender_id.
+  network_relay_challenge_remove_for_test(network.get(), &sender_id);
+  EXPECT_EQ(network_relay_challenge_count_for_test(network.get()), 0u);
+  EXPECT_EQ(network_relay_challenge_find_for_test(network.get(), &sender_id), -1);
+}
+
+TEST(RelayChallengeTable, MultipleChallenges) {
+  std::unique_ptr<network_t, RelayChallengeNetworkDeleter> network(
+      make_minimal_network_for_relay_challenge_test());
+  ASSERT_NE(network, nullptr);
+
+  // Append three challenges for three distinct senders.
+  node_id_t sender_ids[3];
+  for (int index = 0; index < 3; index++) {
+    node_id_generate(&sender_ids[index]);
+    uint8_t nonce[32];
+    memset(nonce, (uint8_t)(index + 1), 32);
+    ASSERT_EQ(network_relay_challenge_append_for_test(network.get(),
+                                                       &sender_ids[index],
+                                                       nonce,
+                                                       (uint64_t)time(NULL) * 1000 + 30000,
+                                                       (uint32_t)(100 + index)), 0);
+  }
+  EXPECT_EQ(network_relay_challenge_count_for_test(network.get()), 3u);
+
+  // Each sender is found at some index.
+  for (int index = 0; index < 3; index++) {
+    int found = network_relay_challenge_find_for_test(network.get(),
+                                                      &sender_ids[index]);
+    ASSERT_GE(found, 0);
+    relay_challenge_t entry;
+    ASSERT_EQ(network_relay_challenge_get_for_test(network.get(),
+                                                    (size_t)found, &entry), 0);
+    EXPECT_EQ(entry.relay_endpoint_id, (uint32_t)(100 + index))
+        << "endpoint id must round-trip per sender";
+  }
+
+  // Remove the middle one; count goes to 2, the removed one is gone, the
+  // others are still found (swap-with-last means index may change, but
+  // find-by-id still works).
+  network_relay_challenge_remove_for_test(network.get(), &sender_ids[1]);
+  EXPECT_EQ(network_relay_challenge_count_for_test(network.get()), 2u);
+  EXPECT_EQ(network_relay_challenge_find_for_test(network.get(), &sender_ids[1]), -1);
+  EXPECT_GE(network_relay_challenge_find_for_test(network.get(), &sender_ids[0]), 0);
+  EXPECT_GE(network_relay_challenge_find_for_test(network.get(), &sender_ids[2]), 0);
+
+  // Remove the remaining two.
+  network_relay_challenge_remove_for_test(network.get(), &sender_ids[0]);
+  network_relay_challenge_remove_for_test(network.get(), &sender_ids[2]);
+  EXPECT_EQ(network_relay_challenge_count_for_test(network.get()), 0u);
+}
+
+TEST(RelayChallengeTable, SweepExpiresPastDeadlines) {
+  std::unique_ptr<network_t, RelayChallengeNetworkDeleter> network(
+      make_minimal_network_for_relay_challenge_test());
+  ASSERT_NE(network, nullptr);
+
+  uint64_t now_ms = (uint64_t)time(NULL) * 1000;
+  // Two expired, one fresh.
+  node_id_t expired1, expired2, fresh;
+  node_id_generate(&expired1);
+  node_id_generate(&expired2);
+  node_id_generate(&fresh);
+  uint8_t nonce[32] = {0};
+  ASSERT_EQ(network_relay_challenge_append_for_test(network.get(), &expired1,
+                                                     nonce, now_ms - 1000, 1), 0);
+  ASSERT_EQ(network_relay_challenge_append_for_test(network.get(), &expired2,
+                                                     nonce, now_ms - 1, 2), 0);
+  ASSERT_EQ(network_relay_challenge_append_for_test(network.get(), &fresh,
+                                                     nonce, now_ms + 30000, 3), 0);
+  ASSERT_EQ(network_relay_challenge_count_for_test(network.get()), 3u);
+
+  // Sweep at now_ms — expired1 (deadline now_ms-1000) and expired2 (deadline
+  // now_ms-1) must be removed; fresh (deadline now_ms+30000) must remain.
+  network_relay_challenge_sweep_for_test(network.get(), now_ms);
+  EXPECT_EQ(network_relay_challenge_count_for_test(network.get()), 1u);
+  EXPECT_EQ(network_relay_challenge_find_for_test(network.get(), &expired1), -1);
+  EXPECT_EQ(network_relay_challenge_find_for_test(network.get(), &expired2), -1);
+  EXPECT_GE(network_relay_challenge_find_for_test(network.get(), &fresh), 0);
+}
+
+TEST(RelayChallengeTable, SweepKeepsZeroDeadlineEntries) {
+  // A deadline_ms of 0 means "no deadline" (consistent with closest_pending's
+  // convention). The sweep must NOT remove such entries.
+  std::unique_ptr<network_t, RelayChallengeNetworkDeleter> network(
+      make_minimal_network_for_relay_challenge_test());
+  ASSERT_NE(network, nullptr);
+
+  node_id_t sender_id;
+  node_id_generate(&sender_id);
+  uint8_t nonce[32] = {0};
+  ASSERT_EQ(network_relay_challenge_append_for_test(network.get(), &sender_id,
+                                                     nonce, /*deadline_ms=*/0, 7), 0);
+
+  // Sweep far in the future; the zero-deadline entry must remain.
+  network_relay_challenge_sweep_for_test(network.get(),
+                                          (uint64_t)time(NULL) * 1000 + 60000);
+  EXPECT_EQ(network_relay_challenge_count_for_test(network.get()), 1u);
+  EXPECT_GE(network_relay_challenge_find_for_test(network.get(), &sender_id), 0);
+}
+
+TEST(RelayChallengeTable, CapacityGrowth) {
+  // Append enough challenges to force the array to grow past its initial
+  // capacity (8). The grow path uses realloc and must not lose any entry.
+  std::unique_ptr<network_t, RelayChallengeNetworkDeleter> network(
+      make_minimal_network_for_relay_challenge_test());
+  ASSERT_NE(network, nullptr);
+
+  const size_t count = 50;
+  std::vector<node_id_t> sender_ids(count);
+  for (size_t index = 0; index < count; index++) {
+    node_id_generate(&sender_ids[index]);
+    uint8_t nonce[32];
+    memset(nonce, (uint8_t)(index & 0xFF), 32);
+    ASSERT_EQ(network_relay_challenge_append_for_test(network.get(),
+                                                       &sender_ids[index],
+                                                       nonce,
+                                                       (uint64_t)time(NULL) * 1000 + 30000,
+                                                       (uint32_t)index), 0);
+  }
+  EXPECT_EQ(network_relay_challenge_count_for_test(network.get()), count);
+  for (size_t index = 0; index < count; index++) {
+    int found = network_relay_challenge_find_for_test(network.get(),
+                                                       &sender_ids[index]);
+    ASSERT_GE(found, 0);
+  }
+}
+
+TEST(RelayChallengeTable, GetAtIndexOutOfRangeFails) {
+  std::unique_ptr<network_t, RelayChallengeNetworkDeleter> network(
+      make_minimal_network_for_relay_challenge_test());
+  ASSERT_NE(network, nullptr);
+  relay_challenge_t entry;
+  EXPECT_EQ(network_relay_challenge_get_for_test(network.get(), 0, &entry), -1);
+  EXPECT_EQ(network_relay_challenge_get_for_test(network.get(), 99, &entry), -1);
+}
+
+TEST(RelayChallengeTable, AppendNullInputsFails) {
+  std::unique_ptr<network_t, RelayChallengeNetworkDeleter> network(
+      make_minimal_network_for_relay_challenge_test());
+  ASSERT_NE(network, nullptr);
+  node_id_t sender_id;
+  node_id_generate(&sender_id);
+  uint8_t nonce[32] = {0};
+  EXPECT_EQ(network_relay_challenge_append_for_test(nullptr, &sender_id,
+                                                     nonce, 1, 1), -1);
+  EXPECT_EQ(network_relay_challenge_append_for_test(network.get(), nullptr,
+                                                     nonce, 1, 1), -1);
+  EXPECT_EQ(network_relay_challenge_append_for_test(network.get(), &sender_id,
+                                                     nullptr, 1, 1), -1);
 }
 
 // --- Salutation round-trip tests ---

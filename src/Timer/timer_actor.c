@@ -209,28 +209,83 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
         entry->completion_type = 0;
         entry->timer = NULL;
         entry->completion_payload = NULL;
-        /* Immediately dispatch the completion message to the target actor
-           via two-hop through the timer_actor. */
+        /* Build the completion to forward to the target. Send it ONE-hop
+           directly to the target instead of two-hop through the timer_actor:
+           the entry was just cleared above, so the TIMER_COMPLETION
+           dispatch's F8 re-check (which only forwards when the target is
+           still in the debounce_map / active_timers) would otherwise drop
+           the completion. The cancel+clear happened under loop_lock, so the
+           timer can no longer fire and enqueue a competing completion.
+           actor_send to a destroyed target drops the payload safely; a
+           freed target is the destroyer's responsibility (the destroyer
+           calls timer_actor_cancel_target before freeing, which removes
+           the entry, making this flush a no-op). */
         timer_completion_payload_t* copy = get_clear_memory(sizeof(timer_completion_payload_t));
         copy->target = payload->target;
         copy->completion_type = payload->completion_type;
         copy->timer_id = 0;
         copy->timer_actor = timer_actor;
-        message_t dispatch_msg = {0};
-        dispatch_msg.type = TIMER_COMPLETION;
-        dispatch_msg.payload = copy;
-        dispatch_msg.payload_destroy = free;
+        message_t target_msg = {0};
+        target_msg.type = copy->completion_type;
+        target_msg.payload = copy;
+        target_msg.payload_destroy = free;
         platform_mutex_unlock(timer_actor->loop_lock);
-        actor_send(&timer_actor->actor, &dispatch_msg);
+        actor_send(copy->target, &target_msg);
       } else {
         platform_mutex_unlock(timer_actor->loop_lock);
       }
-      /* payload (timer_debounce_payload_t) fields are copied into the dispatch
-         copy above. Let actor_run free the original via msg->payload_destroy. */
+      /* payload (timer_debounce_payload_t) fields are copied into the
+         completion copy above. Let actor_run free the original via
+         msg->payload_destroy. */
       break;
     }
     case TIMER_COMPLETION: {
       timer_completion_payload_t* completion = (timer_completion_payload_t*)msg->payload;
+      /* F8 re-check: before actor_send-ing to completion->target, confirm
+         the target is still tracked in the debounce_map or active_timers.
+         timer_actor_cancel_target removes the target from both BEFORE the
+         target is freed; if the target isn't tracked, this completion is
+         stale (the target was canceled/freed) and must be dropped without
+         dereferencing completion->target. The lookup compares pointer VALUES
+         (no dereference), so a freed target's stale pointer value is safe
+         to compare. actor_send would otherwise read freed flags -> UAF.
+
+         Both debounce timers (TIMER_DEBOUNCE dispatch) and direct
+         timer_actor_set timers are tracked in active_timers, so checking
+         both the debounce_map and active_timers covers every completion
+         source. The completion payload carried in msg->payload is owned by
+         actor_run (payload_destroy = free) and is freed regardless of
+         whether we drop or forward, so the drop path leaks nothing. */
+      platform_mutex_lock(timer_actor->loop_lock);
+      bool target_tracked = false;
+      for (size_t index = 0; index < MAX_DEBOUNCE_KEYS; index++) {
+        if (timer_actor->debounce_map[index].target == completion->target) {
+          target_tracked = true;
+          break;
+        }
+      }
+      if (!target_tracked) {
+        for (size_t index = 0; index < timer_actor->active_timer_count;
+             index++) {
+          pd_timer_t* tracked_timer = timer_actor->active_timers[index];
+          if (tracked_timer == NULL) {
+            continue;
+          }
+          timer_completion_payload_t* tracked_completion =
+              (timer_completion_payload_t*)tracked_timer->user_data;
+          if (tracked_completion != NULL &&
+              tracked_completion->target == completion->target) {
+            target_tracked = true;
+            break;
+          }
+        }
+      }
+      platform_mutex_unlock(timer_actor->loop_lock);
+      if (!target_tracked) {
+        /* Drop the stale completion — the target was canceled/freed. The
+           payload is freed by actor_run via msg->payload_destroy. */
+        break;
+      }
       /* Allocate a fresh copy of the completion to forward to the target
        * actor. The original payload's fields are copied into `copy` and the
        * original is then freed by actor_run's post-dispatch cleanup via
@@ -443,6 +498,85 @@ void timer_actor_cancel(timer_actor_t* timer_actor, uint64_t timer_id) {
     pd_timer_destroy(timer);
     free(user_data);
   }
+  platform_mutex_unlock(timer_actor->loop_lock);
+}
+
+void timer_actor_cancel_target(timer_actor_t* timer_actor, actor_t* target) {
+  if (timer_actor == NULL || target == NULL) {
+    return;
+  }
+
+  /* Synchronous cancel-by-target: remove every debounce entry and every
+     active timer whose completion payload targets `target`, inline under
+     loop_lock. This is the F8 fix: a short-lived target actor can be freed
+     before an in-flight TIMER_COMPLETION (already enqueued by
+     _timer_completion_callback on the pd-loop thread) is processed by the
+     timer_actor's dispatch. Without this cancel, the dispatch's
+     actor_send(payload->target, ...) would read freed flags -> UAF.
+
+     The destroyer calls cancel_target BEFORE freeing `target`; any
+     in-flight completion is then dropped by the TIMER_COMPLETION dispatch
+     re-check (the target is no longer in the debounce_map nor in
+     active_timers). The re-check compares pointer VALUES (no dereference),
+     so a freed target's stale pointer value is safe to compare.
+
+     Takes the same loop_lock as timer_actor_cancel / timer_actor_set / the
+     TIMER_DEBOUNCE / TIMER_DEBOUNCE_FLUSH dispatches / teardown, so the
+     debounce_map and active_timers mutations are serialized. pd_timer_stop
+     and pd_timer_destroy do not need the timer_actor's loop thread to take
+     loop_lock, so holding it across them cannot deadlock with the loop
+     thread (which never takes loop_lock). _timer_actor_untrack returns
+     false if a timer was already removed (a concurrent cancel, or teardown
+     via _timer_actor_destroy_all_tracked); in that case the pointer is
+     already freed and must not be touched. */
+  platform_mutex_lock(timer_actor->loop_lock);
+
+  /* Cancel every debounce entry for this target. Mirrors the per-entry
+     cleanup in the TIMER_DEBOUNCE / TIMER_DEBOUNCE_FLUSH dispatches. */
+  for (size_t index = 0; index < MAX_DEBOUNCE_KEYS; index++) {
+    debounce_entry_t* entry = &timer_actor->debounce_map[index];
+    if (entry->target != target) {
+      continue;
+    }
+    if (entry->timer != NULL) {
+      pd_timer_stop(entry->timer);
+      void* old_user_data = entry->timer->user_data;
+      _timer_actor_untrack(timer_actor, entry->timer);
+      pd_timer_destroy(entry->timer);
+      free(old_user_data);
+      entry->timer = NULL;
+      entry->completion_payload = NULL;
+    }
+    entry->target = NULL;
+    entry->completion_type = 0;
+  }
+
+  /* Cancel any non-debounce timers (from timer_actor_set) whose completion
+     payload targets this actor. _timer_actor_untrack does swap-removal, so
+     on a match do not advance the index — the swapped-in last element must
+     be re-checked at the same slot. A while loop (rather than a for-loop
+     with index--) avoids the size_t underflow at index 0. */
+  size_t index = 0;
+  while (index < timer_actor->active_timer_count) {
+    pd_timer_t* timer = timer_actor->active_timers[index];
+    if (timer == NULL) {
+      index++;
+      continue;
+    }
+    timer_completion_payload_t* completion =
+        (timer_completion_payload_t*)timer->user_data;
+    if (completion == NULL || completion->target != target) {
+      index++;
+      continue;
+    }
+    pd_timer_stop(timer);
+    _timer_actor_untrack(timer_actor, timer);
+    pd_timer_destroy(timer);
+    free(completion);
+    /* Don't advance index — the swap brought the previous last element
+       into this slot, and it may also target `target`. */
+  }
+
   platform_mutex_unlock(timer_actor->loop_lock);
 }
 

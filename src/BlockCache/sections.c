@@ -188,6 +188,7 @@ static void sections_read_result_destroy(void* ptr) {
 
 void sections_dispatch(void* state, message_t* msg) {
   sections_t* sections = (sections_t*)state;
+  platform_mutex_lock(sections->dispatch_lock);
   switch (msg->type) {
     case SECTIONS_WRITE: {
       sections_write_payload_t* p = (sections_write_payload_t*)msg->payload;
@@ -439,6 +440,7 @@ void sections_dispatch(void* state, message_t* msg) {
     default:
       break;
   }
+  platform_mutex_unlock(sections->dispatch_lock);
 }
 
 static void section_on_dirty(void* context, section_t* section) {
@@ -721,6 +723,7 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
   sections->type = type;
   sections->max_tuple_size = max_tuple_size;
   sections->size = size;
+  sections->dispatch_lock = platform_mutex_create();
   actor_init(&sections->actor, sections, sections_dispatch, pool);
   if (platform_file_exists(robin_path)) {
     FILE* robin_file = fopen(robin_path, "rb");
@@ -848,6 +851,8 @@ void sections_destroy(sections_t* sections) {
   free(sections->meta_path);
   free(sections->data_path);
   free(sections->robin_path);
+  platform_mutex_destroy(sections->dispatch_lock);
+  sections->dispatch_lock = NULL;
   free(sections);
 }
 

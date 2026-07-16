@@ -57,6 +57,13 @@ typedef struct {
   char*    tcp_tls_cert_path;
   char*    tcp_tls_key_path;
 
+  /* TLS peer validation policy. When false (default) the P2P listener,
+   * relay server/client, WT transport, and offs client refuse to start
+   * (or connect) without a configured CA — fail closed. When true, those
+   * paths proceed with NO_CERTIFICATE_VALIDATION and a logged warning
+   * (trusted-LAN/research opt-in). See audit #11. */
+  bool     allow_insecure;
+
   /* Auth */
   char*    api_key_hash;        // bcrypt hash ($2b$ prefix), NULL if auth disabled
 

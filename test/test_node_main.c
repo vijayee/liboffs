@@ -1776,6 +1776,10 @@ int node_main(int argc, char* argv[]) {
     node_state_destroy(&g_node);
     return 1;
   }
+  /* The integration node runs without a CA, so fail-close (audit #11) would
+   * reject the listener and any relay connect. Allow insecure for this
+   * test fixture (trusted-LAN/research path). */
+  g_node.authority->allow_insecure = true;
   if (g_node.cert_path && g_node.key_path) {
     g_node.authority->node_cert_path = strdup(g_node.cert_path);
     g_node.authority->node_key_path = strdup(g_node.key_path);

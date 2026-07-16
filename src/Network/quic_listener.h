@@ -27,6 +27,17 @@
 
 typedef struct quic_connection_t quic_connection_t;
 
+// Per-connection tracking entry. The HQUIC handle is tracked for graceful
+// shutdown, and the peer's leaf cert (DER) is stashed here during the
+// QUIC_CONNECTION_EVENT_PEER_CERTIFICATE_RECEIVED callback (fired during the
+// TLS handshake, before CONNECTED) so the CONNECTED handler can pass it to
+// the salutation handler for the audit #8 public_key pin. See audit #8.
+typedef struct conn_track_entry_t {
+  void*    connection;       // HQUIC handle
+  uint8_t* peer_cert_der;    // peer leaf cert (DER); NULL if none/not yet received
+  size_t   peer_cert_der_len;
+} conn_track_entry_t;
+
 // Payload for NETWORK_QUIC_DATA messages
 typedef struct quic_data_payload_t {
   uint8_t* data;
@@ -42,6 +53,8 @@ typedef struct quic_connected_payload_t {
   void* connection;               /* HQUIC connection handle */
   void* stream;                   /* HQUIC persistent bidirectional stream handle */
   struct sockaddr_storage peer_addr;
+  uint8_t* peer_cert_der;        /* peer's leaf cert (DER), extracted at CONNECTED; NULL if none. Stolen by pending_quic_add. */
+  size_t   peer_cert_der_len;
 } quic_connected_payload_t;
 
 void quic_connected_payload_destroy(quic_connected_payload_t* payload);
@@ -89,13 +102,13 @@ typedef struct quic_listener_t {
 
   // Active connection tracking for graceful shutdown
 #ifdef HAS_MSQUIC
-  HQUIC* connections;
+  conn_track_entry_t* connections;
   size_t connection_count;
   size_t connection_capacity;
   platform_mutex_t* conn_lock;
   void* peer_verify;  // peer_verify_ctx_t* — NULL if no CA cert loaded
 #else
-  void** connections;
+  conn_track_entry_t* connections;
   size_t connection_count;
   size_t connection_capacity;
   platform_mutex_t* conn_lock;
@@ -110,5 +123,18 @@ void quic_listener_stop(quic_listener_t* listener);
 int quic_listener_connect(quic_listener_t* listener, const char* host, uint16_t port);
 
 void quic_listener_dispatch(void* state, message_t* msg);
+
+// Test-only accessors for the connection tracking array. Defined only in
+// debug builds (NDEBUG unset) so they cannot be relied on in production.
+// Used by test_quic_integration.cpp ConnTrackAddIsIdempotent to verify
+// _conn_track_add is idempotent without spinning up a full msquic
+// registration. See docs/liboffs-audit-report.md #4.
+#ifndef NDEBUG
+void quic_listener__conn_track_init_for_test(quic_listener_t* listener);
+void quic_listener__conn_track_destroy_for_test(quic_listener_t* listener);
+void quic_listener__conn_track_add_for_test(quic_listener_t* listener,
+                                              HQUIC connection);
+size_t quic_listener__conn_track_count_for_test(quic_listener_t* listener);
+#endif
 
 #endif // OFFS_QUIC_LISTENER_H

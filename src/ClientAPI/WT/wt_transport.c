@@ -7,6 +7,8 @@
 
 #include "../../Util/allocator.h"
 #include "../../Platform/platform.h"
+#include "../../Util/log.h"
+#include "../../Network/peer_verify.h"
 #include "../../Actor/message.h"
 #include "../../Actor/message_queue.h"
 #include <poll-dancer/poll-dancer.h>
@@ -244,6 +246,8 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
                                       uint16_t port,
                                       const char* cert_path,
                                       const char* key_path,
+                                      const char* ca_path,
+                                      bool allow_insecure,
                                       size_t max_connections,
                                       const char* api_key_hash,
                                       health_context_t* health_ctx) {
@@ -287,6 +291,27 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
     memcpy(transport->key_path, key_path, strlen(key_path) + 1);
   } else {
     transport->key_path = NULL;
+  }
+  /* Load CA for client-cert validation. If the CA fails to load, the cert
+   * config block falls back to NO_CERTIFICATE_VALIDATION with a logged
+   * warning (Task 2 will fail-close unless allow_insecure is set). */
+  transport->peer_verify = NULL;
+  transport->allow_insecure = allow_insecure;
+  if (ca_path != NULL) {
+    transport->peer_verify = peer_verify_ctx_create_from_pem_file(ca_path);
+    if (transport->peer_verify == NULL) {
+      fprintf(stderr, "wt_transport_create: failed to load CA from %s\n", ca_path);
+      free(transport->cert_path);
+      free(transport->key_path);
+      free(transport->host);
+      free(transport->api_key_hash);
+      platform_mutex_destroy(transport->conn_lock);
+      _destroy_stack_destroy(transport);
+      pd_loop_destroy(transport->loop);
+      actor_destroy(&transport->actor);
+      free(transport);
+      return NULL;
+    }
   }
   transport->win_cert_store = NULL;
   transport->win_cert_context = NULL;
@@ -332,12 +357,33 @@ void wt_transport_destroy(wt_transport_t* transport) {
   if (!atomic_load_explicit(&transport->pool->terminate, memory_order_acquire)) {
     scheduler_pool_wait_for_idle(transport->pool);
   }
+  /* Take conn_lock defensively during the residual free loop. After
+     wt_transport_stop awaited active_connections == 0, all SHUTDOWN_COMPLETE
+     handlers have run, so no MsQuic callback can fire on these connections
+     and the counter is already 0 — do NOT decrement here (the SHUTDOWN_COMPLETE
+     handler owns the decrement). The lock guards against a late callback
+     that raced the quiesce poll. See concurrency-pass.md F7. */
+  platform_mutex_lock(transport->conn_lock);
   for (int i = transport->connections.length - 1; i >= 0; i--) {
     wt_connection_t* conn = transport->connections.data[i];
     /* Detach from the pool registry before freeing conn, so no dangling
      * registry pointer remains for a recovery scan / pool-destroy detach. */
     actor_detach_pool(&conn->actor);
     message_queue_destroy(&conn->actor.queue);
+    /* Close the MsQuic stream + connection handles. wt_transport_stop already
+       shut down each connection and awaited SHUTDOWN_COMPLETE, so the
+       connection is fully quiesced — ConnectionClose/StreamClose just release
+       the HQUIC handles. Without this, RegistrationClose below blocks
+       indefinitely waiting for the still-open connection handles. See
+       concurrency-pass.md F7. */
+    if (conn->stream != NULL) {
+      transport->msquic->StreamClose(conn->stream);
+      conn->stream = NULL;
+    }
+    if (conn->connection != NULL) {
+      transport->msquic->ConnectionClose(conn->connection);
+      conn->connection = NULL;
+    }
     if (conn->framer != NULL) {
       stream_framer_destroy(conn->framer);
     }
@@ -365,10 +411,10 @@ void wt_transport_destroy(wt_transport_t* transport) {
     if (conn->resolve_path != NULL) {
       free(conn->resolve_path);
     }
-    atomic_fetch_sub(&transport->active_connections, 1);
     free(conn);
   }
   vec_deinit(&transport->connections);
+  platform_mutex_unlock(transport->conn_lock);
 
   if (transport->listener != NULL) {
     transport->msquic->ListenerStop(transport->listener);
@@ -393,6 +439,10 @@ void wt_transport_destroy(wt_transport_t* transport) {
   if (transport->key_path != NULL) {
     free(transport->key_path);
   }
+  if (transport->peer_verify != NULL) {
+    peer_verify_ctx_destroy((peer_verify_ctx_t*)transport->peer_verify);
+    transport->peer_verify = NULL;
+  }
   if (transport->host != NULL) {
     free(transport->host);
   }
@@ -415,6 +465,11 @@ static QUIC_STATUS QUIC_API _wt_listener_callback(
       HQUIC connection = event->NEW_CONNECTION.Connection;
       transport->msquic->SetCallbackHandler(connection, _wt_connection_callback, transport);
       transport->msquic->ConnectionSetConfiguration(connection, transport->configuration);
+      /* Count the connection as active as soon as it arrives so the
+         SHUTDOWN_COMPLETE handler (which fires for every connection,
+         including handshake failures and refused connections) has a
+         matching decrement and cannot underflow. See concurrency-pass.md F7. */
+      atomic_fetch_add(&transport->active_connections, 1);
       break;
     }
     default:
@@ -431,16 +486,25 @@ static QUIC_STATUS QUIC_API _wt_connection_callback(
 
   switch (event->Type) {
     case QUIC_CONNECTION_EVENT_CONNECTED: {
+      /* The connection was already counted at NEW_CONNECTION. Enforce the
+         max_connections cap here: the count includes this connection, so
+         use > (not >=). A refused connection is shut down by MsQuic and its
+         SHUTDOWN_COMPLETE handler decrements back. See concurrency-pass.md F7. */
       if (transport->max_connections > 0 &&
-          atomic_load(&transport->active_connections) >= transport->max_connections) {
+          atomic_load(&transport->active_connections) > transport->max_connections) {
         return QUIC_STATUS_CONNECTION_REFUSED;
       }
       /* Accept the connection — stream acceptance is handled separately */
       break;
     }
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
-      /* Connection fully closed — nothing to do here, connection cleanup
-       * is handled by the connection actor system. */
+      /* Connection fully closed — decrement the active counter (paired with
+         the increment at NEW_CONNECTION) so wt_transport_stop's quiesce poll
+         can observe shutdown completion. The wt_connection_t cleanup itself is
+         handled by wt_transport_destroy's free loop (the connection is
+         quiesced by then, so no callback can race the free). See
+         concurrency-pass.md F7. */
+      atomic_fetch_sub(&transport->active_connections, 1);
       break;
     }
     case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
@@ -454,7 +518,6 @@ static QUIC_STATUS QUIC_API _wt_connection_callback(
       platform_mutex_lock(transport->conn_lock);
       vec_push(&transport->connections, wt_conn);
       platform_mutex_unlock(transport->conn_lock);
-      atomic_fetch_add(&transport->active_connections, 1);
 
       /* Set stream callback to receive data */
       transport->msquic->SetCallbackHandler(stream, _wt_stream_callback, wt_conn);
@@ -581,10 +644,52 @@ static void* _server_thread(void* arg) {
     };
     cred_config.Flags = QUIC_CREDENTIAL_FLAG_NONE;
 #endif
+    /* When a CA is configured, validate client certs against it. The cert
+     * branches above initialize Flags to NONE (server-side); ORing in
+     * SET_CA_CERTIFICATE_FILE enables peer-cert validation. */
+    if (transport->peer_verify != NULL) {
+      cred_config.Flags |= QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
+      cred_config.CaCertificateFile = peer_verify_ctx_path(
+          (peer_verify_ctx_t*)transport->peer_verify);
+    } else if (transport->allow_insecure) {
+      log_warn("wt_transport: no CA configured and allow_insecure is set — "
+               "TLS will not authenticate client certs (MITM possible). "
+               "Configure a CA for production. See audit #11.");
+      cred_config.Flags |= QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    } else {
+      log_error("wt_transport: no CA configured and allow_insecure is not set "
+                "— refusing to start. Configure a CA, or set allow_insecure=1 "
+                "for trusted-LAN use. See audit #11.");
+      transport->msquic->ConfigurationClose(transport->configuration);
+      transport->configuration = NULL;
+      transport->msquic->RegistrationClose(transport->registration);
+      transport->registration = NULL;
+      atomic_store(&transport->running, 0);
+      return NULL;
+    }
   } else {
     /* Self-signed / insecure mode for testing */
     cred_config.Type = QUIC_CREDENTIAL_TYPE_NONE;
-    cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    if (transport->peer_verify != NULL) {
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
+      cred_config.CaCertificateFile = peer_verify_ctx_path(
+          (peer_verify_ctx_t*)transport->peer_verify);
+    } else if (transport->allow_insecure) {
+      log_warn("wt_transport: no CA configured and allow_insecure is set — "
+               "TLS will not authenticate client certs (MITM possible). "
+               "Configure a CA for production. See audit #11.");
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    } else {
+      log_error("wt_transport: no CA configured and allow_insecure is not set "
+                "— refusing to start. Configure a CA, or set allow_insecure=1 "
+                "for trusted-LAN use. See audit #11.");
+      transport->msquic->ConfigurationClose(transport->configuration);
+      transport->configuration = NULL;
+      transport->msquic->RegistrationClose(transport->registration);
+      transport->registration = NULL;
+      atomic_store(&transport->running, 0);
+      return NULL;
+    }
   }
 
   status = transport->msquic->ConfigurationLoadCredential(transport->configuration, &cred_config);
@@ -649,9 +754,47 @@ void wt_transport_start(wt_transport_t* transport) {
 }
 
 void wt_transport_stop(wt_transport_t* transport) {
+  if (transport == NULL) {
+    return;
+  }
   atomic_store(&transport->running, 0);
   pd_loop_async_send(transport->loop, transport);
   platform_thread_join(transport->thread);
+
+  /* The server thread already called ListenerStop + ListenerClose on exit,
+     so no new connections can arrive. Shut down each existing connection so
+     MsQuic fires SHUTDOWN_COMPLETE (which decrements active_connections) and
+     no callback can deref a wt_connection_t after wt_transport_destroy frees
+     it. Without this, MsQuic worker threads still fire stream/connection
+     callbacks on the wt_connection_t objects during destroy's free loop ->
+     UAF, and RegistrationClose blocks indefinitely waiting for the
+     still-open connections. See concurrency-pass.md F7. */
+  platform_mutex_lock(transport->conn_lock);
+  for (int index = 0; index < transport->connections.length; index++) {
+    wt_connection_t* conn = transport->connections.data[index];
+    if (conn != NULL && conn->connection != NULL) {
+      transport->msquic->ConnectionShutdown(
+          conn->connection,
+          QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
+          0);
+    }
+  }
+  size_t remaining = atomic_load(&transport->active_connections);
+  platform_mutex_unlock(transport->conn_lock);
+
+  /* Await quiesce: poll active_connections until 0 or a 5s timeout. The
+     SHUTDOWN_COMPLETE handler (on a MsQuic worker thread) decrements the
+     counter for each connection that was shut down. Do NOT null
+     conn->connection here — the destroy free loop still needs it to have
+     been valid for the shutdown call above (it is now quiesced). */
+  for (int wait_ms = 0; wait_ms < 5000 && remaining > 0; wait_ms += 10) {
+    platform_sleep_ms(10);
+    remaining = atomic_load(&transport->active_connections);
+  }
+  if (remaining > 0) {
+    log_error("wt_transport: shutdown timed out with %zu connections active",
+              remaining);
+  }
 }
 
 #else /* !HAS_MSQUIC */
@@ -668,11 +811,13 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
                                       uint16_t port,
                                       const char* cert_path,
                                       const char* key_path,
+                                      const char* ca_path,
+                                      bool allow_insecure,
                                       size_t max_connections,
                                       const char* api_key_hash,
                                       health_context_t* health_ctx) {
   (void)pool; (void)bc; (void)ofd_cache; (void)tc;
-  (void)host; (void)port; (void)cert_path; (void)key_path; (void)max_connections; (void)api_key_hash; (void)health_ctx;
+  (void)host; (void)port; (void)cert_path; (void)key_path; (void)ca_path; (void)allow_insecure; (void)max_connections; (void)api_key_hash; (void)health_ctx;
   return NULL;
 }
 

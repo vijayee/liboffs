@@ -58,8 +58,9 @@ extern "C" {
 namespace {
 
 /* Pre-staged PEMs (copied into the test working dir by test/CMakeLists.txt). */
-static const char* kCertPath = "certs/leaf_cert.pem";
-static const char* kKeyPath = "certs/leaf_key.pem";
+#include "test_ssl_certs.h"
+
+/* Cert paths — generated programmatically in SetUp. */
 
 /* 1 MiB — exceeds one loopback send, so the server's GET_DATA frame forces the
  * Windows write-BIO drain (SSL_write into wbio, drain to ciphertext, bounded-
@@ -204,6 +205,8 @@ static cbor_item_t* _tls_recv_frame(SSL* ssl, stream_framer_t* framer, int timeo
 }
 
 class TestTcpTransportSsl : public testing::Test {
+  char* cert_path;
+  char* key_path;
 protected:
   scheduler_pool_t* pool;
   timer_actor_t* timer;
@@ -217,6 +220,9 @@ protected:
   void SetUp() override {
     static std::atomic<uint16_t> next_port{30080};
     port = next_port.fetch_add(1) + (uint16_t)((platform_getpid() % 113) * 4);
+    cert_path = NULL;
+    key_path = NULL;
+    ASSERT_EQ(test_generate_ssl_certs(&cert_path, &key_path), 0);
     pool = scheduler_pool_create(4);
     scheduler_pool_start(pool);
     timer = timer_actor_create(pool);
@@ -241,11 +247,11 @@ protected:
     tc = tuple_cache_create(100, pool);
 
     transport = tcp_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port,
-                                     kCertPath, kKeyPath, NULL, NULL);
+                                     cert_path, key_path, NULL, NULL);
     for (int retry = 0; transport == nullptr && retry < 10; retry++) {
       port = next_port.fetch_add(1) + (uint16_t)((platform_getpid() % 113) * 4);
       transport = tcp_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port,
-                                       kCertPath, kKeyPath, NULL, NULL);
+                                       cert_path, key_path, NULL, NULL);
     }
     ASSERT_NE(transport, nullptr);
     tcp_transport_start(transport);
@@ -263,6 +269,7 @@ protected:
     scheduler_pool_destroy(pool);
     rm_rf(cache_dir);
     free(cache_dir);
+    test_cleanup_ssl_certs(cert_path, key_path);
   }
 };
 

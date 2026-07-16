@@ -144,18 +144,26 @@ void offs_node_stop(offs_node_t* node) {
     network_shutdown_connections(node->network);
   }
 
-  /* Phase 6: Flush index/WAL and persist peer state. */
+  /* Phase 6: Flush index/WAL. (authority_save_peers moved to after pool stop
+     — it reads network->rings/hebbian, which a late RELAY_RECEIVED dispatch
+     on a still-live worker could mutate until the pool is stopped. See
+     concurrency-pass.md F9.) */
   if (!_shutdown_deadline_exceeded(deadline)) {
     if (node->block_cache != NULL) {
       block_cache_sync(node->block_cache);
-    }
-    if (node->authority != NULL && node->network != NULL) {
-      authority_save_peers(node->authority, node->network);
     }
   }
 
   /* Phase 7: Stop scheduler — join all worker threads. */
   scheduler_pool_stop(node->scheduler);
+
+  /* Phase 8: Persist peer state. Now that workers are joined, no late
+     RELAY_RECEIVED can mutate rings/hebbian during the read. See F9. */
+  if (!_shutdown_deadline_exceeded(deadline)) {
+    if (node->authority != NULL && node->network != NULL) {
+      authority_save_peers(node->authority, node->network);
+    }
+  }
 }
 
 void offs_node_stop_http(offs_node_t* node) {

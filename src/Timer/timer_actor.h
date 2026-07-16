@@ -66,6 +66,14 @@ uint64_t timer_actor_set(timer_actor_t* timer_actor, uint64_t timeout_ms,
                          uint32_t completion_type,
                          ATOMIC(uint64_t)* out_timer_id);
 void timer_actor_cancel(timer_actor_t* timer_actor, uint64_t timer_id);
+/* Cancel all debounce timers for `target` and remove its entries from the
+   debounce_map and active_timers. Call this BEFORE freeing `target` — any
+   in-flight completion already in the timer_actor's mailbox will be dropped
+   by the dispatch (the target is no longer in the map / active_timers, so
+   the dispatch won't actor_send to it). The map lookup compares pointer
+   VALUES (not dereferencing), so a freed target's stale pointer value is
+   safe to compare. See concurrency-pass.md F8. */
+void timer_actor_cancel_target(timer_actor_t* timer_actor, actor_t* target);
 uint64_t timer_actor_debounce(timer_actor_t* timer_actor,
                               uint64_t timeout_ms, uint64_t interval_ms,
                               actor_t* target, uint32_t completion_type);

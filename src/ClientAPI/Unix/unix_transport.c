@@ -138,6 +138,14 @@ void unix_transport_destroy(unix_transport_t* transport) {
   if (transport == NULL) {
     return;
   }
+  /* unix_transport_stop (called above when running) joins the server thread.
+     For pipe-backed listeners the server thread also joins the separate
+     _pipe_loop_thread; for AF_UNIX the server thread IS the loop thread.
+     Either way, by the time we reach the connection free loop below, every
+     pd-loop thread is done and no callback can fire on a unix_connection_t
+     during the free — no race, no conn_lock needed here. The explicit
+     loop_thread join below covers the case where stop was never called
+     (running was never set). See concurrency-pass.md F7 sibling audit. */
   if (atomic_load(&transport->running)) {
     unix_transport_stop(transport);
   }

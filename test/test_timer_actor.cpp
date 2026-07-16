@@ -615,3 +615,127 @@ TEST(TestTimerActor, TestOutTimerId) {
   scheduler_pool_destroy(pool);
   actor_destroy(&target);
 }
+
+/* ---- F8: timer_actor_cancel_target + dispatch re-check ----
+ *
+ * Timer completions carry a raw actor_t* target. If the target is freed
+ * before the timer_actor's dispatch processes an in-flight TIMER_COMPLETION,
+ * the dispatch's actor_send(payload->target, ...) would read freed flags
+ * (UAF). timer_actor_cancel_target removes every debounce entry and active
+ * timer for a target; the dispatch re-checks the debounce_map / active_timers
+ * under loop_lock and drops stale completions without dereferencing the
+ * target. The map lookup compares pointer VALUES (no dereference), so a freed
+ * target's stale pointer value is safe to compare. See concurrency-pass.md F8. */
+
+TEST(TimerCancelTarget, CancelTargetRemovesDebounceEntries) {
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  timer_actor_t* ta = timer_actor_create(pool);
+  ASSERT_NE(ta, nullptr);
+
+  completion_state state;
+  state.fire_count.store(0);
+  state.last_timer_id.store(0);
+  actor_t target;
+  actor_init(&target, &state, completion_dispatch, pool);
+
+  /* Set a debounce timer with a long timeout so it does not fire during the
+     test — the entry should sit in the debounce_map and the timer in
+     active_timers until we cancel it. */
+  timer_actor_debounce(ta, 60000, 0, &target, COMPLETION_FIRE);
+  /* Drain so the TIMER_DEBOUNCE dispatch has populated the entry. */
+  scheduler_pool_wait_for_idle(pool);
+
+  /* The entry must exist before cancel. */
+  bool found_before = false;
+  for (size_t index = 0; index < MAX_DEBOUNCE_KEYS; index++) {
+    if (ta->debounce_map[index].target == &target) {
+      found_before = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(found_before) << "debounce entry missing before cancel_target";
+  EXPECT_GT(ta->active_timer_count, (size_t)0);
+
+  /* Cancel every debounce entry + active timer for this target. */
+  timer_actor_cancel_target(ta, &target);
+  scheduler_pool_wait_for_idle(pool);
+
+  /* The debounce_map must no longer reference the target. */
+  bool found_after = false;
+  for (size_t index = 0; index < MAX_DEBOUNCE_KEYS; index++) {
+    if (ta->debounce_map[index].target == &target) {
+      found_after = true;
+      break;
+    }
+  }
+  EXPECT_FALSE(found_after) << "debounce entry still present after cancel_target";
+
+  /* cancel_target must also remove the debounce timer from active_timers.
+     The pd_timer_t struct is opaque to the test, so we verify by count: the
+     debounce created exactly one tracked timer, and cancel_target must
+     remove it. */
+  EXPECT_EQ(ta->active_timer_count, (size_t)0)
+      << "active timer still tracked after cancel_target";
+
+  timer_actor_destroy(ta);
+  scheduler_pool_wait_for_idle(pool);
+  actor_destroy(&target);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
+}
+
+TEST(TimerCancelTarget, CancelTargetBeforeFreePreventsUseAfterFree) {
+  /* Stress the race window: set a short debounce, immediately cancel_target,
+     then free the target while a TIMER_COMPLETION may already be in the
+     timer_actor's mailbox. Pre-fix, the dispatch's actor_send to the freed
+     target read freed flags (valgrind: Invalid read of size 1). Post-fix, the
+     dispatch drops the stale completion because the target is no longer
+     tracked. Run several iterations so valgrind has a chance to observe the
+     stale-pointer dereference if the re-check is missing. */
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  timer_actor_t* ta = timer_actor_create(pool);
+  ASSERT_NE(ta, nullptr);
+
+  const int iterations = 50;
+  for (int iteration = 0; iteration < iterations; iteration++) {
+    completion_state* state = new completion_state;
+    state->fire_count.store(0);
+    state->last_timer_id.store(0);
+    actor_t* target = (actor_t*)calloc(1, sizeof(actor_t));
+    ASSERT_NE(target, nullptr);
+    actor_init(target, state, completion_dispatch, pool);
+
+    /* Short debounce so the timer fires quickly and enqueues a
+       TIMER_COMPLETION into the timer_actor's mailbox. */
+    timer_actor_debounce(ta, 5, 0, target, COMPLETION_FIRE);
+    /* Let the TIMER_DEBOUNCE dispatch create the timer. */
+    scheduler_pool_wait_for_idle(pool);
+    /* Give the timer a chance to fire and enqueue TIMER_COMPLETION. */
+    platform_sleep_ms(15);
+
+    /* Cancel every entry for this target, then destroy + free the target
+       BEFORE the timer_actor drains its mailbox. Any in-flight
+       TIMER_COMPLETION is now stale (target freed). The dispatch must drop
+       it instead of actor_send-ing to the freed pointer. */
+    timer_actor_cancel_target(ta, target);
+    actor_destroy(target);
+    free(target);
+    delete state;
+
+    /* Drain the timer_actor's mailbox — this is where the UAF would surface
+       pre-fix. */
+    scheduler_pool_wait_for_idle(pool);
+  }
+
+  timer_actor_destroy(ta);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
+}

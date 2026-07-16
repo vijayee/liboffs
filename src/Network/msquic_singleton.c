@@ -8,16 +8,28 @@
 
 #include "../Util/log.h"
 #include "../Platform/platform.h"
+#include "../Util/atomic_compat.h"
 #include <stdint.h>
 #include <stdbool.h>
 
 static const struct QUIC_API_TABLE* g_msquic = NULL;
 static uint32_t g_msquic_refcount = 0;
-static platform_mutex_t* g_msquic_lock = NULL;
+static _Atomic(platform_mutex_t*) g_msquic_lock = NULL;
 
 static void _ensure_msquic_lock_initialized(void) {
-  if (g_msquic_lock == NULL) {
-    g_msquic_lock = platform_mutex_create();
+  /* CAS-init: only one caller wins the NULL -> created swap; losers free
+     their mutex and use the winner's. The old check-then-act could let two
+     first-callers both create a mutex and both enter the critical section
+     -> double MsQuicOpen2 / refcount corruption. See concurrency-pass.md F11. */
+  platform_mutex_t* existing = atomic_load_explicit(&g_msquic_lock, memory_order_acquire);
+  if (existing != NULL) return;
+  platform_mutex_t* created = platform_mutex_create();
+  if (created == NULL) return;
+  platform_mutex_t* expected = NULL;
+  if (!atomic_compare_exchange_strong_explicit(&g_msquic_lock, &expected, created,
+                                               memory_order_acq_rel, memory_order_acquire)) {
+    /* Lost the race — another thread won. Free ours (no leak). */
+    platform_mutex_destroy(created);
   }
 }
 

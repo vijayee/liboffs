@@ -6,6 +6,7 @@
 #include "peer_info.h"
 #include "connection_manager.h"
 #include "wire.h"
+#include "peer_verify.h"
 #include "quic_listener.h"
 #include "find_block.h"
 #include "store_block.h"
@@ -35,6 +36,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <openssl/rand.h>
+#include "pem_key.h"
 
 #define TOPOLOGY_METRICS_PUSH_INTERVAL_MS 300000  // 5 minutes
 #define PING_CAPACITY_INTERVAL_MS 900000  // 15 minutes
@@ -50,6 +53,85 @@ static void network_handle_measure_nodes(network_t* network, message_t* msg);
 static void network_handle_measure_nodes_response(network_t* network, message_t* msg);
 static void network_handle_closest_nodes_progress(network_t* network, message_t* msg);
 static void network_handle_local_closest_nodes(network_t* network, message_t* msg);
+
+// Forward declarations for the static relay-challenge table helpers (defined
+// below; the test-only wrappers at the top of the file call them).
+static int network_relay_challenge_find(network_t* network,
+                                         const node_id_t* sender_id);
+static void network_relay_challenge_remove_at(network_t* network, size_t index);
+static int network_relay_challenge_append(network_t* network,
+                                           const node_id_t* sender_id,
+                                           const uint8_t nonce[32],
+                                           uint64_t deadline_ms,
+                                           uint32_t relay_endpoint_id);
+
+// Monotonic per-node message ID counter. message_id was previously
+// time(NULL) * 1000, which is second-granularity: two queries issued in the
+// same wall-clock second collided. closest_pending is keyed on message_id
+// and the remove returns the first match, so colliding queries cross-delivered
+// and orphaned an entry. The counter is seeded from the wall clock in
+// network_create and incremented monotonically here. See audit #6.
+static uint64_t network_next_message_id(network_t* network) {
+  return atomic_fetch_add_explicit(&network->next_message_id, 1,
+                                   memory_order_relaxed);
+}
+
+#ifndef NDEBUG
+uint64_t network_next_message_id_for_test(network_t* network) {
+  return network_next_message_id(network);
+}
+
+/* Test-only wrappers around the static relay-challenge table helpers. The
+   table itself lives in the network_t; the helpers are static above. These
+   thin wrappers are only compiled in debug builds so the release library
+   does not export them. */
+int network_relay_challenge_find_for_test(network_t* network,
+                                          const node_id_t* sender_id) {
+  return network_relay_challenge_find(network, sender_id);
+}
+
+int network_relay_challenge_append_for_test(network_t* network,
+                                            const node_id_t* sender_id,
+                                            const uint8_t nonce[32],
+                                            uint64_t deadline_ms,
+                                            uint32_t relay_endpoint_id) {
+  return network_relay_challenge_append(network, sender_id, nonce,
+                                        deadline_ms, relay_endpoint_id);
+}
+
+void network_relay_challenge_remove_for_test(network_t* network,
+                                             const node_id_t* sender_id) {
+  int index = network_relay_challenge_find(network, sender_id);
+  if (index >= 0) {
+    network_relay_challenge_remove_at(network, (size_t)index);
+  }
+}
+
+size_t network_relay_challenge_count_for_test(network_t* network) {
+  return network->relay_challenge_count;
+}
+
+void network_relay_challenge_sweep_for_test(network_t* network,
+                                            uint64_t now_ms) {
+  size_t idx = 0;
+  while (idx < network->relay_challenge_count) {
+    relay_challenge_t* pending = &network->relay_challenges[idx];
+    if (pending->deadline_ms != 0 && pending->deadline_ms <= now_ms) {
+      network_relay_challenge_remove_at(network, idx);
+    } else {
+      idx++;
+    }
+  }
+}
+
+int network_relay_challenge_get_for_test(network_t* network, size_t index,
+                                          relay_challenge_t* out) {
+  if (network == NULL || out == NULL) return -1;
+  if (index >= network->relay_challenge_count) return -1;
+  memcpy(out, &network->relay_challenges[index], sizeof(relay_challenge_t));
+  return 0;
+}
+#endif
 
 // --- Local FindBlock payload destroy ---
 // Frees the heap-allocated payload and releases the hash buffer reference.
@@ -138,6 +220,11 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   network->metrics_push_timer_id = 0;
   network->ping_capacity_timer_id = 0;
   network->friend_reconnect_timer_id = 0;
+  network->request_timer_id = 0;
+  network->request_timeout_ms = 30000;  /* 30s default per-pending-request timeout */
+  /* Seed the monotonic message ID counter from the wall clock so the first
+     ID is roughly time-aligned, then increments monotonically. See audit #6. */
+  atomic_store(&network->next_message_id, (uint64_t)time(NULL) * 1000);
   network->relay = NULL;
   network->nat_detect = NULL;
   network->local_nat_type = NAT_TYPE_UNKNOWN;
@@ -215,24 +302,71 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
       NETWORK_FRIEND_RECONNECT_TICK,
       &network->friend_reconnect_timer_id);
 
+  // Request timeout sweep: 1s recurring tick that sweeps wanted_list and
+  // closest_pending for entries whose deadline_ms has passed. Each expired
+  // wanted_list entry's requesters are notified with a found=0
+  // NETWORK_FIND_BLOCK_RESULT; each expired closest_pending entry's reply_to
+  // gets a found=0 NETWORK_CLOSEST_NODES_RESULT. See audit #5/#6/#9.
+  network->request_timer_id = 0;
+  timer_actor_set(timer,
+      1000,
+      1000,
+      &network->actor,
+      NETWORK_REQUEST_TIMEOUT_TICK,
+      &network->request_timer_id);
+
   return network;
 }
 
 void network_shutdown_connections(network_t* network) {
   if (network == NULL) return;
 
+  /* Route the shutdown loop through the network actor so ConnectionShutdown,
+     connection_manager_remove, and ConnectionClose all run on the same thread.
+     The old code iterated conn_mgr.peers on the main thread while the network
+     actor's worker ran connection_manager_remove (freed peers + memmove) on
+     SHUTDOWN_COMPLETE -> UAF on the peers array and a race on the HQUIC
+     lifecycle. See concurrency-pass.md F3. */
 #ifdef HAS_MSQUIC
   if (network->msquic != NULL) {
-    for (size_t i = 0; i < network->conn_mgr.peer_count; i++) {
-      peer_connection_t* peer = network->conn_mgr.peers[i];
-      if (peer != NULL && peer->quic_connection != NULL) {
-        network->msquic->ConnectionShutdown(
-            peer->quic_connection,
-            QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
-            0);
-        peer->quic_connection = NULL;
-        peer->quic_stream = NULL;
+    network_shutdown_payload_t* payload = get_clear_memory(sizeof(network_shutdown_payload_t));
+    if (payload != NULL) {
+      atomic_store(&payload->done_flag, false);
+      message_t msg;
+      memset(&msg, 0, sizeof(msg));
+      msg.type = NETWORK_SHUTDOWN_CONNECTIONS;
+      msg.payload = payload;
+      /* payload_destroy = NULL: the main thread frees the payload after the
+         wait; the network actor only sets done_flag — it must NOT free it. */
+      msg.payload_destroy = NULL;
+      bool sent = actor_send(&network->actor, &msg);
+
+      if (sent) {
+        /* Bounded poll for done_flag (10ms sleep, 5s cap) — consistent with
+           the F6/F7 quiesce pattern. The network actor's worker is live during
+           offs_node_stop phase 5 (joins in phase 7), so it processes the message
+           and sets done_flag when the ConnectionShutdown loop completes. The
+           subsequent SHUTDOWN_COMPLETE -> remove -> ConnectionClose sequence
+           continues on the actor as the worker drains. A 5s timeout indicates
+           a stuck actor and is logged, not fatal — network_destroy will
+           forcibly close any remaining connections. */
+        for (int wait_ms = 0;
+             wait_ms < 5000 && !atomic_load(&payload->done_flag);
+             wait_ms += 10) {
+          platform_sleep_ms(10);
+        }
+        if (!atomic_load(&payload->done_flag)) {
+          log_error("network: shutdown timed out (actor did not complete "
+                    "ConnectionShutdown loop within 5s)");
+        }
+      } else {
+        /* The network actor is destroyed — the message was dropped. No worker
+           is running connection_manager_remove, so graceful shutdown is not
+           possible; network_destroy will forcibly close the connections when
+           it closes the registration. */
+        log_warn("network: actor unavailable for graceful connection shutdown");
       }
+      free(payload);
     }
   }
 #endif
@@ -274,6 +408,10 @@ void network_destroy(network_t* network) {
     timer_actor_cancel(network->timer, atomic_load(&network->friend_reconnect_timer_id));
     atomic_store(&network->friend_reconnect_timer_id, 0);
   }
+  if (atomic_load(&network->request_timer_id) != 0) {
+    timer_actor_cancel(network->timer, atomic_load(&network->request_timer_id));
+    atomic_store(&network->request_timer_id, 0);
+  }
   if (network->relay != NULL) {
     relay_client_destroy(network->relay);
     network->relay = NULL;
@@ -289,10 +427,21 @@ void network_destroy(network_t* network) {
   pending_quic_t* pending = network->pending_connections;
   while (pending != NULL) {
     pending_quic_t* next = pending->next;
+    free(pending->peer_cert_der);
     free(pending);
     pending = next;
   }
   network->pending_connections = NULL;
+
+  // Free the relay challenge table (audit #8 relay; tier-5b). The table is a
+  // flat array of relay_challenge_t — no per-entry allocations — so a single
+  // free suffices.
+  if (network->relay_challenges != NULL) {
+    free(network->relay_challenges);
+    network->relay_challenges = NULL;
+    network->relay_challenge_count = 0;
+    network->relay_challenge_capacity = 0;
+  }
 #ifdef HAS_MSQUIC
   if (network->msquic != NULL) {
     offs_msquic_close();
@@ -381,16 +530,25 @@ static pending_quic_t* pending_quic_find(network_t* network, void* quic_connecti
 
 static void pending_quic_add(network_t* network, void* quic_connection,
                              void* quic_stream,
-                             const struct sockaddr_storage* peer_addr) {
-  // Avoid duplicates
-  if (pending_quic_find(network, quic_connection) != NULL) return;
+                             const struct sockaddr_storage* peer_addr,
+                             uint8_t* peer_cert_der, size_t peer_cert_der_len) {
+  // Avoid duplicates. On duplicate, free the cert — it isn't needed.
+  if (pending_quic_find(network, quic_connection) != NULL) {
+    free(peer_cert_der);
+    return;
+  }
   pending_quic_t* entry = get_clear_memory(sizeof(pending_quic_t));
-  if (entry == NULL) return;
+  if (entry == NULL) {
+    free(peer_cert_der);
+    return;
+  }
   entry->quic_connection = quic_connection;
   entry->quic_stream = quic_stream;
   if (peer_addr != NULL) {
     memcpy(&entry->peer_addr, peer_addr, sizeof(struct sockaddr_storage));
   }
+  entry->peer_cert_der = peer_cert_der;
+  entry->peer_cert_der_len = peer_cert_der_len;
   entry->next = network->pending_connections;
   network->pending_connections = entry;
 }
@@ -452,6 +610,37 @@ static void network_handle_salutation(network_t* network, message_t* msg,
     return;
   }
 
+  // Pin the salutation public_key to the TLS leaf-cert public key. The
+  // BLAKE3 check above only verifies self-consistency; without this pin,
+  // any CA-admitted node can lift a victim's public_key from gossip and
+  // impersonate them. See audit #8.
+  if (pending->peer_cert_der != NULL && pending->peer_cert_der_len > 0) {
+    uint8_t* cert_pubkey = NULL;
+    size_t cert_pubkey_len = 0;
+    if (peer_verify_extract_pubkey(pending->peer_cert_der,
+                                   pending->peer_cert_der_len,
+                                   &cert_pubkey, &cert_pubkey_len) != 0) {
+      log_error("salutation: failed to extract peer cert public key");
+      wire_salutation_destroy(salut);
+      free(pending->peer_cert_der);
+      free(pending);
+      return;
+    }
+    bool pubkey_matches = (cert_pubkey_len == salut->public_key_len &&
+                          memcmp(cert_pubkey, salut->public_key, cert_pubkey_len) == 0);
+    free(cert_pubkey);
+    if (!pubkey_matches) {
+      log_error("salutation: public_key does not match the TLS leaf-cert key "
+                "(impersonation attempt?)");
+      wire_salutation_destroy(salut);
+      free(pending->peer_cert_der);
+      free(pending);
+      return;
+    }
+  }
+  // If no peer cert (allow_insecure mode), the pin is a no-op; the BLAKE3
+  // check above is the only guard. This is the documented insecure-mode behavior.
+
   // Add peer to connection manager with verified identity
   peer_connection_t* peer = connection_manager_add(
       &network->conn_mgr, &salut->sender_id, &pending->peer_addr, network->pool);
@@ -461,6 +650,13 @@ static void network_handle_salutation(network_t* network, message_t* msg,
     peer->quic_connection = quic_connection;
     peer->quic_stream = pending->quic_stream;
 #endif
+    // Identity confirmed via the direct salutation path: BLAKE3 hash check
+    // + (if a TLS cert was available) leaf-cert pin. Mark this peer as
+    // relay_verified so future gating can distinguish it from relay-admitted
+    // (unverified) peers. connection_manager_add returns the existing peer
+    // for a known sender_id, so this also upgrades a previously
+    // relay-admitted peer to verified on first direct contact. See #8.
+    peer->relay_verified = true;
     conn_state_on_direct_connected(peer);
 
     // Insert the authenticated peer into the ring table so find_block_execute
@@ -488,6 +684,7 @@ static void network_handle_salutation(network_t* network, message_t* msg,
     }
   }
 
+  free(pending->peer_cert_der);
   free(pending);
 
   wire_salutation_destroy(salut);
@@ -707,6 +904,445 @@ static void network_add_node_to_ring(network_t* network,
       node->last_gossip_time = (uint64_t)time(NULL) * 1000;
       net_node_record_success(node);
       ring_set_insert(network->rings, node, 0);
+    }
+  }
+}
+
+// --- Request timeout sweep callback + handler (audit #5, #6, #9) ---
+
+// Callback for wanted_list_sweep: notify each expired requester with a
+// found=0 NETWORK_FIND_BLOCK_RESULT. Takes ownership of `requesters` (frees
+// each requester). REFERENCES `hash` for the result payload — the sweep
+// calls buffer_destroy(entry->hash) after the callback returns, so the
+// REFERENCE bumps the refcount and the sweep's buffer_destroy decrements it
+// (net +1 for the result). See audit #5/#9.
+static void network_wanted_list_timeout_cb(buffer_t* hash,
+                                            wanted_requester_t* requesters,
+                                            void* user_data) {
+  wanted_requester_t* req = requesters;
+  while (req != NULL) {
+    wanted_requester_t* next = req->next;
+    network_find_block_result_payload_t* result =
+        get_clear_memory(sizeof(network_find_block_result_payload_t));
+    if (result != NULL) {
+      result->hash = (hash != NULL) ? REFERENCE(hash, buffer_t) : NULL;
+      result->found = 0;  /* timeout */
+      result->block = NULL;
+      message_t result_msg = {0};
+      result_msg.type = NETWORK_FIND_BLOCK_RESULT;
+      result_msg.payload = result;
+      result_msg.payload_destroy = network_find_block_result_destroy;
+      actor_send(req->actor, &result_msg);
+    }
+    free(req);
+    req = next;
+  }
+  (void)user_data;
+}
+
+// --- Relay signed-nonce challenge table (audit #8 relay; tier-5b) ---
+//
+// The challenge table records pending challenges sent to unverified
+// relayed senders. It is a flat array of relay_challenge_t grown on
+// demand. The sweep (network_handle_request_timeout_tick) compacts in
+// place. The send-challenge helper records the entry before dispatching
+// the WIRE_RELAY_CHALLENGE; the handle-response helper removes the entry
+// when a valid response arrives.
+
+// Return the index of the pending challenge for sender_id, or -1 if none.
+static int network_relay_challenge_find(network_t* network,
+                                         const node_id_t* sender_id) {
+  if (network == NULL || sender_id == NULL) return -1;
+  for (size_t index = 0; index < network->relay_challenge_count; index++) {
+    if (node_id_equals(&network->relay_challenges[index].sender_id, sender_id)) {
+      return (int)index;
+    }
+  }
+  return -1;
+}
+
+// Remove the challenge at the given index by swap-with-last. No-op if the
+// index is out of range. The array is flat (no per-entry allocations), so
+// remove is just a copy.
+static void network_relay_challenge_remove_at(network_t* network, size_t index) {
+  if (network == NULL) return;
+  if (index >= network->relay_challenge_count) return;
+  size_t last = network->relay_challenge_count - 1;
+  if (index != last) {
+    network->relay_challenges[index] = network->relay_challenges[last];
+  }
+  network->relay_challenge_count--;
+}
+
+// Append a challenge to the table. Grows the array on demand. Returns 0 on
+// success, -1 on allocation failure.
+static int network_relay_challenge_append(network_t* network,
+                                           const node_id_t* sender_id,
+                                           const uint8_t nonce[32],
+                                           uint64_t deadline_ms,
+                                           uint32_t relay_endpoint_id) {
+  if (network == NULL || sender_id == NULL || nonce == NULL) return -1;
+  if (network->relay_challenge_count == network->relay_challenge_capacity) {
+    size_t new_capacity =
+        network->relay_challenge_capacity == 0
+            ? 8
+            : network->relay_challenge_capacity * 2;
+    relay_challenge_t* grown = realloc(network->relay_challenges,
+                                       new_capacity * sizeof(relay_challenge_t));
+    if (grown == NULL) {
+      log_error("network: relay challenge table growth failed (cap=%zu)",
+                network->relay_challenge_capacity);
+      return -1;
+    }
+    network->relay_challenges = grown;
+    network->relay_challenge_capacity = new_capacity;
+  }
+  relay_challenge_t* entry =
+      &network->relay_challenges[network->relay_challenge_count];
+  memcpy(&entry->sender_id, sender_id, sizeof(node_id_t));
+  memcpy(entry->nonce, nonce, 32);
+  entry->deadline_ms = deadline_ms;
+  entry->relay_endpoint_id = relay_endpoint_id;
+  network->relay_challenge_count++;
+  return 0;
+}
+
+// Generate a fresh 32-byte nonce using OpenSSL's CSPRNG (already linked
+// for the rest of the project). Returns 0 on success, -1 on failure.
+static int network_relay_challenge_generate_nonce(uint8_t nonce[32]) {
+  if (nonce == NULL) return -1;
+  if (RAND_bytes(nonce, 32) != 1) {
+    log_error("network: RAND_bytes failed for relay challenge nonce");
+    return -1;
+  }
+  return 0;
+}
+
+// Send a WIRE_RELAY_CHALLENGE to the unverified relayed sender via the relay
+// client. Records the challenge in the table (no double-challenge — if a
+// challenge is already pending for sender_id, this is a no-op). The
+// challenge payload is built from the authority's local_id + local endpoint
+// id, wrapped in a wire_relay_send_t envelope and dispatched to the relay
+// client actor with RELAY_CLIENT_SEND.
+static void network_relay_send_challenge(network_t* network,
+                                         const node_id_t* sender_id,
+                                         uint32_t relay_endpoint_id) {
+  if (network == NULL || sender_id == NULL) return;
+  if (network->relay == NULL) {
+    log_warn("network: cannot send relay challenge — no relay client");
+    return;
+  }
+  if (network->authority == NULL) return;
+
+  // Don't double-challenge: if a challenge for sender_id is already pending,
+  // let the existing deadline expire (or the response arrive) first.
+  if (network_relay_challenge_find(network, sender_id) >= 0) {
+    return;
+  }
+
+  // Don't challenge ourselves (a misrouted relay or a local-echo bug).
+  if (node_id_equals(sender_id, &network->authority->local_id)) {
+    return;
+  }
+
+  uint8_t nonce[32];
+  if (network_relay_challenge_generate_nonce(nonce) != 0) {
+    return;
+  }
+
+  uint64_t deadline_ms =
+      (uint64_t)time(NULL) * 1000 + (uint64_t)network->request_timeout_ms;
+  if (network_relay_challenge_append(network, sender_id, nonce, deadline_ms,
+                                     relay_endpoint_id) != 0) {
+    return;
+  }
+
+  // Build the WIRE_RELAY_CHALLENGE inner payload.
+  wire_relay_challenge_t challenge;
+  memset(&challenge, 0, sizeof(challenge));
+  memcpy(&challenge.challenger_id, &network->authority->local_id,
+         sizeof(node_id_t));
+  challenge.challenger_endpoint_id = network->relay->local_endpoint_id;
+  memcpy(challenge.nonce, nonce, 32);
+
+  cbor_item_t* challenge_cbor = wire_relay_challenge_encode(&challenge);
+  if (challenge_cbor == NULL) {
+    log_error("network: wire_relay_challenge_encode failed");
+    // Roll back the table append so the next relayed message can re-trigger.
+    network_relay_challenge_remove_at(network,
+                                      network->relay_challenge_count - 1);
+    return;
+  }
+
+  size_t cbor_len = 0;
+  unsigned char* cbor_data = NULL;
+  size_t serialized =
+      cbor_serialize_alloc(challenge_cbor, &cbor_data, &cbor_len);
+  cbor_decref(&challenge_cbor);
+  if (cbor_data == NULL || serialized == 0) {
+    log_error("network: failed to serialize WIRE_RELAY_CHALLENGE");
+    network_relay_challenge_remove_at(network,
+                                      network->relay_challenge_count - 1);
+    return;
+  }
+
+  // Wrap in the relay send envelope and dispatch to the relay client.
+  wire_relay_send_t* relay_send =
+      get_clear_memory(sizeof(wire_relay_send_t));
+  if (relay_send == NULL) {
+    free(cbor_data);
+    network_relay_challenge_remove_at(network,
+                                      network->relay_challenge_count - 1);
+    return;
+  }
+  relay_send->src_endpoint_id = network->relay->local_endpoint_id;
+  relay_send->dest_endpoint_id = relay_endpoint_id;
+  relay_send->payload = cbor_data;
+  relay_send->payload_len = cbor_len;
+
+  message_t relay_msg;
+  memset(&relay_msg, 0, sizeof(relay_msg));
+  relay_msg.type = RELAY_CLIENT_SEND;
+  relay_msg.payload = relay_send;
+  relay_msg.payload_destroy = (void (*)(void*))wire_relay_send_destroy;
+  actor_send(&network->relay->actor, &relay_msg);
+}
+
+// Handle a WIRE_RELAY_CHALLENGE arriving via the relay: the responder signs
+// the nonce with the authority's cached private key and sends
+// WIRE_RELAY_CHALLENGE_RESPONSE back via the relay. If the authority has no
+// private key (no node_key_path), the challenge is dropped — the challenger
+// will time out and leave the peer unverified (no regression for old nodes).
+static void network_handle_relay_challenge(network_t* network,
+                                            cbor_item_t* wire_msg) {
+  if (network == NULL || wire_msg == NULL) return;
+  if (network->relay == NULL || network->authority == NULL) return;
+
+  wire_relay_challenge_t challenge;
+  memset(&challenge, 0, sizeof(challenge));
+  if (wire_relay_challenge_decode(wire_msg, &challenge) != 0) {
+    log_error("network: WIRE_RELAY_CHALLENGE decode failed");
+    return;
+  }
+
+  // The response carries our public key + a signature of the nonce under
+  // the matching private key. If we have no private key (no node_key_path),
+  // we can't respond — drop the challenge silently; the challenger will
+  // time out and leave us unverified.
+  if (network->authority->node_private_key == NULL &&
+      network->authority->node_key_path == NULL) {
+    log_warn("network: WIRE_RELAY_CHALLENGE received but no private key "
+             "configured — dropping (peer stays unverified)");
+    return;
+  }
+
+  uint8_t* signature = NULL;
+  size_t signature_len = 0;
+  if (authority_sign_nonce(network->authority, challenge.nonce,
+                           &signature, &signature_len) != 0) {
+    log_error("network: authority_sign_nonce failed for relay challenge");
+    return;
+  }
+
+  // The public key must be present (authority_init_local_id caches it from
+  // the cert). If somehow it's missing, we can't construct a verifiable
+  // response — drop.
+  if (network->authority->public_key == NULL ||
+      network->authority->public_key_len == 0) {
+    log_error("network: no cached public key for relay challenge response");
+    free(signature);
+    return;
+  }
+
+  wire_relay_challenge_response_t response;
+  memset(&response, 0, sizeof(response));
+  memcpy(&response.responder_id, &network->authority->local_id,
+         sizeof(node_id_t));
+  memcpy(response.nonce, challenge.nonce, 32);
+  response.public_key = network->authority->public_key;
+  response.public_key_len = network->authority->public_key_len;
+  response.signature = signature;
+  response.signature_len = signature_len;
+
+  cbor_item_t* response_cbor = wire_relay_challenge_response_encode(&response);
+  free(signature);
+  response.signature = NULL;
+  response.signature_len = 0;
+  if (response_cbor == NULL) {
+    log_error("network: wire_relay_challenge_response_encode failed");
+    return;
+  }
+
+  size_t cbor_len = 0;
+  unsigned char* cbor_data = NULL;
+  size_t serialized =
+      cbor_serialize_alloc(response_cbor, &cbor_data, &cbor_len);
+  cbor_decref(&response_cbor);
+  if (cbor_data == NULL || serialized == 0) {
+    log_error("network: failed to serialize WIRE_RELAY_CHALLENGE_RESPONSE");
+    return;
+  }
+
+  wire_relay_send_t* relay_send =
+      get_clear_memory(sizeof(wire_relay_send_t));
+  if (relay_send == NULL) {
+    free(cbor_data);
+    return;
+  }
+  relay_send->src_endpoint_id = network->relay->local_endpoint_id;
+  relay_send->dest_endpoint_id = challenge.challenger_endpoint_id;
+  relay_send->payload = cbor_data;
+  relay_send->payload_len = cbor_len;
+
+  message_t relay_msg;
+  memset(&relay_msg, 0, sizeof(relay_msg));
+  relay_msg.type = RELAY_CLIENT_SEND;
+  relay_msg.payload = relay_send;
+  relay_msg.payload_destroy = (void (*)(void*))wire_relay_send_destroy;
+  actor_send(&network->relay->actor, &relay_msg);
+}
+
+// Handle a WIRE_RELAY_CHALLENGE_RESPONSE arriving via the relay: the
+// challenger verifies BLAKE3(public_key)==responder_id AND the signature
+// under public_key. On success, set peer->relay_verified=true and remove
+// the pending challenge. On failure (or no pending challenge for this
+// responder_id/nonce), drop — don't re-challenge automatically (a future
+// relayed message re-triggers).
+//
+// `response` is stack-allocated; wire_relay_challenge_response_decode
+// allocates response.public_key and response.signature on the heap. We
+// free those manually (NOT via wire_relay_challenge_response_destroy,
+// which also frees the struct itself and would be UB on a stack pointer).
+static void network_handle_relay_challenge_response(network_t* network,
+                                                      cbor_item_t* wire_msg) {
+  if (network == NULL || wire_msg == NULL) return;
+  if (network->authority == NULL) return;
+
+  wire_relay_challenge_response_t response;
+  memset(&response, 0, sizeof(response));
+  if (wire_relay_challenge_response_decode(wire_msg, &response) != 0) {
+    log_error("network: WIRE_RELAY_CHALLENGE_RESPONSE decode failed");
+    /* decode zeroes the struct on entry and only allocates public_key /
+       signature after the type/nonce checks pass. On a decode failure the
+       allocations may or may not have happened — but they're owned by the
+       struct, so free them defensively. */
+    free(response.public_key);
+    free(response.signature);
+    return;
+  }
+
+  // Find the pending challenge by responder_id. The nonce must also match
+  // (defends against a stale response for an earlier challenge).
+  int found_index = network_relay_challenge_find(network, &response.responder_id);
+  if (found_index < 0) {
+    log_warn("network: WIRE_RELAY_CHALLENGE_RESPONSE for unknown responder "
+             "(stale/unsolicited) — dropping");
+    free(response.public_key);
+    free(response.signature);
+    return;
+  }
+  relay_challenge_t* pending = &network->relay_challenges[found_index];
+  if (memcmp(pending->nonce, response.nonce, 32) != 0) {
+    log_warn("network: WIRE_RELAY_CHALLENGE_RESPONSE nonce mismatch — dropping");
+    free(response.public_key);
+    free(response.signature);
+    return;
+  }
+
+  // Verify: BLAKE3(public_key)==responder_id AND the signature is valid
+  // under public_key. Both must pass; otherwise the peer stays unverified.
+  node_id_t computed_id;
+  memset(&computed_id, 0, sizeof(computed_id));
+  bool id_ok = (response.public_key != NULL && response.public_key_len > 0 &&
+                node_id_from_public_key(response.public_key,
+                                        response.public_key_len,
+                                        &computed_id) == 0 &&
+                node_id_equals(&computed_id, &response.responder_id));
+  bool sig_ok = (response.public_key != NULL && response.public_key_len > 0 &&
+                 response.signature != NULL && response.signature_len > 0 &&
+                 pem_key_verify_nonce(response.public_key,
+                                      response.public_key_len,
+                                      response.nonce,
+                                      response.signature,
+                                      response.signature_len) == 0);
+
+  if (id_ok && sig_ok) {
+    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr,
+                                                        &response.responder_id);
+    if (peer != NULL) {
+      peer->relay_verified = true;
+    } else {
+      log_warn("network: relay challenge verified but peer %s not in conn_mgr",
+                response.responder_id.str);
+    }
+    network_relay_challenge_remove_at(network, (size_t)found_index);
+  } else {
+    log_warn("network: relay challenge response verify failed (id_ok=%d "
+             "sig_ok=%d) — peer stays unverified", (int)id_ok, (int)sig_ok);
+    network_relay_challenge_remove_at(network, (size_t)found_index);
+  }
+
+  free(response.public_key);
+  free(response.signature);
+}
+
+static void network_handle_request_timeout_tick(network_t* network,
+                                                 message_t* msg) {
+  (void)msg;
+  uint64_t now_ms = (uint64_t)time(NULL) * 1000;
+
+  // Sweep wanted_list — the callback notifies each expired requester with a
+  // found=0 result and frees the requester list.
+  wanted_list_sweep(network->wanted_list, now_ms,
+                    network_wanted_list_timeout_cb, network);
+
+  // Sweep closest_pending — signal expired reply_to actors with a found=0
+  // NETWORK_CLOSEST_NODES_RESULT. Walk in place with the swap-with-last trick
+  // so we don't skip the entry that moves into the evicted slot.
+  size_t idx = 0;
+  while (idx < network->closest_pending_count) {
+    closest_nodes_pending_t* pending = &network->closest_pending[idx];
+    if (pending->deadline_ms != 0 && pending->deadline_ms <= now_ms) {
+      actor_t* reply_to = pending->reply_to;
+      /* Remove (swap with last). */
+      network->closest_pending[idx] =
+          network->closest_pending[network->closest_pending_count - 1];
+      network->closest_pending_count--;
+      /* Send a timeout result (found=0) to the reply_to. */
+      if (reply_to != NULL) {
+        network_closest_nodes_result_payload_t* result =
+            get_clear_memory(sizeof(network_closest_nodes_result_payload_t));
+        if (result != NULL) {
+          result->found = 0;
+          result->ring_count = 0;
+          result->reply_to = NULL;
+          message_t result_msg = {0};
+          result_msg.type = NETWORK_CLOSEST_NODES_RESULT;
+          result_msg.payload = result;
+          result_msg.payload_destroy =
+              network_closest_nodes_result_payload_destroy;
+          actor_send(reply_to, &result_msg);
+        }
+      }
+      /* Don't advance idx — the swap moved a new entry into this slot. */
+    } else {
+      idx++;
+    }
+  }
+
+  // Sweep relay_challenges — expired unanswered challenges are removed; the
+  // peer stays relay_verified=false (a future relayed message re-triggers a
+  // fresh challenge). The table is a flat array of relay_challenge_t (no
+  // per-entry allocations), so we just compact in place with swap-with-last.
+  // See audit #8 relay (tier-5b).
+  size_t relay_idx = 0;
+  while (relay_idx < network->relay_challenge_count) {
+    relay_challenge_t* pending = &network->relay_challenges[relay_idx];
+    if (pending->deadline_ms != 0 && pending->deadline_ms <= now_ms) {
+      network_relay_challenge_remove_at(network, relay_idx);
+      /* Don't advance — the swap moved a new entry into this slot. */
+    } else {
+      relay_idx++;
     }
   }
 }
@@ -1145,6 +1781,7 @@ static void network_handle_closest_nodes_progress(network_t* network, message_t*
 
 static void network_closest_pending_add(network_t* network, uint64_t message_id,
                                          actor_t* reply_to) {
+  uint64_t deadline_ms = (uint64_t)time(NULL) * 1000 + network->request_timeout_ms;
   if (network->closest_pending_count >= CLOSEST_NODES_PENDING_MAX) {
     size_t oldest = 0;
     for (size_t idx = 1; idx < network->closest_pending_count; idx++) {
@@ -1170,10 +1807,12 @@ static void network_closest_pending_add(network_t* network, uint64_t message_id,
     }
     network->closest_pending[oldest].message_id = message_id;
     network->closest_pending[oldest].reply_to = reply_to;
+    network->closest_pending[oldest].deadline_ms = deadline_ms;
     return;
   }
   network->closest_pending[network->closest_pending_count].message_id = message_id;
   network->closest_pending[network->closest_pending_count].reply_to = reply_to;
+  network->closest_pending[network->closest_pending_count].deadline_ms = deadline_ms;
   network->closest_pending_count++;
 }
 
@@ -1201,7 +1840,7 @@ static void network_handle_local_closest_nodes(network_t* network, message_t* ms
   wire_closest_nodes_t wire_query;
   memset(&wire_query, 0, sizeof(wire_query));
   uint64_t now_ts = (uint64_t)time(NULL) * 1000;
-  wire_query.message_id = now_ts;
+  wire_query.message_id = network_next_message_id(network);
   memcpy(&wire_query.sender_id, &network->authority->local_id, sizeof(node_id_t));
   memcpy(&wire_query.target_id, &payload->target_id, sizeof(node_id_t));
   wire_query.count = payload->count;
@@ -1558,7 +2197,11 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         }
       }
 
-      // Send NOT_FOUND response back along the path
+      // Send NOT_FOUND response back along the path. Include the incoming
+      // path so each intermediate hop can find itself (self_index > 0) and
+      // relay the not-found further upstream (audit #5). The previous code
+      // set path_len=0, so the predecessor couldn't tell where it was in the
+      // path and the not-found died one hop from the terminal.
       {
         wire_find_block_response_t not_found;
         memset(&not_found, 0, sizeof(not_found));
@@ -1566,7 +2209,8 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         memcpy(not_found.block_hash, state.block_hash, 32);
         not_found.found = 0;
         memcpy(&not_found.holder, &network->authority->local_id, sizeof(node_id_t));
-        not_found.path_len = 0;
+        memcpy(not_found.path, state.path, state.path_len * sizeof(node_id_t));
+        not_found.path_len = (uint8_t)state.path_len;
         not_found.latency_ms = 0;
         // Reply to the sender: last node in the path, or original_source
         const node_id_t* reply_to = &state.original_source;
@@ -1602,6 +2246,15 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
           peer_eabf_subscribe(peer, state.block_hash, 32);
         }
       }
+      // Save the predecessor and incoming path length BEFORE adding self to
+      // the path. The not-found reply (if every forward fails) goes to the
+      // predecessor, and the not-found's path is the incoming path (without
+      // self) so intermediate hops can find themselves and relay upstream.
+      const node_id_t* predecessor = &state.original_source;
+      size_t incoming_path_len = state.path_len;
+      if (state.path_len > 0) {
+        predecessor = &state.path[state.path_len - 1];
+      }
       // Add self to visited bloom and path
       find_block_add_visited(state.visited_bloom, &state.visited_count, network->authority->local_id.hash);
       if (state.path_len < FIND_BLOCK_MAX_PATH) {
@@ -1611,7 +2264,11 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
       // Decrement TTL
       state.ttl--;
 
-      // Forward to each selected next-hop
+      // Forward to each selected next-hop, counting reachable hops.
+      // conn_state_send returns -1 when a peer's stream is gone (audit #9);
+      // if every forward fails, send a not-found back along the path so the
+      // origin learns sooner (rather than waiting for the 30s timeout).
+      size_t reachable_hops = 0;
       for (size_t hop = 0; hop < next_hop_count; hop++) {
         // Build forwarded FindBlock message
         wire_find_block_t* forward = get_clear_memory(sizeof(wire_find_block_t));
@@ -1630,16 +2287,43 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         cbor_item_t* cbor = wire_find_block_encode(forward);
         peer_connection_t* next_peer = connection_manager_lookup(
             &network->conn_mgr, &next_hops[hop]->id);
-        if (next_peer != NULL) {
-          conn_state_send(network, next_peer, cbor);
+        if (next_peer != NULL && conn_state_send(network, next_peer, cbor) == 0) {
+          reachable_hops++;
+          if (network->log != NULL) {
+            message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
+                               &next_hops[hop]->id, state.message_id, state.block_hash,
+                               1, &network->hebbian);
+          }
         }
         cbor_decref(&cbor);
-        if (network->log != NULL) {
-          message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
-                             &next_hops[hop]->id, state.message_id, state.block_hash,
-                             1, &network->hebbian);
-        }
         free(forward);
+      }
+
+      if (reachable_hops == 0) {
+        // No reachable next hop — send a NOT_FOUND back along the path so
+        // the origin's found==0 handler accounts for this branch. See #9.
+        // Include the incoming path (without self) so intermediate hops can
+        // find themselves and relay the not-found further upstream (#5).
+        wire_find_block_response_t not_found;
+        memset(&not_found, 0, sizeof(not_found));
+        not_found.message_id = state.message_id;
+        memcpy(not_found.block_hash, state.block_hash, 32);
+        not_found.found = 0;
+        memcpy(&not_found.holder, &network->authority->local_id, sizeof(node_id_t));
+        memcpy(not_found.path, state.path, incoming_path_len * sizeof(node_id_t));
+        not_found.path_len = (uint8_t)incoming_path_len;
+        not_found.latency_ms = 0;
+        peer_connection_t* reply_peer = connection_manager_lookup(&network->conn_mgr, predecessor);
+        if (reply_peer != NULL) {
+          cbor_item_t* cbor = wire_find_block_response_encode(&not_found);
+          conn_state_send(network, reply_peer, cbor);
+          cbor_decref(&cbor);
+          if (network->log != NULL) {
+            message_log_record(network->log, WIRE_FIND_BLOCK_RESPONSE, MSG_DIRECTION_SENT,
+                               predecessor, state.message_id, state.block_hash,
+                               2, &network->hebbian);
+          }
+        }
       }
       break;
     }
@@ -1771,29 +2455,88 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
       DESTROY(block, block);
     }
   } else {
-    // Block not found — subscribe block_hash in EABFs as negative info
-    // This is handled by TTL_EXPIRED in the forwarding path
+    // Block not found. Relay the not-found upstream so the origin learns.
+    // The old code only notified local requesters, which exist only at the
+    // origin — so an intermediate hop's not-found died there and the origin
+    // hung forever (audit #5). Mirrors the found==1 upstream relay above.
 
-    // Check wanted_list — notify any local requesters that the block was not found
-    {
+    int self_index = -1;
+    for (int index = 0; index < (int)response->path_len; index++) {
+      if (node_id_equals(&response->path[index], &network->authority->local_id)) {
+        self_index = index;
+        break;
+      }
+    }
+    if (self_index > 0) {
+      const node_id_t* predecessor = &response->path[self_index - 1];
+      peer_connection_t* relay_peer = connection_manager_lookup(&network->conn_mgr, predecessor);
+      if (relay_peer != NULL) {
+        cbor_item_t* cbor = wire_find_block_response_encode(response);
+        conn_state_send(network, relay_peer, cbor);
+        cbor_decref(&cbor);
+        if (network->log != NULL) {
+          message_log_record(network->log, WIRE_FIND_BLOCK_RESPONSE, MSG_DIRECTION_FORWARDED,
+                             predecessor, response->message_id, response->block_hash,
+                             2, &network->hebbian);
+        }
+      }
+    }
+
+    // Only at the origin do we account for the not-found and possibly fail
+    // the request. is_origin: self is path[0] (origin is the first node),
+    // or self is not in the path (path_len 0 — defensive; after the fix to
+    // network_handle_find_block's NOT_FOUND responses to include the path,
+    // this only happens if the terminal sent a pathless not-found directly
+    // back to us, which means we're the origin). At an intermediate hop
+    // (self_index > 0) the relay above already forwarded the not-found;
+    // there is no local wanted_list entry to account against.
+    bool is_origin = (self_index <= 0);
+    if (is_origin) {
       buffer_t* hash_buf = buffer_create_from_pointer_copy(response->block_hash, 32);
       if (hash_buf != NULL) {
-        wanted_requester_t* requesters = wanted_list_clear_requesters(network->wanted_list, hash_buf);
-        if (requesters != NULL) {
-          wanted_requester_t* req = requesters;
-          while (req != NULL) {
-            network_find_block_result_payload_t* result =
-                get_clear_memory(sizeof(network_find_block_result_payload_t));
-            result->hash = REFERENCE(hash_buf, buffer_t);
-            result->found = 0;
-            message_t result_msg = {0};
-            result_msg.type = NETWORK_FIND_BLOCK_RESULT;
-            result_msg.payload = result;
-            result_msg.payload_destroy = network_find_block_result_destroy;
-            actor_send(req->actor, &result_msg);
-            req = req->next;
+        wanted_entry_t* entry = wanted_list_get(network->wanted_list, hash_buf);
+        if (entry != NULL) {
+          // Bind the not-found to the current request: a stale not-found from
+          // a previous FindBlock for the same block (different message_id)
+          // or a forged not-found with a random message_id must not count
+          // toward the current request's not_found_count. The wanted_list
+          // dedupes by hash (one FindBlock per hash at a time), so the entry
+          // stores one message_id. message_id 0 means unset (no check).
+          // See audit #10 (follow-up: per-request nonce binding).
+          if (entry->message_id != 0 && response->message_id != entry->message_id) {
+            // Stale or forged not-found — skip counting; fall through to
+            // buffer_destroy below. The search continues for other branches.
+          } else {
+            entry->not_found_count++;
+            // Fail only after all branches report not-found (or the timeout
+            // sweep expires). A dead-end neighbor's not-found no longer
+            // aborts a still-live search before a live branch's found=1
+            // arrives (audit #10). fanout_count was set by the forwarding
+            // loop to the reachable hop count (audit #9), so the threshold
+            // is achievable. If fanout_count is 0 (e.g., the entry was added
+            // but the forwarding case didn't set it — defensively), the
+            // first not-found fails immediately, matching the old behavior.
+            if (entry->not_found_count >= entry->fanout_count) {
+              wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, hash_buf);
+              if (requesters != NULL) {
+                wanted_requester_t* req = requesters;
+                while (req != NULL) {
+                  wanted_requester_t* next = req->next;
+                  network_find_block_result_payload_t* result =
+                      get_clear_memory(sizeof(network_find_block_result_payload_t));
+                  result->hash = REFERENCE(hash_buf, buffer_t);
+                  result->found = 0;
+                  message_t result_msg = {0};
+                  result_msg.type = NETWORK_FIND_BLOCK_RESULT;
+                  result_msg.payload = result;
+                  result_msg.payload_destroy = network_find_block_result_destroy;
+                  actor_send(req->actor, &result_msg);
+                  free(req);
+                  req = next;
+                }
+              }
+            }
           }
-          wanted_requester_list_destroy(requesters);
         }
         buffer_destroy(hash_buf);
       }
@@ -2370,7 +3113,7 @@ static void network_handle_rank_block(network_t* network, message_t* msg) {
     wire_find_block_t* find = get_clear_memory(sizeof(wire_find_block_t));
     if (find != NULL) {
       uint64_t now_ts = (uint64_t)time(NULL) * 1000;
-      find->message_id = now_ts + rank->count;
+      find->message_id = network_next_message_id(network);
       memcpy(find->block_hash, rank->block_hash, 32);
       find->ttl = FIND_BLOCK_FORWARD_FANOUT;
       memset(find->visited_bloom, 0, WIRE_MAX_VISITED_BLOOM);
@@ -2743,14 +3486,26 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
     return;
   }
 
-  // Step 3: New request — add to wanted list
-  wanted_list_add(network->wanted_list, payload->hash, payload->reply_to);
+  // Step 3: New request — add to wanted list with a per-request timeout.
+  // The 1s NETWORK_REQUEST_TIMEOUT_TICK sweep will deliver a found=0 result
+  // to reply_to if no response arrives within request_timeout_ms. See #5/#9.
+  uint64_t find_block_deadline_ms =
+      (uint64_t)time(NULL) * 1000 + network->request_timeout_ms;
+  wanted_list_add(network->wanted_list, payload->hash, payload->reply_to,
+                  find_block_deadline_ms);
 
   // Step 4: Execute FindBlock routing
   find_block_state_t state;
   memset(&state, 0, sizeof(state));
   uint64_t now_ts = (uint64_t)time(NULL) * 1000;
-  state.message_id = now_ts;
+  state.message_id = network_next_message_id(network);
+  // Bind the wanted_list entry to this request's message_id so a stale or
+  // forged not-found (different message_id) can't prematurely fail the
+  // search. See audit #10 (follow-up: per-request nonce binding).
+  wanted_entry_t* wanted_entry = wanted_list_get(network->wanted_list, payload->hash);
+  if (wanted_entry != NULL) {
+    wanted_entry->message_id = state.message_id;
+  }
   memcpy(state.block_hash, payload->hash->data, 32);
   state.ttl = FIND_BLOCK_FORWARD_FANOUT;
   state.start_time_ms = now_ts;
@@ -2805,7 +3560,7 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
       }
 
       // Block not found — notify all requesters
-      wanted_requester_t* requesters = wanted_list_clear_requesters(network->wanted_list, payload->hash);
+      wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, payload->hash);
       if (requesters != NULL) {
         wanted_requester_t* req = requesters;
         while (req != NULL) {
@@ -2836,7 +3591,12 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
       // Decrement TTL
       state.ttl--;
 
-      // Forward to each selected next-hop
+      // Forward to each selected next-hop, counting reachable hops.
+      // conn_state_send returns -1 when a peer's stream is gone (audit #9);
+      // an unreachable hop won't send a not-found, so counting it in
+      // fanout_count would deadlock the request (not_found_count could never
+      // reach fanout_count). Instead, only count successful sends.
+      size_t reachable_hops = 0;
       for (size_t hop = 0; hop < next_hop_count; hop++) {
         wire_find_block_t* forward = get_clear_memory(sizeof(wire_find_block_t));
         if (forward == NULL) continue;
@@ -2854,11 +3614,50 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
         cbor_item_t* cbor = wire_find_block_encode(forward);
         peer_connection_t* next_peer = connection_manager_lookup(
             &network->conn_mgr, &next_hops[hop]->id);
-        if (next_peer != NULL) {
-          conn_state_send(network, next_peer, cbor);
+        if (next_peer != NULL && conn_state_send(network, next_peer, cbor) == 0) {
+          reachable_hops++;
+          if (network->log != NULL) {
+            message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
+                               &next_hops[hop]->id, state.message_id, state.block_hash,
+                               1, &network->hebbian);
+          }
         }
         cbor_decref(&cbor);
         free(forward);
+      }
+
+      if (reachable_hops == 0) {
+        // No reachable next hop — fail the request immediately rather
+        // than waiting for the 30s timeout sweep. See audit #9.
+        wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, payload->hash);
+        if (requesters != NULL) {
+          wanted_requester_t* req = requesters;
+          while (req != NULL) {
+            wanted_requester_t* next = req->next;
+            network_find_block_result_payload_t* fb_result =
+                get_clear_memory(sizeof(network_find_block_result_payload_t));
+            fb_result->hash = REFERENCE(payload->hash, buffer_t);
+            fb_result->found = 0;
+            message_t fb_msg = {0};
+            fb_msg.type = NETWORK_FIND_BLOCK_RESULT;
+            fb_msg.payload = fb_result;
+            fb_msg.payload_destroy = network_find_block_result_destroy;
+            actor_send(req->actor, &fb_msg);
+            free(req);
+            req = next;
+          }
+        }
+        break;
+      }
+
+      // Set fanout_count to the reachable hop count so the
+      // not_found_count >= fanout_count check (in the found==0 handler
+      // below) is achievable. Unreachable hops won't send not-founds, so
+      // counting them in fanout_count would deadlock the request. See #10.
+      wanted_entry_t* entry = wanted_list_get(network->wanted_list, payload->hash);
+      if (entry != NULL) {
+        entry->fanout_count = (uint8_t)reachable_hops;
+        entry->not_found_count = 0;
       }
       break;
     }
@@ -2996,6 +3795,9 @@ void network_dispatch(void* state, message_t* msg) {
       break;
     case NETWORK_GOSSIP_TICK:
       network_handle_gossip_tick(network, msg);
+      break;
+    case NETWORK_REQUEST_TIMEOUT_TICK:
+      network_handle_request_timeout_tick(network, msg);
       break;
     case NETWORK_GOSSIP_EXPIRE:
       network_handle_gossip_expire(network, msg);
@@ -3233,6 +4035,7 @@ void network_dispatch(void* state, message_t* msg) {
           wire_find_block_response_t* payload = get_clear_memory(sizeof(wire_find_block_response_t));
           if (wire_find_block_response_decode(wire_msg, payload) == 0) {
             dispatch_msg.payload = payload;
+            dispatch_msg.payload_destroy = (void (*)(void*))wire_find_block_response_destroy;
             network_handle_find_block_response(network, &dispatch_msg);
           } else {
             free(payload);
@@ -3395,6 +4198,13 @@ void network_dispatch(void* state, message_t* msg) {
         default:
           break;
       }
+      /* The synchronous dispatch bypasses actor_run, so the framework does
+         not free the payload. Handlers that CONSUME the payload set
+         dispatch_msg.payload = NULL; respect that. See audit #2. */
+      if (dispatch_msg.payload != NULL && dispatch_msg.payload_destroy != NULL) {
+        dispatch_msg.payload_destroy(dispatch_msg.payload);
+        dispatch_msg.payload = NULL;
+      }
       cbor_decref(&wire_msg);
       break;
     }
@@ -3402,7 +4212,14 @@ void network_dispatch(void* state, message_t* msg) {
       // New QUIC connection — add to pending (salutation deferred via actor message)
       quic_connected_payload_t* quic_conn = (quic_connected_payload_t*)msg->payload;
       if (quic_conn != NULL) {
-        pending_quic_add(network, quic_conn->connection, quic_conn->stream, &quic_conn->peer_addr);
+        // Steal the peer cert so the pending entry owns it; the payload
+        // destroy won't free it after this. See audit #8.
+        uint8_t* cert_der = quic_conn->peer_cert_der;
+        size_t cert_der_len = quic_conn->peer_cert_der_len;
+        quic_conn->peer_cert_der = NULL;
+        quic_conn->peer_cert_der_len = 0;
+        pending_quic_add(network, quic_conn->connection, quic_conn->stream,
+                         &quic_conn->peer_addr, cert_der, cert_der_len);
       }
       break;
     }
@@ -3423,6 +4240,7 @@ void network_dispatch(void* state, message_t* msg) {
           // Unauthenticated — remove from pending list
           pending_quic_t* pending = pending_quic_remove(network, quic_conn->connection);
           if (pending != NULL) {
+            free(pending->peer_cert_der);
             free(pending);
           }
         }
@@ -3434,6 +4252,39 @@ void network_dispatch(void* state, message_t* msg) {
           network->msquic->ConnectionClose(quic_conn->connection);
         }
 #endif
+      }
+      break;
+    }
+    case NETWORK_SHUTDOWN_CONNECTIONS: {
+      network_shutdown_payload_t* payload = (network_shutdown_payload_t*)msg->payload;
+#ifdef HAS_MSQUIC
+      if (network->msquic != NULL) {
+        /* We're on the network actor — the sole owner of conn_mgr + the HQUIC
+           lifecycle. ConnectionShutdown is safe here because
+           connection_manager_remove + ConnectionClose also run on this actor
+           (in the NETWORK_QUIC_DISCONNECTED handler). The subsequent
+           SHUTDOWN_COMPLETE callbacks will actor_send NETWORK_QUIC_DISCONNECT
+           back to this actor's mailbox and be processed as the worker drains. */
+        for (size_t index = 0; index < network->conn_mgr.peer_count; index++) {
+          peer_connection_t* peer = network->conn_mgr.peers[index];
+          if (peer != NULL && peer->quic_connection != NULL) {
+            network->msquic->ConnectionShutdown(
+                peer->quic_connection,
+                QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
+                0);
+            peer->quic_connection = NULL;
+            peer->quic_stream = NULL;
+          }
+        }
+      }
+#endif
+      /* Signal the main thread that the shutdown loop is done. The
+         SHUTDOWN_COMPLETE -> remove -> ConnectionClose sequence continues
+         on this actor as the worker drains its mailbox; the main thread
+         proceeds to phase 6 and the workers join in phase 7. The payload
+         is owned (and freed) by the main thread after its bounded poll. */
+      if (payload != NULL) {
+        atomic_store(&payload->done_flag, true);
       }
       break;
     }
@@ -3473,7 +4324,7 @@ void network_dispatch(void* state, message_t* msg) {
         store_block_state_t state;
         memset(&state, 0, sizeof(state));
         uint64_t now_ts = (uint64_t)time(NULL) * 1000;
-        state.message_id = now_ts;
+        state.message_id = network_next_message_id(network);
         memcpy(state.block_hash, payload->hash->data, 32);
         state.block_fib = payload->fib;
         state.replicas_needed = STORE_BLOCK_FORWARD_FANOUT;
@@ -3563,7 +4414,7 @@ void network_dispatch(void* state, message_t* msg) {
       /* Build a FindNode wire message and send to each connected peer */
       wire_find_node_t find;
       memset(&find, 0, sizeof(find));
-      find.message_id = (uint64_t)time(NULL) ^ ((uint64_t)rand() << 32);
+      find.message_id = network_next_message_id(network);
       memcpy(&find.sender_id, &network->authority->local_id, sizeof(node_id_t));
       memcpy(&find.target_id, &payload->target_id, sizeof(node_id_t));
 
@@ -3605,6 +4456,17 @@ void network_dispatch(void* state, message_t* msg) {
           peer_connection_t* existing = connection_manager_lookup(&network->conn_mgr, &sender_id);
           if (existing == NULL) {
             existing = connection_manager_add(&network->conn_mgr, &sender_id, NULL, network->pool);
+            // Relay-admitted peers are relay_verified=false (identity NOT
+            // confirmed): the relayed message carries only the sender_id
+            // hash, not the public_key preimage, so the BLAKE3 salutation
+            // check can't be applied here. The signed-nonce challenge
+            // (deferred — a protocol change) will verify these peers
+            // without a direct connection. We do NOT refuse to admit
+            // (connection_manager_add is load-bearing — relay replies
+            // route via the endpoint id) and we do NOT gate ring_set_insert
+            // (gating would break routability of relayed-only peers). The
+            // relay_verified flag surfaces the trust gap for future gating
+            // decisions; the signed-nonce is the real fix. See audit #8.
           }
           // Store the relay endpoint ID so we can route messages back
           if (existing != NULL && relay_payload->src_endpoint_id != 0) {
@@ -3618,6 +4480,20 @@ void network_dispatch(void* state, message_t* msg) {
               node->weight = FIND_BLOCK_MIN_WEIGHT;
               ring_set_insert(network->rings, node, 0);
             }
+          }
+
+          // Challenge unverified relayed senders (audit #8 relay; tier-5b).
+          // The trigger fires BEFORE the inner switch so that
+          // WIRE_RELAY_CHALLENGE / WIRE_RELAY_CHALLENGE_RESPONSE messages
+          // themselves don't double-trigger (the no-double-challenge guard
+          // also helps). When a relayed message arrives from a peer admitted
+          // with relay_verified=false, send a WIRE_RELAY_CHALLENGE back via
+          // the relay. Old peers that don't implement the challenge simply
+          // don't respond -> the challenge times out -> the peer stays
+          // unverified (no regression; just not upgraded).
+          if (existing != NULL && !existing->relay_verified) {
+            network_relay_send_challenge(network, &sender_id,
+                                         relay_payload->src_endpoint_id);
           }
         }
 
@@ -3717,6 +4593,7 @@ void network_dispatch(void* state, message_t* msg) {
             if (payload != NULL) {
               if (wire_find_block_response_decode(wire_msg, payload) == 0) {
                 dispatch_msg.payload = payload;
+                dispatch_msg.payload_destroy = (void (*)(void*))wire_find_block_response_destroy;
                 network_handle_find_block_response(network, &dispatch_msg);
               } else {
                 free(payload);
@@ -3943,8 +4820,28 @@ void network_dispatch(void* state, message_t* msg) {
             }
             break;
           }
+          case WIRE_RELAY_CHALLENGE: {
+            // Relay signed-nonce challenge (audit #8 relay; tier-5b): the
+            // responder signs the nonce + returns WIRE_RELAY_CHALLENGE_RESPONSE.
+            // Operates on the relayed CBOR directly (no separate payload).
+            network_handle_relay_challenge(network, wire_msg);
+            break;
+          }
+          case WIRE_RELAY_CHALLENGE_RESPONSE: {
+            // The challenger verifies BLAKE3(public_key)==responder_id and the
+            // signature, then sets peer->relay_verified=true.
+            network_handle_relay_challenge_response(network, wire_msg);
+            break;
+          }
           default:
             break;
+        }
+        /* The synchronous dispatch bypasses actor_run, so the framework does
+           not free the payload. Handlers that CONSUME the payload set
+           dispatch_msg.payload = NULL; respect that. See audit #2. */
+        if (dispatch_msg.payload != NULL && dispatch_msg.payload_destroy != NULL) {
+          dispatch_msg.payload_destroy(dispatch_msg.payload);
+          dispatch_msg.payload = NULL;
         }
       }
       cbor_decref(&wire_msg);

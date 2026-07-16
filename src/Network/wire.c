@@ -655,8 +655,9 @@ int wire_recall_accept_decode(cbor_item_t* item, wire_recall_accept_t* msg) {
       }
     }
     cbor_decref(&data);
+    /* Discard the attacker-controlled declared length at index 6; the
+       bytestring length is the single source of truth. See audit #1. */
     cbor_item_t* data_len = cbor_array_get(item, 6);
-    msg->block_data_len = (size_t)cbor_get_int(data_len);
     cbor_decref(&data_len);
     cbor_item_t* bfib = cbor_array_get(item, 7);
     msg->block_fib = cbor_get_uint32(bfib);
@@ -1175,8 +1176,12 @@ int wire_find_block_response_decode(cbor_item_t* item, wire_find_block_response_
       }
     }
     cbor_decref(&data);
+    /* The wire format also carries an explicit block_data_len at array index 10
+       for symmetry with the encoder, but it is attacker-controlled and must NOT
+       override the bytestring length we already used to size the buffer (a
+       mismatch caused a heap over-read; see docs/liboffs-audit-report.md #1).
+       Consume the item to release the refcount, then discard the value. */
     cbor_item_t* data_len = cbor_array_get(item, 10);
-    msg->block_data_len = (size_t)cbor_get_int(data_len);
     cbor_decref(&data_len);
     cbor_item_t* bfib = cbor_array_get(item, 11);
     msg->block_fib = cbor_get_uint32(bfib);
@@ -1699,6 +1704,180 @@ int wire_relay_received_decode(cbor_item_t* item, wire_relay_received_t* msg) {
   }
   cbor_decref(&data);
   return 0;
+}
+
+// --- RelayChallenge ---
+
+cbor_item_t* wire_relay_challenge_encode(const wire_relay_challenge_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(4);
+  cbor_item_t* entry;
+
+  entry = cbor_build_uint8(WIRE_RELAY_CHALLENGE);
+  (void)cbor_array_push(array, entry);
+  cbor_decref(&entry);
+
+  entry = _node_id_encode(&msg->challenger_id);
+  (void)cbor_array_push(array, entry);
+  cbor_decref(&entry);
+
+  entry = cbor_build_uint32(msg->challenger_endpoint_id);
+  (void)cbor_array_push(array, entry);
+  cbor_decref(&entry);
+
+  entry = cbor_build_bytestring(msg->nonce, 32);
+  (void)cbor_array_push(array, entry);
+  cbor_decref(&entry);
+
+  return array;
+}
+
+int wire_relay_challenge_decode(cbor_item_t* item, wire_relay_challenge_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 4) return -1;
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != WIRE_RELAY_CHALLENGE) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* challenger = cbor_array_get(item, 1);
+  int challenger_rc = _node_id_decode(challenger, &msg->challenger_id);
+  cbor_decref(&challenger);
+  if (challenger_rc != 0) return challenger_rc;
+
+  cbor_item_t* endpoint = cbor_array_get(item, 2);
+  if (!cbor_isa_uint(endpoint)) {
+    cbor_decref(&endpoint);
+    return -1;
+  }
+  msg->challenger_endpoint_id = cbor_get_uint32(endpoint);
+  cbor_decref(&endpoint);
+
+  cbor_item_t* nonce = cbor_array_get(item, 3);
+  int nonce_rc = -1;
+  if (cbor_isa_bytestring(nonce) && cbor_bytestring_length(nonce) == 32) {
+    memcpy(msg->nonce, cbor_bytestring_handle(nonce), 32);
+    nonce_rc = 0;
+  }
+  cbor_decref(&nonce);
+  return nonce_rc;
+}
+
+void wire_relay_challenge_destroy(wire_relay_challenge_t* msg) {
+  if (msg == NULL) return;
+  // challenge has no allocations; provide a hook for symmetry with the response destroy
+  free(msg);
+}
+
+// --- RelayChallengeResponse ---
+
+cbor_item_t* wire_relay_challenge_response_encode(const wire_relay_challenge_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(5);
+  cbor_item_t* entry;
+
+  entry = cbor_build_uint8(WIRE_RELAY_CHALLENGE_RESPONSE);
+  (void)cbor_array_push(array, entry);
+  cbor_decref(&entry);
+
+  entry = _node_id_encode(&msg->responder_id);
+  (void)cbor_array_push(array, entry);
+  cbor_decref(&entry);
+
+  entry = cbor_build_bytestring(msg->nonce, 32);
+  (void)cbor_array_push(array, entry);
+  cbor_decref(&entry);
+
+  if (msg->public_key != NULL && msg->public_key_len > 0) {
+    entry = cbor_build_bytestring(msg->public_key, msg->public_key_len);
+  } else {
+    entry = cbor_build_bytestring((const unsigned char*)"", 0);
+  }
+  (void)cbor_array_push(array, entry);
+  cbor_decref(&entry);
+
+  if (msg->signature != NULL && msg->signature_len > 0) {
+    entry = cbor_build_bytestring(msg->signature, msg->signature_len);
+  } else {
+    entry = cbor_build_bytestring((const unsigned char*)"", 0);
+  }
+  (void)cbor_array_push(array, entry);
+  cbor_decref(&entry);
+
+  return array;
+}
+
+int wire_relay_challenge_response_decode(cbor_item_t* item, wire_relay_challenge_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 5) return -1;
+  msg->public_key = NULL;
+  msg->public_key_len = 0;
+  msg->signature = NULL;
+  msg->signature_len = 0;
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != WIRE_RELAY_CHALLENGE_RESPONSE) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* responder = cbor_array_get(item, 1);
+  int responder_rc = _node_id_decode(responder, &msg->responder_id);
+  cbor_decref(&responder);
+  if (responder_rc != 0) return responder_rc;
+
+  cbor_item_t* nonce = cbor_array_get(item, 2);
+  int nonce_rc = -1;
+  if (cbor_isa_bytestring(nonce) && cbor_bytestring_length(nonce) == 32) {
+    memcpy(msg->nonce, cbor_bytestring_handle(nonce), 32);
+    nonce_rc = 0;
+  }
+  cbor_decref(&nonce);
+  if (nonce_rc != 0) return nonce_rc;
+
+  cbor_item_t* key_data = cbor_array_get(item, 3);
+  if (!cbor_isa_bytestring(key_data)) {
+    cbor_decref(&key_data);
+    return -1;
+  }
+  if (cbor_bytestring_length(key_data) > 0) {
+    msg->public_key_len = cbor_bytestring_length(key_data);
+    msg->public_key = get_clear_memory(msg->public_key_len);
+    if (msg->public_key != NULL) {
+      memcpy(msg->public_key, cbor_bytestring_handle(key_data), msg->public_key_len);
+    } else {
+      msg->public_key_len = 0;
+      cbor_decref(&key_data);
+      return -1;
+    }
+  }
+  cbor_decref(&key_data);
+
+  cbor_item_t* sig_data = cbor_array_get(item, 4);
+  if (!cbor_isa_bytestring(sig_data)) {
+    cbor_decref(&sig_data);
+    return -1;
+  }
+  if (cbor_bytestring_length(sig_data) > 0) {
+    msg->signature_len = cbor_bytestring_length(sig_data);
+    msg->signature = get_clear_memory(msg->signature_len);
+    if (msg->signature != NULL) {
+      memcpy(msg->signature, cbor_bytestring_handle(sig_data), msg->signature_len);
+    } else {
+      msg->signature_len = 0;
+      cbor_decref(&sig_data);
+      return -1;
+    }
+  }
+  cbor_decref(&sig_data);
+
+  return 0;
+}
+
+void wire_relay_challenge_response_destroy(wire_relay_challenge_response_t* msg) {
+  if (msg == NULL) return;
+  free(msg->public_key);
+  free(msg->signature);
+  free(msg);
 }
 
 // --- AddrRequest ---

@@ -21,6 +21,7 @@
 #include <poll-dancer/poll-dancer.h>
 #include "wt_connection.h"
 #include "../health_handler.h"
+#include <stdbool.h>
 
 typedef vec_t(wt_connection_t*) vec_wt_connection_t;
 
@@ -50,6 +51,17 @@ typedef struct wt_transport_t {
   uint16_t port;
   char* cert_path;
   char* key_path;
+  /* CA certificate for validating client certs. NULL when no CA is
+   * configured — in that case peer cert validation is disabled (with a
+   * logged warning) and Task 2 fails closed unless allow_insecure is set.
+   * Holds a peer_verify_ctx_t* (opaque void* here so the header does not
+   * pull in peer_verify.h). See audit #11. */
+  void* peer_verify;
+  /* When true and no CA is configured, proceed with
+   * NO_CERTIFICATE_VALIDATION and a logged warning (trusted-LAN/research
+   * opt-in). Default false — wt_transport_start fails when no CA is
+   * configured. See audit #11. */
+  bool allow_insecure;
   /* Windows/Schannel only: the msquic Schannel backend cannot load a server
    * cert from PEM files, so wt_transport_create imports the PEM pair into a
    * transient cert store and hands the resulting PCCERT_CONTEXT to msquic.
@@ -79,6 +91,8 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
                                       uint16_t port,
                                       const char* cert_path,
                                       const char* key_path,
+                                      const char* ca_path,
+                                      bool allow_insecure,
                                       size_t max_connections,
                                       const char* api_key_hash,
                                       health_context_t* health_ctx);

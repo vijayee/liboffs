@@ -18,6 +18,17 @@
 #define ACTOR_FLAG_PRESSURED 0x10
 #define ACTOR_FLAG_MUTED 0x20
 
+/* Actor queue-state: tracks whether the actor is IDLE (in no deque, not
+   running), QUEUED (in a worker deque, not running), or RUNNING (being run
+   by a worker). This lets actor_destroy wait until the actor is fully out
+   of every scheduler deque before freeing the enclosing struct, closing
+   the re-queue-vs-destroy UAF. See docs/concurrency-pass.md F5. */
+typedef enum {
+  ACTOR_QUEUE_IDLE = 0,
+  ACTOR_QUEUE_QUEUED = 1,
+  ACTOR_QUEUE_RUNNING = 2,
+} actor_queue_state_e;
+
 typedef struct scheduler_pool_t scheduler_pool_t;
 
 typedef struct muted_sender_node_t {
@@ -28,6 +39,14 @@ typedef struct muted_sender_node_t {
 typedef struct actor_t {
   message_queue_t queue;
   ATOMIC(uint8_t) flags;
+  /* Mirrors the lifecycle of the actor with respect to worker deques. Set
+     to IDLE in actor_init, QUEUED by actor_send / scheduler_inject and by
+     the worker's re-queue path, RUNNING by the worker after it wins the
+     ACTOR_FLAG_RUNNING CAS, and back to IDLE or QUEUED by the worker when
+     actor_run returns. actor_destroy waits for IDLE before freeing, so the
+     worker can never push a freeable pointer into a deque. See
+     actor_queue_state_e above. */
+  ATOMIC(uint8_t) queue_state;
   ATOMIC(muted_sender_node_t*) pressured_senders;
   scheduler_pool_t* pool;
   void* state;

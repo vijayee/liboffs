@@ -8,6 +8,12 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* Hard cap on a single framed message. Blocks are <= 128 KB; 2 MB gives
+   headroom for future larger payloads and blocks any peer from pinning
+   arbitrarily large allocations by advertising a huge length and slow-dripping
+   bytes. See docs/liboffs-audit-report.md #3. */
+#define STREAM_FRAMER_MAX_FRAME_SIZE ((size_t)(2 * 1024 * 1024))
+
 /* Encode a framed message: [4-byte big-endian length][data].
  * Returns heap-allocated buffer, or NULL on failure.
  * Caller must free() the returned buffer. */

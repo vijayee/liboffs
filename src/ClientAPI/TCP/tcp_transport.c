@@ -239,6 +239,11 @@ void tcp_transport_destroy(tcp_transport_t* transport) {
   if (transport == NULL) {
     return;
   }
+  /* tcp_transport_stop (called above when running) joins the server thread,
+     which runs the pd-loop and all connection callbacks. By the time we
+     reach the connection free loop below, the loop thread is done and no
+     callback can fire on a tcp_connection_t during the free — no race, no
+     conn_lock needed here. See concurrency-pass.md F7 sibling audit. */
   if (atomic_load(&transport->running)) {
     tcp_transport_stop(transport);
   }

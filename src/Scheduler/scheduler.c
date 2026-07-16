@@ -118,7 +118,10 @@ static void* _scheduler_worker_loop(void* arg) {
       self->current = actor;
       uint8_t flags = atomic_load(&actor->flags);
       if (flags & ACTOR_FLAG_DESTROY) {
-        /* Actor has been destroyed — skip it */
+        /* Actor has been destroyed — skip it. It is still in our deque; we
+           leave it there (it will be skipped on every pop) and transition
+           its queue_state to IDLE so the destroyer can proceed. */
+        atomic_store(&actor->queue_state, ACTOR_QUEUE_IDLE);
         self->current = NULL;
         continue;
       }
@@ -137,15 +140,30 @@ static void* _scheduler_worker_loop(void* arg) {
         deque_push(&self->local_queue, (void*)actor);
         continue;
       }
+      /* We won the RUNNING flag. Record that we are running this actor so
+         actor_destroy can distinguish "in a deque" from "being run". */
+      atomic_store(&actor->queue_state, ACTOR_QUEUE_RUNNING);
+
       bool has_more = actor_run(actor, ACTOR_BATCH_SIZE);
-      atomic_fetch_and(&actor->flags, ~ACTOR_FLAG_RUNNING);
-      self->current = NULL;
-      if (has_more) {
+      /* Atomically decide: re-queue (RUNNING->QUEUED) or release
+         (RUNNING->IDLE), and clear RUNNING. The destroyer waits for IDLE
+         before freeing, so the re-queue below cannot push a freeable
+         pointer. */
+      uint8_t destroy_flags = atomic_load(&actor->flags);
+      bool destroy_set = (destroy_flags & ACTOR_FLAG_DESTROY) != 0;
+      if (has_more && !destroy_set) {
+        atomic_store(&actor->queue_state, ACTOR_QUEUE_QUEUED);
+        atomic_fetch_and(&actor->flags, ~ACTOR_FLAG_RUNNING);
+        self->current = NULL;
         deque_push(&self->local_queue, (void*)actor);
         // Signal other workers that might be sleeping
         platform_mutex_lock(pool->inject.lock);
         platform_condvar_broadcast(pool->inject.condition);
         platform_mutex_unlock(pool->inject.lock);
+      } else {
+        atomic_store(&actor->queue_state, ACTOR_QUEUE_IDLE);
+        atomic_fetch_and(&actor->flags, ~ACTOR_FLAG_RUNNING);
+        self->current = NULL;
       }
     } else {
       spin_count++;
@@ -203,6 +221,7 @@ scheduler_pool_t* scheduler_pool_create(size_t worker_count) {
   atomic_store_explicit(&pool->idle_count, 0, memory_order_relaxed);
   atomic_store_explicit(&pool->active_count, 0, memory_order_relaxed);
   atomic_store_explicit(&pool->terminate, 0, memory_order_relaxed);
+  atomic_store_explicit(&pool->stopped, 0, memory_order_relaxed);
   atomic_store_explicit(&pool->pending_messages, 0, memory_order_relaxed);
   return pool;
 }
@@ -248,6 +267,8 @@ void scheduler_pool_destroy(scheduler_pool_t* pool) {
 void scheduler_pool_start(scheduler_pool_t* pool) {
   atomic_store_explicit(&pool->idle_count, 0, memory_order_relaxed);
   atomic_store_explicit(&pool->active_count, 0, memory_order_relaxed);
+  atomic_store_explicit(&pool->terminate, 0, memory_order_release);
+  atomic_store_explicit(&pool->stopped, 0, memory_order_release);
   for (size_t index = 0; index < pool->worker_count; index++) {
     pool->workers[index].thread = platform_thread_create(_scheduler_worker_loop, pool);
     if (pool->workers[index].thread == NULL) {
@@ -267,6 +288,12 @@ void scheduler_pool_stop(scheduler_pool_t* pool) {
   for (size_t index = 0; index < pool->worker_count; index++) {
     platform_thread_join(pool->workers[index].thread);
   }
+  /* Workers are now joined — no worker thread can touch an actor on this
+     pool. actor_destroy's wait for queue_state == IDLE can break out once
+     this is set, because an actor may still be QUEUED (an external thread
+     like the timer loop can inject work after stop) but no live worker
+     will dereference it. */
+  atomic_store_explicit(&pool->stopped, 1, memory_order_release);
 }
 
 void scheduler_inject(scheduler_pool_t* pool, actor_t* actor) {
@@ -345,6 +372,10 @@ static bool _scheduler_pool_reinject_stranded(scheduler_pool_t* pool) {
     uint8_t flags = atomic_load(&actor->flags);
     if (!(flags & ACTOR_FLAG_DESTROY) && !message_queue_isempty(&actor->queue)) {
       atomic_fetch_or(&actor->flags, ACTOR_FLAG_SCHEDULED);
+      /* Re-injection puts the actor into a worker deque: transition to
+         QUEUED so a concurrent actor_destroy cannot free it while it is
+         in flight. */
+      atomic_store(&actor->queue_state, ACTOR_QUEUE_QUEUED);
       scheduler_inject(pool, actor);
       reinjected = true;
     }

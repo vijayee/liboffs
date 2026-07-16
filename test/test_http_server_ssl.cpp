@@ -48,11 +48,11 @@ extern "C" {
 #include <atomic>
 #include <sstream>
 
+#include "test_ssl_certs.h"
+
 namespace {
 
-/* Pre-staged PEMs (copied into the test working dir by test/CMakeLists.txt). */
-static const char* kCertPath = "certs/leaf_cert.pem";
-static const char* kKeyPath = "certs/leaf_key.pem";
+/* Cert paths — generated programmatically in SetUp via test_generate_ssl_certs. */
 
 /* ≥384 KiB — the historical large-response hang point. A response this size
  * spans many TLS records, exercising the Windows write path (SSL_write into the
@@ -267,6 +267,8 @@ public:
   scheduler_pool_t* pool;
   http_server_t* server;
   uint16_t port;
+  char* cert_path;
+  char* key_path;
 
   void SetUp() override {
     static std::atomic<uint16_t> next_port{19456};
@@ -274,6 +276,10 @@ public:
     pool = scheduler_pool_create(4);
     scheduler_pool_start(pool);
     server = NULL;
+    cert_path = NULL;
+    key_path = NULL;
+    ASSERT_EQ(test_generate_ssl_certs(&cert_path, &key_path), 0)
+        << "could not generate self-signed cert for SSL test";
   }
 
   void TearDown() override {
@@ -290,11 +296,12 @@ public:
     if (pool != NULL) {
       scheduler_pool_destroy(pool);
     }
+    test_cleanup_ssl_certs(cert_path, key_path);
   }
 };
 
 TEST_F(TestHttpServerSsl, SmallGet) {
-  server = http_server_create_ssl(pool, "127.0.0.1", port, kCertPath, kKeyPath);
+  server = http_server_create_ssl(pool, "127.0.0.1", port, cert_path, key_path);
   ASSERT_TRUE(server != NULL) << "could not create SSL server (certs missing?)";
   http_server_get(server, "^/small$", _handle_small, NULL);
   http_server_listen(server);
@@ -306,7 +313,7 @@ TEST_F(TestHttpServerSsl, SmallGet) {
 }
 
 TEST_F(TestHttpServerSsl, LargeGet) {
-  server = http_server_create_ssl(pool, "127.0.0.1", port, kCertPath, kKeyPath);
+  server = http_server_create_ssl(pool, "127.0.0.1", port, cert_path, key_path);
   ASSERT_TRUE(server != NULL);
   http_server_get(server, "^/large$", _handle_large, NULL);
   http_server_listen(server);
@@ -320,7 +327,7 @@ TEST_F(TestHttpServerSsl, LargeGet) {
 }
 
 TEST_F(TestHttpServerSsl, LargePostEcho) {
-  server = http_server_create_ssl(pool, "127.0.0.1", port, kCertPath, kKeyPath);
+  server = http_server_create_ssl(pool, "127.0.0.1", port, cert_path, key_path);
   ASSERT_TRUE(server != NULL);
   http_server_post(server, "^/echo$", _handle_echo, NULL);
   http_server_listen(server);
