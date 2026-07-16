@@ -38,6 +38,7 @@ typedef struct eabf_table_t {
   eabf_entry_t* entries;
   size_t capacity;
   size_t count;
+  size_t max_count;       /* Cap; evict lowest-weight entry when reached. 0 = no cap. See audit #14. */
   uint64_t base_ttl_ms;
   uint64_t maintenance_ms;
 } eabf_table_t;
@@ -79,6 +80,11 @@ void eabf_table_deinit(eabf_table_t* table);
 eabf_t* eabf_table_lookup(const eabf_table_t* table, const node_id_t* peer_id);
 eabf_t* eabf_table_insert(eabf_table_t* table, const node_id_t* peer_id);
 int eabf_table_remove(eabf_table_t* table, const node_id_t* peer_id);
+
+/* Set the max-count cap. When the table reaches max_count, the entry with the
+   lowest eabf->weight is evicted on insert. 0 disables the cap (unbounded).
+   See audit #14. */
+void eabf_table_set_max_count(eabf_table_t* table, size_t max_count);
 
 // --- TTL table ---
 

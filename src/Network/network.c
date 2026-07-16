@@ -212,7 +212,12 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   eabf_ttl_table_init(&network->eabf_ttl, 64);
   network->wanted_list = wanted_list_create();
   hebbian_table_init(&network->hebbian, 32, config->hebbian_decay_factor);
+  // Cap per-peer tables so a malicious peer can't mint fake node_ids and
+  // grow them unbounded. See audit #14.
+  hebbian_table_set_max_count(&network->hebbian, 1024);
   rate_limit_table_init(&network->rate_limits, 32);
+  rate_limit_table_set_max_count(&network->rate_limits, 1024);
+  eabf_table_set_max_count(&network->eabf_table, 256);
   network->log = NULL;
   network->topology_metrics = topology_metrics_create(pool);
   connection_manager_init(&network->conn_mgr, 16, NULL);
@@ -4279,6 +4284,11 @@ void network_dispatch(void* state, message_t* msg) {
           peer->quic_connection = NULL;
           peer->quic_stream = NULL;
 #endif
+          // Drop per-peer state keyed on the disconnected peer's node_id so
+          // the tables don't accumulate stale entries. See audit #14.
+          hebbian_table_remove(&network->hebbian, &peer->remote_node_id);
+          eabf_table_remove(&network->eabf_table, &peer->remote_node_id);
+          rate_limit_table_remove(&network->rate_limits, &peer->remote_node_id);
           connection_manager_remove(&network->conn_mgr, &peer->remote_node_id);
         } else {
           // Unauthenticated — remove from pending list
