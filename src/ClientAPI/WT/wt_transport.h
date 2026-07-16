@@ -50,6 +50,12 @@ typedef struct wt_transport_t {
   uint16_t port;
   char* cert_path;
   char* key_path;
+  /* CA certificate for validating client certs. NULL when no CA is
+   * configured — in that case peer cert validation is disabled (with a
+   * logged warning) and Task 2 fails closed unless allow_insecure is set.
+   * Holds a peer_verify_ctx_t* (opaque void* here so the header does not
+   * pull in peer_verify.h). See audit #11. */
+  void* peer_verify;
   /* Windows/Schannel only: the msquic Schannel backend cannot load a server
    * cert from PEM files, so wt_transport_create imports the PEM pair into a
    * transient cert store and hands the resulting PCCERT_CONTEXT to msquic.
@@ -79,6 +85,7 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
                                       uint16_t port,
                                       const char* cert_path,
                                       const char* key_path,
+                                      const char* ca_path,
                                       size_t max_connections,
                                       const char* api_key_hash,
                                       health_context_t* health_ctx);

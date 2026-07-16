@@ -640,6 +640,8 @@ int relay_server_start(relay_server_t* server, const char* host, uint16_t port) 
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)server->peer_verify);
     } else {
+      log_warn("relay_server: no CA configured; TLS encrypts but does not "
+               "authenticate client certs (MITM possible). See audit #11.");
       cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
     }
   } else {
@@ -648,6 +650,8 @@ int relay_server_start(relay_server_t* server, const char* host, uint16_t port) 
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)server->peer_verify);
     } else {
+      log_warn("relay_server: no CA configured; TLS encrypts but does not "
+               "authenticate client certs (MITM possible). See audit #11.");
       cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
     }
   }

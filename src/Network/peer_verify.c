@@ -9,6 +9,8 @@
 #include <openssl/x509.h>
 #include <openssl/pem.h>
 #include <openssl/bio.h>
+#include <openssl/crypto.h>
+#include <stdio.h>
 #include <string.h>
 
 struct peer_verify_ctx_t {
@@ -72,6 +74,34 @@ void peer_verify_ctx_destroy(peer_verify_ctx_t* ctx) {
     free(ctx->temp_path);
   }
   free(ctx);
+}
+
+peer_verify_ctx_t* peer_verify_ctx_create_from_pem_file(const char* pem_path) {
+  if (pem_path == NULL) {
+    return NULL;
+  }
+  FILE* pem_file = fopen(pem_path, "rb");
+  if (pem_file == NULL) {
+    log_error("peer_verify: failed to open CA PEM file: %s", pem_path);
+    return NULL;
+  }
+  X509* ca_cert = PEM_read_X509(pem_file, NULL, NULL, NULL);
+  fclose(pem_file);
+  if (ca_cert == NULL) {
+    log_error("peer_verify: failed to parse PEM CA certificate: %s", pem_path);
+    return NULL;
+  }
+  unsigned char* der_data = NULL;
+  int der_len = i2d_X509(ca_cert, &der_data);
+  X509_free(ca_cert);
+  if (der_len <= 0 || der_data == NULL) {
+    log_error("peer_verify: failed to convert PEM CA to DER: %s", pem_path);
+    if (der_data != NULL) OPENSSL_free(der_data);
+    return NULL;
+  }
+  peer_verify_ctx_t* ctx = peer_verify_ctx_create(der_data, (size_t)der_len);
+  OPENSSL_free(der_data);
+  return ctx;
 }
 
 const char* peer_verify_ctx_path(const peer_verify_ctx_t* ctx) {

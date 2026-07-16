@@ -8,6 +8,7 @@
 #include "../../Util/allocator.h"
 #include "../../Platform/platform.h"
 #include "../../Util/log.h"
+#include "../../Network/peer_verify.h"
 #include "../../Actor/message.h"
 #include "../../Actor/message_queue.h"
 #include <poll-dancer/poll-dancer.h>
@@ -245,6 +246,7 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
                                       uint16_t port,
                                       const char* cert_path,
                                       const char* key_path,
+                                      const char* ca_path,
                                       size_t max_connections,
                                       const char* api_key_hash,
                                       health_context_t* health_ctx) {
@@ -288,6 +290,26 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
     memcpy(transport->key_path, key_path, strlen(key_path) + 1);
   } else {
     transport->key_path = NULL;
+  }
+  /* Load CA for client-cert validation. If the CA fails to load, the cert
+   * config block falls back to NO_CERTIFICATE_VALIDATION with a logged
+   * warning (Task 2 will fail-close unless allow_insecure is set). */
+  transport->peer_verify = NULL;
+  if (ca_path != NULL) {
+    transport->peer_verify = peer_verify_ctx_create_from_pem_file(ca_path);
+    if (transport->peer_verify == NULL) {
+      fprintf(stderr, "wt_transport_create: failed to load CA from %s\n", ca_path);
+      free(transport->cert_path);
+      free(transport->key_path);
+      free(transport->host);
+      free(transport->api_key_hash);
+      platform_mutex_destroy(transport->conn_lock);
+      _destroy_stack_destroy(transport);
+      pd_loop_destroy(transport->loop);
+      actor_destroy(&transport->actor);
+      free(transport);
+      return NULL;
+    }
   }
   transport->win_cert_store = NULL;
   transport->win_cert_context = NULL;
@@ -414,6 +436,10 @@ void wt_transport_destroy(wt_transport_t* transport) {
   }
   if (transport->key_path != NULL) {
     free(transport->key_path);
+  }
+  if (transport->peer_verify != NULL) {
+    peer_verify_ctx_destroy((peer_verify_ctx_t*)transport->peer_verify);
+    transport->peer_verify = NULL;
   }
   if (transport->host != NULL) {
     free(transport->host);
@@ -616,10 +642,30 @@ static void* _server_thread(void* arg) {
     };
     cred_config.Flags = QUIC_CREDENTIAL_FLAG_NONE;
 #endif
+    /* When a CA is configured, validate client certs against it. The cert
+     * branches above initialize Flags to NONE (server-side); ORing in
+     * SET_CA_CERTIFICATE_FILE enables peer-cert validation. */
+    if (transport->peer_verify != NULL) {
+      cred_config.Flags |= QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
+      cred_config.CaCertificateFile = peer_verify_ctx_path(
+          (peer_verify_ctx_t*)transport->peer_verify);
+    } else {
+      log_warn("wt_transport: no CA configured; TLS encrypts but does not "
+               "authenticate client certs (MITM possible). See audit #11.");
+      cred_config.Flags |= QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    }
   } else {
     /* Self-signed / insecure mode for testing */
     cred_config.Type = QUIC_CREDENTIAL_TYPE_NONE;
-    cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    if (transport->peer_verify != NULL) {
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
+      cred_config.CaCertificateFile = peer_verify_ctx_path(
+          (peer_verify_ctx_t*)transport->peer_verify);
+    } else {
+      log_warn("wt_transport: no CA configured; TLS encrypts but does not "
+               "authenticate client certs (MITM possible). See audit #11.");
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    }
   }
 
   status = transport->msquic->ConfigurationLoadCredential(transport->configuration, &cred_config);
@@ -741,11 +787,12 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
                                       uint16_t port,
                                       const char* cert_path,
                                       const char* key_path,
+                                      const char* ca_path,
                                       size_t max_connections,
                                       const char* api_key_hash,
                                       health_context_t* health_ctx) {
   (void)pool; (void)bc; (void)ofd_cache; (void)tc;
-  (void)host; (void)port; (void)cert_path; (void)key_path; (void)max_connections; (void)api_key_hash; (void)health_ctx;
+  (void)host; (void)port; (void)cert_path; (void)key_path; (void)ca_path; (void)max_connections; (void)api_key_hash; (void)health_ctx;
   return NULL;
 }
 

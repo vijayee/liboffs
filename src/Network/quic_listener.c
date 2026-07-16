@@ -626,6 +626,8 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)listener->peer_verify);
     } else {
+      log_warn("quic_listener: no CA configured; TLS encrypts but does not "
+               "authenticate peer certs (MITM possible). See audit #11.");
       cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
     }
   } else {
@@ -635,6 +637,8 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)listener->peer_verify);
     } else {
+      log_warn("quic_listener: no CA configured; TLS encrypts but does not "
+               "authenticate peer certs (MITM possible). See audit #11.");
       cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
     }
   }

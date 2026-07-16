@@ -333,7 +333,7 @@ static int run_wt_node(uint16_t port, const char* cache_dir,
 
   wt_transport_t* transport = wt_transport_create(pool, bc, ofd_cache, tc,
                                                   "127.0.0.1", port,
-                                                  cert_path, key_path, 0, NULL,
+                                                  cert_path, key_path, NULL, 0, NULL,
                                                   &health_ctx);
   if (transport == NULL) return 1;
   wt_transport_start(transport);

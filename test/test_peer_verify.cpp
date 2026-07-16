@@ -127,3 +127,32 @@ TEST_F(PeerVerifyTest, PemFileIsReadable) {
 
   peer_verify_ctx_destroy(ctx);
 }
+
+TEST_F(PeerVerifyTest, FromPemFileLoadsCA) {
+  // The PEM-file helper is what relay_server_main / wt_transport /
+  // offs_client use to convert a configured --ca / ca_path into a
+  // peer_verify_ctx. It must produce a context whose temp PEM file
+  // parses back to the same CA cert.
+  peer_verify_ctx_t* ctx = peer_verify_ctx_create_from_pem_file(ca_cert_path.c_str());
+  ASSERT_NE(ctx, nullptr);
+  const char* path = peer_verify_ctx_path(ctx);
+  ASSERT_NE(path, nullptr);
+  EXPECT_TRUE(file_exists(path));
+
+  BIO* bio = BIO_new_file(path, "r");
+  ASSERT_NE(bio, nullptr);
+  X509* cert = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+  BIO_free(bio);
+  EXPECT_NE(cert, nullptr);
+  X509_free(cert);
+
+  peer_verify_ctx_destroy(ctx);
+}
+
+TEST_F(PeerVerifyTest, FromPemFileNullPathReturnsNull) {
+  EXPECT_EQ(peer_verify_ctx_create_from_pem_file(NULL), nullptr);
+}
+
+TEST_F(PeerVerifyTest, FromPemFileMissingReturnsNull) {
+  EXPECT_EQ(peer_verify_ctx_create_from_pem_file("/nonexistent/ca.pem"), nullptr);
+}

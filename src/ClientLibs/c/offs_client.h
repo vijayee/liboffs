@@ -20,6 +20,11 @@ typedef struct {
   uint32_t poll_timeout_ms;
   uint32_t max_retries;
   uint32_t retry_base_delay_ms;
+  /* PEM-encoded CA certificate file path for validating the server's TLS
+   * cert on outbound wts:// connections. NULL (or zero-length) disables
+   * validation (with a logged warning — MITM risk; Task 2 fails closed
+   * unless allow_insecure is set). See audit #11. */
+  const char* ca_path;
 } offs_client_config_t;
 
 offs_client_config_t offs_client_config_default(void);

@@ -1190,7 +1190,7 @@ protected:
 
         const char* cp = (cert_path[0] != '\0') ? cert_path : NULL;
         const char* kp = (key_path[0] != '\0') ? key_path : NULL;
-        transport = wt_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, cp, kp, 0, NULL, NULL);
+        transport = wt_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, cp, kp, NULL, 0, NULL, NULL);
         if (transport != nullptr) {
             wt_transport_start(transport);
             /* Wait for QUIC server listener to be ready */

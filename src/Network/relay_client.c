@@ -526,19 +526,29 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
     cred_config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
     cred_config.CertificateFile = &cert_file;
     if (client->peer_verify != NULL) {
-      cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE
+                       | QUIC_CREDENTIAL_FLAG_CLIENT;
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)client->peer_verify);
     } else {
-      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+      log_warn("relay_client: no CA configured; TLS encrypts but does not "
+               "authenticate the relay server's cert (MITM possible). "
+               "See audit #11.");
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_CLIENT
+                       | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
     }
   } else {
     if (client->peer_verify != NULL) {
-      cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE
+                       | QUIC_CREDENTIAL_FLAG_CLIENT;
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)client->peer_verify);
     } else {
-      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+      log_warn("relay_client: no CA configured; TLS encrypts but does not "
+               "authenticate the relay server's cert (MITM possible). "
+               "See audit #11.");
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_CLIENT
+                       | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
     }
   }
 
