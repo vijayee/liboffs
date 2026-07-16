@@ -49,6 +49,12 @@
 #define WIRE_MAX_OFFERS           20
 #define WIRE_MAX_SAMPLES          8
 
+// Max hops for a forwarded search — separate from the per-protocol
+// *_FORWARD_FANOUT constants (branch width = how many next-hops to contact at
+// each hop). Was conflated with *_FORWARD_FANOUT=3, silently capping reach at
+// 3 hops even though WIRE_MAX_PATH / FIND_BLOCK_MAX_PATH = 6. See audit #22.
+#define FORWARD_TTL 6
+
 // Closest-N protocol limits
 #define CLOSEST_NODES_MAX_PATH       6
 #define CLOSEST_NODES_MAX_VISITED    256  // bytes = 2048 bits

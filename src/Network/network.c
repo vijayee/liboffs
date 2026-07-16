@@ -1846,7 +1846,7 @@ static void network_handle_local_closest_nodes(network_t* network, message_t* ms
   wire_query.count = payload->count;
   wire_query.beta_numerator = payload->beta_numerator;
   wire_query.beta_denominator = payload->beta_denominator;
-  wire_query.ttl = CLOSEST_NODES_FORWARD_FANOUT;
+  wire_query.ttl = FORWARD_TTL;
   closest_nodes_add_visited(wire_query.visited_bloom, &wire_query.visited_count,
                             network->authority->local_id.hash);
   memcpy(&wire_query.path[0], &network->authority->local_id, sizeof(node_id_t));
@@ -2001,6 +2001,22 @@ static void network_handle_ping_capacity_response(network_t* network, message_t*
 // --- FindNode handler ---
 // Returns the K closest nodes to a target ID from our ring table
 
+// Compare two node_ids by XOR distance to a target. Returns <0 if left is
+// closer to target than right, 0 if equal, >0 if left is farther. XOR distance
+// is the Kademlia routing metric: smaller XOR = closer. Comparison is byte-by-
+// byte lexicographic on the XOR digest (the first differing byte decides).
+static int network_node_id_xor_cmp(const node_id_t* left, const node_id_t* right,
+                                    const node_id_t* target) {
+  for (size_t index = 0; index < NODE_ID_HASH_SIZE; index++) {
+    uint8_t left_byte = left->hash[index] ^ target->hash[index];
+    uint8_t right_byte = right->hash[index] ^ target->hash[index];
+    if (left_byte != right_byte) {
+      return (int)left_byte - (int)right_byte;
+    }
+  }
+  return 0;
+}
+
 static void network_handle_find_node(network_t* network, message_t* msg) {
   wire_find_node_t* find = (wire_find_node_t*)msg->payload;
   if (find == NULL) return;
@@ -2016,16 +2032,47 @@ static void network_handle_find_node(network_t* network, message_t* msg) {
   memcpy(&response->sender_id, &network->authority->local_id, sizeof(node_id_t));
   response->closest_count = 0;
 
-  // Walk rings from lowest latency to highest, collecting up to 8 closest nodes
-  for (size_t ring_idx = 0; ring_idx < network->rings->ring_count && response->closest_count < 8; ring_idx++) {
+  // Collect candidate node ids from all rings (primary members only, skip
+  // rendezvous-only nodes). The handler previously walked rings lowest-
+  // latency-first and returned the first 8 — ignoring find->target_id. That
+  // returned the lowest-latency nodes, not the nodes closest to target_id by
+  // XOR distance (the Kademlia routing metric). See audit #23.
+  node_id_t candidates[RING_K * RING_MAX_RINGS];
+  size_t candidate_count = 0;
+  for (size_t ring_idx = 0; ring_idx < network->rings->ring_count; ring_idx++) {
     ring_t* ring = &network->rings->rings[ring_idx];
-    for (int node_idx = 0; node_idx < ring->primary.length && response->closest_count < 8; node_idx++) {
+    for (int node_idx = 0; node_idx < ring->primary.length; node_idx++) {
       net_node_t* node = ring->primary.data[node_idx];
-      // Skip rendezvous-only nodes
+      if (node == NULL) continue;
       if (node->flags & NET_NODE_FLAG_RENDEZVOUS) continue;
-      memcpy(&response->closest_nodes[response->closest_count], &node->id, sizeof(node_id_t));
-      response->closest_count++;
+      if (candidate_count < RING_K * RING_MAX_RINGS) {
+        memcpy(&candidates[candidate_count], &node->id, sizeof(node_id_t));
+        candidate_count++;
+      }
     }
+  }
+
+  // Select the 8 closest to find->target_id by XOR distance. Selection sort on
+  // the first min(candidate_count, 8) positions — the candidate pool is small
+  // (<= RING_K * RING_MAX_RINGS = 80) so O(n*k) is trivial.
+  size_t select_count = candidate_count < 8 ? candidate_count : 8;
+  for (size_t out_idx = 0; out_idx < select_count; out_idx++) {
+    size_t best_idx = out_idx;
+    for (size_t in_idx = out_idx + 1; in_idx < candidate_count; in_idx++) {
+      if (network_node_id_xor_cmp(&candidates[in_idx], &candidates[best_idx],
+                                  &find->target_id) < 0) {
+        best_idx = in_idx;
+      }
+    }
+    if (best_idx != out_idx) {
+      node_id_t tmp;
+      memcpy(&tmp, &candidates[out_idx], sizeof(node_id_t));
+      memcpy(&candidates[out_idx], &candidates[best_idx], sizeof(node_id_t));
+      memcpy(&candidates[best_idx], &tmp, sizeof(node_id_t));
+    }
+    memcpy(&response->closest_nodes[response->closest_count],
+           &candidates[out_idx], sizeof(node_id_t));
+    response->closest_count++;
   }
 
   peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &find->sender_id);
@@ -2953,6 +3000,48 @@ static void network_handle_store_block_response(network_t* network, message_t* m
         free(recall_peers);
       }
     }
+  } else {
+    // Decline (accepted == 0) — the remote node did not store the block.
+    // Previously the decline was silently dropped: no relay upstream, so the
+    // origin never learned that a replica slot went unfilled. Relay the
+    // decline response upstream so intermediate hops and the origin see the
+    // actual replica count, not just the successes. See audit #21.
+    int self_index = -1;
+    for (int index = 0; index < (int)response->path_len; index++) {
+      if (node_id_equals(&response->path[index], &network->authority->local_id)) {
+        self_index = index;
+        break;
+      }
+    }
+    if (self_index > 0) {
+      // Intermediate hop — relay decline to predecessor so it propagates back
+      // to the origin. Without this relay the decline was dropped at the hop
+      // that received it, hiding unfilled replica slots from the origin.
+      const node_id_t* predecessor = &response->path[self_index - 1];
+      peer_connection_t* relay_peer = connection_manager_lookup(&network->conn_mgr, predecessor);
+      if (relay_peer != NULL) {
+        cbor_item_t* cbor = wire_store_block_response_encode(response);
+        conn_state_send(network, relay_peer, cbor);
+        cbor_decref(&cbor);
+        if (network->log != NULL) {
+          message_log_record(network->log, WIRE_STORE_BLOCK_RESPONSE, MSG_DIRECTION_FORWARDED,
+                             predecessor, response->message_id, response->block_hash,
+                             3, &network->hebbian);
+        }
+      }
+    } else {
+      // Origin (self not in path, or self is path[0]): the decline reached the
+      // origin. The receive log at the top of this handler already recorded
+      // the decline (direction code 3). The origin fires its StoreBlock
+      // result to the caller immediately on dispatch (NETWORK_LOCAL_STORE_BLOCK)
+      // based on the local store_block_execute decision, before any remote
+      // responses arrive — so there is no pending-request bookkeeping here to
+      // decrement. The decline is surfaced via the receive log so operators
+      // can see that a replica slot went unfilled. Aggregating per-message-id
+      // decline counts into the result_payload would require a pending-tracking
+      // structure (deferred — the fire-and-forget StoreBlock result contract
+      // is a separate, larger change).
+    }
   }
 }
 
@@ -3115,7 +3204,7 @@ static void network_handle_rank_block(network_t* network, message_t* msg) {
       uint64_t now_ts = (uint64_t)time(NULL) * 1000;
       find->message_id = network_next_message_id(network);
       memcpy(find->block_hash, rank->block_hash, 32);
-      find->ttl = FIND_BLOCK_FORWARD_FANOUT;
+      find->ttl = FORWARD_TTL;
       memset(find->visited_bloom, 0, WIRE_MAX_VISITED_BLOOM);
       find->visited_count = 0;
       find->path_len = 0;
@@ -3507,7 +3596,7 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
     wanted_entry->message_id = state.message_id;
   }
   memcpy(state.block_hash, payload->hash->data, 32);
-  state.ttl = FIND_BLOCK_FORWARD_FANOUT;
+  state.ttl = FORWARD_TTL;
   state.start_time_ms = now_ts;
   memcpy(&state.original_source, &network->authority->local_id, sizeof(node_id_t));
 
