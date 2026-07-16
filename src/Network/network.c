@@ -772,10 +772,16 @@ static void network_handle_salutation(network_t* network, message_t* msg,
   wire_salutation_t* salut = (wire_salutation_t*)msg->payload;
   if (salut == NULL) return;
 
+  /* NOTE: do NOT call wire_salutation_destroy(salut) here — the synchronous
+     dispatch tail-free (tier-1 Task 2) frees dispatch_msg.payload after this
+     handler returns. Freeing salut here would double-free. The tail-free
+     calls dispatch_msg.payload_destroy (which is wire_salutation_destroy) on
+     dispatch_msg.payload (which is salut). Just return on error paths; the
+     tail-free handles cleanup. */
+
   // Verify: BLAKE3(public_key) must match sender_id.hash
   if (salut->public_key == NULL || salut->public_key_len == 0) {
     log_error("salutation: missing public_key, cannot verify identity");
-    wire_salutation_destroy(salut);
     return;
   }
 
@@ -783,12 +789,10 @@ static void network_handle_salutation(network_t* network, message_t* msg,
   if (node_id_from_public_key(salut->public_key, salut->public_key_len,
                               &computed_id) != 0) {
     log_error("salutation: failed to derive node_id from public_key");
-    wire_salutation_destroy(salut);
     return;
   }
   if (!node_id_equals(&computed_id, &salut->sender_id)) {
     log_error("salutation: public_key hash does not match sender_id");
-    wire_salutation_destroy(salut);
     return;
   }
 
@@ -796,7 +800,6 @@ static void network_handle_salutation(network_t* network, message_t* msg,
   pending_quic_t* pending = pending_quic_remove(network, quic_connection);
   if (pending == NULL) {
     log_error("salutation: no pending connection for quic handle");
-    wire_salutation_destroy(salut);
     return;
   }
 
@@ -811,7 +814,6 @@ static void network_handle_salutation(network_t* network, message_t* msg,
                                    pending->peer_cert_der_len,
                                    &cert_pubkey, &cert_pubkey_len) != 0) {
       log_error("salutation: failed to extract peer cert public key");
-      wire_salutation_destroy(salut);
       free(pending->peer_cert_der);
       free(pending);
       return;
@@ -822,7 +824,6 @@ static void network_handle_salutation(network_t* network, message_t* msg,
     if (!pubkey_matches) {
       log_error("salutation: public_key does not match the TLS leaf-cert key "
                 "(impersonation attempt?)");
-      wire_salutation_destroy(salut);
       free(pending->peer_cert_der);
       free(pending);
       return;
@@ -885,7 +886,9 @@ static void network_handle_salutation(network_t* network, message_t* msg,
   free(pending->peer_cert_der);
   free(pending);
 
-  wire_salutation_destroy(salut);
+  /* Do NOT call wire_salutation_destroy(salut) — the synchronous dispatch
+     tail-free (added in tier-1 Task 2) frees dispatch_msg.payload after this
+     handler returns. Freeing salut here double-frees. */
 }
 
 // --- Ping handler ---
