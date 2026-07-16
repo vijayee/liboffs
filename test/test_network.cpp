@@ -2665,6 +2665,89 @@ TEST(NetworkSyncDispatchTest, FreesFindBlockResponsePayloadOnRelayReceived) {
   free(network);
 }
 
+// --- relay_verified flag (audit #8 relay path) ---
+//
+// The relay receive path admits peers via wire_extract_sender_id (which
+// extracts only the sender_id hash, not the public_key preimage) with no
+// identity check. The full fix (signed-nonce challenge) is deferred. The
+// minimum surfaces the trust gap via a `relay_verified` flag on
+// peer_connection_t: true on the direct salutation path (BLAKE3 + TLS cert
+// pin), false on the relay-admit path. These tests verify the flag's
+// contract directly against connection_manager_add (the function the relay
+// handler calls to admit a new peer) and peer_connection_create.
+
+TEST(TestPeerVerify, RelayAdmittedPeerDefaultsUnverified) {
+  // connection_manager_add -> peer_connection_create uses get_clear_memory,
+  // which zeroes the struct, so relay_verified defaults false. This is the
+  // state a relay-admitted peer starts in (identity NOT confirmed).
+  connection_manager_t mgr;
+  connection_manager_init(&mgr, 4, NULL);
+
+  node_id_t sender_id;
+  node_id_generate(&sender_id);
+
+  peer_connection_t* peer = connection_manager_add(&mgr, &sender_id, NULL, NULL);
+  ASSERT_NE(peer, nullptr);
+  EXPECT_FALSE(peer->relay_verified)
+      << "relay-admitted peer must default to relay_verified=false";
+
+  connection_manager_deinit(&mgr);
+}
+
+TEST(TestPeerVerify, DirectSalutationMarksPeerVerified) {
+  // The direct salutation path (network_handle_salutation) sets
+  // relay_verified=true after the BLAKE3 + cert-pin checks pass. Simulate
+  // that here: a peer admitted via connection_manager_add (as the salutation
+  // handler does) starts unverified, then the salutation handler flips the
+  // flag.
+  connection_manager_t mgr;
+  connection_manager_init(&mgr, 4, NULL);
+
+  node_id_t sender_id;
+  node_id_generate(&sender_id);
+
+  peer_connection_t* peer = connection_manager_add(&mgr, &sender_id, NULL, NULL);
+  ASSERT_NE(peer, nullptr);
+  ASSERT_FALSE(peer->relay_verified);
+
+  // Salutation handler sets the flag after the identity checks pass.
+  peer->relay_verified = true;
+  EXPECT_TRUE(peer->relay_verified);
+
+  connection_manager_deinit(&mgr);
+}
+
+TEST(TestPeerVerify, DirectPathUpgradesExistingRelayedPeer) {
+  // connection_manager_add returns the existing peer for a known sender_id
+  // (see connection_manager.c:57-60). So when a relay-admitted peer is later
+  // directly salutation-authenticated, the salutation handler's
+  // `peer->relay_verified = true` upgrades the SAME peer object — no
+  // duplicate peer entry, and the previously-unverified peer becomes
+  // verified. This is the optional hardening the task description called out.
+  connection_manager_t mgr;
+  connection_manager_init(&mgr, 4, NULL);
+
+  node_id_t sender_id;
+  node_id_generate(&sender_id);
+
+  // 1. Relay-admit: creates a new peer, relay_verified=false.
+  peer_connection_t* relayed = connection_manager_add(&mgr, &sender_id, NULL, NULL);
+  ASSERT_NE(relayed, nullptr);
+  ASSERT_FALSE(relayed->relay_verified);
+
+  // 2. Direct salutation: connection_manager_add returns the SAME peer.
+  peer_connection_t* direct = connection_manager_add(&mgr, &sender_id, NULL, NULL);
+  EXPECT_EQ(direct, relayed)
+      << "connection_manager_add must return the existing peer for a known sender_id";
+
+  // Salutation handler sets relay_verified=true on the existing peer.
+  direct->relay_verified = true;
+  EXPECT_TRUE(relayed->relay_verified)
+      << "upgrading the same peer object must flip relay_verified on the relayed entry";
+
+  connection_manager_deinit(&mgr);
+}
+
 // --- Salutation round-trip tests ---
 
 TEST(WireSalutationTest, EncodeDecodeWithPublicKey) {

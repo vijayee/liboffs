@@ -576,6 +576,13 @@ static void network_handle_salutation(network_t* network, message_t* msg,
     peer->quic_connection = quic_connection;
     peer->quic_stream = pending->quic_stream;
 #endif
+    // Identity confirmed via the direct salutation path: BLAKE3 hash check
+    // + (if a TLS cert was available) leaf-cert pin. Mark this peer as
+    // relay_verified so future gating can distinguish it from relay-admitted
+    // (unverified) peers. connection_manager_add returns the existing peer
+    // for a known sender_id, so this also upgrades a previously
+    // relay-admitted peer to verified on first direct contact. See #8.
+    peer->relay_verified = true;
     conn_state_on_direct_connected(peer);
 
     // Insert the authenticated peer into the ring table so find_block_execute
@@ -4013,6 +4020,17 @@ void network_dispatch(void* state, message_t* msg) {
           peer_connection_t* existing = connection_manager_lookup(&network->conn_mgr, &sender_id);
           if (existing == NULL) {
             existing = connection_manager_add(&network->conn_mgr, &sender_id, NULL, network->pool);
+            // Relay-admitted peers are relay_verified=false (identity NOT
+            // confirmed): the relayed message carries only the sender_id
+            // hash, not the public_key preimage, so the BLAKE3 salutation
+            // check can't be applied here. The signed-nonce challenge
+            // (deferred — a protocol change) will verify these peers
+            // without a direct connection. We do NOT refuse to admit
+            // (connection_manager_add is load-bearing — relay replies
+            // route via the endpoint id) and we do NOT gate ring_set_insert
+            // (gating would break routability of relayed-only peers). The
+            // relay_verified flag surfaces the trust gap for future gating
+            // decisions; the signed-nonce is the real fix. See audit #8.
           }
           // Store the relay endpoint ID so we can route messages back
           if (existing != NULL && relay_payload->src_endpoint_id != 0) {
