@@ -126,6 +126,8 @@ static void _relay_client_process_message(
       memset(&response, 0, sizeof(response));
       if (wire_addr_response_decode(cbor, &response) == 0) {
         client->local_endpoint_id = response.endpoint_id;
+        client->reflexive_addr = response.reflexive_addr;
+        client->reflexive_port = response.reflexive_port;
         log_info("relay_client: received ADDR_RESPONSE, endpoint_id=%u, addr=%u:%u",
                  response.endpoint_id, response.reflexive_addr, response.reflexive_port);
       } else {
