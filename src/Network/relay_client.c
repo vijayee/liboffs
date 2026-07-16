@@ -5,6 +5,7 @@
 #include "relay_client.h"
 #include "msquic_singleton.h"
 #include "wire.h"
+#include "nat_detect.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include <cbor.h>
@@ -130,6 +131,29 @@ static void _relay_client_process_message(
         client->reflexive_port = response.reflexive_port;
         log_info("relay_client: received ADDR_RESPONSE, endpoint_id=%u, addr=%u:%u",
                  response.endpoint_id, response.reflexive_addr, response.reflexive_port);
+
+        /* Forward the response to the NAT detection actor if active so it can
+           compare reflexive addresses from two relays and classify the local
+           NAT type. The payload carries source_client = client so nat_detect
+           can match it against detect->relay_a / detect->relay_b. The relay
+           client stays alive for the lifetime of nat_detect (nat_detect_destroy
+           destroys relay_a/relay_b), so the pointer is valid. See audit #18. */
+        if (client->network != NULL && client->network->nat_detect != NULL) {
+          network_addr_response_payload_t* addr_payload =
+              get_clear_memory(sizeof(network_addr_response_payload_t));
+          if (addr_payload != NULL) {
+            addr_payload->endpoint_id = response.endpoint_id;
+            addr_payload->reflexive_addr = response.reflexive_addr;
+            addr_payload->reflexive_port = response.reflexive_port;
+            addr_payload->source_client = client;
+            message_t addr_msg;
+            memset(&addr_msg, 0, sizeof(addr_msg));
+            addr_msg.type = NETWORK_ADDR_RESPONSE;
+            addr_msg.payload = addr_payload;
+            addr_msg.payload_destroy = free;
+            actor_send(&client->network->nat_detect->actor, &addr_msg);
+          }
+        }
       } else {
         log_error("relay_client: failed to decode ADDR_RESPONSE");
       }

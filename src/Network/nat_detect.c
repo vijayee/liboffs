@@ -60,54 +60,94 @@ void nat_detect_dispatch(void* state, message_t* msg) {
   if (msg == NULL) return;
 
   switch (msg->type) {
-    case NETWORK_RELAY_RECEIVED: {
-      wire_relay_received_t* received = (wire_relay_received_t*)msg->payload;
-      if (received == NULL) break;
+    case NETWORK_ADDR_RESPONSE: {
+      network_addr_response_payload_t* response =
+          (network_addr_response_payload_t*)msg->payload;
+      if (response == NULL) break;
 
-      /* Decode the inner wire message to check if it's an ADDR_RESPONSE */
-      struct cbor_load_result load_result;
-      cbor_item_t* cbor = cbor_load(received->payload, received->payload_len, &load_result);
-      if (cbor == NULL) {
-        log_error("nat_detect: failed to parse CBOR from relay received payload");
+      /* Match the source relay_client against detect->relay_a / detect->relay_b
+         to record the reflexive address in the right slot. If source_client
+         doesn't match either (e.g. the network's primary relay when
+         nat_detect_start wasn't called), fall back to first-free-slot
+         assignment so a single-relay deployment still records a reflexive
+         address for SRFLX candidates. Never overwrite an already-filled
+         slot — a slow duplicate response is ignored. */
+      int slot = 0;  /* 0 = a, 1 = b, -1 = unknown */
+      if (response->source_client != NULL) {
+        if (response->source_client == detect->relay_a) {
+          slot = 0;
+        } else if (response->source_client == detect->relay_b) {
+          slot = 1;
+        } else {
+          slot = -1;
+        }
+      }
+      if (slot == 0) {
+        if (detect->got_response_a) break;
+        detect->reflexive_addr_a = response->reflexive_addr;
+        detect->reflexive_port_a = response->reflexive_port;
+        detect->endpoint_id_a = response->endpoint_id;
+        detect->got_response_a = 1;
+        log_info("nat_detect: relay_a response — addr=0x%08x port=%u endpoint=%u",
+                 response->reflexive_addr, response->reflexive_port, response->endpoint_id);
+      } else if (slot == 1) {
+        if (detect->got_response_b) break;
+        detect->reflexive_addr_b = response->reflexive_addr;
+        detect->reflexive_port_b = response->reflexive_port;
+        detect->endpoint_id_b = response->endpoint_id;
+        detect->got_response_b = 1;
+        log_info("nat_detect: relay_b response — addr=0x%08x port=%u endpoint=%u",
+                 response->reflexive_addr, response->reflexive_port, response->endpoint_id);
+      } else if (slot == -1) {
+        if (!detect->got_response_a) {
+          detect->reflexive_addr_a = response->reflexive_addr;
+          detect->reflexive_port_a = response->reflexive_port;
+          detect->endpoint_id_a = response->endpoint_id;
+          detect->got_response_a = 1;
+          log_info("nat_detect: primary-relay response — addr=0x%08x port=%u endpoint=%u",
+                   response->reflexive_addr, response->reflexive_port, response->endpoint_id);
+        } else if (!detect->got_response_b) {
+          detect->reflexive_addr_b = response->reflexive_addr;
+          detect->reflexive_port_b = response->reflexive_port;
+          detect->endpoint_id_b = response->endpoint_id;
+          detect->got_response_b = 1;
+          log_info("nat_detect: secondary-relay response — addr=0x%08x port=%u endpoint=%u",
+                   response->reflexive_addr, response->reflexive_port, response->endpoint_id);
+        } else {
+          break;  /* both slots filled */
+        }
+      } else {
         break;
       }
 
-      uint8_t msg_type = wire_get_type(cbor);
-      if (msg_type == WIRE_ADDR_RESPONSE) {
-        wire_addr_response_t response;
-        memset(&response, 0, sizeof(response));
-        if (wire_addr_response_decode(cbor, &response) == 0) {
-          /* Assign first response to relay_a slot, second to relay_b */
-          if (!detect->got_response_a) {
-            detect->reflexive_addr_a = response.reflexive_addr;
-            detect->reflexive_port_a = response.reflexive_port;
-            detect->endpoint_id_a = response.endpoint_id;
-            detect->got_response_a = 1;
-            log_info("nat_detect: relay_a response — addr=0x%08x port=%u endpoint=%u",
-                     response.reflexive_addr, response.reflexive_port, response.endpoint_id);
-          } else if (!detect->got_response_b) {
-            detect->reflexive_addr_b = response.reflexive_addr;
-            detect->reflexive_port_b = response.reflexive_port;
-            detect->endpoint_id_b = response.endpoint_id;
-            detect->got_response_b = 1;
-            log_info("nat_detect: relay_b response — addr=0x%08x port=%u endpoint=%u",
-                     response.reflexive_addr, response.reflexive_port, response.endpoint_id);
-          }
+      /* Classify once both responses are in. */
+      if (detect->got_response_a && detect->got_response_b &&
+          !detect->detection_complete) {
+        detect->detected_type = nat_detect_classify(
+            detect->local_addr,
+            detect->reflexive_addr_a, detect->reflexive_port_a, detect->got_response_a,
+            detect->reflexive_addr_b, detect->reflexive_port_b, detect->got_response_b);
+        detect->detection_complete = 1;
+        log_info("nat_detect: classification complete — type=%d",
+                 (int)detect->detected_type);
 
-          /* Classify once both responses are in */
-          if (detect->got_response_a && detect->got_response_b) {
-            detect->detected_type = nat_detect_classify(
-                detect->local_addr,
-                detect->reflexive_addr_a, detect->reflexive_port_a, detect->got_response_a,
-                detect->reflexive_addr_b, detect->reflexive_port_b, detect->got_response_b);
-            detect->detection_complete = 1;
-            log_info("nat_detect: classification complete — type=%d", detect->detected_type);
+        /* Notify the network actor so it can update network->local_nat_type on
+           its own thread. The payload is small and owned by the message
+           (payload_destroy = free). */
+        if (detect->network != NULL) {
+          network_nat_type_detected_payload_t* result =
+              get_clear_memory(sizeof(network_nat_type_detected_payload_t));
+          if (result != NULL) {
+            result->nat_type = (int)detect->detected_type;
+            message_t result_msg;
+            memset(&result_msg, 0, sizeof(result_msg));
+            result_msg.type = NETWORK_NAT_TYPE_DETECTED;
+            result_msg.payload = result;
+            result_msg.payload_destroy = free;
+            actor_send(&detect->network->actor, &result_msg);
           }
-        } else {
-          log_error("nat_detect: failed to decode ADDR_RESPONSE");
         }
       }
-      cbor_decref(&cbor);
       break;
     }
     default:
