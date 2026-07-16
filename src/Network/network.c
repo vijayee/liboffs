@@ -736,7 +736,7 @@ static void network_handle_ping_response(network_t* network, message_t* msg) {
     rtt_ms = now_ms - response->echo_time;
   }
   // Update latency cache with the measured RTT
-  latency_cache_insert(network->latency_cache, &response->sender_id, 0, 0, (float)rtt_ms);
+  latency_cache_insert(network->latency_cache, &response->sender_id, 0, 0, (float)rtt_ms, now_ms);
   // Update the peer's RTT in the connection manager
   peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &response->sender_id);
   if (peer != NULL) {
@@ -1635,11 +1635,12 @@ static void network_handle_closest_nodes_response(network_t* network, message_t*
   }
 
   // Update latency cache with ring sample latencies
+  uint64_t now_ms = (uint64_t)time(NULL) * 1000;
   for (uint8_t index = 0; index < response->ring_count && index < CLOSEST_NODES_MAX_RING_SAMPLES; index++) {
     if (response->ring_latencies_us[index] > 0) {
       float latency_ms = (float)response->ring_latencies_us[index] / 1000.0f;
       latency_cache_insert(network->latency_cache, &response->ring_nodes[index],
-                           0, 0, latency_ms);
+                           0, 0, latency_ms, now_ms);
     }
   }
 
@@ -1647,7 +1648,7 @@ static void network_handle_closest_nodes_response(network_t* network, message_t*
     // Also update latency for the closest node
     float latency_ms = (float)response->closest_latency_us / 1000.0f;
     latency_cache_insert(network->latency_cache, &response->closest,
-                         0, 0, latency_ms);
+                         0, 0, latency_ms, now_ms);
   }
 
   // Forward response along the path (pop the last hop to route back)
@@ -1752,11 +1753,12 @@ static void network_handle_measure_nodes_response(network_t* network, message_t*
   }
 
   // Update latency cache with each target/latency pair
+  uint64_t now_ms = (uint64_t)time(NULL) * 1000;
   for (uint8_t index = 0; index < response->target_count && index < MEASURE_NODES_MAX_TARGETS; index++) {
     if (response->latencies_us[index] > 0) {
       float latency_ms = (float)response->latencies_us[index] / 1000.0f;
       latency_cache_insert(network->latency_cache, &response->targets[index],
-                           0, 0, latency_ms);
+                           0, 0, latency_ms, now_ms);
     }
   }
 }
