@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <openssl/evp.h>
 #include "../Configuration/config.h"
 #include "../Util/atomic_compat.h"
 #include "node_id.h"
@@ -48,6 +49,9 @@ typedef struct authority_t {
   uint8_t* public_key;      // Raw public key for salutation (NULL if random node_id)
   size_t   public_key_len;  // Length of public_key
 
+  EVP_PKEY* node_private_key;  // cached private key (loaded once from node_key_path);
+                                // NULL if no key path or load failed. See audit #8.
+
   peer_info_t** friend_peers;
   size_t friend_peer_count;
 
@@ -66,6 +70,13 @@ int authority_init_local_id(authority_t* authority);
 // Load a PEM-encoded CA certificate, convert to DER, store in authority.
 // Returns 0 on success, -1 on failure.
 int authority_load_ca_cert(authority_t* authority, const char* pem_path);
+
+// Sign a 32-byte nonce with the authority's cached node_private_key. Returns
+// 0 on success and writes a freshly-allocated signature to *out_sig (caller
+// frees with free()). Sets *out_sig_len. Returns -1 on failure. Used by the
+// relay responder (audit #8 / tier5b) to sign challenges. See audit #8.
+int authority_sign_nonce(authority_t* authority, const uint8_t nonce[32],
+                         uint8_t** out_sig, size_t* out_sig_len);
 
 // Save/load config-only state (bootstrap peers, paths, local_id)
 int authority_save(const authority_t* authority);

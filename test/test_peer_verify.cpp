@@ -8,6 +8,8 @@
 extern "C" {
 #include "../src/Network/peer_verify.h"
 #include "../src/Network/pem_key.h"
+#include "../src/Network/authority.h"
+#include "../src/Configuration/config.h"
 #include "../src/Util/allocator.h"
 #include "../src/Platform/platform_posix_compat.h"
 #include "../../tools/offs-ca/ca_ops.h"
@@ -259,4 +261,228 @@ TEST_F(PeerVerifyExtractPubkeyTest, MismatchedCertKeyIsNotEqual) {
 
   free(key1);
   free(key2);
+}
+
+// Audit #8 / tier5b: pem_key_sign_nonce + pem_key_verify_nonce round-trip on
+// Ed25519 keys (the key type the relay challenge responder uses). The test
+// fixture generates an Ed25519 node cert + key; the public key extracted
+// from the cert (raw 32 bytes via pem_extract_public_key) is what the
+// challenger would carry, and the private key PEM is what the responder
+// signs with. The verify must reconstruct the EVP_PKEY from the raw 32
+// bytes — exercising the raw Ed25519 path in pem_key_pubkey_from_bytes.
+class PemKeySignVerifyTest : public PeerVerifyExtractPubkeyTest {};
+
+TEST_F(PemKeySignVerifyTest, SignAndVerifyRoundTrip_Ed25519) {
+  uint8_t nonce[32];
+  for (int i = 0; i < 32; i++) nonce[i] = (uint8_t)(i * 7 + 1);
+
+  uint8_t* sig = nullptr;
+  size_t sig_len = 0;
+  ASSERT_EQ(pem_key_sign_nonce(node_key_path.c_str(), nonce, &sig, &sig_len), 0);
+  ASSERT_NE(sig, nullptr);
+  ASSERT_GT(sig_len, 0u);
+
+  size_t pub_len = 0;
+  uint8_t* pub = pem_extract_public_key(node_cert_path.c_str(), &pub_len);
+  ASSERT_NE(pub, nullptr);
+  ASSERT_EQ(pub_len, 32u) << "Ed25519 raw public key must be 32 bytes";
+
+  EXPECT_EQ(pem_key_verify_nonce(pub, pub_len, nonce, sig, sig_len), 0)
+      << "signature must verify under the matching public key";
+
+  free(pub);
+  free(sig);
+}
+
+TEST_F(PemKeySignVerifyTest, VerifyRejectsWrongPublicKey) {
+  uint8_t nonce[32];
+  for (int i = 0; i < 32; i++) nonce[i] = (uint8_t)(0xFF ^ i);
+
+  uint8_t* sig = nullptr;
+  size_t sig_len = 0;
+  ASSERT_EQ(pem_key_sign_nonce(node_key_path.c_str(), nonce, &sig, &sig_len), 0);
+  ASSERT_NE(sig, nullptr);
+
+  // Generate a second distinct key pair and verify with that public key —
+  // the signature was made under node_key, so node2's public key must reject.
+  std::string node2_key_path = tmp_dir + "/node2_key.pem";
+  std::string node2_csr_path = tmp_dir + "/node2.csr";
+  std::string node2_cert_path = tmp_dir + "/node2_cert.pem";
+  std::string ca_key_path = tmp_dir + "/ca_key.pem";
+  ASSERT_EQ(ca_generate_csr("TestNode2", "ed25519",
+                            node2_key_path.c_str(), node2_csr_path.c_str()), 0);
+  ASSERT_EQ(ca_sign_csr(node2_csr_path.c_str(), ca_cert_path.c_str(),
+                        ca_key_path.c_str(), 3650,
+                        node2_cert_path.c_str()), 0);
+  size_t pub2_len = 0;
+  uint8_t* pub2 = pem_extract_public_key(node2_cert_path.c_str(), &pub2_len);
+  ASSERT_NE(pub2, nullptr);
+  ASSERT_EQ(pub2_len, 32u);
+
+  EXPECT_EQ(pem_key_verify_nonce(pub2, pub2_len, nonce, sig, sig_len), -1)
+      << "signature under a wrong public key must be rejected";
+
+  free(pub2);
+  free(sig);
+}
+
+TEST_F(PemKeySignVerifyTest, VerifyRejectsTamperedSignature) {
+  uint8_t nonce[32];
+  for (int i = 0; i < 32; i++) nonce[i] = (uint8_t)(i + 1);
+
+  uint8_t* sig = nullptr;
+  size_t sig_len = 0;
+  ASSERT_EQ(pem_key_sign_nonce(node_key_path.c_str(), nonce, &sig, &sig_len), 0);
+  ASSERT_NE(sig, nullptr);
+  ASSERT_GE(sig_len, 2u);
+
+  // Flip a byte in the middle of the signature — Ed25519 is all-or-nothing,
+  // any change invalidates the whole signature.
+  sig[sig_len / 2] ^= 0xAA;
+
+  size_t pub_len = 0;
+  uint8_t* pub = pem_extract_public_key(node_cert_path.c_str(), &pub_len);
+  ASSERT_NE(pub, nullptr);
+  ASSERT_EQ(pub_len, 32u);
+
+  EXPECT_EQ(pem_key_verify_nonce(pub, pub_len, nonce, sig, sig_len), -1)
+      << "tampered signature must be rejected";
+
+  free(pub);
+  free(sig);
+}
+
+TEST_F(PemKeySignVerifyTest, VerifyRejectsTamperedNonce) {
+  uint8_t nonce[32];
+  for (int i = 0; i < 32; i++) nonce[i] = (uint8_t)(i + 1);
+
+  uint8_t* sig = nullptr;
+  size_t sig_len = 0;
+  ASSERT_EQ(pem_key_sign_nonce(node_key_path.c_str(), nonce, &sig, &sig_len), 0);
+  ASSERT_NE(sig, nullptr);
+
+  // Verify against a different nonce — the signature is bound to the
+  // original nonce, so a different nonce must fail.
+  uint8_t wrong_nonce[32];
+  for (int i = 0; i < 32; i++) wrong_nonce[i] = (uint8_t)(i + 2);
+
+  size_t pub_len = 0;
+  uint8_t* pub = pem_extract_public_key(node_cert_path.c_str(), &pub_len);
+  ASSERT_NE(pub, nullptr);
+  ASSERT_EQ(pub_len, 32u);
+
+  EXPECT_EQ(pem_key_verify_nonce(pub, pub_len, wrong_nonce, sig, sig_len), -1)
+      << "signature over a different nonce must be rejected";
+  // Sanity: the original nonce still verifies.
+  EXPECT_EQ(pem_key_verify_nonce(pub, pub_len, nonce, sig, sig_len), 0);
+
+  free(pub);
+  free(sig);
+}
+
+TEST_F(PemKeySignVerifyTest, SignRejectsNullInputs) {
+  uint8_t nonce[32] = {0};
+  uint8_t* sig = nullptr;
+  size_t sig_len = 0;
+  EXPECT_EQ(pem_key_sign_nonce(NULL, nonce, &sig, &sig_len), -1);
+  EXPECT_EQ(pem_key_sign_nonce(node_key_path.c_str(), NULL, &sig, &sig_len), -1);
+  EXPECT_EQ(pem_key_sign_nonce(node_key_path.c_str(), nonce, NULL, &sig_len), -1);
+  EXPECT_EQ(pem_key_sign_nonce(node_key_path.c_str(), nonce, &sig, NULL), -1);
+}
+
+TEST_F(PemKeySignVerifyTest, SignRejectsMissingKeyFile) {
+  uint8_t nonce[32] = {0};
+  uint8_t* sig = nullptr;
+  size_t sig_len = 0;
+  EXPECT_EQ(pem_key_sign_nonce("/nonexistent/key.pem", nonce, &sig, &sig_len), -1);
+  EXPECT_EQ(sig, nullptr);
+  EXPECT_EQ(sig_len, 0u);
+}
+
+TEST_F(PemKeySignVerifyTest, VerifyRejectsNullInputs) {
+  uint8_t nonce[32] = {0};
+  uint8_t pub[32] = {0};
+  uint8_t sig[64] = {0};
+  EXPECT_EQ(pem_key_verify_nonce(NULL, 32, nonce, sig, sizeof(sig)), -1);
+  EXPECT_EQ(pem_key_verify_nonce(pub, 0, nonce, sig, sizeof(sig)), -1);
+  EXPECT_EQ(pem_key_verify_nonce(pub, 32, NULL, sig, sizeof(sig)), -1);
+  EXPECT_EQ(pem_key_verify_nonce(pub, 32, nonce, NULL, sizeof(sig)), -1);
+  EXPECT_EQ(pem_key_verify_nonce(pub, 32, nonce, sig, 0), -1);
+}
+
+TEST_F(PemKeySignVerifyTest, VerifyRejectsGarbagePublicKey) {
+  uint8_t nonce[32] = {0};
+  uint8_t garbage[16] = {0xFF};  // Not 32 (Ed25519) or 57 (Ed448), not valid DER
+  uint8_t sig[64] = {0};
+  EXPECT_EQ(pem_key_verify_nonce(garbage, sizeof(garbage), nonce, sig, sizeof(sig)), -1);
+}
+
+// authority_sign_nonce uses the cached node_private_key (loaded once during
+// authority_init_local_id from node_key_path) to sign a 32-byte nonce. The
+// signature must verify under the matching public key extracted from the
+// cert. This is the API the relay responder (Task 3) calls.
+TEST_F(PemKeySignVerifyTest, AuthoritySignNonceVerifiesWithCachedKey) {
+  config_t config = config_default();
+  authority_t* authority = authority_create(&config);
+  ASSERT_NE(authority, nullptr);
+  authority->node_cert_path = strdup(node_cert_path.c_str());
+  authority->node_key_path = strdup(node_key_path.c_str());
+
+  // authority_init_local_id loads the cert's public key AND caches the
+  // private key (EVP_PKEY) into authority->node_private_key.
+  ASSERT_EQ(authority_init_local_id(authority), 0);
+  ASSERT_NE(authority->node_private_key, nullptr)
+      << "private key must be cached on authority after init";
+  ASSERT_NE(authority->public_key, nullptr);
+  ASSERT_EQ(authority->public_key_len, 32u);
+
+  uint8_t nonce[32];
+  for (int i = 0; i < 32; i++) nonce[i] = (uint8_t)(0x42 + i);
+
+  uint8_t* sig = nullptr;
+  size_t sig_len = 0;
+  ASSERT_EQ(authority_sign_nonce(authority, nonce, &sig, &sig_len), 0);
+  ASSERT_NE(sig, nullptr);
+  ASSERT_GT(sig_len, 0u);
+
+  // Verify under the authority's own cached public key (raw Ed25519 bytes).
+  EXPECT_EQ(pem_key_verify_nonce(authority->public_key, authority->public_key_len,
+                                  nonce, sig, sig_len), 0)
+      << "authority_sign_nonce output must verify under the cached public key";
+
+  free(sig);
+  authority_destroy(authority);
+}
+
+TEST_F(PemKeySignVerifyTest, AuthoritySignNonceRejectsNullAuthority) {
+  uint8_t nonce[32] = {0};
+  uint8_t* sig = nullptr;
+  size_t sig_len = 0;
+  EXPECT_EQ(authority_sign_nonce(NULL, nonce, &sig, &sig_len), -1);
+}
+
+TEST_F(PemKeySignVerifyTest, AuthoritySignNonceFailsWithoutKey) {
+  config_t config = config_default();
+  authority_t* authority = authority_create(&config);
+  ASSERT_NE(authority, nullptr);
+  // No node_key_path set — sign must fail.
+  uint8_t nonce[32] = {0};
+  uint8_t* sig = nullptr;
+  size_t sig_len = 0;
+  EXPECT_EQ(authority_sign_nonce(authority, nonce, &sig, &sig_len), -1);
+  EXPECT_EQ(sig, nullptr);
+  authority_destroy(authority);
+}
+
+TEST_F(PemKeySignVerifyTest, AuthorityDestroyFreesCachedPrivateKey) {
+  // Sanity: authority_destroy must not leak the cached EVP_PKEY. Run under
+  // valgrind to catch the leak; this test just exercises the path.
+  config_t config = config_default();
+  authority_t* authority = authority_create(&config);
+  ASSERT_NE(authority, nullptr);
+  authority->node_cert_path = strdup(node_cert_path.c_str());
+  authority->node_key_path = strdup(node_key_path.c_str());
+  ASSERT_EQ(authority_init_local_id(authority), 0);
+  ASSERT_NE(authority->node_private_key, nullptr);
+  authority_destroy(authority);
 }
