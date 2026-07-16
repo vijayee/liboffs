@@ -170,18 +170,26 @@ int peer_info_decode(cbor_item_t* item, peer_info_t* info) {
         break;
       case PI_KEY_ADDRESSES:
         if (cbor_isa_array(val)) {
-          info->address_count = cbor_array_size(val);
-          if (info->address_count > PEER_INFO_MAX_ADDRESSES) {
-            info->address_count = PEER_INFO_MAX_ADDRESSES;
+          size_t raw_count = cbor_array_size(val);
+          if (raw_count > PEER_INFO_MAX_ADDRESSES) {
+            raw_count = PEER_INFO_MAX_ADDRESSES;
           }
-          info->addresses = get_clear_memory(info->address_count * sizeof(peer_address_t));
+          info->addresses = get_clear_memory(raw_count * sizeof(peer_address_t));
           if (info->addresses != NULL) {
-            for (size_t addr_index = 0; addr_index < info->address_count; addr_index++) {
+            // Decode each address; on failure the slot stays zeroed and is
+            // skipped via the write_index. Decrementing address_count inside
+            // a forward-iterating loop (the old approach) skipped the next
+            // element every time a decode failed, dropping a valid address.
+            // See audit #33.
+            size_t write_index = 0;
+            for (size_t addr_index = 0; addr_index < raw_count; addr_index++) {
               cbor_item_t* addr_item = cbor_array_get(val, addr_index);
-              if (_decode_address(addr_item, &info->addresses[addr_index]) != 0) {
-                info->address_count--;
+              if (_decode_address(addr_item, &info->addresses[write_index]) == 0) {
+                write_index++;
               }
+              cbor_decref(&addr_item);
             }
+            info->address_count = write_index;
           }
         }
         break;

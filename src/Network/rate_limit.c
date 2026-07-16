@@ -25,8 +25,14 @@ void rate_limit_table_init(rate_limit_table_t* table, size_t capacity) {
   table->entries = get_clear_memory(capacity * sizeof(peer_rate_limits_t));
   table->capacity = capacity;
   table->count = 0;
+  table->max_count = 0;
   table->peer_count = 0;
   table->reference_peer_count = REFERENCE_PEER_COUNT;
+}
+
+void rate_limit_table_set_max_count(rate_limit_table_t* table, size_t max_count) {
+  if (table == NULL) return;
+  table->max_count = max_count;
 }
 
 void rate_limit_table_deinit(rate_limit_table_t* table) {
@@ -58,6 +64,30 @@ peer_rate_limits_t* rate_limit_table_get(rate_limit_table_t* table, const node_i
 
   peer_rate_limits_t* entry = rate_limit_find(table, peer_id);
   if (entry != NULL) return entry;
+
+  // Cap enforcement: if max_count is set and adding a new entry would exceed
+  // it, evict the oldest entry (the one with the lowest last_refill across
+  // all buckets — last_refill starts at 0 and is set to now_ms on first
+  // refill, so the lowest value is the oldest unused entry). Keys are
+  // node_ids from the wire — a malicious peer can mint fake ids to grow the
+  // table unbounded. The cap keeps memory bounded. See audit #14.
+  if (table->max_count > 0 && table->count >= table->max_count) {
+    size_t oldest_index = 0;
+    uint64_t oldest_timestamp = (uint64_t)-1;
+    for (size_t index = 0; index < table->count; index++) {
+      // Use the first bucket's last_refill as a proxy for the entry's age.
+      // All buckets share the same refill timeline on the first request.
+      uint64_t timestamp = table->entries[index].buckets[0].last_refill;
+      if (timestamp < oldest_timestamp) {
+        oldest_timestamp = timestamp;
+        oldest_index = index;
+      }
+    }
+    for (size_t shift = oldest_index; shift < table->count - 1; shift++) {
+      table->entries[shift] = table->entries[shift + 1];
+    }
+    table->count--;
+  }
 
   // Grow if needed
   if (table->count >= table->capacity) {

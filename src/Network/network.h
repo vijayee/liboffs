@@ -42,6 +42,23 @@ typedef struct closest_nodes_pending_t {
   uint64_t deadline_ms;   /* 0 = no deadline (back-compat; never swept) */
 } closest_nodes_pending_t;
 
+// Pending StoreBlock aggregation. The origin records one entry per
+// NETWORK_LOCAL_STORE_BLOCK with a non-NULL reply_to. Each StoreBlockResponse
+// (accepted or declined) decrements replicas_remaining; when it hits 0 (or
+// the deadline passes — swept by NETWORK_REQUEST_TIMEOUT_TICK), the origin
+// sends a single aggregated NETWORK_STORE_BLOCK_RESULT to reply_to with the
+// actual replica count. See audit #21.
+typedef struct store_pending_t {
+  uint64_t message_id;
+  actor_t* reply_to;
+  buffer_t* hash;          /* referenced; used for the result payload */
+  uint32_t fib;
+  uint8_t replicas_needed;
+  uint8_t replicas_remaining;
+  uint8_t accepted_count;
+  uint64_t deadline_ms;    /* 0 = no deadline (back-compat; never swept) */
+} store_pending_t;
+
 // Pending QUIC connections awaiting salutation identity handshake
 typedef struct pending_quic_t {
   void* quic_connection;           // HQUIC handle
@@ -122,6 +139,13 @@ typedef struct network_t {
 
   closest_nodes_pending_t closest_pending[CLOSEST_NODES_PENDING_MAX];
   size_t closest_pending_count;
+
+  // Pending StoreBlock aggregation (audit #21). Grown on demand; swept by
+  // network_handle_request_timeout_tick. The array is a flat array of
+  // store_pending_t (one per still-unresolved origin StoreBlock).
+  store_pending_t* store_pending;
+  size_t           store_pending_count;
+  size_t           store_pending_capacity;
 
   // Pending relay signed-nonce challenges (audit #8 relay; tier-5b). Grown
   // on demand; swept by network_handle_request_timeout_tick. The array is

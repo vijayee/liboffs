@@ -36,6 +36,64 @@ static void _respiration_add_redundant(respiration_actor_t* actor, buffer_t* has
   actor->redundant_hashes[actor->redundant_count++] = hash;
 }
 
+// Arm the exhale watchdog. A lost FindBlock or StoreBlock result would pin
+// the state non-IDLE forever — the node could never shed blocks again. The
+// watchdog fires after RESPIRATION_WATCHDOG_TIMEOUT_MS and resets the state
+// to IDLE, cleaning up any pending hashes. See audit #29.
+static void _respiration_watchdog_arm(respiration_actor_t* actor) {
+  if (actor == NULL || actor->network == NULL || actor->network->timer == NULL) return;
+  // Cancel any prior watchdog first (idempotent — timer_actor_cancel is a
+  // no-op if the id is not found).
+  uint64_t prior_id = atomic_load(&actor->watchdog_timer_id);
+  if (prior_id != 0) {
+    timer_actor_cancel(actor->network->timer, prior_id);
+  }
+  // timer_actor_set stores the new id into the atomic directly.
+  timer_actor_set(actor->network->timer,
+                  RESPIRATION_WATCHDOG_TIMEOUT_MS,
+                  0, /* one-shot */
+                  &actor->actor,
+                  RESPIRATION_WATCHDOG_TIMEOUT,
+                  &actor->watchdog_timer_id);
+}
+
+static void _respiration_watchdog_disarm(respiration_actor_t* actor) {
+  if (actor == NULL || actor->network == NULL || actor->network->timer == NULL) return;
+  uint64_t id = atomic_load(&actor->watchdog_timer_id);
+  if (id != 0) {
+    timer_actor_cancel(actor->network->timer, id);
+    atomic_store(&actor->watchdog_timer_id, 0);
+  }
+}
+
+// Reset the actor to IDLE and free all transient state. Used by both the
+// normal completion path and the watchdog timeout.
+static void _respiration_reset_to_idle(respiration_actor_t* actor) {
+  if (actor == NULL) return;
+  if (actor->redundant_hashes != NULL) {
+    for (size_t idx = 0; idx < actor->redundant_count; idx++) {
+      DESTROY(actor->redundant_hashes[idx], buffer);
+    }
+    actor->redundant_count = 0;
+  }
+  if (actor->preserved != NULL) {
+    for (size_t idx = 0; idx < actor->preserved_count; idx++) {
+      DESTROY(actor->preserved[idx].hash, buffer);
+    }
+    actor->preserved_count = 0;
+  }
+  if (actor->pending != NULL) {
+    for (size_t idx = 0; idx < actor->pending_count; idx++) {
+      if (actor->pending[idx].hash != NULL) {
+        DESTROY(actor->pending[idx].hash, buffer);
+      }
+    }
+    actor->pending_count = 0;
+  }
+  _respiration_watchdog_disarm(actor);
+  atomic_store(&actor->state, RESPIRATION_IDLE);
+}
+
 static void _respiration_add_preserved(respiration_actor_t* actor, buffer_t* hash, uint64_t ejection_date) {
   if (actor->preserved_count >= actor->preserved_capacity) {
     size_t new_capacity = actor->preserved_capacity == 0 ? 16 : actor->preserved_capacity * 2;
@@ -133,6 +191,10 @@ void respiration_actor_dispatch(void* state, message_t* msg) {
         atomic_store(&actor->state, RESPIRATION_IDLE);
         break;
       }
+
+      /* Arm the watchdog — a lost FindBlock result would otherwise pin the
+         state VERIFYING forever. See audit #29. */
+      _respiration_watchdog_arm(actor);
 
       /* Send NETWORK_LOCAL_FIND_BLOCK for each pending hash */
       size_t pending_to_resolve = actor->pending_count;
@@ -247,8 +309,22 @@ void respiration_actor_dispatch(void* state, message_t* msg) {
         if (capacity >= RESPIRATION_EXHALE_THRESHOLD) {
           log_warn("respiration: capacity %.2f still above threshold after store-then-delete", capacity);
         }
+        _respiration_watchdog_disarm(actor);
         atomic_store(&actor->state, RESPIRATION_IDLE);
       }
+      break;
+    }
+
+    case RESPIRATION_WATCHDOG_TIMEOUT: {
+      /* A FindBlock or StoreBlock result was lost (peer disconnected, message
+         dropped) and the state has been non-IDLE for > RESPIRATION_WATCHDOG_TIMEOUT_MS.
+         Reset to IDLE so the next exhale can proceed. See audit #29. */
+      if (atomic_load(&actor->state) == RESPIRATION_IDLE) break;
+      log_warn("respiration: watchdog timeout — resetting exhale state to IDLE "
+               "(pending=%zu, redundant=%zu, preserved=%zu)",
+               actor->pending_count, actor->redundant_count,
+               actor->preserved_count);
+      _respiration_reset_to_idle(actor);
       break;
     }
 
@@ -287,6 +363,7 @@ static void _respiration_delete_redundant(respiration_actor_t* actor) {
       DESTROY(actor->preserved[idx].hash, buffer);
     }
     actor->preserved_count = 0;
+    _respiration_watchdog_disarm(actor);
     atomic_store(&actor->state, RESPIRATION_IDLE);
     return;
   }
@@ -294,6 +371,9 @@ static void _respiration_delete_redundant(respiration_actor_t* actor) {
   /* Still above threshold — try store-then-delete for preserved blocks */
   if (actor->preserved_count > 0) {
     atomic_store(&actor->state, RESPIRATION_STORING);
+    /* Re-arm the watchdog for the STORING phase — a lost StoreBlock result
+       would pin the state STORING forever. See audit #29. */
+    _respiration_watchdog_arm(actor);
 
     /* Move preserved hashes into pending array for tracking */
     size_t moved_count = 0;
@@ -348,10 +428,12 @@ static void _respiration_delete_redundant(respiration_actor_t* actor) {
     actor->pending_count = write_idx;
     /* If all stores failed to allocate, go idle */
     if (actor->pending_count == 0) {
+      _respiration_watchdog_disarm(actor);
       atomic_store(&actor->state, RESPIRATION_IDLE);
     }
   } else {
     /* No preserved blocks and capacity still above threshold — best effort, go idle */
+    _respiration_watchdog_disarm(actor);
     atomic_store(&actor->state, RESPIRATION_IDLE);
   }
 }
@@ -363,6 +445,7 @@ respiration_actor_t* respiration_actor_create(network_t* network, scheduler_pool
   actor->network = network;
   actor->pool = pool;
   actor->state = ATOMIC_VAR_INIT(RESPIRATION_IDLE);
+  actor->watchdog_timer_id = ATOMIC_VAR_INIT(0);
   actor->redundant_hashes = NULL;
   actor->redundant_count = 0;
   actor->redundant_capacity = 0;
@@ -379,6 +462,10 @@ respiration_actor_t* respiration_actor_create(network_t* network, scheduler_pool
 void respiration_actor_destroy(respiration_actor_t* actor) {
   if (actor == NULL) return;
   ATOMIC_STORE(&actor->state, RESPIRATION_IDLE);
+
+  /* Cancel the watchdog timer before tearing down — otherwise a pending
+     watchdog could fire after free. See audit #29. */
+  _respiration_watchdog_disarm(actor);
 
   /* Free pending hashes */
   if (actor->pending != NULL) {

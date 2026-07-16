@@ -5,6 +5,8 @@
 #include "node_id.h"
 #include "../Util/base58.h"
 #include "../../deps/BLAKE3/c/blake3.h"
+#include "../Util/log.h"
+#include <openssl/rand.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -61,8 +63,12 @@ void node_id_generate(node_id_t* result) {
   blake3_hasher hasher;
   blake3_hasher_init(&hasher);
   uint64_t randomness[4];
-  for (size_t index = 0; index < 4; index++) {
-    randomness[index] = (uint64_t)rand() | ((uint64_t)rand() << 32);
+  /* Use OpenSSL's CSPRNG instead of rand() — rand() is predictable and a
+     remote attacker could forecast generated node_ids. RAND_bytes is already
+     linked (used for relay nonces in tier-5b). See audit #28. */
+  if (RAND_bytes((unsigned char*)randomness, sizeof(randomness)) != 1) {
+    log_error("node_id_generate: RAND_bytes failed; falling back to zeroed randomness");
+    memset(randomness, 0, sizeof(randomness));
   }
   blake3_hasher_update(&hasher, randomness, sizeof(randomness));
   blake3_hasher_finalize(&hasher, result->hash, NODE_ID_HASH_SIZE);

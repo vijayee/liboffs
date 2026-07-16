@@ -15,7 +15,13 @@ void hebbian_table_init(hebbian_table_t* table, size_t capacity, float decay_fac
   table->entries = get_clear_memory(capacity * sizeof(hebbian_weight_t));
   table->capacity = capacity;
   table->count = 0;
+  table->max_count = 0;
   table->decay_factor = decay_factor;
+}
+
+void hebbian_table_set_max_count(hebbian_table_t* table, size_t max_count) {
+  if (table == NULL) return;
+  table->max_count = max_count;
 }
 
 void hebbian_table_deinit(hebbian_table_t* table) {
@@ -38,6 +44,25 @@ static hebbian_weight_t* hebbian_find(hebbian_table_t* table, const node_id_t* p
 }
 
 static hebbian_weight_t* hebbian_insert(hebbian_table_t* table, const node_id_t* peer_id, float weight) {
+  // Cap enforcement: if max_count is set and adding a new entry would exceed
+  // it, evict the lowest-weight entry first. A malicious peer can mint fake
+  // node_ids to grow the table unbounded; the cap keeps memory bounded. The
+  // new entry's weight is at least HEBBIAN_MIN_WEIGHT, so evicting the lowest
+  // is safe. See audit #14.
+  if (table->max_count > 0 && table->count >= table->max_count) {
+    size_t lowest_index = 0;
+    for (size_t index = 1; index < table->count; index++) {
+      if (table->entries[index].weight < table->entries[lowest_index].weight) {
+        lowest_index = index;
+      }
+    }
+    // Compact over the evicted slot.
+    for (size_t shift = lowest_index; shift < table->count - 1; shift++) {
+      table->entries[shift] = table->entries[shift + 1];
+    }
+    table->count--;
+  }
+
   // Grow if needed
   if (table->count >= table->capacity) {
     size_t new_capacity = table->capacity * 2;

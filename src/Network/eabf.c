@@ -61,8 +61,14 @@ void eabf_table_init(eabf_table_t* table, size_t capacity,
   table->entries = get_clear_memory(capacity * sizeof(eabf_entry_t));
   table->capacity = capacity;
   table->count = 0;
+  table->max_count = 0;
   table->base_ttl_ms = base_ttl_ms;
   table->maintenance_ms = maintenance_ms;
+}
+
+void eabf_table_set_max_count(eabf_table_t* table, size_t max_count) {
+  if (table == NULL) return;
+  table->max_count = max_count;
 }
 
 void eabf_table_deinit(eabf_table_t* table) {
@@ -91,6 +97,31 @@ eabf_t* eabf_table_insert(eabf_table_t* table, const node_id_t* peer_id) {
   // Check if already exists
   eabf_t* existing = eabf_table_lookup(table, peer_id);
   if (existing != NULL) return existing;
+
+  // Cap enforcement: if max_count is set and adding a new entry would exceed
+  // it, evict the lowest-weight entry first. Keys are node_ids from the wire
+  // — a malicious peer can mint fake ids to grow the table unbounded. The cap
+  // keeps memory bounded. See audit #14.
+  if (table->max_count > 0 && table->count >= table->max_count) {
+    size_t lowest_index = 0;
+    float lowest_weight = table->entries[0].eabf != NULL
+                          ? table->entries[0].eabf->weight
+                          : 0.0f;
+    for (size_t index = 1; index < table->count; index++) {
+      float weight = table->entries[index].eabf != NULL
+                     ? table->entries[index].eabf->weight
+                     : 0.0f;
+      if (weight < lowest_weight) {
+        lowest_weight = weight;
+        lowest_index = index;
+      }
+    }
+    eabf_destroy(table->entries[lowest_index].eabf);
+    for (size_t shift = lowest_index; shift < table->count - 1; shift++) {
+      table->entries[shift] = table->entries[shift + 1];
+    }
+    table->count--;
+  }
 
   // Grow if needed
   if (table->count >= table->capacity) {

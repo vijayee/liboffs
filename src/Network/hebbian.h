@@ -35,12 +35,17 @@ typedef struct hebbian_table_t {
   hebbian_weight_t* entries;
   size_t capacity;
   size_t count;
+  size_t max_count;     /* Cap; evict lowest-weight entry when reached. 0 = no cap. See audit #14. */
   float decay_factor;
 } hebbian_table_t;
 
 // Initialize/deinitialize weight table
 void hebbian_table_init(hebbian_table_t* table, size_t capacity, float decay_factor);
 void hebbian_table_deinit(hebbian_table_t* table);
+
+// Set the max-count cap. When the table reaches max_count, the lowest-weight
+// entry is evicted on insert. 0 disables the cap (unbounded — old behavior).
+void hebbian_table_set_max_count(hebbian_table_t* table, size_t max_count);
 
 // Look up weight for a peer (returns HEBBIAN_MIN_WEIGHT if not found)
 float hebbian_table_get(const hebbian_table_t* table, const node_id_t* peer_id);

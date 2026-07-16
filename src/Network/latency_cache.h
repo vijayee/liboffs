@@ -30,7 +30,8 @@ latency_cache_t* latency_cache_create(size_t capacity);
 void latency_cache_destroy(latency_cache_t* cache);
 
 int latency_cache_insert(latency_cache_t* cache, const node_id_t* id,
-                         uint32_t addr, uint16_t port, float latency_ms);
+                         uint32_t addr, uint16_t port, float latency_ms,
+                         uint64_t now_ms);
 int latency_cache_get(const latency_cache_t* cache, const node_id_t* id,
                       float* latency_ms);
 void latency_cache_evict_expired(latency_cache_t* cache, uint64_t now_ms);

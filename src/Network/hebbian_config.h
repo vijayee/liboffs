@@ -4,7 +4,11 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define HEBBIAN_RPC_MULTIPLIER_COUNT 20
+// Size of the rpc_multipliers array. The wire type with the largest numeric
+// id is WIRE_RELAY_CHALLENGE_RESPONSE = 35, so the array must hold at least
+// 36 entries (indexes 0..35) — otherwise an RPC with type 35 reads past the
+// end of rpc_multipliers. See audit #33.
+#define HEBBIAN_RPC_MULTIPLIER_COUNT 36
 
 typedef struct hebbian_config_t {
   float initial_weight;

@@ -55,6 +55,7 @@ typedef struct rate_limit_table_t {
   peer_rate_limits_t* entries;
   size_t capacity;
   size_t count;
+  size_t max_count;               // Cap; evict oldest (lowest last_refill) entry when reached. 0 = no cap. See audit #14.
   size_t peer_count;              // Current network peer count for inverse scaling
   size_t reference_peer_count;    // Network size at which base rates apply as-is (default 32)
 } rate_limit_table_t;
@@ -62,6 +63,11 @@ typedef struct rate_limit_table_t {
 // Initialize/deinitialize rate limit table
 void rate_limit_table_init(rate_limit_table_t* table, size_t capacity);
 void rate_limit_table_deinit(rate_limit_table_t* table);
+
+// Set the max-count cap. When the table reaches max_count, the entry with the
+// oldest last_refill (lowest timestamp) is evicted on insert. 0 disables the
+// cap (unbounded — old behavior). See audit #14.
+void rate_limit_table_set_max_count(rate_limit_table_t* table, size_t max_count);
 
 // Look up or create per-peer rate limits
 peer_rate_limits_t* rate_limit_table_get(rate_limit_table_t* table, const node_id_t* peer_id);
