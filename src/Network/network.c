@@ -2953,6 +2953,48 @@ static void network_handle_store_block_response(network_t* network, message_t* m
         free(recall_peers);
       }
     }
+  } else {
+    // Decline (accepted == 0) — the remote node did not store the block.
+    // Previously the decline was silently dropped: no relay upstream, so the
+    // origin never learned that a replica slot went unfilled. Relay the
+    // decline response upstream so intermediate hops and the origin see the
+    // actual replica count, not just the successes. See audit #21.
+    int self_index = -1;
+    for (int index = 0; index < (int)response->path_len; index++) {
+      if (node_id_equals(&response->path[index], &network->authority->local_id)) {
+        self_index = index;
+        break;
+      }
+    }
+    if (self_index > 0) {
+      // Intermediate hop — relay decline to predecessor so it propagates back
+      // to the origin. Without this relay the decline was dropped at the hop
+      // that received it, hiding unfilled replica slots from the origin.
+      const node_id_t* predecessor = &response->path[self_index - 1];
+      peer_connection_t* relay_peer = connection_manager_lookup(&network->conn_mgr, predecessor);
+      if (relay_peer != NULL) {
+        cbor_item_t* cbor = wire_store_block_response_encode(response);
+        conn_state_send(network, relay_peer, cbor);
+        cbor_decref(&cbor);
+        if (network->log != NULL) {
+          message_log_record(network->log, WIRE_STORE_BLOCK_RESPONSE, MSG_DIRECTION_FORWARDED,
+                             predecessor, response->message_id, response->block_hash,
+                             3, &network->hebbian);
+        }
+      }
+    } else {
+      // Origin (self not in path, or self is path[0]): the decline reached the
+      // origin. The receive log at the top of this handler already recorded
+      // the decline (direction code 3). The origin fires its StoreBlock
+      // result to the caller immediately on dispatch (NETWORK_LOCAL_STORE_BLOCK)
+      // based on the local store_block_execute decision, before any remote
+      // responses arrive — so there is no pending-request bookkeeping here to
+      // decrement. The decline is surfaced via the receive log so operators
+      // can see that a replica slot went unfilled. Aggregating per-message-id
+      // decline counts into the result_payload would require a pending-tracking
+      // structure (deferred — the fire-and-forget StoreBlock result contract
+      // is a separate, larger change).
+    }
   }
 }
 
