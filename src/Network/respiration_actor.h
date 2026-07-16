@@ -17,6 +17,13 @@
 #define RESPIRATION_VERIFYING  1  /* Finding blocks on network */
 #define RESPIRATION_STORING    2  /* Storing blocks to peers before deleting */
 
+/* Watchdog timeout for an exhale cycle. If a FindBlock or StoreBlock result
+   is lost (peer disconnects before responding, message dropped, etc.), the
+   state would otherwise pin non-IDLE forever — the node could never shed
+   blocks again. The watchdog fires after RESPIRATION_WATCHDOG_TIMEOUT_MS and
+   resets the state to IDLE. See audit #29. */
+#define RESPIRATION_WATCHDOG_TIMEOUT_MS 30000
+
 typedef struct respiration_pending_t {
   buffer_t* hash;
   uint64_t ejection_date;
@@ -32,6 +39,9 @@ typedef struct respiration_actor_t {
   struct network_t* network;
   scheduler_pool_t* pool;
   ATOMIC(uint8_t) state;          /* RESPIRATION_IDLE, VERIFYING, or STORING */
+  /* Watchdog timer id for the current exhale cycle. 0 = no watchdog armed.
+     See audit #29. */
+  ATOMIC(uint64_t) watchdog_timer_id;
   /* Blocks confirmed redundant (found elsewhere, can delete) */
   buffer_t** redundant_hashes;
   size_t redundant_count;
