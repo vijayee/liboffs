@@ -692,6 +692,8 @@ void quic_listener_destroy(quic_listener_t* listener) {
 int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t port) {
   if (listener == NULL) return -1;
 
+  listener->listen_port = port;
+
   QUIC_STATUS status;
 
   // Open registration
