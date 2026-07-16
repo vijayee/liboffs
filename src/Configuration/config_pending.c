@@ -137,6 +137,8 @@ config_t* config_pending_load(const char* data_dir) {
       config->wt_enabled = cJSON_IsTrue(item);
     else if (strcmp(item->string, "tcp_tls_enabled") == 0 && cJSON_IsBool(item))
       config->tcp_tls_enabled = cJSON_IsTrue(item);
+    else if (strcmp(item->string, "allow_insecure") == 0 && cJSON_IsBool(item))
+      config->allow_insecure = cJSON_IsTrue(item);
     /* uint16_t fields */
     else if (strcmp(item->string, "http_port") == 0 && cJSON_IsNumber(item))
       config->http_port = (uint16_t)item->valuedouble;

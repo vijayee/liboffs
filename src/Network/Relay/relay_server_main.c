@@ -37,6 +37,7 @@ int main(int argc, char* argv[]) {
   const char* cert_path = NULL;
   const char* key_path = NULL;
   const char* ca_path = NULL;
+  bool allow_insecure = false;
 
   for (int index = 1; index < argc; index++) {
     if (strcmp(argv[index], "--port") == 0 && index + 1 < argc) {
@@ -54,14 +55,17 @@ int main(int argc, char* argv[]) {
     } else if (strcmp(argv[index], "--ca") == 0 && index + 1 < argc) {
       ca_path = argv[index + 1];
       index++;
+    } else if (strcmp(argv[index], "--allow-insecure") == 0) {
+      allow_insecure = true;
     } else if (strcmp(argv[index], "--help") == 0 || strcmp(argv[index], "-h") == 0) {
-      printf("Usage: offs_relay [--port PORT] [--host HOST] [--cert PATH] [--key PATH] [--ca PATH]\n");
+      printf("Usage: offs_relay [--port PORT] [--host HOST] [--cert PATH] [--key PATH] [--ca PATH] [--allow-insecure]\n");
       printf("  --port PORT   Listen port (default: 14000)\n");
       printf("  --host HOST   Bind host (default: all interfaces)\n");
       printf("  --cert PATH   TLS certificate file path\n");
       printf("  --key PATH    TLS private key file path\n");
       printf("  --ca PATH     CA cert file (PEM) for validating client certs\n");
-      printf("                When omitted, peer cert validation is disabled (MITM risk).\n");
+      printf("  --allow-insecure  Proceed without --ca (NO_CERTIFICATE_VALIDATION, MITM risk).\n");
+      printf("                    Required when --ca is omitted (default is fail-closed).\n");
       return 0;
     }
   }
@@ -97,6 +101,7 @@ int main(int argc, char* argv[]) {
       return 1;
     }
   }
+  server->allow_insecure = allow_insecure;
 
   if (relay_server_start(server, host, port) != 0) {
     log_error("relay: failed to start relay server on port %u", port);

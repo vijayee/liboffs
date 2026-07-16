@@ -73,6 +73,7 @@ offs_client_config_t offs_client_config_default(void) {
   config.max_retries = 3;
   config.retry_base_delay_ms = 1000;
   config.ca_path = NULL;  /* No CA by default -> log_warn + fallback */
+  config.allow_insecure = false;  /* Fail closed by default — see audit #11. */
   return config;
 }
 
@@ -1274,11 +1275,25 @@ static offs_client_t* _connect_attempt(const char* transport_url, const char* ap
     if (peer_verify != NULL) {
       cred_config.Flags |= QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
       cred_config.CaCertificateFile = peer_verify_ctx_path(peer_verify);
-    } else {
-      log_warn("offs_client: no CA configured for %s; TLS encrypts but does "
-               "not authenticate the WT server's cert (MITM possible). "
-               "See audit #11.", transport_url);
+    } else if (client->config.allow_insecure) {
+      log_warn("offs_client: no CA configured for %s and allow_insecure is "
+               "set — TLS will not authenticate the WT server's cert (MITM "
+               "possible). Configure a CA for production. See audit #11.",
+               transport_url);
       cred_config.Flags |= QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    } else {
+      log_error("offs_client: no CA configured for %s and allow_insecure is "
+                "not set — refusing to connect. Configure a CA, or set "
+                "allow_insecure=1 for trusted-LAN use. See audit #11.",
+                transport_url);
+      msquic->RegistrationClose(registration);
+      offs_msquic_close();
+      free(addr_copy);
+      stream_framer_destroy(client->framer);
+      platform_mutex_destroy(client->lock);
+      free(client->api_key);
+      free(client);
+      return NULL;
     }
 
     if (QUIC_FAILED(msquic->ConfigurationOpen(registration, &alpn, 1, &settings, sizeof(settings), NULL, &configuration))) {

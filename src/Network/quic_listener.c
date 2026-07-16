@@ -625,10 +625,20 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
       cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)listener->peer_verify);
-    } else {
-      log_warn("quic_listener: no CA configured; TLS encrypts but does not "
-               "authenticate peer certs (MITM possible). See audit #11.");
+    } else if (authority != NULL && authority->allow_insecure) {
+      log_warn("quic_listener: no CA configured and allow_insecure is set — "
+               "TLS will not authenticate peer certs (MITM possible). "
+               "Configure a CA for production. See audit #11.");
       cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    } else {
+      log_error("quic_listener: no CA configured and allow_insecure is not set "
+                "— refusing to start. Configure a CA, or set allow_insecure=1 "
+                "for trusted-LAN use. See audit #11.");
+      listener->msquic->ConfigurationClose(listener->configuration);
+      listener->configuration = NULL;
+      listener->msquic->RegistrationClose(listener->registration);
+      listener->registration = NULL;
+      return -1;
     }
   } else {
     cred_config.CertificateFile = &cert_file;
@@ -636,10 +646,20 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
       cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)listener->peer_verify);
-    } else {
-      log_warn("quic_listener: no CA configured; TLS encrypts but does not "
-               "authenticate peer certs (MITM possible). See audit #11.");
+    } else if (authority != NULL && authority->allow_insecure) {
+      log_warn("quic_listener: no CA configured and allow_insecure is set — "
+               "TLS will not authenticate peer certs (MITM possible). "
+               "Configure a CA for production. See audit #11.");
       cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    } else {
+      log_error("quic_listener: no CA configured and allow_insecure is not set "
+                "— refusing to start. Configure a CA, or set allow_insecure=1 "
+                "for trusted-LAN use. See audit #11.");
+      listener->msquic->ConfigurationClose(listener->configuration);
+      listener->configuration = NULL;
+      listener->msquic->RegistrationClose(listener->registration);
+      listener->registration = NULL;
+      return -1;
     }
   }
 

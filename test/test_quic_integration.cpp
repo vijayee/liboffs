@@ -768,6 +768,10 @@ TEST(QuicIntegration, QuicListenerStartStop) {
     GTEST_SKIP() << "network creation failed";
   }
 
+  /* The fixture runs without a CA, so fail-close (audit #11) would reject
+   * the listener. Allow insecure for this test (trusted-LAN/research path). */
+  authority->allow_insecure = true;
+
   // Start and stop a QUIC listener on localhost
   quic_listener_t* listener = quic_listener_create(network, pool);
   if (listener == nullptr) {

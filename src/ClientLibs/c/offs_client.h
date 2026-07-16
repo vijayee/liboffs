@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 typedef struct buffer_t buffer_t;
 
@@ -25,6 +26,11 @@ typedef struct {
    * validation (with a logged warning — MITM risk; Task 2 fails closed
    * unless allow_insecure is set). See audit #11. */
   const char* ca_path;
+  /* When true and no ca_path is configured, proceed with
+   * NO_CERTIFICATE_VALIDATION and a logged warning (trusted-LAN/research
+   * opt-in). Default false — offs_client_connect returns NULL. See
+   * audit #11. */
+  bool allow_insecure;
 } offs_client_config_t;
 
 offs_client_config_t offs_client_config_default(void);
