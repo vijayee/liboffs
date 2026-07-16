@@ -130,8 +130,11 @@ wanted_requester_t* wanted_list_remove(wanted_list_t* wl, buffer_t* hash) {
       free(entry);
       /* Note: bloom filters don't support deletion.
        * False positives from stale bloom entries just mean
-       * a redundant FindBlock that resolves quickly.
-       * The bloom is rebuilt periodically to keep false positive rate low. */
+       * a redundant FindBlock that resolves quickly. The bloom is
+       * never rebuilt (the rebuild was a deferred TODO; the false
+       * positive rate stays low while the wanted_list is small,
+       * which it is given short per-request deadlines). See
+       * audit #33. */
       return requesters;
     }
     current = &(*current)->next;

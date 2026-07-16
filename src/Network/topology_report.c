@@ -227,11 +227,11 @@ int topology_report_decode(cbor_item_t* item,
                 _cbor_to_node_id(ppairs[pidx].value, &snap->node_id);
               } else if (pklen == 14 && strncmp(pkey, "hebbian_weight", 14) == 0) {
                 snap->hebbian_weight = (float)cbor_float_get_float8(ppairs[pidx].value);
-              } else if (pklen == 10 && strncmp(pkey, "rtt_ewma_ms", 10) == 0) {
+              } else if (pklen == 11 && strncmp(pkey, "rtt_ewma_ms", 11) == 0) {
                 snap->rtt_ewma_ms = cbor_float_get_float8(ppairs[pidx].value);
               } else if (pklen == 9 && strncmp(pkey, "connected", 9) == 0) {
                 snap->connected = cbor_get_bool(ppairs[pidx].value);
-              } else if (pklen == 14 && strncmp(pkey, "connected_at_ms", 14) == 0) {
+              } else if (pklen == 15 && strncmp(pkey, "connected_at_ms", 15) == 0) {
                 snap->connected_at_ms = (int64_t)cbor_get_uint64(ppairs[pidx].value);
               }
             }
