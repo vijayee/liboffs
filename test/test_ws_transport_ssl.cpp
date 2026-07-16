@@ -59,8 +59,9 @@ extern "C" {
 namespace {
 
 /* Pre-staged PEMs (copied into the test working dir by test/CMakeLists.txt). */
-static const char* kCertPath = "certs/leaf_cert.pem";
-static const char* kKeyPath = "certs/leaf_key.pem";
+#include "test_ssl_certs.h"
+
+/* Cert paths — generated programmatically in SetUp. */
 
 static int _set_recv_timeout(platform_socket_t* sock, int ms) {
   int fd = platform_socket_fd(sock);
@@ -291,6 +292,8 @@ static cbor_item_t* _ws_recv_cbor_ssl(SSL* ssl, int timeout_ms = 5000) {
 }
 
 class TestWsTransportSsl : public testing::Test {
+  char* cert_path;
+  char* key_path;
 protected:
   scheduler_pool_t* pool;
   timer_actor_t* timer;
@@ -304,6 +307,9 @@ protected:
   void SetUp() override {
     static std::atomic<uint16_t> next_port{40080};
     port = next_port.fetch_add(1) + (uint16_t)((platform_getpid() % 113) * 4);
+    cert_path = NULL;
+    key_path = NULL;
+    ASSERT_EQ(test_generate_ssl_certs(&cert_path, &key_path), 0);
     pool = scheduler_pool_create(4);
     scheduler_pool_start(pool);
     timer = timer_actor_create(pool);
@@ -328,11 +334,11 @@ protected:
     tc = tuple_cache_create(100, pool);
 
     transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port,
-                                    kCertPath, kKeyPath, 0, NULL, NULL);
+                                    cert_path, key_path, 0, NULL, NULL);
     for (int retry = 0; transport == nullptr && retry < 10; retry++) {
       port = next_port.fetch_add(1) + (uint16_t)((platform_getpid() % 113) * 4);
       transport = ws_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port,
-                                      kCertPath, kKeyPath, 0, NULL, NULL);
+                                      cert_path, key_path, 0, NULL, NULL);
     }
     ASSERT_NE(transport, nullptr);
     ws_transport_start(transport);
@@ -350,6 +356,7 @@ protected:
     scheduler_pool_destroy(pool);
     rm_rf(cache_dir);
     free(cache_dir);
+    test_cleanup_ssl_certs(cert_path, key_path);
   }
 };
 
