@@ -47,16 +47,14 @@ static void _respiration_watchdog_arm(respiration_actor_t* actor) {
   uint64_t prior_id = atomic_load(&actor->watchdog_timer_id);
   if (prior_id != 0) {
     timer_actor_cancel(actor->network->timer, prior_id);
-    atomic_store(&actor->watchdog_timer_id, 0);
   }
-  uint64_t new_id = 0;
+  // timer_actor_set stores the new id into the atomic directly.
   timer_actor_set(actor->network->timer,
                   RESPIRATION_WATCHDOG_TIMEOUT_MS,
                   0, /* one-shot */
                   &actor->actor,
                   RESPIRATION_WATCHDOG_TIMEOUT,
-                  &new_id);
-  atomic_store(&actor->watchdog_timer_id, new_id);
+                  &actor->watchdog_timer_id);
 }
 
 static void _respiration_watchdog_disarm(respiration_actor_t* actor) {
