@@ -1846,7 +1846,7 @@ static void network_handle_local_closest_nodes(network_t* network, message_t* ms
   wire_query.count = payload->count;
   wire_query.beta_numerator = payload->beta_numerator;
   wire_query.beta_denominator = payload->beta_denominator;
-  wire_query.ttl = CLOSEST_NODES_FORWARD_FANOUT;
+  wire_query.ttl = FORWARD_TTL;
   closest_nodes_add_visited(wire_query.visited_bloom, &wire_query.visited_count,
                             network->authority->local_id.hash);
   memcpy(&wire_query.path[0], &network->authority->local_id, sizeof(node_id_t));
@@ -3115,7 +3115,7 @@ static void network_handle_rank_block(network_t* network, message_t* msg) {
       uint64_t now_ts = (uint64_t)time(NULL) * 1000;
       find->message_id = network_next_message_id(network);
       memcpy(find->block_hash, rank->block_hash, 32);
-      find->ttl = FIND_BLOCK_FORWARD_FANOUT;
+      find->ttl = FORWARD_TTL;
       memset(find->visited_bloom, 0, WIRE_MAX_VISITED_BLOOM);
       find->visited_count = 0;
       find->path_len = 0;
@@ -3507,7 +3507,7 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
     wanted_entry->message_id = state.message_id;
   }
   memcpy(state.block_hash, payload->hash->data, 32);
-  state.ttl = FIND_BLOCK_FORWARD_FANOUT;
+  state.ttl = FORWARD_TTL;
   state.start_time_ms = now_ts;
   memcpy(&state.original_source, &network->authority->local_id, sizeof(node_id_t));
 
