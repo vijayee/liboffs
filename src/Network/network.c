@@ -2001,6 +2001,22 @@ static void network_handle_ping_capacity_response(network_t* network, message_t*
 // --- FindNode handler ---
 // Returns the K closest nodes to a target ID from our ring table
 
+// Compare two node_ids by XOR distance to a target. Returns <0 if left is
+// closer to target than right, 0 if equal, >0 if left is farther. XOR distance
+// is the Kademlia routing metric: smaller XOR = closer. Comparison is byte-by-
+// byte lexicographic on the XOR digest (the first differing byte decides).
+static int network_node_id_xor_cmp(const node_id_t* left, const node_id_t* right,
+                                    const node_id_t* target) {
+  for (size_t index = 0; index < NODE_ID_HASH_SIZE; index++) {
+    uint8_t left_byte = left->hash[index] ^ target->hash[index];
+    uint8_t right_byte = right->hash[index] ^ target->hash[index];
+    if (left_byte != right_byte) {
+      return (int)left_byte - (int)right_byte;
+    }
+  }
+  return 0;
+}
+
 static void network_handle_find_node(network_t* network, message_t* msg) {
   wire_find_node_t* find = (wire_find_node_t*)msg->payload;
   if (find == NULL) return;
@@ -2016,16 +2032,47 @@ static void network_handle_find_node(network_t* network, message_t* msg) {
   memcpy(&response->sender_id, &network->authority->local_id, sizeof(node_id_t));
   response->closest_count = 0;
 
-  // Walk rings from lowest latency to highest, collecting up to 8 closest nodes
-  for (size_t ring_idx = 0; ring_idx < network->rings->ring_count && response->closest_count < 8; ring_idx++) {
+  // Collect candidate node ids from all rings (primary members only, skip
+  // rendezvous-only nodes). The handler previously walked rings lowest-
+  // latency-first and returned the first 8 — ignoring find->target_id. That
+  // returned the lowest-latency nodes, not the nodes closest to target_id by
+  // XOR distance (the Kademlia routing metric). See audit #23.
+  node_id_t candidates[RING_K * RING_MAX_RINGS];
+  size_t candidate_count = 0;
+  for (size_t ring_idx = 0; ring_idx < network->rings->ring_count; ring_idx++) {
     ring_t* ring = &network->rings->rings[ring_idx];
-    for (int node_idx = 0; node_idx < ring->primary.length && response->closest_count < 8; node_idx++) {
+    for (int node_idx = 0; node_idx < ring->primary.length; node_idx++) {
       net_node_t* node = ring->primary.data[node_idx];
-      // Skip rendezvous-only nodes
+      if (node == NULL) continue;
       if (node->flags & NET_NODE_FLAG_RENDEZVOUS) continue;
-      memcpy(&response->closest_nodes[response->closest_count], &node->id, sizeof(node_id_t));
-      response->closest_count++;
+      if (candidate_count < RING_K * RING_MAX_RINGS) {
+        memcpy(&candidates[candidate_count], &node->id, sizeof(node_id_t));
+        candidate_count++;
+      }
     }
+  }
+
+  // Select the 8 closest to find->target_id by XOR distance. Selection sort on
+  // the first min(candidate_count, 8) positions — the candidate pool is small
+  // (<= RING_K * RING_MAX_RINGS = 80) so O(n*k) is trivial.
+  size_t select_count = candidate_count < 8 ? candidate_count : 8;
+  for (size_t out_idx = 0; out_idx < select_count; out_idx++) {
+    size_t best_idx = out_idx;
+    for (size_t in_idx = out_idx + 1; in_idx < candidate_count; in_idx++) {
+      if (network_node_id_xor_cmp(&candidates[in_idx], &candidates[best_idx],
+                                  &find->target_id) < 0) {
+        best_idx = in_idx;
+      }
+    }
+    if (best_idx != out_idx) {
+      node_id_t tmp;
+      memcpy(&tmp, &candidates[out_idx], sizeof(node_id_t));
+      memcpy(&candidates[out_idx], &candidates[best_idx], sizeof(node_id_t));
+      memcpy(&candidates[best_idx], &tmp, sizeof(node_id_t));
+    }
+    memcpy(&response->closest_nodes[response->closest_count],
+           &candidates[out_idx], sizeof(node_id_t));
+    response->closest_count++;
   }
 
   peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &find->sender_id);
