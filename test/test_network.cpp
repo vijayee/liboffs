@@ -45,6 +45,7 @@ extern "C" {
 
 #include <cstdint>
 #include <set>
+#include <vector>
 
 // === Monotonic message ID counter tests (audit #6) ===
 //
@@ -2746,6 +2747,230 @@ TEST(TestPeerVerify, DirectPathUpgradesExistingRelayedPeer) {
       << "upgrading the same peer object must flip relay_verified on the relayed entry";
 
   connection_manager_deinit(&mgr);
+}
+
+// --- Relay signed-nonce challenge table (audit #8 relay; tier-5b Task 3) ---
+//
+// These tests exercise the challenge table CRUD + sweep via the test-only
+// accessors in network.h. The table is a flat array of relay_challenge_t
+// grown on demand; find/append/remove/sweep are the static helpers in
+// network.c. We allocate a minimal stub network_t (get_clear_memory zeroes
+// the struct so relay_challenges=NULL, count=0, capacity=0) and exercise
+// the helpers directly. A full network + relay fixture is heavy, so the
+// send/verify flow is covered by the pem_key_sign_nonce + verify_nonce
+// round-trip tests in test_peer_verify.cpp combined with these table
+// tests and code review.
+
+namespace {
+struct RelayChallengeNetworkDeleter {
+  void operator()(network_t* network) const {
+    if (network != nullptr) {
+      /* Free the challenge table the same way network_destroy does, then
+         free the stub network itself. The stub never initialized the actor
+         or any other subsystem, so no network_destroy. */
+      if (network->relay_challenges != nullptr) {
+        free(network->relay_challenges);
+      }
+      free(network);
+    }
+  }
+};
+}  // namespace
+
+static network_t* make_minimal_network_for_relay_challenge_test() {
+  network_t* network = (network_t*)get_clear_memory(sizeof(network_t));
+  if (network == nullptr) return nullptr;
+  /* network_create sets request_timeout_ms=30000; mirror that so the
+     challenge deadline math matches the production path. */
+  network->request_timeout_ms = 30000;
+  return network;
+}
+
+TEST(RelayChallengeTable, AppendFindRemove) {
+  std::unique_ptr<network_t, RelayChallengeNetworkDeleter> network(
+      make_minimal_network_for_relay_challenge_test());
+  ASSERT_NE(network, nullptr);
+
+  node_id_t sender_id;
+  node_id_generate(&sender_id);
+  uint8_t nonce[32];
+  for (size_t index = 0; index < 32; index++) nonce[index] = (uint8_t)(index + 1);
+  uint64_t deadline_ms = (uint64_t)time(NULL) * 1000 + 30000;
+  uint32_t relay_endpoint_id = 42;
+
+  ASSERT_EQ(network_relay_challenge_append_for_test(network.get(), &sender_id,
+                                                     nonce, deadline_ms,
+                                                     relay_endpoint_id), 0);
+  EXPECT_EQ(network_relay_challenge_count_for_test(network.get()), 1u);
+
+  // Find by sender_id.
+  int found = network_relay_challenge_find_for_test(network.get(), &sender_id);
+  ASSERT_GE(found, 0);
+  EXPECT_EQ(found, 0) << "first appended challenge must be at index 0";
+
+  // Verify the stored entry's fields (nonce, deadline, endpoint).
+  relay_challenge_t entry;
+  ASSERT_EQ(network_relay_challenge_get_for_test(network.get(), 0, &entry), 0);
+  EXPECT_TRUE(node_id_equals(&entry.sender_id, &sender_id));
+  EXPECT_EQ(memcmp(entry.nonce, nonce, 32), 0);
+  EXPECT_EQ(entry.deadline_ms, deadline_ms);
+  EXPECT_EQ(entry.relay_endpoint_id, relay_endpoint_id);
+
+  // A different sender_id is not found.
+  node_id_t other_id;
+  node_id_generate(&other_id);
+  EXPECT_EQ(network_relay_challenge_find_for_test(network.get(), &other_id), -1);
+
+  // Remove by sender_id.
+  network_relay_challenge_remove_for_test(network.get(), &sender_id);
+  EXPECT_EQ(network_relay_challenge_count_for_test(network.get()), 0u);
+  EXPECT_EQ(network_relay_challenge_find_for_test(network.get(), &sender_id), -1);
+}
+
+TEST(RelayChallengeTable, MultipleChallenges) {
+  std::unique_ptr<network_t, RelayChallengeNetworkDeleter> network(
+      make_minimal_network_for_relay_challenge_test());
+  ASSERT_NE(network, nullptr);
+
+  // Append three challenges for three distinct senders.
+  node_id_t sender_ids[3];
+  for (int index = 0; index < 3; index++) {
+    node_id_generate(&sender_ids[index]);
+    uint8_t nonce[32];
+    memset(nonce, (uint8_t)(index + 1), 32);
+    ASSERT_EQ(network_relay_challenge_append_for_test(network.get(),
+                                                       &sender_ids[index],
+                                                       nonce,
+                                                       (uint64_t)time(NULL) * 1000 + 30000,
+                                                       (uint32_t)(100 + index)), 0);
+  }
+  EXPECT_EQ(network_relay_challenge_count_for_test(network.get()), 3u);
+
+  // Each sender is found at some index.
+  for (int index = 0; index < 3; index++) {
+    int found = network_relay_challenge_find_for_test(network.get(),
+                                                      &sender_ids[index]);
+    ASSERT_GE(found, 0);
+    relay_challenge_t entry;
+    ASSERT_EQ(network_relay_challenge_get_for_test(network.get(),
+                                                    (size_t)found, &entry), 0);
+    EXPECT_EQ(entry.relay_endpoint_id, (uint32_t)(100 + index))
+        << "endpoint id must round-trip per sender";
+  }
+
+  // Remove the middle one; count goes to 2, the removed one is gone, the
+  // others are still found (swap-with-last means index may change, but
+  // find-by-id still works).
+  network_relay_challenge_remove_for_test(network.get(), &sender_ids[1]);
+  EXPECT_EQ(network_relay_challenge_count_for_test(network.get()), 2u);
+  EXPECT_EQ(network_relay_challenge_find_for_test(network.get(), &sender_ids[1]), -1);
+  EXPECT_GE(network_relay_challenge_find_for_test(network.get(), &sender_ids[0]), 0);
+  EXPECT_GE(network_relay_challenge_find_for_test(network.get(), &sender_ids[2]), 0);
+
+  // Remove the remaining two.
+  network_relay_challenge_remove_for_test(network.get(), &sender_ids[0]);
+  network_relay_challenge_remove_for_test(network.get(), &sender_ids[2]);
+  EXPECT_EQ(network_relay_challenge_count_for_test(network.get()), 0u);
+}
+
+TEST(RelayChallengeTable, SweepExpiresPastDeadlines) {
+  std::unique_ptr<network_t, RelayChallengeNetworkDeleter> network(
+      make_minimal_network_for_relay_challenge_test());
+  ASSERT_NE(network, nullptr);
+
+  uint64_t now_ms = (uint64_t)time(NULL) * 1000;
+  // Two expired, one fresh.
+  node_id_t expired1, expired2, fresh;
+  node_id_generate(&expired1);
+  node_id_generate(&expired2);
+  node_id_generate(&fresh);
+  uint8_t nonce[32] = {0};
+  ASSERT_EQ(network_relay_challenge_append_for_test(network.get(), &expired1,
+                                                     nonce, now_ms - 1000, 1), 0);
+  ASSERT_EQ(network_relay_challenge_append_for_test(network.get(), &expired2,
+                                                     nonce, now_ms - 1, 2), 0);
+  ASSERT_EQ(network_relay_challenge_append_for_test(network.get(), &fresh,
+                                                     nonce, now_ms + 30000, 3), 0);
+  ASSERT_EQ(network_relay_challenge_count_for_test(network.get()), 3u);
+
+  // Sweep at now_ms — expired1 (deadline now_ms-1000) and expired2 (deadline
+  // now_ms-1) must be removed; fresh (deadline now_ms+30000) must remain.
+  network_relay_challenge_sweep_for_test(network.get(), now_ms);
+  EXPECT_EQ(network_relay_challenge_count_for_test(network.get()), 1u);
+  EXPECT_EQ(network_relay_challenge_find_for_test(network.get(), &expired1), -1);
+  EXPECT_EQ(network_relay_challenge_find_for_test(network.get(), &expired2), -1);
+  EXPECT_GE(network_relay_challenge_find_for_test(network.get(), &fresh), 0);
+}
+
+TEST(RelayChallengeTable, SweepKeepsZeroDeadlineEntries) {
+  // A deadline_ms of 0 means "no deadline" (consistent with closest_pending's
+  // convention). The sweep must NOT remove such entries.
+  std::unique_ptr<network_t, RelayChallengeNetworkDeleter> network(
+      make_minimal_network_for_relay_challenge_test());
+  ASSERT_NE(network, nullptr);
+
+  node_id_t sender_id;
+  node_id_generate(&sender_id);
+  uint8_t nonce[32] = {0};
+  ASSERT_EQ(network_relay_challenge_append_for_test(network.get(), &sender_id,
+                                                     nonce, /*deadline_ms=*/0, 7), 0);
+
+  // Sweep far in the future; the zero-deadline entry must remain.
+  network_relay_challenge_sweep_for_test(network.get(),
+                                          (uint64_t)time(NULL) * 1000 + 60000);
+  EXPECT_EQ(network_relay_challenge_count_for_test(network.get()), 1u);
+  EXPECT_GE(network_relay_challenge_find_for_test(network.get(), &sender_id), 0);
+}
+
+TEST(RelayChallengeTable, CapacityGrowth) {
+  // Append enough challenges to force the array to grow past its initial
+  // capacity (8). The grow path uses realloc and must not lose any entry.
+  std::unique_ptr<network_t, RelayChallengeNetworkDeleter> network(
+      make_minimal_network_for_relay_challenge_test());
+  ASSERT_NE(network, nullptr);
+
+  const size_t count = 50;
+  std::vector<node_id_t> sender_ids(count);
+  for (size_t index = 0; index < count; index++) {
+    node_id_generate(&sender_ids[index]);
+    uint8_t nonce[32];
+    memset(nonce, (uint8_t)(index & 0xFF), 32);
+    ASSERT_EQ(network_relay_challenge_append_for_test(network.get(),
+                                                       &sender_ids[index],
+                                                       nonce,
+                                                       (uint64_t)time(NULL) * 1000 + 30000,
+                                                       (uint32_t)index), 0);
+  }
+  EXPECT_EQ(network_relay_challenge_count_for_test(network.get()), count);
+  for (size_t index = 0; index < count; index++) {
+    int found = network_relay_challenge_find_for_test(network.get(),
+                                                       &sender_ids[index]);
+    ASSERT_GE(found, 0);
+  }
+}
+
+TEST(RelayChallengeTable, GetAtIndexOutOfRangeFails) {
+  std::unique_ptr<network_t, RelayChallengeNetworkDeleter> network(
+      make_minimal_network_for_relay_challenge_test());
+  ASSERT_NE(network, nullptr);
+  relay_challenge_t entry;
+  EXPECT_EQ(network_relay_challenge_get_for_test(network.get(), 0, &entry), -1);
+  EXPECT_EQ(network_relay_challenge_get_for_test(network.get(), 99, &entry), -1);
+}
+
+TEST(RelayChallengeTable, AppendNullInputsFails) {
+  std::unique_ptr<network_t, RelayChallengeNetworkDeleter> network(
+      make_minimal_network_for_relay_challenge_test());
+  ASSERT_NE(network, nullptr);
+  node_id_t sender_id;
+  node_id_generate(&sender_id);
+  uint8_t nonce[32] = {0};
+  EXPECT_EQ(network_relay_challenge_append_for_test(nullptr, &sender_id,
+                                                     nonce, 1, 1), -1);
+  EXPECT_EQ(network_relay_challenge_append_for_test(network.get(), nullptr,
+                                                     nonce, 1, 1), -1);
+  EXPECT_EQ(network_relay_challenge_append_for_test(network.get(), &sender_id,
+                                                     nullptr, 1, 1), -1);
 }
 
 // --- Salutation round-trip tests ---

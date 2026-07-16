@@ -36,6 +36,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <openssl/rand.h>
+#include "pem_key.h"
 
 #define TOPOLOGY_METRICS_PUSH_INTERVAL_MS 300000  // 5 minutes
 #define PING_CAPACITY_INTERVAL_MS 900000  // 15 minutes
@@ -52,6 +54,17 @@ static void network_handle_measure_nodes_response(network_t* network, message_t*
 static void network_handle_closest_nodes_progress(network_t* network, message_t* msg);
 static void network_handle_local_closest_nodes(network_t* network, message_t* msg);
 
+// Forward declarations for the static relay-challenge table helpers (defined
+// below; the test-only wrappers at the top of the file call them).
+static int network_relay_challenge_find(network_t* network,
+                                         const node_id_t* sender_id);
+static void network_relay_challenge_remove_at(network_t* network, size_t index);
+static int network_relay_challenge_append(network_t* network,
+                                           const node_id_t* sender_id,
+                                           const uint8_t nonce[32],
+                                           uint64_t deadline_ms,
+                                           uint32_t relay_endpoint_id);
+
 // Monotonic per-node message ID counter. message_id was previously
 // time(NULL) * 1000, which is second-granularity: two queries issued in the
 // same wall-clock second collided. closest_pending is keyed on message_id
@@ -66,6 +79,57 @@ static uint64_t network_next_message_id(network_t* network) {
 #ifndef NDEBUG
 uint64_t network_next_message_id_for_test(network_t* network) {
   return network_next_message_id(network);
+}
+
+/* Test-only wrappers around the static relay-challenge table helpers. The
+   table itself lives in the network_t; the helpers are static above. These
+   thin wrappers are only compiled in debug builds so the release library
+   does not export them. */
+int network_relay_challenge_find_for_test(network_t* network,
+                                          const node_id_t* sender_id) {
+  return network_relay_challenge_find(network, sender_id);
+}
+
+int network_relay_challenge_append_for_test(network_t* network,
+                                            const node_id_t* sender_id,
+                                            const uint8_t nonce[32],
+                                            uint64_t deadline_ms,
+                                            uint32_t relay_endpoint_id) {
+  return network_relay_challenge_append(network, sender_id, nonce,
+                                        deadline_ms, relay_endpoint_id);
+}
+
+void network_relay_challenge_remove_for_test(network_t* network,
+                                             const node_id_t* sender_id) {
+  int index = network_relay_challenge_find(network, sender_id);
+  if (index >= 0) {
+    network_relay_challenge_remove_at(network, (size_t)index);
+  }
+}
+
+size_t network_relay_challenge_count_for_test(network_t* network) {
+  return network->relay_challenge_count;
+}
+
+void network_relay_challenge_sweep_for_test(network_t* network,
+                                            uint64_t now_ms) {
+  size_t idx = 0;
+  while (idx < network->relay_challenge_count) {
+    relay_challenge_t* pending = &network->relay_challenges[idx];
+    if (pending->deadline_ms != 0 && pending->deadline_ms <= now_ms) {
+      network_relay_challenge_remove_at(network, idx);
+    } else {
+      idx++;
+    }
+  }
+}
+
+int network_relay_challenge_get_for_test(network_t* network, size_t index,
+                                          relay_challenge_t* out) {
+  if (network == NULL || out == NULL) return -1;
+  if (index >= network->relay_challenge_count) return -1;
+  memcpy(out, &network->relay_challenges[index], sizeof(relay_challenge_t));
+  return 0;
 }
 #endif
 
@@ -368,6 +432,16 @@ void network_destroy(network_t* network) {
     pending = next;
   }
   network->pending_connections = NULL;
+
+  // Free the relay challenge table (audit #8 relay; tier-5b). The table is a
+  // flat array of relay_challenge_t — no per-entry allocations — so a single
+  // free suffices.
+  if (network->relay_challenges != NULL) {
+    free(network->relay_challenges);
+    network->relay_challenges = NULL;
+    network->relay_challenge_count = 0;
+    network->relay_challenge_capacity = 0;
+  }
 #ifdef HAS_MSQUIC
   if (network->msquic != NULL) {
     offs_msquic_close();
@@ -866,6 +940,352 @@ static void network_wanted_list_timeout_cb(buffer_t* hash,
   (void)user_data;
 }
 
+// --- Relay signed-nonce challenge table (audit #8 relay; tier-5b) ---
+//
+// The challenge table records pending challenges sent to unverified
+// relayed senders. It is a flat array of relay_challenge_t grown on
+// demand. The sweep (network_handle_request_timeout_tick) compacts in
+// place. The send-challenge helper records the entry before dispatching
+// the WIRE_RELAY_CHALLENGE; the handle-response helper removes the entry
+// when a valid response arrives.
+
+// Return the index of the pending challenge for sender_id, or -1 if none.
+static int network_relay_challenge_find(network_t* network,
+                                         const node_id_t* sender_id) {
+  if (network == NULL || sender_id == NULL) return -1;
+  for (size_t index = 0; index < network->relay_challenge_count; index++) {
+    if (node_id_equals(&network->relay_challenges[index].sender_id, sender_id)) {
+      return (int)index;
+    }
+  }
+  return -1;
+}
+
+// Remove the challenge at the given index by swap-with-last. No-op if the
+// index is out of range. The array is flat (no per-entry allocations), so
+// remove is just a copy.
+static void network_relay_challenge_remove_at(network_t* network, size_t index) {
+  if (network == NULL) return;
+  if (index >= network->relay_challenge_count) return;
+  size_t last = network->relay_challenge_count - 1;
+  if (index != last) {
+    network->relay_challenges[index] = network->relay_challenges[last];
+  }
+  network->relay_challenge_count--;
+}
+
+// Append a challenge to the table. Grows the array on demand. Returns 0 on
+// success, -1 on allocation failure.
+static int network_relay_challenge_append(network_t* network,
+                                           const node_id_t* sender_id,
+                                           const uint8_t nonce[32],
+                                           uint64_t deadline_ms,
+                                           uint32_t relay_endpoint_id) {
+  if (network == NULL || sender_id == NULL || nonce == NULL) return -1;
+  if (network->relay_challenge_count == network->relay_challenge_capacity) {
+    size_t new_capacity =
+        network->relay_challenge_capacity == 0
+            ? 8
+            : network->relay_challenge_capacity * 2;
+    relay_challenge_t* grown = realloc(network->relay_challenges,
+                                       new_capacity * sizeof(relay_challenge_t));
+    if (grown == NULL) {
+      log_error("network: relay challenge table growth failed (cap=%zu)",
+                network->relay_challenge_capacity);
+      return -1;
+    }
+    network->relay_challenges = grown;
+    network->relay_challenge_capacity = new_capacity;
+  }
+  relay_challenge_t* entry =
+      &network->relay_challenges[network->relay_challenge_count];
+  memcpy(&entry->sender_id, sender_id, sizeof(node_id_t));
+  memcpy(entry->nonce, nonce, 32);
+  entry->deadline_ms = deadline_ms;
+  entry->relay_endpoint_id = relay_endpoint_id;
+  network->relay_challenge_count++;
+  return 0;
+}
+
+// Generate a fresh 32-byte nonce using OpenSSL's CSPRNG (already linked
+// for the rest of the project). Returns 0 on success, -1 on failure.
+static int network_relay_challenge_generate_nonce(uint8_t nonce[32]) {
+  if (nonce == NULL) return -1;
+  if (RAND_bytes(nonce, 32) != 1) {
+    log_error("network: RAND_bytes failed for relay challenge nonce");
+    return -1;
+  }
+  return 0;
+}
+
+// Send a WIRE_RELAY_CHALLENGE to the unverified relayed sender via the relay
+// client. Records the challenge in the table (no double-challenge — if a
+// challenge is already pending for sender_id, this is a no-op). The
+// challenge payload is built from the authority's local_id + local endpoint
+// id, wrapped in a wire_relay_send_t envelope and dispatched to the relay
+// client actor with RELAY_CLIENT_SEND.
+static void network_relay_send_challenge(network_t* network,
+                                         const node_id_t* sender_id,
+                                         uint32_t relay_endpoint_id) {
+  if (network == NULL || sender_id == NULL) return;
+  if (network->relay == NULL) {
+    log_warn("network: cannot send relay challenge — no relay client");
+    return;
+  }
+  if (network->authority == NULL) return;
+
+  // Don't double-challenge: if a challenge for sender_id is already pending,
+  // let the existing deadline expire (or the response arrive) first.
+  if (network_relay_challenge_find(network, sender_id) >= 0) {
+    return;
+  }
+
+  // Don't challenge ourselves (a misrouted relay or a local-echo bug).
+  if (node_id_equals(sender_id, &network->authority->local_id)) {
+    return;
+  }
+
+  uint8_t nonce[32];
+  if (network_relay_challenge_generate_nonce(nonce) != 0) {
+    return;
+  }
+
+  uint64_t deadline_ms =
+      (uint64_t)time(NULL) * 1000 + (uint64_t)network->request_timeout_ms;
+  if (network_relay_challenge_append(network, sender_id, nonce, deadline_ms,
+                                     relay_endpoint_id) != 0) {
+    return;
+  }
+
+  // Build the WIRE_RELAY_CHALLENGE inner payload.
+  wire_relay_challenge_t challenge;
+  memset(&challenge, 0, sizeof(challenge));
+  memcpy(&challenge.challenger_id, &network->authority->local_id,
+         sizeof(node_id_t));
+  challenge.challenger_endpoint_id = network->relay->local_endpoint_id;
+  memcpy(challenge.nonce, nonce, 32);
+
+  cbor_item_t* challenge_cbor = wire_relay_challenge_encode(&challenge);
+  if (challenge_cbor == NULL) {
+    log_error("network: wire_relay_challenge_encode failed");
+    // Roll back the table append so the next relayed message can re-trigger.
+    network_relay_challenge_remove_at(network,
+                                      network->relay_challenge_count - 1);
+    return;
+  }
+
+  size_t cbor_len = 0;
+  unsigned char* cbor_data = NULL;
+  size_t serialized =
+      cbor_serialize_alloc(challenge_cbor, &cbor_data, &cbor_len);
+  cbor_decref(&challenge_cbor);
+  if (cbor_data == NULL || serialized == 0) {
+    log_error("network: failed to serialize WIRE_RELAY_CHALLENGE");
+    network_relay_challenge_remove_at(network,
+                                      network->relay_challenge_count - 1);
+    return;
+  }
+
+  // Wrap in the relay send envelope and dispatch to the relay client.
+  wire_relay_send_t* relay_send =
+      get_clear_memory(sizeof(wire_relay_send_t));
+  if (relay_send == NULL) {
+    free(cbor_data);
+    network_relay_challenge_remove_at(network,
+                                      network->relay_challenge_count - 1);
+    return;
+  }
+  relay_send->src_endpoint_id = network->relay->local_endpoint_id;
+  relay_send->dest_endpoint_id = relay_endpoint_id;
+  relay_send->payload = cbor_data;
+  relay_send->payload_len = cbor_len;
+
+  message_t relay_msg;
+  memset(&relay_msg, 0, sizeof(relay_msg));
+  relay_msg.type = RELAY_CLIENT_SEND;
+  relay_msg.payload = relay_send;
+  relay_msg.payload_destroy = (void (*)(void*))wire_relay_send_destroy;
+  actor_send(&network->relay->actor, &relay_msg);
+}
+
+// Handle a WIRE_RELAY_CHALLENGE arriving via the relay: the responder signs
+// the nonce with the authority's cached private key and sends
+// WIRE_RELAY_CHALLENGE_RESPONSE back via the relay. If the authority has no
+// private key (no node_key_path), the challenge is dropped — the challenger
+// will time out and leave the peer unverified (no regression for old nodes).
+static void network_handle_relay_challenge(network_t* network,
+                                            cbor_item_t* wire_msg) {
+  if (network == NULL || wire_msg == NULL) return;
+  if (network->relay == NULL || network->authority == NULL) return;
+
+  wire_relay_challenge_t challenge;
+  memset(&challenge, 0, sizeof(challenge));
+  if (wire_relay_challenge_decode(wire_msg, &challenge) != 0) {
+    log_error("network: WIRE_RELAY_CHALLENGE decode failed");
+    return;
+  }
+
+  // The response carries our public key + a signature of the nonce under
+  // the matching private key. If we have no private key (no node_key_path),
+  // we can't respond — drop the challenge silently; the challenger will
+  // time out and leave us unverified.
+  if (network->authority->node_private_key == NULL &&
+      network->authority->node_key_path == NULL) {
+    log_warn("network: WIRE_RELAY_CHALLENGE received but no private key "
+             "configured — dropping (peer stays unverified)");
+    return;
+  }
+
+  uint8_t* signature = NULL;
+  size_t signature_len = 0;
+  if (authority_sign_nonce(network->authority, challenge.nonce,
+                           &signature, &signature_len) != 0) {
+    log_error("network: authority_sign_nonce failed for relay challenge");
+    return;
+  }
+
+  // The public key must be present (authority_init_local_id caches it from
+  // the cert). If somehow it's missing, we can't construct a verifiable
+  // response — drop.
+  if (network->authority->public_key == NULL ||
+      network->authority->public_key_len == 0) {
+    log_error("network: no cached public key for relay challenge response");
+    free(signature);
+    return;
+  }
+
+  wire_relay_challenge_response_t response;
+  memset(&response, 0, sizeof(response));
+  memcpy(&response.responder_id, &network->authority->local_id,
+         sizeof(node_id_t));
+  memcpy(response.nonce, challenge.nonce, 32);
+  response.public_key = network->authority->public_key;
+  response.public_key_len = network->authority->public_key_len;
+  response.signature = signature;
+  response.signature_len = signature_len;
+
+  cbor_item_t* response_cbor = wire_relay_challenge_response_encode(&response);
+  free(signature);
+  response.signature = NULL;
+  response.signature_len = 0;
+  if (response_cbor == NULL) {
+    log_error("network: wire_relay_challenge_response_encode failed");
+    return;
+  }
+
+  size_t cbor_len = 0;
+  unsigned char* cbor_data = NULL;
+  size_t serialized =
+      cbor_serialize_alloc(response_cbor, &cbor_data, &cbor_len);
+  cbor_decref(&response_cbor);
+  if (cbor_data == NULL || serialized == 0) {
+    log_error("network: failed to serialize WIRE_RELAY_CHALLENGE_RESPONSE");
+    return;
+  }
+
+  wire_relay_send_t* relay_send =
+      get_clear_memory(sizeof(wire_relay_send_t));
+  if (relay_send == NULL) {
+    free(cbor_data);
+    return;
+  }
+  relay_send->src_endpoint_id = network->relay->local_endpoint_id;
+  relay_send->dest_endpoint_id = challenge.challenger_endpoint_id;
+  relay_send->payload = cbor_data;
+  relay_send->payload_len = cbor_len;
+
+  message_t relay_msg;
+  memset(&relay_msg, 0, sizeof(relay_msg));
+  relay_msg.type = RELAY_CLIENT_SEND;
+  relay_msg.payload = relay_send;
+  relay_msg.payload_destroy = (void (*)(void*))wire_relay_send_destroy;
+  actor_send(&network->relay->actor, &relay_msg);
+}
+
+// Handle a WIRE_RELAY_CHALLENGE_RESPONSE arriving via the relay: the
+// challenger verifies BLAKE3(public_key)==responder_id AND the signature
+// under public_key. On success, set peer->relay_verified=true and remove
+// the pending challenge. On failure (or no pending challenge for this
+// responder_id/nonce), drop — don't re-challenge automatically (a future
+// relayed message re-triggers).
+//
+// `response` is stack-allocated; wire_relay_challenge_response_decode
+// allocates response.public_key and response.signature on the heap. We
+// free those manually (NOT via wire_relay_challenge_response_destroy,
+// which also frees the struct itself and would be UB on a stack pointer).
+static void network_handle_relay_challenge_response(network_t* network,
+                                                      cbor_item_t* wire_msg) {
+  if (network == NULL || wire_msg == NULL) return;
+  if (network->authority == NULL) return;
+
+  wire_relay_challenge_response_t response;
+  memset(&response, 0, sizeof(response));
+  if (wire_relay_challenge_response_decode(wire_msg, &response) != 0) {
+    log_error("network: WIRE_RELAY_CHALLENGE_RESPONSE decode failed");
+    /* decode zeroes the struct on entry and only allocates public_key /
+       signature after the type/nonce checks pass. On a decode failure the
+       allocations may or may not have happened — but they're owned by the
+       struct, so free them defensively. */
+    free(response.public_key);
+    free(response.signature);
+    return;
+  }
+
+  // Find the pending challenge by responder_id. The nonce must also match
+  // (defends against a stale response for an earlier challenge).
+  int found_index = network_relay_challenge_find(network, &response.responder_id);
+  if (found_index < 0) {
+    log_warn("network: WIRE_RELAY_CHALLENGE_RESPONSE for unknown responder "
+             "(stale/unsolicited) — dropping");
+    free(response.public_key);
+    free(response.signature);
+    return;
+  }
+  relay_challenge_t* pending = &network->relay_challenges[found_index];
+  if (memcmp(pending->nonce, response.nonce, 32) != 0) {
+    log_warn("network: WIRE_RELAY_CHALLENGE_RESPONSE nonce mismatch — dropping");
+    free(response.public_key);
+    free(response.signature);
+    return;
+  }
+
+  // Verify: BLAKE3(public_key)==responder_id AND the signature is valid
+  // under public_key. Both must pass; otherwise the peer stays unverified.
+  node_id_t computed_id;
+  memset(&computed_id, 0, sizeof(computed_id));
+  bool id_ok = (response.public_key != NULL && response.public_key_len > 0 &&
+                node_id_from_public_key(response.public_key,
+                                        response.public_key_len,
+                                        &computed_id) == 0 &&
+                node_id_equals(&computed_id, &response.responder_id));
+  bool sig_ok = (response.public_key != NULL && response.public_key_len > 0 &&
+                 response.signature != NULL && response.signature_len > 0 &&
+                 pem_key_verify_nonce(response.public_key,
+                                      response.public_key_len,
+                                      response.nonce,
+                                      response.signature,
+                                      response.signature_len) == 0);
+
+  if (id_ok && sig_ok) {
+    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr,
+                                                        &response.responder_id);
+    if (peer != NULL) {
+      peer->relay_verified = true;
+    } else {
+      log_warn("network: relay challenge verified but peer %s not in conn_mgr",
+                response.responder_id.str);
+    }
+    network_relay_challenge_remove_at(network, (size_t)found_index);
+  } else {
+    log_warn("network: relay challenge response verify failed (id_ok=%d "
+             "sig_ok=%d) — peer stays unverified", (int)id_ok, (int)sig_ok);
+    network_relay_challenge_remove_at(network, (size_t)found_index);
+  }
+
+  free(response.public_key);
+  free(response.signature);
+}
+
 static void network_handle_request_timeout_tick(network_t* network,
                                                  message_t* msg) {
   (void)msg;
@@ -907,6 +1327,22 @@ static void network_handle_request_timeout_tick(network_t* network,
       /* Don't advance idx — the swap moved a new entry into this slot. */
     } else {
       idx++;
+    }
+  }
+
+  // Sweep relay_challenges — expired unanswered challenges are removed; the
+  // peer stays relay_verified=false (a future relayed message re-triggers a
+  // fresh challenge). The table is a flat array of relay_challenge_t (no
+  // per-entry allocations), so we just compact in place with swap-with-last.
+  // See audit #8 relay (tier-5b).
+  size_t relay_idx = 0;
+  while (relay_idx < network->relay_challenge_count) {
+    relay_challenge_t* pending = &network->relay_challenges[relay_idx];
+    if (pending->deadline_ms != 0 && pending->deadline_ms <= now_ms) {
+      network_relay_challenge_remove_at(network, relay_idx);
+      /* Don't advance — the swap moved a new entry into this slot. */
+    } else {
+      relay_idx++;
     }
   }
 }
@@ -4045,6 +4481,20 @@ void network_dispatch(void* state, message_t* msg) {
               ring_set_insert(network->rings, node, 0);
             }
           }
+
+          // Challenge unverified relayed senders (audit #8 relay; tier-5b).
+          // The trigger fires BEFORE the inner switch so that
+          // WIRE_RELAY_CHALLENGE / WIRE_RELAY_CHALLENGE_RESPONSE messages
+          // themselves don't double-trigger (the no-double-challenge guard
+          // also helps). When a relayed message arrives from a peer admitted
+          // with relay_verified=false, send a WIRE_RELAY_CHALLENGE back via
+          // the relay. Old peers that don't implement the challenge simply
+          // don't respond -> the challenge times out -> the peer stays
+          // unverified (no regression; just not upgraded).
+          if (existing != NULL && !existing->relay_verified) {
+            network_relay_send_challenge(network, &sender_id,
+                                         relay_payload->src_endpoint_id);
+          }
         }
 
         uint8_t type = wire_get_type(wire_msg);
@@ -4368,6 +4818,19 @@ void network_dispatch(void* state, message_t* msg) {
                 free(payload);
               }
             }
+            break;
+          }
+          case WIRE_RELAY_CHALLENGE: {
+            // Relay signed-nonce challenge (audit #8 relay; tier-5b): the
+            // responder signs the nonce + returns WIRE_RELAY_CHALLENGE_RESPONSE.
+            // Operates on the relayed CBOR directly (no separate payload).
+            network_handle_relay_challenge(network, wire_msg);
+            break;
+          }
+          case WIRE_RELAY_CHALLENGE_RESPONSE: {
+            // The challenger verifies BLAKE3(public_key)==responder_id and the
+            // signature, then sets peer->relay_verified=true.
+            network_handle_relay_challenge_response(network, wire_msg);
             break;
           }
           default:
