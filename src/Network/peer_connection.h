@@ -73,6 +73,18 @@ typedef struct peer_connection_t {
   bool connected;
   int64_t connected_at_ms;
   bool is_friend;       /* Pinned peer — immune to Hebbian decay, auto-reconnect on drop */
+
+  bool relay_verified;  /* true if the peer's identity was verified via a
+                           direct QUIC salutation (BLAKE3 hash check + TLS
+                           leaf-cert pin in network_handle_salutation);
+                           false if admitted via the relay path (identity NOT
+                           confirmed — the relayed message carries only the
+                           sender_id hash, not the public_key preimage, so the
+                           BLAKE3 check can't be applied). Routing/storage
+                           decisions for unverified peers should be cautious.
+                           The signed-nonce challenge (deferred — a protocol
+                           change) will verify relayed peers without a direct
+                           connection. See audit #8 (relay path). */
 } peer_connection_t;
 
 peer_connection_t* peer_connection_create(const node_id_t* remote_id,

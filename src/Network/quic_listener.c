@@ -17,6 +17,11 @@ void quic_connected_payload_destroy(quic_connected_payload_t* payload) {
   // For DISCONNECTED payloads, ConnectionClose is called by the network
   // dispatch handler before this destroy runs. For CONNECTED payloads,
   // the connection and stream handles are owned by msquic.
+  // peer_cert_der is stolen by pending_quic_add (set to NULL) when the
+  // pending entry takes ownership; the destroy path frees any cert that
+  // was never stolen (e.g. duplicate CONNECTED, or CONNECTED that failed
+  // before pending_quic_add). See audit #8.
+  free(payload->peer_cert_der);
   free(payload);
 }
 
@@ -97,33 +102,103 @@ static void _conn_track_add(quic_listener_t* listener, HQUIC connection) {
      ConnectionShutdown on a freed handle. Scan for an existing entry first.
      See docs/liboffs-audit-report.md #4. */
   for (size_t index = 0; index < listener->connection_count; index++) {
-    if (listener->connections[index] == connection) {
+    if (listener->connections[index].connection == connection) {
       platform_mutex_unlock(listener->conn_lock);
       return;
     }
   }
   if (listener->connection_count >= listener->connection_capacity) {
     size_t new_cap = listener->connection_capacity == 0 ? 8 : listener->connection_capacity * 2;
-    HQUIC* new_arr = get_clear_memory(new_cap * sizeof(HQUIC));
+    conn_track_entry_t* new_arr = get_clear_memory(new_cap * sizeof(conn_track_entry_t));
     if (new_arr == NULL) {
       platform_mutex_unlock(listener->conn_lock);
       return;
     }
     if (listener->connections != NULL) {
-      memcpy(new_arr, listener->connections, listener->connection_count * sizeof(HQUIC));
+      memcpy(new_arr, listener->connections,
+             listener->connection_count * sizeof(conn_track_entry_t));
       free(listener->connections);
     }
     listener->connections = new_arr;
     listener->connection_capacity = new_cap;
   }
-  listener->connections[listener->connection_count++] = connection;
+  listener->connections[listener->connection_count].connection = connection;
+  listener->connections[listener->connection_count].peer_cert_der = NULL;
+  listener->connections[listener->connection_count].peer_cert_der_len = 0;
+  listener->connection_count++;
+  platform_mutex_unlock(listener->conn_lock);
+}
+
+// Stash the peer's leaf cert (DER) on the connection's tracking entry. The
+// entry is created if it doesn't exist yet (PEER_CERTIFICATE_RECEIVED fires
+// before CONNECTED on incoming connections). Takes ownership of cert_der
+// (frees the previous cert if one was stashed). See audit #8.
+static void _conn_track_set_cert(quic_listener_t* listener, HQUIC connection,
+                                 uint8_t* cert_der, size_t cert_len) {
+  platform_mutex_lock(listener->conn_lock);
+  conn_track_entry_t* entry = NULL;
+  for (size_t index = 0; index < listener->connection_count; index++) {
+    if (listener->connections[index].connection == connection) {
+      entry = &listener->connections[index];
+      break;
+    }
+  }
+  if (entry == NULL) {
+    // Grow if needed and append a new entry.
+    if (listener->connection_count >= listener->connection_capacity) {
+      size_t new_cap = listener->connection_capacity == 0 ? 8 : listener->connection_capacity * 2;
+      conn_track_entry_t* new_arr = get_clear_memory(new_cap * sizeof(conn_track_entry_t));
+      if (new_arr == NULL) {
+        platform_mutex_unlock(listener->conn_lock);
+        free(cert_der);
+        return;
+      }
+      if (listener->connections != NULL) {
+        memcpy(new_arr, listener->connections,
+               listener->connection_count * sizeof(conn_track_entry_t));
+        free(listener->connections);
+      }
+      listener->connections = new_arr;
+      listener->connection_capacity = new_cap;
+    }
+    entry = &listener->connections[listener->connection_count++];
+    entry->connection = connection;
+    entry->peer_cert_der = NULL;
+    entry->peer_cert_der_len = 0;
+  }
+  free(entry->peer_cert_der);
+  entry->peer_cert_der = cert_der;
+  entry->peer_cert_der_len = cert_len;
+  platform_mutex_unlock(listener->conn_lock);
+}
+
+// Steal the stashed peer cert (DER) from the connection's tracking entry,
+// leaving the entry's cert NULL. Returns the cert in *out_cert / *out_len,
+// or NULL if no cert was stashed (allow_insecure mode). See audit #8.
+static void _conn_track_steal_cert(quic_listener_t* listener, HQUIC connection,
+                                   uint8_t** out_cert, size_t* out_len) {
+  *out_cert = NULL;
+  *out_len = 0;
+  platform_mutex_lock(listener->conn_lock);
+  for (size_t index = 0; index < listener->connection_count; index++) {
+    if (listener->connections[index].connection == connection) {
+      *out_cert = listener->connections[index].peer_cert_der;
+      *out_len = listener->connections[index].peer_cert_der_len;
+      listener->connections[index].peer_cert_der = NULL;
+      listener->connections[index].peer_cert_der_len = 0;
+      break;
+    }
+  }
   platform_mutex_unlock(listener->conn_lock);
 }
 
 static void _conn_track_remove(quic_listener_t* listener, HQUIC connection) {
   platform_mutex_lock(listener->conn_lock);
   for (size_t index = 0; index < listener->connection_count; index++) {
-    if (listener->connections[index] == connection) {
+    if (listener->connections[index].connection == connection) {
+      // Free any cert still stashed on the entry (e.g. connection torn down
+      // before CONNECTED stole it, or duplicate shutdown path).
+      free(listener->connections[index].peer_cert_der);
       listener->connections[index] = listener->connections[listener->connection_count - 1];
       listener->connection_count--;
       break;
@@ -143,7 +218,9 @@ static void _conn_track_shutdown_all(quic_listener_t* listener) {
   if (count > 0) {
     snapshot = get_clear_memory(count * sizeof(HQUIC));
     if (snapshot != NULL) {
-      memcpy(snapshot, listener->connections, count * sizeof(HQUIC));
+      for (size_t index = 0; index < count; index++) {
+        snapshot[index] = listener->connections[index].connection;
+      }
     }
   }
   platform_mutex_unlock(listener->conn_lock);
@@ -162,7 +239,10 @@ static void _conn_track_shutdown_all(quic_listener_t* listener) {
 static void _conn_track_destroy(quic_listener_t* listener) {
   // Connections are closed by their SHUTDOWN_COMPLETE callbacks,
   // which fire after _conn_track_shutdown_all initiates shutdown.
-  // Just free the tracking array.
+  // Free any certs still stashed on entries, then the tracking array.
+  for (size_t index = 0; index < listener->connection_count; index++) {
+    free(listener->connections[index].peer_cert_der);
+  }
   platform_mutex_destroy(listener->conn_lock);
   free(listener->connections);
   listener->connections = NULL;
@@ -386,6 +466,34 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
     HQUIC connection, void* context, QUIC_CONNECTION_EVENT* event) {
   quic_listener_t* listener = (quic_listener_t*)context;
   switch (event->Type) {
+    case QUIC_CONNECTION_EVENT_PEER_CERTIFICATE_RECEIVED: {
+      // Fired during the TLS handshake (before CONNECTED) when
+      // QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED is set. With
+      // QUIC_CREDENTIAL_FLAG_USE_PORTABLE_CERTIFICATES, the Certificate is a
+      // QUIC_BUFFER* whose Buffer points to the DER-encoded leaf cert
+      // (i2d_X509). Stash a copy on the connection's tracking entry so the
+      // CONNECTED handler can pass it to the salutation handler for the
+      // audit #8 public_key pin. In allow_insecure mode (no cert indication
+      // flag), this event doesn't fire and the pin is a no-op.
+      QUIC_BUFFER* cert_buf = (QUIC_BUFFER*)event->PEER_CERTIFICATE_RECEIVED.Certificate;
+      if (cert_buf != NULL && cert_buf->Buffer != NULL && cert_buf->Length > 0) {
+        uint8_t* cert_copy = get_clear_memory(cert_buf->Length);
+        if (cert_copy != NULL) {
+          memcpy(cert_copy, cert_buf->Buffer, cert_buf->Length);
+          _conn_track_set_cert(listener, connection, cert_copy, cert_buf->Length);
+        } else {
+          // Alloc failure: the pin will be a no-op for this connection (the
+          // cert isn't stashed). CA validation still happened; this only
+          // drops the defense-in-depth pubkey pin. Log so it's observable.
+          log_warn("quic_listener: failed to copy peer cert; salutation pin "
+                   "will be skipped for this connection (audit #8)");
+        }
+      }
+      // Do not reject the handshake here — MsQuic's TLS layer validates the
+      // cert against the CA (SET_CA_CERTIFICATE_FILE). The salutation handler
+      // does the public_key pin after the BLAKE3 self-consistency check.
+      break;
+    }
     case QUIC_CONNECTION_EVENT_CONNECTED: {
       log_info("quic_listener: connection CONNECTED");
       _conn_track_add(listener, connection);
@@ -399,12 +507,20 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
           &peer_addr_len,
           &peer_addr);
 
+      // Steal the peer's leaf cert (DER) stashed during
+      // PEER_CERTIFICATE_RECEIVED. NULL in allow_insecure mode (no cert
+      // indication flag) — the salutation pin is then a no-op. See audit #8.
+      uint8_t* peer_cert_der = NULL;
+      size_t peer_cert_der_len = 0;
+      _conn_track_steal_cert(listener, connection, &peer_cert_der, &peer_cert_der_len);
+
       // Open a persistent bidirectional stream — salutation is sent as
       // the first framed message on this same stream
       HQUIC persistent_stream = _open_persistent_stream(listener, connection, &peer_addr);
       if (persistent_stream == NULL) {
         log_error("quic_listener: failed to open persistent stream on CONNECTED, "
                   "shutting down connection %p", (void*)connection);
+        free(peer_cert_der);
         listener->msquic->ConnectionShutdown(connection, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT, 0);
         break;
       }
@@ -415,6 +531,11 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
         payload->connection = connection;
         payload->stream = persistent_stream;
         memcpy(&payload->peer_addr, &peer_addr, sizeof(peer_addr));
+        payload->peer_cert_der = peer_cert_der;
+        payload->peer_cert_der_len = peer_cert_der_len;
+        peer_cert_der = NULL;  // ownership transferred to payload
+      } else {
+        free(peer_cert_der);
       }
 
       message_t msg;
@@ -622,20 +743,48 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
     cred_config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
     cred_config.CertificateFile = &cert_file;
     if (listener->peer_verify != NULL) {
-      cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE |
+                          QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED |
+                          QUIC_CREDENTIAL_FLAG_USE_PORTABLE_CERTIFICATES;
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)listener->peer_verify);
-    } else {
+    } else if (authority != NULL && authority->allow_insecure) {
+      log_warn("quic_listener: no CA configured and allow_insecure is set — "
+               "TLS will not authenticate peer certs (MITM possible). "
+               "Configure a CA for production. See audit #11.");
       cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    } else {
+      log_error("quic_listener: no CA configured and allow_insecure is not set "
+                "— refusing to start. Configure a CA, or set allow_insecure=1 "
+                "for trusted-LAN use. See audit #11.");
+      listener->msquic->ConfigurationClose(listener->configuration);
+      listener->configuration = NULL;
+      listener->msquic->RegistrationClose(listener->registration);
+      listener->registration = NULL;
+      return -1;
     }
   } else {
     cred_config.CertificateFile = &cert_file;
     if (listener->peer_verify != NULL) {
-      cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE |
+                          QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED |
+                          QUIC_CREDENTIAL_FLAG_USE_PORTABLE_CERTIFICATES;
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)listener->peer_verify);
-    } else {
+    } else if (authority != NULL && authority->allow_insecure) {
+      log_warn("quic_listener: no CA configured and allow_insecure is set — "
+               "TLS will not authenticate peer certs (MITM possible). "
+               "Configure a CA for production. See audit #11.");
       cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    } else {
+      log_error("quic_listener: no CA configured and allow_insecure is not set "
+                "— refusing to start. Configure a CA, or set allow_insecure=1 "
+                "for trusted-LAN use. See audit #11.");
+      listener->msquic->ConfigurationClose(listener->configuration);
+      listener->configuration = NULL;
+      listener->msquic->RegistrationClose(listener->registration);
+      listener->registration = NULL;
+      return -1;
     }
   }
 

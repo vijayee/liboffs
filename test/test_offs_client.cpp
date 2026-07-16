@@ -26,6 +26,15 @@ extern "C" {
 #define platform_usleep(us) platform_sleep_ms((us) / 1000)
 }
 
+/* WT/offs_client test helper: the wts:// test fixtures do not generate a CA,
+ * so the fail-close default (audit #11) would refuse to connect. Set
+ * allow_insecure=1 on the client config to exercise the WT path. */
+static offs_client_t* _wt_connect_insecure(const char* url) {
+  offs_client_config_t cfg = offs_client_config_default();
+  cfg.allow_insecure = true;
+  return offs_client_connect_ex(url, NULL, &cfg);
+}
+
 struct PutCallbackContext {
     char* ori_string;
     std::promise<std::string> promise;
@@ -1190,7 +1199,10 @@ protected:
 
         const char* cp = (cert_path[0] != '\0') ? cert_path : NULL;
         const char* kp = (key_path[0] != '\0') ? key_path : NULL;
-        transport = wt_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, cp, kp, 0, NULL, NULL);
+        /* No CA configured (NULL ca_path) — fail-closed by default. Set
+         * allow_insecure=true to exercise the WT path in the test fixture
+         * (trusted-LAN/research opt-in; see audit #11). */
+        transport = wt_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1", port, cp, kp, NULL, true, 0, NULL, NULL);
         if (transport != nullptr) {
             wt_transport_start(transport);
             /* Wait for QUIC server listener to be ready */
@@ -1233,7 +1245,7 @@ TEST_F(TestOffsWtClient, ConnectAndDisconnect) {
     if (transport == nullptr) {
         GTEST_SKIP() << "WT transport creation failed (MsQuic not available)";
     }
-    offs_client_t* client = offs_client_connect(url, NULL);
+    offs_client_t* client = _wt_connect_insecure(url);
     ASSERT_NE(client, nullptr);
     offs_client_disconnect(client);
 }
@@ -1242,7 +1254,7 @@ TEST_F(TestOffsWtClient, PutBuffered) {
     if (transport == nullptr) {
         GTEST_SKIP() << "WT transport creation failed (MsQuic not available)";
     }
-    offs_client_t* client = offs_client_connect(url, NULL);
+    offs_client_t* client = _wt_connect_insecure(url);
     ASSERT_NE(client, nullptr);
 
     PutCallbackContext ctx;
@@ -1269,7 +1281,7 @@ TEST_F(TestOffsWtClient, GetAfterPut) {
     if (transport == nullptr) {
         GTEST_SKIP() << "WT transport creation failed (MsQuic not available)";
     }
-    offs_client_t* client = offs_client_connect(url, NULL);
+    offs_client_t* client = _wt_connect_insecure(url);
     ASSERT_NE(client, nullptr);
 
     PutCallbackContext put_ctx;
@@ -1323,7 +1335,7 @@ TEST_F(TestOffsWtClient, Health) {
     if (transport == nullptr) {
         GTEST_SKIP() << "WT transport creation failed (MsQuic not available)";
     }
-    offs_client_t* client = offs_client_connect(url, NULL);
+    offs_client_t* client = _wt_connect_insecure(url);
     ASSERT_NE(client, nullptr);
 
     HealthCallbackContext ctx;

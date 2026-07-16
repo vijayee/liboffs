@@ -47,6 +47,8 @@ typedef struct pending_quic_t {
   void* quic_connection;           // HQUIC handle
   void* quic_stream;                // HQUIC persistent bidirectional stream handle
   struct sockaddr_storage peer_addr;
+  uint8_t* peer_cert_der;          // peer's leaf cert (DER), extracted at CONNECTED; NULL if none
+  size_t   peer_cert_der_len;
   struct pending_quic_t* next;
 } pending_quic_t;
 

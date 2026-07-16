@@ -12,6 +12,7 @@
 #include <poll-dancer/poll-dancer.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef HAS_MSQUIC
 #include <msquic.h>
@@ -49,6 +50,11 @@ typedef struct relay_server_t {
   char* cert_path;
   char* key_path;
   void* peer_verify;  // peer_verify_ctx_t* — NULL if no CA cert loaded
+  /* When true and no CA is configured, proceed with
+   * NO_CERTIFICATE_VALIDATION and a logged warning (trusted-LAN/research
+   * opt-in). Default false — relay_server_start fails when no CA is
+   * configured. See audit #11. */
+  bool allow_insecure;
   relay_client_entry_t clients[RELAY_MAX_CLIENTS];
   size_t num_clients;
   uint32_t next_endpoint_id;

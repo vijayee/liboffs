@@ -41,6 +41,7 @@
 #ifdef HAS_MSQUIC
 #include <msquic.h>
 #include "../../Network/msquic_singleton.h"
+#include "../../Network/peer_verify.h"
 #endif
 
 #define READ_BUFFER_SIZE 65536
@@ -71,6 +72,8 @@ offs_client_config_t offs_client_config_default(void) {
   config.poll_timeout_ms = 10;  /* Short timeout for responsive recv */
   config.max_retries = 3;
   config.retry_base_delay_ms = 1000;
+  config.ca_path = NULL;  /* No CA by default -> log_warn + fallback */
+  config.allow_insecure = false;  /* Fail closed by default — see audit #11. */
   return config;
 }
 
@@ -1248,16 +1251,55 @@ static offs_client_t* _connect_attempt(const char* transport_url, const char* ap
 
     QUIC_BUFFER alpn = { sizeof("offs") - 1, (uint8_t*)"offs" };
 
+    /* Load credentials — when a CA is configured, validate the WT server's
+     * cert against it. Without a CA, fall back to NO_CERTIFICATE_VALIDATION
+     * with a logged warning (Task 2 fails closed unless allow_insecure). */
+    peer_verify_ctx_t* peer_verify = NULL;
+    if (client->config.ca_path != NULL) {
+      peer_verify = peer_verify_ctx_create_from_pem_file(client->config.ca_path);
+      if (peer_verify == NULL) {
+        log_error("offs_client: failed to load CA from %s", client->config.ca_path);
+        msquic->RegistrationClose(registration);
+        offs_msquic_close();
+        free(addr_copy);
+        stream_framer_destroy(client->framer);
+        platform_mutex_destroy(client->lock);
+        free(client->api_key);
+        free(client);
+        return NULL;
+      }
+    }
     QUIC_CREDENTIAL_CONFIG cred_config = {0};
     cred_config.Type = QUIC_CREDENTIAL_TYPE_NONE;
     cred_config.Flags = QUIC_CREDENTIAL_FLAG_CLIENT;
-    if (!is_secure) {
+    if (peer_verify != NULL) {
+      cred_config.Flags |= QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
+      cred_config.CaCertificateFile = peer_verify_ctx_path(peer_verify);
+    } else if (client->config.allow_insecure) {
+      log_warn("offs_client: no CA configured for %s and allow_insecure is "
+               "set — TLS will not authenticate the WT server's cert (MITM "
+               "possible). Configure a CA for production. See audit #11.",
+               transport_url);
       cred_config.Flags |= QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    } else {
+      log_error("offs_client: no CA configured for %s and allow_insecure is "
+                "not set — refusing to connect. Configure a CA, or set "
+                "allow_insecure=1 for trusted-LAN use. See audit #11.",
+                transport_url);
+      msquic->RegistrationClose(registration);
+      offs_msquic_close();
+      free(addr_copy);
+      stream_framer_destroy(client->framer);
+      platform_mutex_destroy(client->lock);
+      free(client->api_key);
+      free(client);
+      return NULL;
     }
 
     if (QUIC_FAILED(msquic->ConfigurationOpen(registration, &alpn, 1, &settings, sizeof(settings), NULL, &configuration))) {
       msquic->RegistrationClose(registration);
       offs_msquic_close();
+      if (peer_verify != NULL) peer_verify_ctx_destroy(peer_verify);
       free(addr_copy);
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
@@ -1269,12 +1311,19 @@ static offs_client_t* _connect_attempt(const char* transport_url, const char* ap
       msquic->ConfigurationClose(configuration);
       msquic->RegistrationClose(registration);
       offs_msquic_close();
+      if (peer_verify != NULL) peer_verify_ctx_destroy(peer_verify);
       free(addr_copy);
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
       free(client->api_key);
       free(client);
       return NULL;
+    }
+    /* MsQuic has read the CA file into the trust store during
+     * ConfigurationLoadCredential, so the temp file can be released now. */
+    if (peer_verify != NULL) {
+      peer_verify_ctx_destroy(peer_verify);
+      peer_verify = NULL;
     }
 
     /* Open connection */

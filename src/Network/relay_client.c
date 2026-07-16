@@ -518,6 +518,9 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
   }
 
   // Load credentials — use cert/key if configured, otherwise self-signed/no-cert
+  bool allow_insecure = (client->network != NULL &&
+                         client->network->authority != NULL &&
+                         client->network->authority->allow_insecure);
   QUIC_CREDENTIAL_CONFIG cred_config = {0};
   QUIC_CERTIFICATE_FILE cert_file = {0};
   if (client->cert_path && client->key_path) {
@@ -526,19 +529,51 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
     cred_config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
     cred_config.CertificateFile = &cert_file;
     if (client->peer_verify != NULL) {
-      cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE
+                       | QUIC_CREDENTIAL_FLAG_CLIENT;
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)client->peer_verify);
+    } else if (allow_insecure) {
+      log_warn("relay_client: no CA configured and allow_insecure is set — "
+               "TLS will not authenticate the relay server's cert (MITM "
+               "possible). Configure a CA for production. See audit #11.");
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_CLIENT
+                       | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
     } else {
-      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+      log_error("relay_client: no CA configured and allow_insecure is not set "
+                "— refusing to connect. Configure a CA, or set allow_insecure=1 "
+                "for trusted-LAN use. See audit #11.");
+      client->msquic->ConfigurationClose(client->configuration);
+      client->configuration = NULL;
+      if (client->owns_registration) {
+        client->msquic->RegistrationClose(client->registration);
+      }
+      client->registration = NULL;
+      return -1;
     }
   } else {
     if (client->peer_verify != NULL) {
-      cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE
+                       | QUIC_CREDENTIAL_FLAG_CLIENT;
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)client->peer_verify);
+    } else if (allow_insecure) {
+      log_warn("relay_client: no CA configured and allow_insecure is set — "
+               "TLS will not authenticate the relay server's cert (MITM "
+               "possible). Configure a CA for production. See audit #11.");
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_CLIENT
+                       | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
     } else {
-      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+      log_error("relay_client: no CA configured and allow_insecure is not set "
+                "— refusing to connect. Configure a CA, or set allow_insecure=1 "
+                "for trusted-LAN use. See audit #11.");
+      client->msquic->ConfigurationClose(client->configuration);
+      client->configuration = NULL;
+      if (client->owns_registration) {
+        client->msquic->RegistrationClose(client->registration);
+      }
+      client->registration = NULL;
+      return -1;
     }
   }
 
