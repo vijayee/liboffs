@@ -447,6 +447,20 @@ void network_destroy(network_t* network) {
     network->relay_challenge_count = 0;
     network->relay_challenge_capacity = 0;
   }
+
+  // Free the store_pending table (audit #21). Each entry holds a referenced
+  // hash buffer — release those before freeing the array.
+  if (network->store_pending != NULL) {
+    for (size_t index = 0; index < network->store_pending_count; index++) {
+      if (network->store_pending[index].hash != NULL) {
+        DESTROY(network->store_pending[index].hash, buffer);
+      }
+    }
+    free(network->store_pending);
+    network->store_pending = NULL;
+    network->store_pending_count = 0;
+    network->store_pending_capacity = 0;
+  }
 #ifdef HAS_MSQUIC
   if (network->msquic != NULL) {
     offs_msquic_close();
@@ -1291,6 +1305,85 @@ static void network_handle_relay_challenge_response(network_t* network,
   free(response.signature);
 }
 
+// --- StoreBlock pending aggregation (audit #21) ---
+
+// Append a new store_pending entry. Returns the entry on success, NULL on
+// allocation failure. The hash buffer is referenced by the caller (we
+// REFERENCE here for the table's ownership).
+static store_pending_t* network_store_pending_append(network_t* network,
+                                                     uint64_t message_id,
+                                                     actor_t* reply_to,
+                                                     buffer_t* hash,
+                                                     uint32_t fib,
+                                                     uint8_t replicas_needed,
+                                                     uint64_t deadline_ms) {
+  if (network->store_pending_count == network->store_pending_capacity) {
+    size_t new_capacity = network->store_pending_capacity == 0
+                          ? 8 : network->store_pending_capacity * 2;
+    store_pending_t* new_pending = realloc(network->store_pending,
+                                           sizeof(store_pending_t) * new_capacity);
+    if (new_pending == NULL) return NULL;
+    network->store_pending = new_pending;
+    network->store_pending_capacity = new_capacity;
+  }
+  store_pending_t* entry = &network->store_pending[network->store_pending_count++];
+  entry->message_id = message_id;
+  entry->reply_to = reply_to;
+  entry->hash = REFERENCE(hash, buffer_t);
+  entry->fib = fib;
+  entry->replicas_needed = replicas_needed;
+  entry->replicas_remaining = replicas_needed;
+  entry->accepted_count = 0;
+  entry->deadline_ms = deadline_ms;
+  return entry;
+}
+
+static store_pending_t* network_store_pending_find(network_t* network,
+                                                    uint64_t message_id) {
+  for (size_t index = 0; index < network->store_pending_count; index++) {
+    if (network->store_pending[index].message_id == message_id) {
+      return &network->store_pending[index];
+    }
+  }
+  return NULL;
+}
+
+static void network_store_pending_remove(network_t* network, size_t index) {
+  if (index >= network->store_pending_count) return;
+  if (network->store_pending[index].hash != NULL) {
+    DESTROY(network->store_pending[index].hash, buffer);
+  }
+  for (size_t shift = index; shift < network->store_pending_count - 1; shift++) {
+    network->store_pending[shift] = network->store_pending[shift + 1];
+  }
+  network->store_pending_count--;
+}
+
+// Send the aggregated StoreBlock result to reply_to and remove the entry.
+// `accepted` is 1 if at least one replica (local or remote) accepted.
+static void network_store_pending_finalize(network_t* network,
+                                            store_pending_t* entry,
+                                            size_t entry_index) {
+  if (entry == NULL || entry->reply_to == NULL) {
+    network_store_pending_remove(network, entry_index);
+    return;
+  }
+  network_store_block_result_payload_t* result_payload =
+      get_clear_memory(sizeof(network_store_block_result_payload_t));
+  if (result_payload != NULL) {
+    result_payload->accepted = entry->accepted_count > 0 ? 1 : 0;
+    result_payload->replicas = (uint32_t)entry->accepted_count;
+    result_payload->hash = REFERENCE(entry->hash, buffer_t);
+    result_payload->reply_to = NULL;
+    message_t result_msg = {0};
+    result_msg.type = NETWORK_STORE_BLOCK_RESULT;
+    result_msg.payload = result_payload;
+    result_msg.payload_destroy = free;
+    actor_send(entry->reply_to, &result_msg);
+  }
+  network_store_pending_remove(network, entry_index);
+}
+
 static void network_handle_request_timeout_tick(network_t* network,
                                                  message_t* msg) {
   (void)msg;
@@ -1348,6 +1441,21 @@ static void network_handle_request_timeout_tick(network_t* network,
       /* Don't advance — the swap moved a new entry into this slot. */
     } else {
       relay_idx++;
+    }
+  }
+
+  // Sweep store_pending — expired entries get a best-effort aggregated result
+  // with the current accepted_count, then are removed. The sweep walks in
+  // place with swap-with-last so we don't skip the entry that moves into the
+  // evicted slot. See audit #21.
+  size_t store_idx = 0;
+  while (store_idx < network->store_pending_count) {
+    store_pending_t* pending = &network->store_pending[store_idx];
+    if (pending->deadline_ms != 0 && pending->deadline_ms <= now_ms) {
+      network_store_pending_finalize(network, pending, store_idx);
+      /* Don't advance — the finalize removed the slot. */
+    } else {
+      store_idx++;
     }
   }
 }
@@ -2992,15 +3100,40 @@ static void network_handle_store_block_response(network_t* network, message_t* m
     } else {
       // Origin (self not in path, or self is path[0]): the decline reached the
       // origin. The receive log at the top of this handler already recorded
-      // the decline (direction code 3). The origin fires its StoreBlock
-      // result to the caller immediately on dispatch (NETWORK_LOCAL_STORE_BLOCK)
-      // based on the local store_block_execute decision, before any remote
-      // responses arrive — so there is no pending-request bookkeeping here to
-      // decrement. The decline is surfaced via the receive log so operators
-      // can see that a replica slot went unfilled. Aggregating per-message-id
-      // decline counts into the result_payload would require a pending-tracking
-      // structure (deferred — the fire-and-forget StoreBlock result contract
-      // is a separate, larger change).
+      // the decline (direction code 3). The pending-store tracker (audit #21)
+      // accounts for the unfilled slot below — see the store_pending tail.
+    }
+  }
+
+  // Origin aggregation: if this is our StoreBlock (we're the origin, not an
+  // intermediate hop), decrement replicas_remaining on the matching
+  // store_pending entry. When all replicas have responded (or the deadline
+  // passes — swept by NETWORK_REQUEST_TIMEOUT_TICK), send the aggregated
+  // result to reply_to. See audit #21.
+  {
+    int origin_self_index = -1;
+    for (int index = 0; index < (int)response->path_len; index++) {
+      if (node_id_equals(&response->path[index], &network->authority->local_id)) {
+        origin_self_index = index;
+        break;
+      }
+    }
+    // origin if self not in path (origin hasn't appended itself) or self is path[0]
+    if (origin_self_index <= 0) {
+      store_pending_t* pending = network_store_pending_find(network,
+                                                             response->message_id);
+      if (pending != NULL) {
+        if (response->accepted) {
+          pending->accepted_count++;
+        }
+        if (pending->replicas_remaining > 0) {
+          pending->replicas_remaining--;
+        }
+        if (pending->replicas_remaining == 0) {
+          size_t pending_index = (size_t)(pending - network->store_pending);
+          network_store_pending_finalize(network, pending, pending_index);
+        }
+      }
     }
   }
 }
@@ -4530,20 +4663,36 @@ void network_dispatch(void* state, message_t* msg) {
           }
         }
 
-        // Notify the stream actor if a reply_to was provided
+        // Aggregate the result if a reply_to was provided. The origin sends
+        // a single NETWORK_STORE_BLOCK_RESULT once all remote replicas respond
+        // (or the deadline passes — swept by NETWORK_REQUEST_TIMEOUT_TICK).
+        // The local decision counts as one acceptance if result == ACCEPTED.
+        // See audit #21.
         if (payload->reply_to != NULL) {
-          network_store_block_result_payload_t* result_payload =
-              get_clear_memory(sizeof(network_store_block_result_payload_t));
-          if (result_payload != NULL) {
-            result_payload->accepted = (result == STORE_BLOCK_ACCEPTED) ? 1 : 0;
-            result_payload->replicas = (result == STORE_BLOCK_ACCEPTED) ? (uint32_t)next_hop_count : 0;
-            result_payload->hash = REFERENCE(payload->hash, buffer_t);
-            result_payload->reply_to = NULL;
-            message_t result_msg = {0};
-            result_msg.type = NETWORK_STORE_BLOCK_RESULT;
-            result_msg.payload = result_payload;
-            result_msg.payload_destroy = free;
-            actor_send(payload->reply_to, &result_msg);
+          uint64_t deadline_ms =
+              now_ts + (uint64_t)network->request_timeout_ms;
+          store_pending_t* pending = network_store_pending_append(
+              network, state.message_id, payload->reply_to, payload->hash,
+              state.block_fib, state.replicas_needed, deadline_ms);
+          if (pending != NULL) {
+            // The local decision counts as one replica if we stored locally.
+            if (result == STORE_BLOCK_ACCEPTED) {
+              pending->accepted_count = 1;
+            }
+            // If we didn't forward (no next hops), the result is final — the
+            // origin can be notified immediately. Otherwise, replicas_remaining
+            // tracks the outstanding remote responses.
+            if (next_hop_count == 0) {
+              pending->replicas_remaining = 0;
+              // Finalize immediately (no remote responses to wait for).
+              // Find the entry again — append may have moved the array.
+              store_pending_t* fresh = network_store_pending_find(
+                  network, state.message_id);
+              if (fresh != NULL) {
+                size_t fresh_index = (size_t)(fresh - network->store_pending);
+                network_store_pending_finalize(network, fresh, fresh_index);
+              }
+            }
           }
         }
       }
