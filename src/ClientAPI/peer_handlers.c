@@ -36,15 +36,33 @@ void peer_handle_info_request(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
   local_info.node_id = auth->local_id;
   local_info.public_key = auth->public_key;       /* borrow — authority owns it */
   local_info.public_key_len = auth->public_key_len;
-  local_info.addresses = NULL;
-  local_info.address_count = 0;
+  /* Populate candidate addresses: include LAN (HOST) candidates only for
+     authenticated friends (privacy — never broadcast internal IPs to
+     arbitrary peers or in DHT gossip). SRFLX + RELAY candidates are always
+     safe to share. See audit #18. */
+  if (peer_info_from_node(&local_info, ctx->network,
+                          ctx->is_authenticated != 0) != 0) {
+    local_info.public_key = NULL;  /* borrowed — don't let destroy free it */
+    peer_info_destroy(&local_info);
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                    "Failed to populate local addresses");
+    return;
+  }
 
   /* Encode to CBOR and serialize to bytes */
   cbor_item_t* cbor_map = peer_info_encode(&local_info);
   if (cbor_map == NULL) {
+    /* public_key is borrowed from authority — NULL it so peer_info_destroy
+       only frees the addresses we allocated in peer_info_from_node. */
+    local_info.public_key = NULL;
+    peer_info_destroy(&local_info);
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR, "Failed to encode peer info");
     return;
   }
+  /* CBOR encode has copied address data into refcounted cbor items; release
+     our address array (public_key is still borrowed — NULL before destroy). */
+  local_info.public_key = NULL;
+  peer_info_destroy(&local_info);
 
   size_t serialized_len = cbor_serialized_size(cbor_map);
   uint8_t* serialized = get_clear_memory(serialized_len);
