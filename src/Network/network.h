@@ -24,6 +24,7 @@
 #include "../Configuration/config.h"
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef HAS_MSQUIC
 #include <msquic.h>
@@ -33,6 +34,7 @@ typedef struct block_cache_t block_cache_t;
 typedef struct relay_client_t relay_client_t;
 typedef struct nat_detect_t nat_detect_t;
 typedef struct quic_listener_t quic_listener_t;
+typedef struct mdns_t mdns_t;
 
 #define CLOSEST_NODES_PENDING_MAX 32
 
@@ -126,6 +128,7 @@ typedef struct network_t {
   relay_client_t* relay;          /* Connected relay client (or NULL) */
   nat_detect_t* nat_detect;       /* NAT detection module */
   nat_type_e local_nat_type;      /* Detected NAT type */
+  mdns_t* mdns;                    /* mDNS responder (NULL if not started) */
 
   pending_quic_t* pending_connections;  /* QUIC connections awaiting salutation */
 
@@ -178,6 +181,36 @@ void network_destroy(network_t* network);
 void network_dispatch(void* state, message_t* msg);
 int network_connect_relay(network_t* network, const char* host, uint16_t port);
 int network_connect_peer(network_t* network, const char* host, uint16_t port);
+
+/* Start NAT type detection by connecting two relay clients (relay_a and
+   relay_b) and comparing their reflexive addresses. The detected NAT type
+   is delivered to the network actor via NETWORK_NAT_TYPE_DETECTED, which
+   updates network->local_nat_type and re-evaluates all existing peers'
+   conn_state. If this is never called, local_nat_type stays at the
+   conservative default NAT_TYPE_PORT_RESTRICTED_CONE (try direct, fall back
+   to relay). See audit #18. Returns 0 on success, -1 on error. */
+int network_start_nat_detect(network_t* network,
+                              const char* relay_a_host, uint16_t relay_a_port,
+                              const char* relay_b_host, uint16_t relay_b_port);
+
+/* Start the mDNS responder for same-LAN auto-discovery. Idempotent —
+   calling start on an already-running responder is a no-op. POSIX-only;
+   stubbed on Windows. See audit #18. */
+int network_start_mdns(network_t* network);
+
+/* Stop the mDNS responder. Idempotent. */
+void network_stop_mdns(network_t* network);
+
+/* Try a peer_info's candidate addresses in priority order (HOST -> SRFLX ->
+   DIRECT -> RELAY) and connect via the first that works. RELAY candidates
+   are admitted via the connection manager with relay_endpoint_id set (no
+   QUIC connection). is_friend controls friend pinning on admission.
+   Returns 0 if any candidate connected, -1 otherwise. See audit #18. */
+struct peer_address_t;  /* forward decl — peer_info.h */
+int network_connect_peer_candidates(network_t* network, const node_id_t* remote_id,
+                                    const struct peer_address_t* addresses,
+                                    size_t address_count, bool is_friend);
+
 void network_shutdown_connections(network_t* network);
 
 // Start connections to bootstrap and friend peers. Called after node start.

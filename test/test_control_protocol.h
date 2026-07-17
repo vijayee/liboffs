@@ -11,6 +11,8 @@
 #define CTRL_STATUS          "STATUS"
 #define CTRL_SHUTDOWN        "SHUTDOWN"
 #define CTRL_FORCE_RELAY_ENDPOINT "FORCE_RELAY_ENDPOINT"
+#define CTRL_START_NAT_DETECT "START_NAT_DETECT"
+#define CTRL_START_MDNS      "START_MDNS"
 
 /* Event log and Hebbian query commands (OFFS_TEST only) */
 #define CTRL_GET_EVENTS      "GET_EVENTS"

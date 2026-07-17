@@ -96,6 +96,11 @@ typedef struct quic_listener_t {
   platform_thread_t* thread;
   ATOMIC(uint8_t) running;
 
+  /* The UDP port the listener is bound on (host byte order). Set by
+     quic_listener_start. 0 if not started or no listener configured.
+     Used by peer_info_from_node to populate HOST candidates. See audit #18. */
+  uint16_t listen_port;
+
   // Destroy stack for deferred watcher cleanup
   platform_mutex_t* destroy_lock;
   struct quic_destroy_node_t* destroy_head;

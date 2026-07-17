@@ -349,3 +349,64 @@ TEST(TestWireValidation, RelayChallengeResponseRejectsTooShortArray) {
   wire_relay_challenge_response_destroy(decoded);
   cbor_decref(&cbor);
 }
+
+/* --- WIRE_RELAY_PUNCH (audit #18 — ICE simultaneous open) --- */
+
+TEST(TestWireValidation, RelayPunchRoundTrip) {
+  wire_relay_punch_t punch;
+  memset(&punch, 0, sizeof(punch));
+  _fill_test_node_id(&punch.sender_id, 0x42, "punch-sender");
+  punch.reflexive_addr = 0xC0A80101u;  /* 192.168.1.1 */
+  punch.reflexive_port = 4242;
+
+  cbor_item_t* cbor = wire_relay_punch_encode(&punch);
+  ASSERT_NE(cbor, nullptr);
+  EXPECT_EQ(wire_get_type(cbor), WIRE_RELAY_PUNCH);
+
+  wire_relay_punch_t* decoded =
+      (wire_relay_punch_t*)get_clear_memory(sizeof(wire_relay_punch_t));
+  ASSERT_NE(decoded, nullptr);
+  int rc = wire_relay_punch_decode(cbor, decoded);
+  ASSERT_EQ(rc, 0);
+
+  EXPECT_EQ(memcmp(decoded->sender_id.hash, punch.sender_id.hash,
+                   NODE_ID_HASH_SIZE), 0);
+  EXPECT_EQ(decoded->reflexive_addr, punch.reflexive_addr);
+  EXPECT_EQ(decoded->reflexive_port, punch.reflexive_port);
+
+  wire_relay_punch_destroy(decoded);
+  cbor_decref(&cbor);
+}
+
+TEST(TestWireValidation, RelayPunchRejectsWrongType) {
+  cbor_item_t* cbor = cbor_new_definite_array(4);
+  cbor_item_t* entry;
+  entry = cbor_build_uint8(WIRE_RELAY_CHALLENGE); cbor_array_push(cbor, entry); cbor_decref(&entry);
+  entry = _build_node_id_array(); cbor_array_push(cbor, entry); cbor_decref(&entry);
+  entry = cbor_build_uint32(0x01020304u); cbor_array_push(cbor, entry); cbor_decref(&entry);
+  entry = cbor_build_uint16(1234); cbor_array_push(cbor, entry); cbor_decref(&entry);
+
+  wire_relay_punch_t* decoded =
+      (wire_relay_punch_t*)get_clear_memory(sizeof(wire_relay_punch_t));
+  ASSERT_NE(decoded, nullptr);
+  int rc = wire_relay_punch_decode(cbor, decoded);
+  EXPECT_NE(rc, 0);
+  wire_relay_punch_destroy(decoded);
+  cbor_decref(&cbor);
+}
+
+TEST(TestWireValidation, RelayPunchRejectsTooShortArray) {
+  cbor_item_t* cbor = cbor_new_definite_array(3);
+  cbor_item_t* entry;
+  entry = cbor_build_uint8(WIRE_RELAY_PUNCH); cbor_array_push(cbor, entry); cbor_decref(&entry);
+  entry = _build_node_id_array(); cbor_array_push(cbor, entry); cbor_decref(&entry);
+  entry = cbor_build_uint32(0x01020304u); cbor_array_push(cbor, entry); cbor_decref(&entry);
+
+  wire_relay_punch_t* decoded =
+      (wire_relay_punch_t*)get_clear_memory(sizeof(wire_relay_punch_t));
+  ASSERT_NE(decoded, nullptr);
+  int rc = wire_relay_punch_decode(cbor, decoded);
+  EXPECT_NE(rc, 0);
+  wire_relay_punch_destroy(decoded);
+  cbor_decref(&cbor);
+}

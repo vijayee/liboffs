@@ -11,14 +11,20 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+/* Forward declaration — network_t is defined in network.h. Avoids a circular
+   include (network.h pulls in many headers; peer_info.h stays lightweight). */
+struct network_t;
+
 #define PEER_INFO_MAX_ADDRESSES 8
 
 typedef enum {
-  PEER_ADDR_DIRECT = 0,  // Direct QUIC connection
+  PEER_ADDR_DIRECT = 0,  // Direct QUIC connection (back-compat: treated as HOST)
   PEER_ADDR_RELAY   = 1,  // Relay-mediated connection
+  PEER_ADDR_HOST    = 2,  // Private/LAN address (RFC1918 or link-local)
+  PEER_ADDR_SRFLX   = 3,  // Server-reflexive address (learned from relay)
 } peer_addr_type_e;
 
-typedef struct {
+typedef struct peer_address_t {
   peer_addr_type_e type;
   char* host;
   uint16_t port;
@@ -53,5 +59,16 @@ void peer_info_destroy(peer_info_t* info);
 
 // Check if two peer_info_t refer to the same node (by node_id).
 bool peer_info_equals(const peer_info_t* left, const peer_info_t* right);
+
+/* Populate a peer_info_t with this node's candidate addresses:
+   - HOST candidates: local LAN addresses (RFC1918/link-local) from interfaces
+   - SRFLX candidate: the relay-learned reflexive address (if connected)
+   - RELAY candidate: the relay endpoint (host + port + local_endpoint_id)
+   Only includes HOST candidates if include_lan is true (privacy gating —
+   friends only). The node_id and public_key fields are NOT touched; the
+   caller sets them from authority. See audit #18.
+   Returns 0 on success, -1 on error. */
+int peer_info_from_node(peer_info_t* info, const struct network_t* network,
+                        bool include_lan);
 
 #endif // OFFS_PEER_INFO_H

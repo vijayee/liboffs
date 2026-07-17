@@ -144,6 +144,14 @@ typedef enum message_type_e {
   RELAY_CLIENT_SEND,
   RELAY_CLIENT_ADDR_REQUEST,
   NETWORK_RELAY_RECEIVED,
+  /* NAT detection: a relay client received an ADDR_RESPONSE. Forwarded to
+     nat_detect so it can compare reflexive addresses from two relays and
+     classify the local NAT type. See audit #18. */
+  NETWORK_ADDR_RESPONSE,
+  /* NAT detection: classification complete. Sent from nat_detect_dispatch
+     to the network actor so the network actor's worker (and only that
+     thread) writes network->local_nat_type. See audit #18. */
+  NETWORK_NAT_TYPE_DETECTED,
   /* Peer connection messages */
   PEER_SEND_FIND_BLOCK,
   PEER_SEND_STORE_BLOCK,
@@ -342,5 +350,23 @@ typedef struct message_t {
   void* payload;
   void (*payload_destroy)(void*);
 } message_t;
+
+/* Payload for NETWORK_ADDR_RESPONSE messages. Carries the reflexive
+   address+port a relay client learned from its ADDR_RESPONSE, plus the
+   originating relay_client_t* so nat_detect can match it against its two
+   relay clients (relay_a / relay_b). See audit #18. */
+typedef struct network_addr_response_payload_t {
+  uint32_t endpoint_id;
+  uint32_t reflexive_addr;
+  uint16_t reflexive_port;
+  void*    source_client;  /* relay_client_t* — identifies which relay */
+} network_addr_response_payload_t;
+
+/* Payload for NETWORK_NAT_TYPE_DETECTED messages. Sent from nat_detect's
+   actor to the network actor when classification completes; the network
+   actor writes network->local_nat_type. See audit #18. */
+typedef struct {
+  int nat_type;  /* nat_type_e cast to int — int avoids an enum dependency */
+} network_nat_type_detected_payload_t;
 
 #endif // OFFS_MESSAGE_H

@@ -39,6 +39,7 @@
 #define WIRE_ADDR_RESPONSE       33
 #define WIRE_RELAY_CHALLENGE     34
 #define WIRE_RELAY_CHALLENGE_RESPONSE 35
+#define WIRE_RELAY_PUNCH         36
 
 // Magic number for protocol identification
 #define WIRE_MAGIC 0x4F464653  // "OFFS"
@@ -327,6 +328,18 @@ typedef struct wire_relay_challenge_response_t {
   size_t   signature_len;
 } wire_relay_challenge_response_t;
 
+// --- RelayPunch (symmetric NAT simultaneous-open signal) ---
+// Inner wire message for the ICE-style simultaneous open. Peer A sends a
+// PUNCH to peer B via the relay with A's SRFLX address; on receipt, B
+// immediately attempts quic_listener_connect to A's SRFLX. Both sides
+// connect at the same time, creating NAT mappings that allow the incoming
+// connection. See audit #18.
+typedef struct wire_relay_punch_t {
+  node_id_t sender_id;       // the node sending the punch
+  uint32_t  reflexive_addr;  // sender's server-reflexive IPv4 (host byte order)
+  uint16_t  reflexive_port;  // sender's server-reflexive port
+} wire_relay_punch_t;
+
 // --- AddrRequest ---
 
 typedef struct wire_addr_request_t {
@@ -453,6 +466,7 @@ cbor_item_t* wire_relay_send_encode(const wire_relay_send_t* msg);
 cbor_item_t* wire_relay_received_encode(const wire_relay_received_t* msg);
 cbor_item_t* wire_relay_challenge_encode(const wire_relay_challenge_t* msg);
 cbor_item_t* wire_relay_challenge_response_encode(const wire_relay_challenge_response_t* msg);
+cbor_item_t* wire_relay_punch_encode(const wire_relay_punch_t* msg);
 cbor_item_t* wire_addr_request_encode(const wire_addr_request_t* msg);
 cbor_item_t* wire_addr_response_encode(const wire_addr_response_t* msg);
 cbor_item_t* wire_gossip_encode(const wire_gossip_t* msg);
@@ -488,6 +502,7 @@ int wire_relay_send_decode(cbor_item_t* item, wire_relay_send_t* msg);
 int wire_relay_received_decode(cbor_item_t* item, wire_relay_received_t* msg);
 int wire_relay_challenge_decode(cbor_item_t* item, wire_relay_challenge_t* msg);
 int wire_relay_challenge_response_decode(cbor_item_t* item, wire_relay_challenge_response_t* msg);
+int wire_relay_punch_decode(cbor_item_t* item, wire_relay_punch_t* msg);
 int wire_addr_request_decode(cbor_item_t* item, wire_addr_request_t* msg);
 int wire_addr_response_decode(cbor_item_t* item, wire_addr_response_t* msg);
 int wire_gossip_decode(cbor_item_t* item, wire_gossip_t* msg);
@@ -521,5 +536,7 @@ void wire_relay_received_destroy(wire_relay_received_t* msg);
 void wire_relay_challenge_response_destroy(wire_relay_challenge_response_t* msg);
 // No nested allocations; frees the struct itself
 void wire_relay_challenge_destroy(wire_relay_challenge_t* msg);
+// No nested allocations; frees the struct itself
+void wire_relay_punch_destroy(wire_relay_punch_t* msg);
 
 #endif // OFFS_WIRE_H

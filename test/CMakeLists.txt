@@ -60,6 +60,7 @@ if (BUILD_TESTING)
             test_conn_state.cpp
             test_quic_integration.cpp
             test_peer_verify.cpp
+            test_peer_info_from_node.cpp
             test_platform.cpp
             test_platform_socket.cpp
             test_platform_file_sync.cpp

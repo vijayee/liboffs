@@ -36,15 +36,33 @@ void peer_handle_info_request(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
   local_info.node_id = auth->local_id;
   local_info.public_key = auth->public_key;       /* borrow — authority owns it */
   local_info.public_key_len = auth->public_key_len;
-  local_info.addresses = NULL;
-  local_info.address_count = 0;
+  /* Populate candidate addresses: include LAN (HOST) candidates only for
+     authenticated friends (privacy — never broadcast internal IPs to
+     arbitrary peers or in DHT gossip). SRFLX + RELAY candidates are always
+     safe to share. See audit #18. */
+  if (peer_info_from_node(&local_info, ctx->network,
+                          ctx->is_authenticated != 0) != 0) {
+    local_info.public_key = NULL;  /* borrowed — don't let destroy free it */
+    peer_info_destroy(&local_info);
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                    "Failed to populate local addresses");
+    return;
+  }
 
   /* Encode to CBOR and serialize to bytes */
   cbor_item_t* cbor_map = peer_info_encode(&local_info);
   if (cbor_map == NULL) {
+    /* public_key is borrowed from authority — NULL it so peer_info_destroy
+       only frees the addresses we allocated in peer_info_from_node. */
+    local_info.public_key = NULL;
+    peer_info_destroy(&local_info);
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR, "Failed to encode peer info");
     return;
   }
+  /* CBOR encode has copied address data into refcounted cbor items; release
+     our address array (public_key is still borrowed — NULL before destroy). */
+  local_info.public_key = NULL;
+  peer_info_destroy(&local_info);
 
   size_t serialized_len = cbor_serialized_size(cbor_map);
   uint8_t* serialized = get_clear_memory(serialized_len);
@@ -117,19 +135,15 @@ void peer_handle_connect(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     return;
   }
 
-  /* Find first direct address and connect */
-  int connected = 0;
-  for (size_t index = 0; index < remote_info.address_count; index++) {
-    if (remote_info.addresses[index].type == PEER_ADDR_DIRECT) {
-      int rc = network_connect_peer(ctx->network,
-                                    remote_info.addresses[index].host,
-                                    remote_info.addresses[index].port);
-      if (rc == 0) {
-        connected = 1;
-      }
-      break; /* only try the first direct address */
-    }
-  }
+  /* Try candidates in priority order: HOST (LAN) -> SRFLX (reflexive) ->
+     DIRECT (back-compat) -> RELAY. The first that connects wins. RELAY
+     candidates are admitted via the connection manager with
+     relay_endpoint_id set; no QUIC connection is needed. See audit #18. */
+  int connected = (network_connect_peer_candidates(ctx->network,
+                                                   &remote_info.node_id,
+                                                   remote_info.addresses,
+                                                   remote_info.address_count,
+                                                   false) == 0) ? 1 : 0;
 
   peer_info_destroy(&remote_info);
 
@@ -270,19 +284,14 @@ void peer_handle_friend_add(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
   auth->friend_peers[auth->friend_peer_count] = new_friend;
   auth->friend_peer_count = new_count;
 
-  /* Try to connect to the first direct address */
-  int connected = 0;
-  for (size_t index = 0; index < new_friend->address_count; index++) {
-    if (new_friend->addresses[index].type == PEER_ADDR_DIRECT) {
-      int rc = network_connect_peer(ctx->network,
-                                    new_friend->addresses[index].host,
-                                    new_friend->addresses[index].port);
-      if (rc == 0) {
-        connected = 1;
-      }
-      break;
-    }
-  }
+  /* Try candidates in priority order: HOST -> SRFLX -> DIRECT -> RELAY.
+     Friend peers are admitted via connection_manager_add_friend so they
+     skip Hebbian decay eviction. See audit #18. */
+  int connected = (network_connect_peer_candidates(ctx->network,
+                                                   &new_friend->node_id,
+                                                   new_friend->addresses,
+                                                   new_friend->address_count,
+                                                   true) == 0) ? 1 : 0;
 
   /* Report whether the best-effort connect to the first direct address
      succeeded, mirroring peer_handle_connect. The friend is added to the

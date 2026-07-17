@@ -1929,6 +1929,60 @@ void wire_relay_challenge_response_destroy(wire_relay_challenge_response_t* msg)
   free(msg);
 }
 
+// --- RelayPunch (symmetric NAT simultaneous-open signal) ---
+
+cbor_item_t* wire_relay_punch_encode(const wire_relay_punch_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(4);
+  cbor_item_t* entry;
+
+  entry = cbor_build_uint8(WIRE_RELAY_PUNCH);
+  (void)cbor_array_push(array, entry);
+  cbor_decref(&entry);
+
+  entry = _node_id_encode(&msg->sender_id);
+  (void)cbor_array_push(array, entry);
+  cbor_decref(&entry);
+
+  entry = cbor_build_uint32(msg->reflexive_addr);
+  (void)cbor_array_push(array, entry);
+  cbor_decref(&entry);
+
+  entry = cbor_build_uint16(msg->reflexive_port);
+  (void)cbor_array_push(array, entry);
+  cbor_decref(&entry);
+
+  return array;
+}
+
+int wire_relay_punch_decode(cbor_item_t* item, wire_relay_punch_t* msg) {
+  if (item == NULL || msg == NULL) return -1;
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 4) return -1;
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != WIRE_RELAY_PUNCH) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* sender = cbor_array_get(item, 1);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+
+  if (_array_get_uint32(item, 2, &msg->reflexive_addr) != 0) return -1;
+  uint16_t port_val;
+  if (_array_get_uint16(item, 3, &port_val) != 0) return -1;
+  msg->reflexive_port = port_val;
+  return 0;
+}
+
+void wire_relay_punch_destroy(wire_relay_punch_t* msg) {
+  if (msg == NULL) return;
+  /* No nested allocations; struct is flat. */
+  free(msg);
+}
+
 // --- AddrRequest ---
 
 cbor_item_t* wire_addr_request_encode(const wire_addr_request_t* msg) {

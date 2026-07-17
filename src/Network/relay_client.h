@@ -51,6 +51,8 @@ typedef struct relay_client_t {
 
   stream_framer_t* framer;
   uint32_t local_endpoint_id;
+  uint32_t reflexive_addr;   /* Server-reflexive IP (host byte order, from ADDR_RESPONSE). 0 if unknown. */
+  uint16_t reflexive_port;   /* Server-reflexive port (host byte order, from ADDR_RESPONSE). 0 if unknown. */
   ATOMIC(uint8_t) connected;
 
   pd_loop_t* loop;

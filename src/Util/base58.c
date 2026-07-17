@@ -28,7 +28,7 @@ static const int8_t BASE58_MAP[256] = {
     -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
 };
 
-#define BIGINT_SIZE 200
+#define BIGINT_SIZE 1024
 
 static void bigint_reverse(uint8_t* data, size_t len) {
     for (size_t i = 0, j = len - 1; i < j; i++, j--) {
