@@ -19,7 +19,7 @@ static const char* _string_fields[] = {
 
 static const char* _bool_fields[] = {
   "http_enabled", "https_enabled", "unix_enabled", "tcp_enabled",
-  "ws_enabled", "wt_enabled", "tcp_tls_enabled", "allow_insecure", NULL
+  "ws_enabled", "wt_enabled", "tcp_tls_enabled", "allow_secure", NULL
 };
 
 static const char* _number_fields[] = {
@@ -88,7 +88,7 @@ cJSON* config_to_json(const config_t* config) {
   else
     cJSON_AddNullToObject(root, "tcp_tls_key_path");
 
-  cJSON_AddBoolToObject(root, "allow_insecure", config->allow_insecure);
+  cJSON_AddBoolToObject(root, "allow_secure", config->allow_secure);
 
   if (config->api_key_hash)
     cJSON_AddStringToObject(root, "api_key_hash", config->api_key_hash);

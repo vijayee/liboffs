@@ -35,10 +35,10 @@ typedef struct authority_t {
   char* node_cert_path;
   char* node_key_path;
 
-  /* If true, allow NO_CERTIFICATE_VALIDATION when no CA is configured
-   * (trusted-LAN/research; logs a warning). Default false — fail closed
-   * without a CA. See audit #11. */
-  bool allow_insecure;
+  /* If true, require a configured CA and validate peer certificates.
+   * Default false — run without CA validation; connections are still
+   * encrypted. See audit #11 / 2026-07-21 allow_secure rename. */
+  bool allow_secure;
 
   char* relay_url;
   size_t max_peers;
