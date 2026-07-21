@@ -174,7 +174,7 @@ static void _conn_track_set_cert(quic_listener_t* listener, HQUIC connection,
 
 // Steal the stashed peer cert (DER) from the connection's tracking entry,
 // leaving the entry's cert NULL. Returns the cert in *out_cert / *out_len,
-// or NULL if no cert was stashed (allow_insecure mode). See audit #8.
+// or NULL if no cert was stashed (allow_secure=false mode). See audit #8.
 static void _conn_track_steal_cert(quic_listener_t* listener, HQUIC connection,
                                    uint8_t** out_cert, size_t* out_len) {
   *out_cert = NULL;
@@ -473,7 +473,7 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
       // QUIC_BUFFER* whose Buffer points to the DER-encoded leaf cert
       // (i2d_X509). Stash a copy on the connection's tracking entry so the
       // CONNECTED handler can pass it to the salutation handler for the
-      // audit #8 public_key pin. In allow_insecure mode (no cert indication
+      // audit #8 public_key pin. In allow_secure=false mode (no cert indication
       // flag), this event doesn't fire and the pin is a no-op.
       QUIC_BUFFER* cert_buf = (QUIC_BUFFER*)event->PEER_CERTIFICATE_RECEIVED.Certificate;
       if (cert_buf != NULL && cert_buf->Buffer != NULL && cert_buf->Length > 0) {
@@ -508,7 +508,7 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
           &peer_addr);
 
       // Steal the peer's leaf cert (DER) stashed during
-      // PEER_CERTIFICATE_RECEIVED. NULL in allow_insecure mode (no cert
+      // PEER_CERTIFICATE_RECEIVED. NULL in allow_secure=false mode (no cert
       // indication flag) — the salutation pin is then a no-op. See audit #8.
       uint8_t* peer_cert_der = NULL;
       size_t peer_cert_der_len = 0;
@@ -750,20 +750,20 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
                           QUIC_CREDENTIAL_FLAG_USE_PORTABLE_CERTIFICATES;
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)listener->peer_verify);
-    } else if (authority != NULL && authority->allow_insecure) {
-      log_warn("quic_listener: no CA configured and allow_insecure is set — "
-               "TLS will not authenticate peer certs (MITM possible). "
-               "Configure a CA for production. See audit #11.");
-      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
-    } else {
-      log_error("quic_listener: no CA configured and allow_insecure is not set "
-                "— refusing to start. Configure a CA, or set allow_insecure=1 "
-                "for trusted-LAN use. See audit #11.");
+    } else if (authority == NULL || authority->allow_secure) {
+      log_error("quic_listener: no CA configured (or authority unavailable) — "
+               "refusing to start. Provide a CA certificate or set "
+               "allow_secure=false.");
       listener->msquic->ConfigurationClose(listener->configuration);
       listener->configuration = NULL;
       listener->msquic->RegistrationClose(listener->registration);
       listener->registration = NULL;
       return -1;
+    } else {
+      log_info("quic_listener: running without CA-based peer validation "
+               "(allow_secure=false). Set allow_secure=true and configure a CA "
+               "to require validated peer certificates.");
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
     }
   } else {
     cred_config.CertificateFile = &cert_file;
@@ -773,20 +773,20 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
                           QUIC_CREDENTIAL_FLAG_USE_PORTABLE_CERTIFICATES;
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)listener->peer_verify);
-    } else if (authority != NULL && authority->allow_insecure) {
-      log_warn("quic_listener: no CA configured and allow_insecure is set — "
-               "TLS will not authenticate peer certs (MITM possible). "
-               "Configure a CA for production. See audit #11.");
-      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
-    } else {
-      log_error("quic_listener: no CA configured and allow_insecure is not set "
-                "— refusing to start. Configure a CA, or set allow_insecure=1 "
-                "for trusted-LAN use. See audit #11.");
+    } else if (authority == NULL || authority->allow_secure) {
+      log_error("quic_listener: no CA configured (or authority unavailable) — "
+               "refusing to start. Provide a CA certificate or set "
+               "allow_secure=false.");
       listener->msquic->ConfigurationClose(listener->configuration);
       listener->configuration = NULL;
       listener->msquic->RegistrationClose(listener->registration);
       listener->registration = NULL;
       return -1;
+    } else {
+      log_info("quic_listener: running without CA-based peer validation "
+               "(allow_secure=false). Set allow_secure=true and configure a CA "
+               "to require validated peer certificates.");
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
     }
   }
 
