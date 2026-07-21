@@ -829,8 +829,8 @@ static void network_handle_salutation(network_t* network, message_t* msg,
       return;
     }
   }
-  // If no peer cert (allow_insecure mode), the pin is a no-op; the BLAKE3
-  // check above is the only guard. This is the documented insecure-mode behavior.
+  // If no peer cert (allow_secure=false mode), the pin is a no-op; the BLAKE3
+  // check above is the only guard. This is the documented no-CA-validation behavior.
 
   // Add peer to connection manager with verified identity
   peer_connection_t* peer = connection_manager_add(
