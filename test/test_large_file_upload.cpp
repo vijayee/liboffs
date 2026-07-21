@@ -333,7 +333,7 @@ static int run_wt_node(uint16_t port, const char* cache_dir,
 
   wt_transport_t* transport = wt_transport_create(pool, bc, ofd_cache, tc,
                                                   "127.0.0.1", port,
-                                                  cert_path, key_path, NULL, true, 0, NULL,
+                                                  cert_path, key_path, NULL, false, 0, NULL,
                                                   &health_ctx);
   if (transport == NULL) return 1;
   wt_transport_start(transport);
@@ -716,10 +716,9 @@ cleanup:
         << "the BLAKE3 of source_data. The test data is corrupt; the seed "
         << "or fill routine is wrong.";
 
-    /* allow_insecure=true so the wt:// URL paths work without a CA — only
-     * the WT/wts branch of offs_client reads this flag (audit #11). */
+    /* offs_client_config_default() now disables CA validation
+     * (allow_secure=false), so wt:// URLs work without a CA by default. */
     offs_client_config_t cfg = offs_client_config_default();
-    cfg.allow_insecure = true;
     offs_client_t* client = offs_client_connect_ex(url.c_str(), NULL, &cfg);
     ASSERT_NE(client, nullptr) << "Failed to connect to " << url;
 
