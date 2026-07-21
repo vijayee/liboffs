@@ -247,7 +247,7 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
                                       const char* cert_path,
                                       const char* key_path,
                                       const char* ca_path,
-                                      bool allow_insecure,
+                                      bool allow_secure,
                                       size_t max_connections,
                                       const char* api_key_hash,
                                       health_context_t* health_ctx) {
@@ -293,10 +293,10 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
     transport->key_path = NULL;
   }
   /* Load CA for client-cert validation. If the CA fails to load, the cert
-   * config block falls back to NO_CERTIFICATE_VALIDATION with a logged
-   * warning (Task 2 will fail-close unless allow_insecure is set). */
+   * config block proceeds based on allow_secure (false disables validation
+   * with a logged info message; true requires a CA and fails closed). */
   transport->peer_verify = NULL;
-  transport->allow_insecure = allow_insecure;
+  transport->allow_secure = allow_secure;
   if (ca_path != NULL) {
     transport->peer_verify = peer_verify_ctx_create_from_pem_file(ca_path);
     if (transport->peer_verify == NULL) {
@@ -651,21 +651,21 @@ static void* _server_thread(void* arg) {
       cred_config.Flags |= QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)transport->peer_verify);
-    } else if (transport->allow_insecure) {
-      log_warn("wt_transport: no CA configured and allow_insecure is set — "
-               "TLS will not authenticate client certs (MITM possible). "
-               "Configure a CA for production. See audit #11.");
-      cred_config.Flags |= QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
-    } else {
-      log_error("wt_transport: no CA configured and allow_insecure is not set "
-                "— refusing to start. Configure a CA, or set allow_insecure=1 "
-                "for trusted-LAN use. See audit #11.");
+    } else if (transport->allow_secure) {
+      log_error("wt_transport: allow_secure=true but no CA configured — "
+                "refusing to start. Provide a CA certificate or set "
+                "allow_secure=false.");
       transport->msquic->ConfigurationClose(transport->configuration);
       transport->configuration = NULL;
       transport->msquic->RegistrationClose(transport->registration);
       transport->registration = NULL;
       atomic_store(&transport->running, 0);
       return NULL;
+    } else {
+      log_info("wt_transport: running without CA-based client cert validation "
+               "(allow_secure=false). Set allow_secure=true and configure a CA "
+               "to require validated client certificates.");
+      cred_config.Flags |= QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
     }
   } else {
     /* Self-signed / insecure mode for testing */
@@ -674,21 +674,21 @@ static void* _server_thread(void* arg) {
       cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)transport->peer_verify);
-    } else if (transport->allow_insecure) {
-      log_warn("wt_transport: no CA configured and allow_insecure is set — "
-               "TLS will not authenticate client certs (MITM possible). "
-               "Configure a CA for production. See audit #11.");
-      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
-    } else {
-      log_error("wt_transport: no CA configured and allow_insecure is not set "
-                "— refusing to start. Configure a CA, or set allow_insecure=1 "
-                "for trusted-LAN use. See audit #11.");
+    } else if (transport->allow_secure) {
+      log_error("wt_transport: allow_secure=true but no CA configured — "
+                "refusing to start. Provide a CA certificate or set "
+                "allow_secure=false.");
       transport->msquic->ConfigurationClose(transport->configuration);
       transport->configuration = NULL;
       transport->msquic->RegistrationClose(transport->registration);
       transport->registration = NULL;
       atomic_store(&transport->running, 0);
       return NULL;
+    } else {
+      log_info("wt_transport: running without CA-based client cert validation "
+               "(allow_secure=false). Set allow_secure=true and configure a CA "
+               "to require validated client certificates.");
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
     }
   }
 
@@ -812,12 +812,12 @@ wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
                                       const char* cert_path,
                                       const char* key_path,
                                       const char* ca_path,
-                                      bool allow_insecure,
+                                      bool allow_secure,
                                       size_t max_connections,
                                       const char* api_key_hash,
                                       health_context_t* health_ctx) {
   (void)pool; (void)bc; (void)ofd_cache; (void)tc;
-  (void)host; (void)port; (void)cert_path; (void)key_path; (void)ca_path; (void)allow_insecure; (void)max_connections; (void)api_key_hash; (void)health_ctx;
+  (void)host; (void)port; (void)cert_path; (void)key_path; (void)ca_path; (void)allow_secure; (void)max_connections; (void)api_key_hash; (void)health_ctx;
   return NULL;
 }
 
