@@ -82,6 +82,63 @@ Shutdown is triggered by SIGINT or SIGTERM. The signal handler clears the node `
 
 ## 6. Inside `liboffs`: the layers
 
+`liboffs` is not a monolithic module. Its code is split into semantic layers under `src/`, each with a single responsibility and a narrow interface to the layers above and below it. The BlockCache layer is the only one that touches the disk directly; OFFStreams builds the owner-free file abstractions on top of it; Network moves blocks between peers; ClientAPI turns local operations into remote endpoints; and the Actor/Scheduler layer runs all of the above concurrently. This layering keeps the storage engine, networking, and API surfaces independent, so you can replace or test each one without dragging the rest of the daemon into scope.
+
+| Layer           | Directory                                    | Responsibility                                          |
+|-----------------|----------------------------------------------|---------------------------------------------------------|
+| BlockCache      | `src/BlockCache/`                            | Fixed-size block storage, LRU, index, sections          |
+| OFFStreams      | `src/OFFStreams/`                            | ORI/OFD/tuple encoding and stream descriptors           |
+| Network         | `src/Network/`                               | QUIC/P2P, gossip, relay, peer discovery                 |
+| ClientAPI       | `src/ClientAPI/`                             | HTTP, Unix socket, TCP, WebSocket, WebTransport servers |
+| Actor/Scheduler | `src/Actor/`, `src/Scheduler/`, `src/Timer/` | Async actor system and timing                           |
+
+The BlockCache owns the physical store, keeping section files, maintaining the hash-to-location index with a write-ahead log, and caching hot blocks in memory with an LRU policy. OFFStreams turns user data into the OFF wire format: it splits a stream into fixed-size blocks, XORs each source block with randomizer blocks, records the output hashes in a tuple, and wraps the tuple in an ORI or OFD that can be encoded as an OFF URL. The Network layer implements direct QUIC peer connections, gossip for peer discovery and block availability, and relay-assisted NAT traversal. ClientAPI exposes the same operations through HTTP, Unix socket, TCP, WebSocket, and WebTransport servers so `offs`, the Flutter example, and future bindings share the daemon without duplicating protocol code. Finally, the Actor/Scheduler layer provides the asynchronous runtime: actors, message mailboxes, a thread-pool scheduler, and a timer wheel for timeouts and eviction.
+
+A block put or get therefore passes through the cache layer in a predictable pipeline:
+
+```
+PUT:                                 GET:
+  data                                 hash
+   │                                    │
+   ▼                                    ▼
+┌─────────────────┐              ┌─────────────────┐
+│ split into      │              │ check LRU       │
+│ fixed blocks    │              │ cache           │
+└────────┬────────┘              └────────┬────────┘
+         │                                │
+         ▼                                ▼
+┌─────────────────┐              ┌─────────────────┐
+│ BLAKE3 hash     │              │ check index     │
+└────────┬────────┘              └────────┬────────┘
+         │                                │
+         ▼                                ▼
+┌─────────────────┐              ┌─────────────────┐
+│ check index     │              │ read section    │
+└────────┬────────┘              └────────┬────────┘
+         │                                │
+         ▼                                ▼
+┌─────────────────┐              ┌─────────────────┐
+│ write section   │              │ read block      │
+└────────┬────────┘              └────────┬────────┘
+         │                                │
+         ▼                                ▼
+┌─────────────────┐              ┌─────────────────┐
+│ update index    │              │ add to LRU      │
+└────────┬────────┘              └────────┬────────┘
+         │                                │
+         ▼                                ▼
+┌─────────────────┐              ┌─────────────────┐
+│ add to LRU      │              │ resolve promise │
+└────────┬────────┘              └─────────────────┘
+         │
+         ▼
+┌─────────────────┐
+│ return promise  │
+└─────────────────┘
+```
+
+Every put deduplicates on the index before writing to disk, and every get tries the in-memory LRU first before falling back to the section files. Because both paths return promises, callers see the same asynchronous interface. The network and client layers operate on the same promises, so a remote request follows the same path once it reaches the daemon.
+
 ## 7. The `offs` CLI in action
 
 ## 8. Client libraries and bindings
