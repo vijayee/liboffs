@@ -67,6 +67,20 @@ const slides = [
       '<li><strong>JavaScript client</strong>: browser-only, supports HTTP, WebSocket, and WebTransport.</li>' +
       '</ul>'
     ]
+  },
+  {
+    title: 'Demo 1: Upload a PDF',
+    type: 'demo',
+    demoType: 'pdf',
+    fragments: [
+      '<p>Select a PDF file and upload it to the OFFS daemon.</p>'
+    ]
+  },
+  {
+    title: 'Demo 1 Result',
+    type: 'result',
+    demoType: 'pdf',
+    fragments: []
   }
 ];
 
@@ -93,6 +107,9 @@ function getButtonNext() {
   return document.getElementById('btn-next');
 }
 
+const client = typeof OffsClient !== 'undefined' ? new OffsClient('http://localhost:23402') : null;
+const demoResults = { pdf: null, video: null, site: null };
+
 function updateProgress() {
   const progressFill = getProgressFill();
   const slideCounter = getSlideCounter();
@@ -102,23 +119,99 @@ function updateProgress() {
   slideCounter.textContent = `${current + 1} / ${slides.length}`;
 }
 
+function wireDemoControls(slide) {
+  const fileInput = document.getElementById('demo-file');
+  const uploadBtn = document.getElementById('demo-upload');
+  const status = document.getElementById('demo-status');
+  if (!fileInput || !uploadBtn || !status) return;
+
+  fileInput.addEventListener('change', () => {
+    uploadBtn.disabled = !fileInput.files || fileInput.files.length === 0;
+  });
+
+  uploadBtn.addEventListener('click', async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    uploadBtn.disabled = true;
+    status.textContent = 'Uploading…';
+    status.className = 'status';
+    try {
+      await client.connect();
+      const arrayBuffer = await file.arrayBuffer();
+      const data = new Uint8Array(arrayBuffer);
+      const { oriString } = await client.put({
+        contentType: file.type || 'application/pdf',
+        fileName: file.name,
+        streamLength: data.length
+      }, data);
+      demoResults[slide.demoType] = oriString;
+      status.textContent = 'Upload complete. Advancing to result…';
+      status.className = 'status success';
+      setTimeout(next, 1200);
+    } catch (err) {
+      status.textContent = `Error: ${err.message}`;
+      status.className = 'status error';
+      uploadBtn.disabled = false;
+    }
+  });
+}
+
 function renderSlide() {
   const slideContent = getSlideContent();
   if (!slideContent) return;
   const slide = slides[current];
+
+  if (slide.type === 'result') {
+    const ori = demoResults[slide.demoType];
+    slideContent.className = 'slide slide-transition-enter';
+    slideContent.innerHTML = `
+      <div class="slide-content" style="display:flex;flex-direction:column;height:100%">
+        <h2>${slide.title}</h2>
+        ${ori ?
+          `<div class="ori-url">${ori}</div>
+           <div class="iframe-wrapper"><iframe src="${ori}" title="${slide.demoType} result"></iframe></div>` :
+          '<p class="status error">No upload result available. Go back and run the demo first.</p>'}
+      </div>
+    `;
+    void slideContent.offsetWidth;
+    updateProgress();
+    return;
+  }
+
   slideContent.className = 'slide slide-transition-enter';
   const fragmentHtml = (slide.fragments || [])
     .map((html, index) => `<div class="fragment ${index < fragmentIndex ? 'visible' : ''}" data-index="${index}">${html}</div>`)
     .join('');
+
+  let demoHtml = '';
+  if (slide.type === 'demo') {
+    const accept =
+      slide.demoType === 'pdf' ? '.pdf' :
+      slide.demoType === 'video' ? 'video/*' : '';
+    const directoryAttr = slide.demoType === 'site' ? 'webkitdirectory directory' : '';
+    demoHtml = `
+      <div class="demo-controls">
+        <input type="file" id="demo-file" accept="${accept}" ${directoryAttr}>
+        <button id="demo-upload" disabled>Upload to OFFS</button>
+        <div id="demo-status" class="status"></div>
+      </div>
+    `;
+  }
+
   slideContent.innerHTML = `
     <div class="slide-content">
       ${slide.subtitle ? `<h3>${slide.subtitle}</h3>` : ''}
       <h2>${slide.title}</h2>
       ${fragmentHtml}
+      ${demoHtml}
     </div>
   `;
   void slideContent.offsetWidth;
   updateProgress();
+
+  if (slide.type === 'demo') {
+    wireDemoControls(slide);
+  }
 }
 
 function next() {
