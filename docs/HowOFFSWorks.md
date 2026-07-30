@@ -39,6 +39,39 @@ The implementation of these OFF structures lives in `src/OFFStreams/`, which han
 
 ## 4. The three binaries: library, daemon, and CLI
 
+OFFS ships as three cooperating artifacts instead of a single monolithic program: a C library, a long-running daemon, and a command-line client. This separation lets you embed the storage engine in your own application, run it as a background service, and manage it remotely without each tool duplicating code.
+
+`liboffs` is the core C library. It owns the block cache, the OFF stream machinery, the scheduler and actor runtime, the peer-to-peer network layer, and the client API transport implementations. The block cache stores fixed-size blocks on disk and indexes them by BLAKE3 hash. OFFStreams provide the readable and writeable descriptors that turn those blocks into ORIs, OFDs, and tuples. The network layer implements QUIC gossip, relays, and peer discovery. ClientAPI exposes HTTP, Unix socket, TCP, WebSocket, and WebTransport endpoints. All other OFFS components are built directly on `liboffs`.
+
+`offsd` is the daemon. It initializes the scheduler pool, loads configuration, starts the block, OFD, and tuple caches, opens the client transports, and then listens for peer connections and admin requests until it receives a shutdown signal. The daemon is meant to run as a system service and keep all local state across long sessions.
+
+`offs` is the administration CLI. Modeled after Docker's daemon/client split, the binary itself performs no storage work. It opens a Unix socket to `offsd` and sends CBOR-encoded wire-protocol messages to start or stop the daemon, put and get files, inspect blocks, list peers, manage friends, and read or update configuration. The same CLI can target the local daemon or, when the client endpoint is reachable, a remote one.
+
+```
+┌─────────────────────────────────────────────┐
+│                 APPLICATIONS                  │
+│  offs CLI │ Flutter example │ future bindings│
+└──────────────────┬────────────────────────────┘
+                   │
+        ┌──────────┴──────────┐
+        │      ClientAPI        │
+        │  HTTP / Unix / TCP /  │
+        │ WebSocket / WebTransport │
+        └──────────┬──────────────┘
+                   │
+        ┌──────────┴──────────┐
+        │       offsd         │
+        │  daemon built on    │
+        │      liboffs        │
+        └──────────┬──────────┘
+                   │
+        ┌──────────┴──────────┐
+        │       liboffs         │
+        │  BlockCache │ Network │
+        │ OFFStreams │ ClientAPI│
+        └───────────────────────┘
+```
+
 ## 5. Inside `offsd`: from startup to shutdown
 
 ## 6. Inside `liboffs`: the layers
