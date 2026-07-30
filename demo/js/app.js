@@ -125,6 +125,13 @@ function wireDemoControls(slide) {
   const status = document.getElementById('demo-status');
   if (!fileInput || !uploadBtn || !status) return;
 
+  if (!client) {
+    status.textContent = 'OFFS client library is not loaded. Make sure offs-client.umd.js is available.';
+    status.className = 'status error';
+    uploadBtn.disabled = false;
+    return;
+  }
+
   fileInput.addEventListener('change', () => {
     uploadBtn.disabled = !fileInput.files || fileInput.files.length === 0;
   });
