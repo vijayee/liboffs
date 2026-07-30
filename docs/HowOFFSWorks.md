@@ -141,6 +141,27 @@ Every put deduplicates on the index before writing to disk, and every get tries 
 
 ## 7. The `offs` CLI in action
 
+`offs` is the command-line companion to `offsd`. It follows Docker's daemon/client split: the binary performs no storage work itself. Instead it opens a Unix socket to a running `offsd` and exchanges CBOR-encoded wire-protocol messages. This keeps the administration tool small and lets it manage either the local daemon or any `offsd` whose Unix socket path is reachable.
+
+The command surface is a single dispatch table. The available commands are `start`, `stop`, `restart`, `put`, `get`, `block`, `peer`, `config`, `friend`, `health`, `status`, `version`, and `help`. Most commands need an active daemon connection, but a few are handled client-side: `start`, `stop`, `restart`, and `version` never open a socket, and `config help` and `put --help` are pure client-side help.
+
+The CLI is deliberately flexible about two global flags. Before it looks at the subcommand, `offs` scans the entire `argv` and lifts `--socket <path>` and `--lang <code>` out wherever they appear, consuming each value. The remaining arguments are compacted in place so the subcommand handler sees a clean `argv`. That means `offs --socket /tmp/offs.sock health` and `offs health --socket /tmp/offs.sock` both connect to the same socket. Language detection defaults from `OFFS_LANG`, then `LANG`, then falls back to English, and `--lang` overrides it.
+
+Once the global flags are removed, the first remaining argument selects the handler from `cli_command_table()`. The matching handler lives in `OFFS/src/offs/commands/` (`put.c`, `get.c`, `peer.c`, `start_stop.c`, and the rest). Socket-requiring handlers receive a connected `cli_client_t` that encodes the request as CBOR and reads the daemon's response.
+
+A typical foreground session looks like this:
+
+```bash
+# Start the daemon in the foreground
+./offsd --foreground --cache-dir /tmp/offs-cache --data-dir /tmp/offs-data
+
+# In another terminal
+./offs health
+./offs put ./README.md
+./offs get <ori-string>
+./offs peer list
+```
+
 ## 8. Client libraries and bindings
 
 ## 9. Security and trust model
