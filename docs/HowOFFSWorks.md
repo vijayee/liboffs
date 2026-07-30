@@ -12,11 +12,11 @@ Retrieval is driven by an OFF URL or ORI string: a compact identifier that names
 
 The OFF System grew out of the hacktivism collective The Big Hack around 2003, with early design and prototyping by Cheater512, CaptainMorgan, Aqlo, and WhiteRaven. The first public proof of concept was a rudimentary PHP demo that circulated on CDs in 2004. It demonstrated the core idea, but it was not yet a practical network client.
 
-The real mainline appeared when SpectralMorning re-implemented the system in C++. CaptainMorgan announced the public launch in 2006, promoting it as a copy-less file system in which the network carries only random-looking data blocks. By April 2008, a beta test had reached more than one hundred nodes. Active development stopped when SpectralMorning halted work in late 2008, leaving the original project in maintenance mode with only minor bug-fix releases afterward.
+The real mainline appeared when SpectralMorning re-implemented the system in C++. CaptainMorgan announced the public launch in 2006, promoting it as a copyless file system in which the network carries only random-looking data blocks. By April 2008, a beta test had reached more than one hundred nodes. Active development stopped when SpectralMorning halted work in late 2008, leaving the original project in maintenance mode with only minor bug-fix releases afterward.
 
-Despite the slowdown, the ecosystem produced several alternative clients. BlocksNet, written in Ruby, was maintained from 2007 to 2011. OFFLoad offered a more minimal fork of the same ideas, and Monolith explored the block-recombination concept without any networking layer at all.
+Despite the slowdown, the ecosystem produced several alternative clients. BlocksNet, written in Ruby, was maintained from 2007 to 2011. OFFLoader offered a more minimal fork of the same ideas, and Monolith explored the block-recombination concept without any networking layer at all.
 
-Today, liboffs/OFFS is a modern re-interpretation of the same brightnet idea by Prometheus-SCN. Where a darknet hides traffic routes, OFFS keeps the network open and instead anonymizes the data blocks themselves, continuing the original claim that no one can own mathematics or numbers.
+Today, liboffs/OFFS is a modern reinterpretation of the same brightnet idea by Prometheus-SCN. Where a darknet hides traffic routes, OFFS keeps the network open and instead anonymizes the data blocks themselves, continuing the original claim that no one can own mathematics or numbers.
 
 ## 3. Core data model: blocks, descriptors, and ORIs
 
