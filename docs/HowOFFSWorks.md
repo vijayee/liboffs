@@ -164,6 +164,36 @@ A typical foreground session looks like this:
 
 ## 8. Client libraries and bindings
 
+liboffs exposes its operations through two main surfaces: a C client library in `src/ClientLibs/c/offs_client.h` for native applications, and plain HTTP endpoints that higher-level clients such as the Flutter example can call directly. Both surfaces talk to the same `offsd` daemon through ClientAPI.
+
+The C API is the primary binding surface for native code. `offs_client_connect_ex(url, api_key, config)` opens a connection, applies retry/timeouts, and optionally validates the server's TLS certificate through `ca_path` and `allow_secure` in `offs_client_config_t`. Once connected, `offs_client_put_ex()` performs a buffered upload with recycler URLs and temporary-storage options, while the streaming variants `offs_client_put_stream_start_ex`, `offs_client_put_stream_data`, and `offs_client_put_stream_end` feed data incrementally. Retrieval is done with `offs_client_get(ori_string, ...)` which delivers chunks through a data callback and signals completion through an end callback. Lower-level block cache operations are available through `offs_client_block_put`, `offs_client_block_get`, and `offs_client_block_delete`, and `offs_client_health` returns a JSON health response. All results are delivered asynchronously through callback functions.
+
+```c
+offs_client_config_t config = offs_client_config_default();
+config.connect_timeout_ms = 5000;
+config.allow_secure = true;
+config.ca_path = "/etc/offs/ca.pem";
+
+offs_client_t* client = offs_client_connect_ex(
+    "http://localhost:23402", "secret-api-key", &config);
+
+const uint8_t payload[] = "hello, OFFS";
+offs_client_put_ex(client,
+                   &(offs_put_options_t){
+                     .content_type = "text/plain",
+                     .file_name = "greeting.txt",
+                     .stream_length = sizeof(payload) - 1,
+                   },
+                   payload, sizeof(payload) - 1,
+                   on_put_response, NULL);
+
+offs_client_disconnect(client);
+```
+
+The Flutter example in `examples/off_client/lib/services/off_api.dart` takes a different approach. Its `OffApi` class speaks plain HTTP to the daemon, so it can run on any platform that supports Dart's `http` package. `uploadFile` streams a file to `PUT /offsystem` without loading the whole file into memory, setting headers such as `type`, `file-name`, `stream-length`, and optional `server-address`, `recycler`, and `temporary`. `downloadFile` fetches data from an OFF URL with a simple `GET`. The class also wraps `/health`, `/peer/info`, `/peer/connect`, and `/friends` for health checks, peer introspection, outbound peer connections, and friend-list management. API-key authentication is carried on admin endpoints via an `Authorization: Bearer` header.
+
+Because the C API exposes connection, put, get, block, and health operations through stable C types and callbacks, it is the natural binding surface for other languages. Python, Go, Rust, and similar environments can wrap `offs_client_t` with FFI, cgo, or foreign-function interfaces, while mobile or web clients can follow the Flutter pattern and use the HTTP endpoints directly.
+
 ## 9. Security and trust model
 
 ## 10. Current status and where it fits
