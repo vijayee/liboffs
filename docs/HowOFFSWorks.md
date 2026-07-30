@@ -136,7 +136,41 @@ PUT:                                 GET:
 
 Every put deduplicates on the index before writing to disk, and every get tries the in-memory LRU before falling back to the section files. Because both paths return promises, callers see the same asynchronous interface whether the request is local or remote.
 
-## 7. The `offs` CLI in action
+## 7. How the network works
+
+The network layer in `src/Network/` turns a local block cache into a distributed store. It is built on QUIC peer connections, a Meridian-style ring overlay, gossip-based discovery, attenuated Bloom filters for block routing, Hebbian learning for topology optimization, and relay-assisted NAT traversal.
+
+### Peer identities and connections
+
+Each node has a stable identity derived from its public key. The `authority_t` subsystem in `src/Network/authority.c` loads the node's certificate and key, derives the node ID, and signs salutation messages. When a node wants to talk to a peer, it tries a list of connection candidates in priority order: direct host address, server-reflexive address learned from a relay, direct UDP after hole punching, and finally a relayed path. The connection manager admits peers, tracks their state, and associates a persistent bidirectional QUIC stream with each successful connection.
+
+### Rings and gossip
+
+Peer discovery is inspired by Meridian. Each node organizes its peers into concentric rings of exponentially increasing latency. A new node joins by contacting a bootstrap peer, copying that peer's ring members, measuring latency to them, and placing them into its own rings. Ongoing discovery uses a two-phase gossip scheduler: an aggressive initial phase with short intervals so a new node quickly populates its rings, followed by a steady-state phase with longer intervals. During each gossip round, a node picks random members from its rings and exchanges peer samples, then probes them to refresh latency information.
+
+### Routing blocks: EABF and directed walks
+
+Block lookup uses an **EABF** (Exponentially Attenuated Bloom Filter), inspired by Quasar. Every peer connection owns a multi-level Bloom filter. The local node's level-0 filter records the block hashes it stores. Higher levels are built by merging the level-0 filters of its neighbors, with each level representing one additional hop of reach. A level-0 entry is authoritative ("I have this block"), while a level-3 entry means "someone up to three hops away probably has this block." Each level has its own TTL; the timing wheel in `src/Network/timing_wheel.c` schedules when entries expire, with higher levels fading faster than lower levels.
+
+When a node needs a block it does not have, it sends a `WIRE_FIND_BLOCK` message. The recipient checks its EABF and either returns the block, or forwards the request to the best next-hop peers selected by roulette-wheel weighting. A visited Bloom filter in the message prevents loops and limits the walk to six hops. The same machinery supports `WIRE_CLOSEST_NODES`, which locates peers near a target node ID or address using the ring structure and beta-convergence checks.
+
+### Hebbian learning
+
+The overlay improves itself through Hebbian learning, adapted from SoPPSoN. Each directed edge `self → peer` has a weight. Successful RPCs strengthen weights along the path: a node that provided a block gets a frequency boost, intermediate forwarders get feedback, and the reverse direction gets a symmetry boost. Slow or failed searches reduce weights. Periodic decay keeps the table fresh and lets the topology adapt as peers join, leave, or move. This turns raw gossip connections into an optimized routing substrate.
+
+### Storing and recalling blocks
+
+Storage is also cooperative. A `WIRE_STORE_BLOCK` request asks selected peers to accept a block. The origin aggregates their responses and reports how many replicas were accepted. If a node runs low on cache capacity, the respiration actor decides whether to inhale (seek more blocks), exhale (shed blocks to stay near 50% capacity), or do nothing. Shed blocks can be offered to peers through `WIRE_RECALL_BLOCK` / recall accept/decline messages.
+
+### NAT traversal and relays
+
+Not every node is directly reachable. `offsd` can connect to a relay server on a public host. The relay provides server-reflexive address discovery and forwards messages between peers behind NAT. After relay-mediated rendezvous, peers attempt UDP hole punching to establish a direct QUIC path. The relay also implements a signed-nonce challenge so a peer cannot impersonate another through the relay. On the same LAN, mDNS discovery lets nodes find each other without using the relay at all.
+
+### Wire protocol
+
+All peer messages are CBOR-encoded and sent over the persistent QUIC streams. The message types include ping and capacity probes, `FIND_BLOCK`, `FIND_NODE`, `STORE_BLOCK`, `SEEKING_BLOCKS`, `RANK_BLOCK`, `RECALL_BLOCK`, relay addressing, and relay hole-punching. The wire format is defined in `src/Network/wire.h`.
+
+## 8. The `offs` CLI in action
 
 `offs` is the command-line companion to `offsd`. It performs no storage work itself; it opens a Unix socket to a running `offsd` and exchanges CBOR-encoded messages. The available commands are `start`, `stop`, `restart`, `put`, `get`, `block`, `peer`, `config`, `friend`, `health`, `status`, `version`, and `help`.
 
@@ -155,7 +189,7 @@ A typical foreground session looks like this:
 ./offs peer list
 ```
 
-## 8. Client libraries and bindings
+## 9. Client libraries and bindings
 
 liboffs exposes its operations through two surfaces: a C client library for native applications, and plain HTTP endpoints for higher-level clients such as the Flutter example. Both talk to the same `offsd` daemon through ClientAPI.
 
@@ -195,7 +229,7 @@ The Flutter example in `examples/off_client/lib/services/off_api.dart` takes the
 
 Other languages can wrap the C API with FFI, cgo, or similar interfaces, while mobile or web clients can follow the Flutter pattern and use the HTTP endpoints directly.
 
-## 9. Security and trust model
+## 10. Security and trust model
 
 OFFS uses a layered security model: transport-level credentials for peer and admin traffic, content-level anonymization through the OFF block transform, and no central authority that knows what any node is storing.
 
@@ -207,8 +241,8 @@ The brightnet property itself is a security primitive. No single node ever store
 
 Connectivity uses relay-assisted NAT traversal when direct QUIC peer connections are not possible, plus mDNS for same-LAN discovery.
 
-## 10. Current status and where it fits
+## 11. Current status and where it fits
 
-liboffs/OFFS is a working research and developer preview of the brightnet idea, not a production-ready public storage network. The block cache, OFF stream machinery, actor/scheduler runtime, and multi-transport ClientAPI are implemented and testable; the daemon can start, store blocks, serve admin requests, and communicate with peers. Active development is concentrated in the areas listed in `docs/Investigate.md` and the current tiered plans: multi-hop RPC behavior and memory-safety hardening, concurrency teardown and scheduler ordering, relay/NAT hole punching and same-LAN discovery, and CLI/daemon streaming consistency across the Unix socket, C client library, and HTTP endpoints.
+liboffs/OFFS is a working research and developer preview of the brightnet idea, not a production-ready public storage network. The block cache, OFF stream machinery, actor/scheduler runtime, network layer, and multi-transport ClientAPI are implemented and testable; the daemon can start, store blocks, serve admin requests, and communicate with peers. Active development is concentrated in the areas listed in `docs/Investigate.md` and the current tiered plans: multi-hop RPC behavior and memory-safety hardening, concurrency teardown and scheduler ordering, relay/NAT hole punching and same-LAN discovery, and CLI/daemon streaming consistency across the Unix socket, C client library, and HTTP endpoints.
 
 What ties these efforts together is the original brightnet promise: an open network where the data itself is anonymized. OFFS does not try to hide routes or timestamps; it makes every stored block look like random noise and lets the same block serve many unrelated files. The current implementation is a step toward that goal, and the ongoing work is aimed at making the network layer reliable and safe enough that the brightnet property can hold in practice as well as in theory.
