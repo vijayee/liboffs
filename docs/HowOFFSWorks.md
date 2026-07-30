@@ -20,6 +20,21 @@ Today, liboffs/OFFS is a modern reinterpretation of the same brightnet idea by P
 
 ## 3. Core data model: blocks, descriptors, and ORIs
 
+OFFS stores data as fixed-size blocks rather than files. liboffs defines four block sizes so the system can choose the granularity that best fits a given payload:
+
+- Mega: 1 MB
+- Standard: 128 KB
+- Mini: 64 KB
+- Nano: 136 bytes
+
+Every block is identified by its BLAKE3 hash. Because the hash is deterministic, identical blocks map to the same identifier, so the store keeps only one physical copy of any given block. This content-addressing model provides built-in deduplication across unrelated files: a block that appears in two different representations is stored once and referenced twice. The physical storage is organized into section files on disk, while the Index component records each hash-to-location mapping in a write-ahead log. On start-up the index replays that WAL to rebuild the hash-location tree; on every put the index is updated and logged before the promise resolves.
+
+The OFF layer turns those raw blocks into retrievable representations. The public key for retrieval is an ORI string, a compact identifier that names the representation and carries enough information for a client to locate the required blocks. The actual recipe is stored in an OFD descriptor, which records the tuple of blocks that must be combined to produce the output.
+
+A tuple is encoded as an XOR chain: a source block is XORed with one or more randomizer blocks to yield an output block. Reversing the operation is the same operation, so anyone holding the descriptor and the referenced blocks can reconstruct the data, while the raw blocks themselves remain indistinguishable from random noise. The descriptor is small and stored separately from the blocks it names, preserving the brightnet separation between possession and meaning.
+
+The implementation of these OFF structures lives in `src/OFFStreams/`, which handles ORI parsing, OFD creation, tuple encoding, and the stream descriptors that connect them to the block cache and network layers.
+
 ## 4. The three binaries: library, daemon, and CLI
 
 ## 5. Inside `offsd`: from startup to shutdown
