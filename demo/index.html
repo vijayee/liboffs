@@ -2,11 +2,28 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>The OFF System</title>
   <link rel="stylesheet" href="css/slides.css">
 </head>
 <body>
-  <div id="slide-content"></div>
+  <div class="deck">
+    <header class="deck-header">
+      <img src="assets/off-logo.svg" alt="OFF System logo" class="logo">
+    </header>
+    <main id="slide-content" class="slide"></main>
+    <footer class="deck-footer">
+      <div class="progress" aria-label="slide progress">
+        <div id="progress-fill" class="progress-fill"></div>
+      </div>
+      <div class="controls">
+        <button id="btn-prev" class="control" aria-label="previous slide">&#10094;</button>
+        <span id="slide-counter" class="counter">1 / 14</span>
+        <button id="btn-next" class="control" aria-label="next slide">&#10095;</button>
+      </div>
+    </footer>
+  </div>
+  <script src="../src/ClientLibs/js/offs-client/dist/offs-client.umd.js"></script>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>

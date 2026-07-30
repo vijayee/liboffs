@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { renderSlide, nextSlide, prevSlide } from '../js/app.js';
+import { renderSlide } from '../js/app.js';
 
 describe('navigation', () => {
   beforeEach(() => {
@@ -8,6 +8,6 @@ describe('navigation', () => {
 
   it('renders the first slide', () => {
     renderSlide();
-    expect(document.getElementById('slide-content').textContent).toBe('');
+    expect(document.getElementById('slide-content').textContent).toContain('The OFF System');
   });
 });
