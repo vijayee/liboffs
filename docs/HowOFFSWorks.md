@@ -204,4 +204,26 @@ Because the C API exposes connection, put, get, block, and health operations thr
 
 ## 9. Security and trust model
 
+OFFS uses a layered security model: transport-level credentials for peer and admin traffic, content-level anonymization through the OFF block transform, and no central authority that knows what any node is storing.
+
+Peer and client transports are built on TLS-capable transports. The daemon loads `--ca-cert`, `--node-cert`, and `--node-key` into the `authority_t` identity subsystem. When `allow_secure` is true, the node requires a configured CA and validates peer certificates on QUIC, WebTransport, and relay connections, so encrypted links are also authenticated links. When `allow_secure` is false (the current default), connections are still encrypted but not authenticated against a CA, which is convenient for trusted-LAN or research deployments but leaves the node open to MITM on untrusted networks. The CLI and daemon let an operator opt into the stricter mode explicitly; the default is intentionally conservative for experimentation, not for public-internet deployment.
+
+Admin endpoints on ClientAPI carry an API key via an `Authorization: Bearer` header. The HTTP server registers middleware around the OFF, block, peer, config, and friend routes, so management requests must present the configured key while ordinary storage retrieval does not require one. This separates peer-to-peer block exchange from node administration.
+
+The brightnet property itself is a security primitive. No single node ever stores a complete file; it keeps only fixed-size blocks that are XOR-mixed with randomizer blocks and content-addressed by BLAKE3 hash. The same random-looking block can appear in many unrelated representations, and without the ORI or OFF URL there is no way to know which blocks belong to which content. Possession and meaning are deliberately separated: a node can prove it holds a block without revealing what that block is for.
+
+Connectivity uses relay-assisted NAT traversal when direct QUIC peer connections are not possible. The relay server runs on a publicly reachable host; peers behind NAT can exchange rendezvous information through the relay and then attempt UDP hole punching for direct paths. mDNS is also used for same-LAN discovery, so nodes on the same local network can find each other without going through an external relay.
+
 ## 10. Current status and where it fits
+
+liboffs/OFFS is a working research and developer preview of the brightnet idea, not a production-ready public storage network. The block cache, OFF stream machinery, actor/scheduler runtime, and multi-transport ClientAPI are implemented and testable; the daemon can start, store blocks, serve admin requests, and communicate with peers. Active development is concentrated in a few areas that are visible in `docs/Investigate.md` and the current tiered plans.
+
+Multi-hop RPC behavior and memory-safety hardening are a primary focus. The multi-hop FindBlock/ClosestNodes path has known issues with colliding message IDs, missing request timeouts, and first-response-wins failure semantics, and the tiered plans call for monotonic IDs, a pending-request timeout sweep, proper not-found relaying, and fanout counting so a dead-end neighbor does not abort a still-live search. Memory-safety work is similarly staged: the tier-1 plan targets heap over-reads, payload leaks, and refcounter/actor teardown races that could be triggered by untrusted input, while the tier-2 plan addresses larger concurrency teardown ordering in the block-cache sections, QUIC connection shutdown, relay server, and WebTransport client paths.
+
+Concurrency teardown and scheduler work runs alongside that. The scheduler, message queues, and actor lifecycle have already seen fixes for send-vs-destroy races and re-queue-vs-destroy use-after-free conditions, and further work is planned around sections dispatch, network shutdown sequencing, and relay/transport quiesce before freeing connection state.
+
+NAT traversal and same-LAN peer discovery are partially in place. mDNS-based local discovery and relay-assisted hole punching have landed, and remaining work focuses on making hole punching more reliable and deciding how internal IP addresses should be included in connection information without leaking topology.
+
+CLI/daemon streaming consistency is the fourth active area. The `offs` CLI and `offsd` daemon coordinate over a Unix socket CBOR protocol, and the current focus is on making put/get streaming behavior consistent across the CLI, C client library, and HTTP endpoints.
+
+What ties these efforts together is the original brightnet promise: an open network where the data itself is anonymized. OFFS does not try to hide routes or timestamps; it makes every stored block look like random noise and lets the same block serve many unrelated files. The current implementation is a step toward that goal, and the ongoing work is aimed at making the network layer reliable and safe enough that the brightnet property can hold in practice as well as in theory.
