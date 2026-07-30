@@ -48,28 +48,28 @@ OFFS ships as three cooperating artifacts instead of a single monolithic program
 `offs` is the administration CLI. Modeled after Docker's daemon/client split, the binary itself performs no storage work. It opens a Unix socket to `offsd` and sends CBOR-encoded wire-protocol messages to start or stop the daemon, put and get files, inspect blocks, list peers, manage friends, and read or update configuration. The same CLI can target the local daemon or, when the client endpoint is reachable, a remote one.
 
 ```
-┌─────────────────────────────────────────────┐
+┌───────────────────────────────────────────────┐
 │                 APPLICATIONS                  │
-│  offs CLI │ Flutter example │ future bindings│
-└──────────────────┬────────────────────────────┘
-                   │
-        ┌──────────┴──────────┐
-        │      ClientAPI        │
-        │  HTTP / Unix / TCP /  │
-        │ WebSocket / WebTransport │
-        └──────────┬──────────────┘
-                   │
-        ┌──────────┴──────────┐
-        │       offsd         │
-        │  daemon built on    │
-        │      liboffs        │
-        └──────────┬──────────┘
-                   │
-        ┌──────────┴──────────┐
-        │       liboffs         │
-        │  BlockCache │ Network │
-        │ OFFStreams │ ClientAPI│
-        └───────────────────────┘
+│  offs CLI │ Flutter example │ future bindings │
+└───────────────────────┬───────────────────────┘
+                        │
+┌───────────────────────┴───────────────────────┐
+│                   ClientAPI                   │
+│              HTTP / Unix / TCP /              │
+│           WebSocket / WebTransport            │
+└───────────────────────┬───────────────────────┘
+                        │
+┌───────────────────────┴───────────────────────┐
+│                     offsd                     │
+│                daemon built on                │
+│                    liboffs                    │
+└───────────────────────┬───────────────────────┘
+                        │
+┌───────────────────────┴───────────────────────┐
+│                    liboffs                    │
+│              BlockCache │ Network             │
+│             OFFStreams │ ClientAPI            │
+└───────────────────────────────────────────────┘
 ```
 
 ## 5. Inside `offsd`: from startup to shutdown
