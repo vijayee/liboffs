@@ -70,8 +70,14 @@ function initDeck() {
   btnPrev?.addEventListener('click', previous);
   btnNext?.addEventListener('click', next);
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'ArrowRight' || event.key === ' ') next();
-    if (event.key === 'ArrowLeft') previous();
+    if (event.key === 'ArrowRight' || event.key === ' ') {
+      event.preventDefault();
+      next();
+    }
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      previous();
+    }
   });
   renderSlide();
 }
