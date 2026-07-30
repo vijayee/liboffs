@@ -81,6 +81,20 @@ const slides = [
     type: 'result',
     demoType: 'pdf',
     fragments: []
+  },
+  {
+    title: 'Demo 2: Upload a Video',
+    type: 'demo',
+    demoType: 'video',
+    fragments: [
+      '<p>Select a video file and upload it to the OFFS daemon.</p>'
+    ]
+  },
+  {
+    title: 'Demo 2 Result',
+    type: 'result',
+    demoType: 'video',
+    fragments: []
   }
 ];
 
