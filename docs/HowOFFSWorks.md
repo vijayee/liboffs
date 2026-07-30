@@ -166,16 +166,18 @@ A typical foreground session looks like this:
 
 liboffs exposes its operations through two main surfaces: a C client library in `src/ClientLibs/c/offs_client.h` for native applications, and plain HTTP endpoints that higher-level clients such as the Flutter example can call directly. Both surfaces talk to the same `offsd` daemon through ClientAPI.
 
-The C API is the primary binding surface for native code. `offs_client_connect_ex(url, api_key, config)` opens a connection, applies retry/timeouts, and optionally validates the server's TLS certificate through `ca_path` and `allow_secure` in `offs_client_config_t`. Once connected, `offs_client_put_ex()` performs a buffered upload with recycler URLs and temporary-storage options, while the streaming variants `offs_client_put_stream_start_ex`, `offs_client_put_stream_data`, and `offs_client_put_stream_end` feed data incrementally. Retrieval is done with `offs_client_get(ori_string, ...)` which delivers chunks through a data callback and signals completion through an end callback. Lower-level block cache operations are available through `offs_client_block_put`, `offs_client_block_get`, and `offs_client_block_delete`, and `offs_client_health` returns a JSON health response. All results are delivered asynchronously through callback functions.
+The C API is the primary binding surface for native code. `offs_client_connect_ex(url, api_key, config)` opens a connection, applies retry/timeouts, and optionally enforces TLS certificate validation through `ca_path` and `allow_secure` in `offs_client_config_t` (when `allow_secure` is true, a `ca_path` must be set). The client understands `unix://`, `tcp://`, `ws://`, `wss://`, `wt://`, and `wts://` transport URLs. Once connected, `offs_client_put_ex()` performs a buffered upload with recycler URLs and temporary-storage options, while the streaming variants `offs_client_put_stream_start_ex`, `offs_client_put_stream_data`, and `offs_client_put_stream_end` feed data incrementally. Retrieval is done with `offs_client_get(ori_string, ...)` which delivers chunks through a data callback and signals completion through an end callback. Lower-level block cache operations are available through `offs_client_block_put`, `offs_client_block_get`, and `offs_client_block_delete`, and `offs_client_health` returns a JSON health response. All results are delivered asynchronously through callback functions, so the caller must wait for the callback before disconnecting.
 
 ```c
+static void on_put_response(void* ctx, const char* ori_string) {
+  printf("stored as: %s\n", ori_string);
+}
+
 offs_client_config_t config = offs_client_config_default();
 config.connect_timeout_ms = 5000;
-config.allow_secure = true;
-config.ca_path = "/etc/offs/ca.pem";
 
 offs_client_t* client = offs_client_connect_ex(
-    "http://localhost:23402", "secret-api-key", &config);
+    "ws://localhost:23402", "secret-api-key", &config);
 
 const uint8_t payload[] = "hello, OFFS";
 offs_client_put_ex(client,
@@ -187,6 +189,7 @@ offs_client_put_ex(client,
                    payload, sizeof(payload) - 1,
                    on_put_response, NULL);
 
+/* run until the callback fires, then disconnect */
 offs_client_disconnect(client);
 ```
 
