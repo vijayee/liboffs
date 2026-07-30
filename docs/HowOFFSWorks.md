@@ -162,6 +162,13 @@ liboffs exposes its operations through two surfaces: a C client library for nati
 The C API in `src/ClientLibs/c/offs_client.h` is the primary binding surface. `offs_client_connect_ex(url, api_key, config)` opens a connection and applies retry/timeouts; it understands `unix://`, `tcp://`, `ws://`, `wss://`, `wt://`, and `wts://` URLs. For `wts://` connections, `ca_path` and `allow_secure` control TLS certificate validation. Buffered upload is done with `offs_client_put_ex()`, and streaming upload uses `offs_client_put_stream_start_ex`, `offs_client_put_stream_data`, and `offs_client_put_stream_end`. Retrieval uses `offs_client_get()`, block operations use `offs_client_block_put/get/delete`, and `offs_client_health` returns a JSON health response. All results arrive asynchronously through callbacks.
 
 ```c
+static volatile int put_done = 0;
+
+static void on_put_response(void* ctx, const char* ori_string) {
+  printf("stored as: %s\n", ori_string);
+  put_done = 1;
+}
+
 offs_client_config_t config = offs_client_config_default();
 config.connect_timeout_ms = 5000;
 
@@ -177,6 +184,11 @@ offs_client_put_ex(client,
                    },
                    payload, sizeof(payload) - 1,
                    on_put_response, NULL);
+
+while (!put_done) {
+  platform_sleep_ms(10);
+}
+offs_client_disconnect(client);
 ```
 
 The Flutter example in `examples/off_client/lib/services/off_api.dart` takes the HTTP route. Its `OffApi` class streams a file to `PUT /offsystem`, fetches data with `GET` on an OFF URL, and wraps `/health`, `/peer/info`, `/peer/connect`, and `/friends` for health checks and peer management. API-key authentication is carried on admin endpoints via an `Authorization: Bearer` header.
