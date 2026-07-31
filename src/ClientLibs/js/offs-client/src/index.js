@@ -9,7 +9,8 @@ import {
   offUrlToHttpUrl,
   mimeFromExtension,
   fileToReadableStream,
-  normalizeFolderEntries
+  normalizeFolderEntries,
+  basename
 } from './util.js';
 import { buildOfdCbor, ofdFile, ofdDirectory } from './ofd.js';
 
@@ -240,12 +241,18 @@ export class OffsClient {
       throw new Error('Use object options (contentType, fileName, streamLength)');
     }
 
+    const safeOptions = {
+      ...options,
+      fileName: basename(options.fileName)
+    };
+
     if (this.transport instanceof HttpTransport) {
       const body = data || new Uint8Array(0);
-      return this.transport.put(options, body);
+      return this.transport.put(safeOptions, body);
     }
 
-    const requestBytes = wire.encodePutRequest(options, data);
+    const requestBytes = wire.encodePutRequest(safeOptions, data);
+
     const responseBytes = await this._sendAndWait(requestBytes, wire.MSG.PUT_RESPONSE);
     return wire.decodePutResponse(responseBytes);
   }
@@ -552,7 +559,7 @@ export class OffsClient {
      * @returns {Promise<{oriString: string}>}
      */
     const uploadDirectory = async (dirPath) => {
-      const dirName = dirPath ? dirPath.split('/').pop() : rootDir.split('/').pop() || 'root';
+      const dirName = basename(dirPath ? dirPath : rootDir || 'root');
       const childEntries = _children(entries, dirPath);
       const fileEntries = childEntries;
       const subdirs = _childDirectories(entries, dirPath);
@@ -573,14 +580,14 @@ export class OffsClient {
           throw new Error(`Invalid directory hash in URL: ${subUrl}`);
         }
         ofdEntries.push(ofdDirectory({
-          name: subdir.split('/').pop() || subdir,
+          name: basename(subdir),
           dirHash
         }));
       }
 
       // Upload files in this directory.
       for (const fileEntry of fileEntries) {
-        const fileName = fileEntry.path.split('/').pop() || fileEntry.path;
+        const fileName = basename(fileEntry.path);
         const contentType = mimeFromExtension(fileName);
         const streamLength = fileEntry.file.size;
 

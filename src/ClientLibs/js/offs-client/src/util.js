@@ -205,6 +205,18 @@ export function readFileBytes(file) {
 }
 
 /**
+ * Return the last path segment, stripping any directory separators or parent
+ * references so the value is safe to use as a `file-name` header.
+ * @param {string} path
+ * @returns {string}
+ */
+export function basename(path) {
+  const normalized = path.replace(/\\\\/g, '/');
+  const parts = normalized.split('/').filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : 'file';
+}
+
+/**
  * Create a ReadableStream from a browser File.
  * @param {File} file
  * @param {number} [chunkSize=65536]

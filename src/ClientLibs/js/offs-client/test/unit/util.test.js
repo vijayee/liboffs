@@ -5,7 +5,8 @@ import {
   parseOffUrl,
   offUrlToHttpUrl,
   mimeFromExtension,
-  normalizeFolderEntries
+  normalizeFolderEntries,
+  basename
 } from '../../src/util.js';
 
 describe('base58', () => {
@@ -96,5 +97,19 @@ describe('offUrlToHttpUrl', () => {
   it('uses a custom baseUrl', () => {
     expect(offUrlToHttpUrl('/offsystem/v3/text/plain/10/abc/def/file.txt', 'https://example.com'))
       .toBe('https://example.com/offsystem/v3/text/plain/10/abc/def/file.txt');
+  });
+});
+
+describe('basename', () => {
+  it('returns the last segment of a POSIX path', () => {
+    expect(basename('folder/file.txt')).toBe('file.txt');
+  });
+
+  it('handles Windows-style separators', () => {
+    expect(basename('C:\\\\folder\\\\file.txt')).toBe('file.txt');
+  });
+
+  it('returns a default for an empty path', () => {
+    expect(basename('')).toBe('file');
   });
 });

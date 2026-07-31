@@ -1,6 +1,6 @@
-var er = Object.defineProperty;
-var tr = (t, e, r) => e in t ? er(t, e, { enumerable: !0, configurable: !0, writable: !0, value: r }) : t[e] = r;
-var B = (t, e, r) => tr(t, typeof e != "symbol" ? e + "" : e, r);
+var tr = Object.defineProperty;
+var rr = (t, e, r) => e in t ? tr(t, e, { enumerable: !0, configurable: !0, writable: !0, value: r }) : t[e] = r;
+var B = (t, e, r) => rr(t, typeof e != "symbol" ? e + "" : e, r);
 class D {
   /**
    * @param {string} url
@@ -110,38 +110,38 @@ class D {
    * @param {import('../types.js').OffsGetCallbacks} callbacks
    */
   async get(e, r) {
-    var P, L, G, V, I, q, re;
+    var P, L, G, V, C, q, re;
     const n = await fetch(e, {
       method: "GET",
       headers: this.authHeaders(),
       signal: (P = this.abortController) == null ? void 0 : P.signal
     });
     if (!n.ok) {
-      const C = await n.text();
-      (L = r.onError) == null || L.call(r, n.status, C);
+      const I = await n.text();
+      (L = r.onError) == null || L.call(r, n.status, I);
       return;
     }
     const s = n.headers.get("content-type") || "application/octet-stream", o = parseInt(n.headers.get("content-length") || "0", 10), l = n.status === 206, p = n.headers.get("content-range");
     let y, _;
     if (p) {
-      const C = p.match(/bytes (\d+)-(\d+)\//);
-      C && (y = parseInt(C[1], 10), _ = parseInt(C[2], 10));
+      const I = p.match(/bytes (\d+)-(\d+)\//);
+      I && (y = parseInt(I[1], 10), _ = parseInt(I[2], 10));
     }
     (G = r.onStart) == null || G.call(r, s, o, l, y, _);
     const g = (V = n.body) == null ? void 0 : V.getReader();
     if (!g) {
-      (I = r.onEnd) == null || I.call(r);
+      (C = r.onEnd) == null || C.call(r);
       return;
     }
     try {
       for (; ; ) {
-        const { done: C, value: S } = await g.read();
-        if (C) break;
+        const { done: I, value: S } = await g.read();
+        if (I) break;
         S && r.onData(S);
       }
       (q = r.onEnd) == null || q.call(r);
-    } catch (C) {
-      (re = r.onError) == null || re.call(r, 0, String(C));
+    } catch (I) {
+      (re = r.onError) == null || re.call(r, 0, String(I));
     }
   }
   /**
@@ -350,21 +350,21 @@ class D {
     if (!e.ok) throw new Error(`Config reload failed: ${e.status}`);
   }
 }
-let Le;
+let Me;
 try {
-  Le = new TextDecoder();
+  Me = new TextDecoder();
 } catch {
 }
 let w, le, c = 0;
-const rr = 105, nr = 57342, sr = 57343, rt = 57337, nt = 6, de = {};
-let ye = 11281e4, ie = 1681e4, T = {}, k, Ue, Pe = 0, Ee = 0, H, Z, F = [], Me = [], z, W, we, st = {
+const nr = 105, sr = 57342, ir = 57343, nt = 57337, st = 6, de = {};
+let ye = 11281e4, ie = 1681e4, T = {}, k, Pe, Ne = 0, Ee = 0, H, Z, F = [], He = [], z, W, we, it = {
   useRecords: !1,
   mapsAsObjects: !0
-}, ge = !1, yt = 2;
+}, ge = !1, wt = 2;
 try {
   new Function("");
 } catch {
-  yt = 1 / 0;
+  wt = 1 / 0;
 }
 class me {
   constructor(e) {
@@ -413,8 +413,8 @@ class me {
   }
   decode(e, r) {
     if (w)
-      return gt(() => (Ge(), this ? this.decode(e, r) : me.prototype.decode.call(st, e, r)));
-    le = r > -1 ? r : e.length, c = 0, Ee = 0, Ue = null, H = null, w = e;
+      return mt(() => (qe(), this ? this.decode(e, r) : me.prototype.decode.call(it, e, r)));
+    le = r > -1 ? r : e.length, c = 0, Ee = 0, Pe = null, H = null, w = e;
     try {
       W = e.dataView || (e.dataView = new DataView(e.buffer, e.byteOffset, e.byteLength));
     } catch (n) {
@@ -425,7 +425,7 @@ class me {
         return k = this.structures, Re();
       (!k || k.length > 0) && (k = []);
     } else
-      T = st, (!k || k.length > 0) && (k = []), z = null;
+      T = it, (!k || k.length > 0) && (k = []), z = null;
     return Re();
   }
   decodeMultiple(e, r) {
@@ -433,7 +433,7 @@ class me {
     try {
       let o = e.length;
       ge = !0;
-      let l = this ? this.decode(e, o) : Je.decode(e, o);
+      let l = this ? this.decode(e, o) : Ze.decode(e, o);
       if (r) {
         if (r(l) === !1)
           return;
@@ -448,7 +448,7 @@ class me {
     } catch (o) {
       throw o.lastPosition = s, o.values = n, o;
     } finally {
-      ge = !1, Ge();
+      ge = !1, qe();
     }
   }
 }
@@ -471,7 +471,7 @@ function Re() {
       throw new Error("Data read, but end of buffer not reached");
     return t;
   } catch (t) {
-    throw Ge(), (t instanceof RangeError || t.message.startsWith("Unexpected end of buffer")) && (t.incomplete = !0), t;
+    throw qe(), (t instanceof RangeError || t.message.startsWith("Unexpected end of buffer")) && (t.incomplete = !0), t;
   }
 }
 function A() {
@@ -483,14 +483,14 @@ function A() {
         break;
       case 25:
         if (e == 7)
-          return fr();
+          return lr();
         t = W.getUint16(c), c += 2;
         break;
       case 26:
         if (e == 7) {
           let r = W.getFloat32(c);
           if (T.useFloat32 > 2) {
-            let n = Qe[(w[c] & 127) << 1 | w[c + 1] >> 7];
+            let n = Je[(w[c] & 127) << 1 | w[c + 1] >> 7];
             return c += 4, (n * r + (r > 0 ? 0.5 : -0.5) >> 0) / n;
           }
           return c += 4, r;
@@ -570,16 +570,16 @@ function A() {
     case 1:
       return ~t;
     case 2:
-      return ar(t);
+      return fr(t);
     case 3:
       if (Ee >= c)
-        return Ue.slice(c - Pe, (c += t) - Pe);
+        return Pe.slice(c - Ne, (c += t) - Ne);
       if (Ee == 0 && le < 140 && t < 32) {
-        let s = t < 16 ? wt(t) : or(t);
+        let s = t < 16 ? xt(t) : ar(t);
         if (s != null)
           return s;
       }
-      return ir(t);
+      return or(t);
     case 4:
       if (t >= ye) throw new Error(`Array length exceeds ${ye}`);
       let r = new Array(t);
@@ -600,14 +600,14 @@ function A() {
         return s;
       }
     case 6:
-      if (t >= rt) {
+      if (t >= nt) {
         let s = k[t & 8191];
         if (s)
-          return s.read || (s.read = He(s)), s.read();
+          return s.read || (s.read = je(s)), s.read();
         if (t < 65536) {
-          if (t == sr) {
+          if (t == ir) {
             let o = pe(), l = A(), p = A();
-            Ke(l, p);
+            Ge(l, p);
             let y = {};
             if (T.keyMap) for (let _ = 2; _ < o; _++) {
               let g = T.decodeKey(p[_ - 2]);
@@ -618,15 +618,15 @@ function A() {
               y[Y(g)] = A();
             }
             return y;
-          } else if (t == nr) {
+          } else if (t == sr) {
             let o = pe(), l = A();
             for (let p = 2; p < o; p++)
-              Ke(l++, A());
+              Ge(l++, A());
             return A();
-          } else if (t == rt)
-            return pr();
-          if (T.getShared && (ze(), s = k[t & 8191], s))
-            return s.read || (s.read = He(s)), s.read();
+          } else if (t == nt)
+            return yr();
+          if (T.getShared && (Qe(), s = k[t & 8191], s))
+            return s.read || (s.read = je(s)), s.read();
         }
       }
       let n = F[t];
@@ -634,8 +634,8 @@ function A() {
         return n.handlesRead ? n(A) : n(A());
       {
         let s = A();
-        for (let o = 0; o < Me.length; o++) {
-          let l = Me[o](t, s);
+        for (let o = 0; o < He.length; o++) {
+          let l = He[o](t, s);
           if (l !== void 0)
             return l;
         }
@@ -666,8 +666,8 @@ function A() {
       throw new Error("Unknown CBOR token " + t);
   }
 }
-const it = /^[a-zA-Z_$][a-zA-Z\d_$]*$/;
-function He(t) {
+const ot = /^[a-zA-Z_$][a-zA-Z\d_$]*$/;
+function je(t) {
   if (!t) throw new Error("Structure is required in record definition");
   function e() {
     let r = w[c++];
@@ -691,9 +691,9 @@ function He(t) {
         return n(A);
       n = n.next;
     }
-    if (this.slowReads++ >= yt) {
+    if (this.slowReads++ >= wt) {
       let o = this.length == r ? this : this.slice(0, r);
-      return n = T.keyMap ? new Function("r", "return {" + o.map((l) => T.decodeKey(l)).map((l) => it.test(l) ? Y(l) + ":r()" : "[" + JSON.stringify(l) + "]:r()").join(",") + "}") : new Function("r", "return {" + o.map((l) => it.test(l) ? Y(l) + ":r()" : "[" + JSON.stringify(l) + "]:r()").join(",") + "}"), this.compiledReader && (n.next = this.compiledReader), n.propertyCount = r, this.compiledReader = n, n(A);
+      return n = T.keyMap ? new Function("r", "return {" + o.map((l) => T.decodeKey(l)).map((l) => ot.test(l) ? Y(l) + ":r()" : "[" + JSON.stringify(l) + "]:r()").join(",") + "}") : new Function("r", "return {" + o.map((l) => ot.test(l) ? Y(l) + ":r()" : "[" + JSON.stringify(l) + "]:r()").join(",") + "}"), this.compiledReader && (n.next = this.compiledReader), n.propertyCount = r, this.compiledReader = n, n(A);
     }
     let s = {};
     if (T.keyMap) for (let o = 0; o < r; o++) s[Y(T.decodeKey(this[o]))] = A();
@@ -709,13 +709,13 @@ function Y(t) {
   if (t == null) return t + "";
   throw new Error("Invalid property name type " + typeof t);
 }
-let ir = je;
-function je(t) {
+let or = Ke;
+function Ke(t) {
   let e;
-  if (t < 16 && (e = wt(t)))
+  if (t < 16 && (e = xt(t)))
     return e;
-  if (t > 64 && Le)
-    return Le.decode(w.subarray(c, c += t));
+  if (t > 64 && Me)
+    return Me.decode(w.subarray(c, c += t));
   const r = c + t, n = [];
   for (e = ""; c < r; ) {
     const s = w[c++];
@@ -761,7 +761,7 @@ function je(t) {
   return n.length > 0 && (e += j.apply(String, n)), e;
 }
 let j = String.fromCharCode;
-function or(t) {
+function ar(t) {
   let e = c, r = new Array(t);
   for (let n = 0; n < t; n++) {
     const s = w[c++];
@@ -773,7 +773,7 @@ function or(t) {
   }
   return j.apply(String, r);
 }
-function wt(t) {
+function xt(t) {
   if (t < 4)
     if (t < 2) {
       if (t === 0)
@@ -888,25 +888,25 @@ function wt(t) {
           }
           if (t < 15)
             return j(e, r, n, s, o, l, p, y, _, g, P, L, G, V);
-          let I = w[c++];
-          if ((I & 128) > 0) {
+          let C = w[c++];
+          if ((C & 128) > 0) {
             c -= 15;
             return;
           }
-          return j(e, r, n, s, o, l, p, y, _, g, P, L, G, V, I);
+          return j(e, r, n, s, o, l, p, y, _, g, P, L, G, V, C);
         }
       }
     }
   }
 }
-function ar(t) {
+function fr(t) {
   return T.copyBuffers ? (
     // specifically use the copying slice (not the node one)
     Uint8Array.prototype.slice.call(w, c, c += t)
   ) : w.subarray(c, c += t);
 }
-let xt = new Float32Array(1), Oe = new Uint8Array(xt.buffer, 0, 4);
-function fr() {
+let Et = new Float32Array(1), Oe = new Uint8Array(Et.buffer, 0, 4);
+function lr() {
   let t = w[c++], e = w[c++], r = (t & 127) >> 2;
   if (r === 31)
     return e || t & 3 ? NaN : t & 128 ? -1 / 0 : 1 / 0;
@@ -916,7 +916,7 @@ function fr() {
   }
   return Oe[3] = t & 128 | // sign bit
   (r >> 1) + 56, Oe[2] = (t & 7) << 5 | // last exponent bit and first two mantissa bits
-  e >> 3, Oe[1] = e << 5, Oe[0] = 0, xt[0];
+  e >> 3, Oe[1] = e << 5, Oe[0] = 0, Et[0];
 }
 new Array(4096);
 class ce {
@@ -935,14 +935,14 @@ F[2] = (t) => {
 F[3] = (t) => BigInt(-1) - F[2](t);
 F[4] = (t) => +(t[1] + "e" + t[0]);
 F[5] = (t) => t[1] * Math.exp(t[0] * Math.log(2));
-const Ke = (t, e) => {
+const Ge = (t, e) => {
   t = t - 57344;
   let r = k[t];
-  r && r.isShared && ((k.restoreStructures || (k.restoreStructures = []))[t] = r), k[t] = e, e.read = He(e);
+  r && r.isShared && ((k.restoreStructures || (k.restoreStructures = []))[t] = r), k[t] = e, e.read = je(e);
 };
-F[rr] = (t) => {
+F[nr] = (t) => {
   let e = t.length, r = t[1];
-  Ke(t[0], r);
+  Ge(t[0], r);
   let n = {};
   for (let s = 2; s < e; s++) {
     let o = r[s - 2];
@@ -952,9 +952,9 @@ F[rr] = (t) => {
 };
 F[14] = (t) => H ? H[0].slice(H.position0, H.position0 += t) : new ce(t, 14);
 F[15] = (t) => H ? H[1].slice(H.position1, H.position1 += t) : new ce(t, 15);
-let lr = { Error, RegExp };
-F[27] = (t) => (lr[t[0]] || Error)(t[1], t[2]);
-const Et = (t) => {
+let cr = { Error, RegExp };
+F[27] = (t) => (cr[t[0]] || Error)(t[1], t[2]);
+const gt = (t) => {
   if (w[c++] != 132) {
     let r = new Error("Packed values structure must be followed by a 4 element array");
     throw w.length < c && (r.incomplete = !0), r;
@@ -966,14 +966,14 @@ const Et = (t) => {
   }
   return z = z ? e.concat(z.slice(e.length)) : e, z.prefixes = t(), z.suffixes = t(), t();
 };
-Et.handlesRead = !0;
-F[51] = Et;
-F[nt] = (t) => {
+gt.handlesRead = !0;
+F[51] = gt;
+F[st] = (t) => {
   if (!z)
     if (T.getShared)
-      ze();
+      Qe();
     else
-      return new ce(t, nt);
+      return new ce(t, st);
   if (typeof t == "number")
     return z[16 + (t >= 0 ? 2 * t : -2 * t - 1)];
   let e = new Error("No support for non-integer packed references yet");
@@ -1001,13 +1001,13 @@ function he(t, e) {
 function fe() {
   if (!z)
     if (T.getShared)
-      ze();
+      Qe();
     else
       throw new Error("No packed values available");
   return z;
 }
-const cr = 1399353956;
-Me.push((t, e) => {
+const ur = 1399353956;
+He.push((t, e) => {
   if (t >= 225 && t <= 255)
     return he(fe().prefixes[t - 224], e);
   if (t >= 28704 && t <= 32767)
@@ -1020,7 +1020,7 @@ Me.push((t, e) => {
     return he(e, fe().suffixes[t - 27639]);
   if (t >= 1811940352 && t <= 1879048191)
     return he(e, fe().suffixes[t - 1811939328]);
-  if (t == cr)
+  if (t == ur)
     return {
       packedValues: z,
       structures: k.slice(0),
@@ -1029,7 +1029,7 @@ Me.push((t, e) => {
   if (t == 55799)
     return e;
 });
-const ur = new Uint8Array(new Uint16Array([1]).buffer)[0] == 1, ot = [
+const dr = new Uint8Array(new Uint16Array([1]).buffer)[0] == 1, at = [
   Uint8Array,
   Uint8ClampedArray,
   Uint16Array,
@@ -1041,17 +1041,17 @@ const ur = new Uint8Array(new Uint16Array([1]).buffer)[0] == 1, ot = [
   typeof BigInt64Array > "u" ? { name: "BigInt64Array" } : BigInt64Array,
   Float32Array,
   Float64Array
-], dr = [64, 68, 69, 70, 71, 72, 77, 78, 79, 85, 86];
-for (let t = 0; t < ot.length; t++)
-  hr(ot[t], dr[t]);
-function hr(t, e) {
+], hr = [64, 68, 69, 70, 71, 72, 77, 78, 79, 85, 86];
+for (let t = 0; t < at.length; t++)
+  pr(at[t], hr[t]);
+function pr(t, e) {
   let r = "get" + t.name.slice(0, -5), n;
   typeof t == "function" ? n = t.BYTES_PER_ELEMENT : t = null;
   for (let s = 0; s < 2; s++) {
     if (!s && n == 1)
       continue;
     let o = n == 2 ? 1 : n == 4 ? 2 : n == 8 ? 3 : 0;
-    F[s ? e : e - 4] = n == 1 || s == ur ? (l) => {
+    F[s ? e : e - 4] = n == 1 || s == dr ? (l) => {
       if (!t)
         throw new Error("Could not find typed array for code " + e);
       return !T.copyBuffers && (n === 1 || n === 2 && !(l.byteOffset & 1) || n === 4 && !(l.byteOffset & 3) || n === 8 && !(l.byteOffset & 7)) ? new t(l.buffer, l.byteOffset, l.byteLength >> o) : new t(Uint8Array.prototype.slice.call(l, 0).buffer);
@@ -1065,14 +1065,14 @@ function hr(t, e) {
     };
   }
 }
-function pr() {
+function yr() {
   let t = pe(), e = c + A();
   for (let n = 2; n < t; n++) {
     let s = pe();
     c += s;
   }
   let r = c;
-  return c = e, H = [je(pe()), je(pe())], H.position0 = 0, H.position1 = 0, H.postBundlePosition = c, c = r, A();
+  return c = e, H = [Ke(pe()), Ke(pe())], H.position0 = 0, H.position1 = 0, H.postBundlePosition = c, c = r, A();
 }
 function pe() {
   let t = w[c++] & 31;
@@ -1090,55 +1090,55 @@ function pe() {
     }
   return t;
 }
-function ze() {
+function Qe() {
   if (T.getShared) {
-    let t = gt(() => (w = null, T.getShared())) || {}, e = t.structures || [];
+    let t = mt(() => (w = null, T.getShared())) || {}, e = t.structures || [];
     T.sharedVersion = t.version, z = T.sharedValues = t.packedValues, k === !0 ? T.structures = k = e : k.splice.apply(k, [0, e.length].concat(e));
   }
 }
-function gt(t) {
-  let e = le, r = c, n = Pe, s = Ee, o = Ue, l = Z, p = H, y = new Uint8Array(w.slice(0, le)), _ = k, g = T, P = ge, L = t();
-  return le = e, c = r, Pe = n, Ee = s, Ue = o, Z = l, H = p, w = y, ge = P, k = _, T = g, W = new DataView(w.buffer, w.byteOffset, w.byteLength), L;
+function mt(t) {
+  let e = le, r = c, n = Ne, s = Ee, o = Pe, l = Z, p = H, y = new Uint8Array(w.slice(0, le)), _ = k, g = T, P = ge, L = t();
+  return le = e, c = r, Ne = n, Ee = s, Pe = o, Z = l, H = p, w = y, ge = P, k = _, T = g, W = new DataView(w.buffer, w.byteOffset, w.byteLength), L;
 }
-function Ge() {
+function qe() {
   w = null, Z = null, k = null;
 }
-const Qe = new Array(147);
+const Je = new Array(147);
 for (let t = 0; t < 256; t++)
-  Qe[t] = +("1e" + Math.floor(45.15 - t * 0.30103));
-let Je = new me({ useRecords: !1 });
-const $ = Je.decode;
-Je.decodeMultiple;
-let Te;
+  Je[t] = +("1e" + Math.floor(45.15 - t * 0.30103));
+let Ze = new me({ useRecords: !1 });
+const $ = Ze.decode;
+Ze.decodeMultiple;
+let Ae;
 try {
-  Te = new TextEncoder();
+  Ae = new TextEncoder();
 } catch {
 }
-let qe, mt;
-const Ne = typeof globalThis == "object" && globalThis.Buffer, Se = typeof Ne < "u", Be = Se ? Ne.allocUnsafeSlow : Uint8Array, at = Se ? Ne : Uint8Array, ft = 256, lt = Se ? 4294967296 : 2144337920;
-let Ce, f, N, i = 0, oe, M = null;
-const yr = 61440, wr = /[\u0080-\uFFFF]/, Q = Symbol("record-id");
-class St extends me {
+let $e, St;
+const Be = typeof globalThis == "object" && globalThis.Buffer, Se = typeof Be < "u", Ce = Se ? Be.allocUnsafeSlow : Uint8Array, ft = Se ? Be : Uint8Array, lt = 256, ct = Se ? 4294967296 : 2144337920;
+let Ie, f, N, i = 0, oe, M = null;
+const wr = 61440, xr = /[\u0080-\uFFFF]/, Q = Symbol("record-id");
+class bt extends me {
   constructor(e) {
     super(e), this.offset = 0;
     let r, n, s, o, l;
     e = e || {};
-    let p = at.prototype.utf8Write ? function(a, x) {
+    let p = ft.prototype.utf8Write ? function(a, x) {
       return f.utf8Write(a, x, f.byteLength - x);
-    } : Te && Te.encodeInto ? function(a, x) {
-      return Te.encodeInto(a, f.subarray(x)).written;
+    } : Ae && Ae.encodeInto ? function(a, x) {
+      return Ae.encodeInto(a, f.subarray(x)).written;
     } : !1, y = this, _ = e.structures || e.saveStructures, g = e.maxSharedStructures;
     if (g == null && (g = _ ? 128 : 0), g > 8190)
       throw new Error("Maximum maxSharedStructure is 8190");
     let P = e.sequential;
     P && (g = 0), this.structures || (this.structures = []), this.saveStructures && (this.saveShared = this.saveStructures);
-    let L, G, V = e.sharedValues, I;
+    let L, G, V = e.sharedValues, C;
     if (V) {
-      I = /* @__PURE__ */ Object.create(null);
+      C = /* @__PURE__ */ Object.create(null);
       for (let a = 0, x = V.length; a < x; a++)
-        I[V[a]] = a;
+        C[V[a]] = a;
     }
-    let q = [], re = 0, C = 0;
+    let q = [], re = 0, I = 0;
     this.mapEncode = function(a, x) {
       if (this._keyMap && !this._mapped)
         switch (a.constructor.name) {
@@ -1148,15 +1148,15 @@ class St extends me {
         }
       return this.encode(a, x);
     }, this.encode = function(a, x) {
-      if (f || (f = new Be(8192), N = new DataView(f.buffer, 0, 8192), i = 0), oe = f.length - 10, oe - i < 2048 ? (f = new Be(f.length), N = new DataView(f.buffer, 0, f.length), oe = f.length - 10, i = 0) : x === dt && (i = i + 7 & 2147483640), r = i, y.useSelfDescribedHeader && (N.setUint32(i, 3654940416), i += 3), l = y.structuredClone ? /* @__PURE__ */ new Map() : null, y.bundleStrings && typeof a != "string" ? (M = [], M.size = 1 / 0) : M = null, n = y.structures, n) {
+      if (f || (f = new Ce(8192), N = new DataView(f.buffer, 0, 8192), i = 0), oe = f.length - 10, oe - i < 2048 ? (f = new Ce(f.length), N = new DataView(f.buffer, 0, f.length), oe = f.length - 10, i = 0) : x === ht && (i = i + 7 & 2147483640), r = i, y.useSelfDescribedHeader && (N.setUint32(i, 3654940416), i += 3), l = y.structuredClone ? /* @__PURE__ */ new Map() : null, y.bundleStrings && typeof a != "string" ? (M = [], M.size = 1 / 0) : M = null, n = y.structures, n) {
         if (n.uninitialized) {
           let h = y.getShared() || {};
           y.structures = n = h.structures || [], y.sharedVersion = h.version;
           let u = y.sharedValues = h.packedValues;
           if (u) {
-            I = {};
+            C = {};
             for (let m = 0, b = u.length; m < b; m++)
-              I[u[m]] = m;
+              C[u[m]] = m;
           }
         }
         let d = n.length;
@@ -1177,30 +1177,30 @@ class St extends me {
         }
         P || (n.nextId = d);
       }
-      if (s && (s = !1), o = n || [], G = I, e.pack) {
+      if (s && (s = !1), o = n || [], G = C, e.pack) {
         let d = /* @__PURE__ */ new Map();
-        if (d.values = [], d.encoder = y, d.maxValues = e.maxPrivatePackedValues || (I ? 16 : 1 / 0), d.objectMap = I || !1, d.samplingPackedValues = L, Ae(a, d), d.values.length > 0) {
+        if (d.values = [], d.encoder = y, d.maxValues = e.maxPrivatePackedValues || (C ? 16 : 1 / 0), d.objectMap = C || !1, d.samplingPackedValues = L, Ue(a, d), d.values.length > 0) {
           f[i++] = 216, f[i++] = 51, te(4);
           let h = d.values;
-          S(h), te(0), te(0), G = Object.create(I || null);
+          S(h), te(0), te(0), G = Object.create(C || null);
           for (let u = 0, m = h.length; u < m; u++)
             G[h[u]] = u;
         }
       }
-      Ce = x & ke;
+      Ie = x & De;
       try {
-        if (Ce)
+        if (Ie)
           return;
-        if (S(a), M && ut(r, S), y.offset = i, l && l.idsToInsert) {
+        if (S(a), M && dt(r, S), y.offset = i, l && l.idsToInsert) {
           i += l.idsToInsert.length * 2, i > oe && J(i), y.offset = i;
-          let d = gr(f.subarray(r, i), l.idsToInsert);
+          let d = mr(f.subarray(r, i), l.idsToInsert);
           return l = null, d;
         }
-        return x & dt ? (f.start = r, f.end = i, f) : f.subarray(r, i);
+        return x & ht ? (f.start = r, f.end = i, f) : f.subarray(r, i);
       } finally {
         if (n) {
-          if (C < 10 && C++, n.length > g && (n.length = g), re > 1e4)
-            n.transitions = null, C = 0, re = 0, q.length > 0 && (q = []);
+          if (I < 10 && I++, n.length > g && (n.length = g), re > 1e4)
+            n.transitions = null, I = 0, re = 0, q.length > 0 && (q = []);
           else if (q.length > 0 && !P) {
             for (let d = 0, h = q.length; d < h; d++)
               q[d][Q] = void 0;
@@ -1212,13 +1212,13 @@ class St extends me {
           let d = f.subarray(r, i);
           return y.updateSharedData() === !1 ? y.encode(a) : d;
         }
-        x & Sr && (i = r);
+        x & br && (i = r);
       }
-    }, this.findCommonStringsToPack = () => (L = /* @__PURE__ */ new Map(), I || (I = /* @__PURE__ */ Object.create(null)), (a) => {
+    }, this.findCommonStringsToPack = () => (L = /* @__PURE__ */ new Map(), C || (C = /* @__PURE__ */ Object.create(null)), (a) => {
       let x = a && a.threshold || 4, d = this.pack ? a.maxPrivatePackedValues || 16 : 0;
       V || (V = this.sharedValues = []);
       for (let [h, u] of L)
-        u.count > x && (I[h] = d++, V.push(h), s = !0);
+        u.count > x && (C[h] = d++, V.push(h), s = !0);
       for (; this.saveShared && this.updateSharedData() === !1; )
         ;
       L = null;
@@ -1241,11 +1241,11 @@ class St extends me {
         }
         let h = a.length;
         if (M && h >= 4 && h < 1024) {
-          if ((M.size += h) > yr) {
+          if ((M.size += h) > wr) {
             let R, O = (M[0] ? M[0].length * 3 + M[1].length : 0) + 10;
-            i + O > oe && (f = J(i + O)), f[i++] = 217, f[i++] = 223, f[i++] = 249, f[i++] = M.position ? 132 : 130, f[i++] = 26, R = i - r, i += 4, M.position && ut(r, S), M = ["", ""], M.size = 0, M.position = R;
+            i + O > oe && (f = J(i + O)), f[i++] = 217, f[i++] = 223, f[i++] = 249, f[i++] = M.position ? 132 : 130, f[i++] = 26, R = i - r, i += 4, M.position && dt(r, S), M = ["", ""], M.size = 0, M.position = R;
           }
-          let b = wr.test(a);
+          let b = xr.test(a);
           M[b ? 0 : 1] += a, f[i++] = b ? 206 : 207, S(h);
           return;
         }
@@ -1273,7 +1273,7 @@ class St extends me {
             f[i++] = 250, N.setFloat32(i, a);
             let u;
             if (h < 4 || // this checks for rounding of numbers that were encoded in 32-bit float to nearest significant decimal digit that could be preserved
-            (u = a * Qe[(f[i] & 127) << 1 | f[i + 1] >> 7]) >> 0 === u) {
+            (u = a * Je[(f[i] & 127) << 1 | f[i + 1] >> 7]) >> 0 === u) {
               i += 4;
               return;
             } else
@@ -1312,16 +1312,16 @@ class St extends me {
               for (let [u, m] of a)
                 S(u), S(m);
           else {
-            for (let u = 0, m = qe.length; u < m; u++) {
-              let b = mt[u];
+            for (let u = 0, m = $e.length; u < m; u++) {
+              let b = St[u];
               if (a instanceof b) {
-                let R = qe[u], O = R.tag;
+                let R = $e[u], O = R.tag;
                 O == null && (O = R.getTag && R.getTag.call(this, a)), O < 24 ? f[i++] = 192 | O : O < 256 ? (f[i++] = 216, f[i++] = O) : O < 65536 ? (f[i++] = 217, f[i++] = O >> 8, f[i++] = O & 255) : O > -1 && (f[i++] = 218, N.setUint32(i, O), i += 4), R.encode.call(this, a, S, J);
                 return;
               }
             }
             if (a[Symbol.iterator]) {
-              if (Ce) {
+              if (Ie) {
                 let u = new Error("Iterable should be serialized as iterator");
                 throw u.iteratorNotHandled = !0, u;
               }
@@ -1331,7 +1331,7 @@ class St extends me {
               f[i++] = 255;
               return;
             }
-            if (a[Symbol.asyncIterator] || Ie(a)) {
+            if (a[Symbol.asyncIterator] || ke(a)) {
               let u = new Error("Iterable/blob should be serialized as iterator");
               throw u.iteratorNotHandled = !0, u;
             }
@@ -1357,7 +1357,7 @@ class St extends me {
           let h = [];
           for (; a; )
             h.push(Number(a & BigInt(255))), a >>= BigInt(8);
-          $e(new Uint8Array(h.reverse()), J);
+          ve(new Uint8Array(h.reverse()), J);
           return;
         }
         i += 8;
@@ -1388,21 +1388,21 @@ class St extends me {
       if (this.keyMap) {
         R = Object.keys(a).map((U) => this.encodeKey(U)), m = R.length;
         for (let U = 0; U < m; U++) {
-          let tt = R[U];
-          d = h[tt], d || (d = h[tt] = /* @__PURE__ */ Object.create(null), u++), h = d;
+          let rt = R[U];
+          d = h[rt], d || (d = h[rt] = /* @__PURE__ */ Object.create(null), u++), h = d;
         }
       } else
         for (let U in a) (typeof a.hasOwnProperty != "function" || a.hasOwnProperty(U)) && (d = h[U], d || (h[Q] & 1048576 && (b = h[Q] & 65535), d = h[U] = /* @__PURE__ */ Object.create(null), u++), h = d, m++);
       let O = h[Q];
       if (O !== void 0)
         O &= 65535, f[i++] = 217, f[i++] = O >> 8 | 224, f[i++] = O & 255;
-      else if (R || (R = h.__keys__ || (h.__keys__ = Object.keys(a))), b === void 0 ? (O = o.nextId++, O || (O = 0, o.nextId = 1), O >= ft && (o.nextId = (O = g) + 1)) : O = b, o[O] = R, O < g) {
+      else if (R || (R = h.__keys__ || (h.__keys__ = Object.keys(a))), b === void 0 ? (O = o.nextId++, O || (O = 0, o.nextId = 1), O >= lt && (o.nextId = (O = g) + 1)) : O = b, o[O] = R, O < g) {
         f[i++] = 217, f[i++] = O >> 8 | 224, f[i++] = O & 255, h = o.transitions;
         for (let U = 0; U < m; U++)
           (h[Q] === void 0 || h[Q] & 1048576) && (h[Q] = O), h = h[R[U]];
         h[Q] = O | 1048576, s = !0;
       } else {
-        if (h[Q] = O, N.setUint32(i, 3655335680), i += 3, u && (re += C * u), q.length >= ft - g && (q.shift()[Q] = void 0), q.push(h), te(m + 2), S(57344 + O), S(R), x) return;
+        if (h[Q] = O, N.setUint32(i, 3655335680), i += 3, u && (re += I * u), q.length >= lt - g && (q.shift()[Q] = void 0), q.push(h), te(m + 2), S(57344 + O), S(R), x) return;
         for (let U in a)
           (typeof a.hasOwnProperty != "function" || a.hasOwnProperty(U)) && S(a[U]);
         return;
@@ -1413,15 +1413,15 @@ class St extends me {
     }, J = (a) => {
       let x;
       if (a > 16777216) {
-        if (a - r > lt)
+        if (a - r > ct)
           throw new Error("Encoded buffer would be larger than maximum buffer size");
         x = Math.min(
-          lt,
+          ct,
           Math.round(Math.max((a - r) * (a > 67108864 ? 1.25 : 2), 4194304) / 4096) * 4096
         );
       } else
         x = (Math.max(a - r << 2, f.length - 1) >> 12) + 1 << 12;
-      let d = new Be(x);
+      let d = new Ce(x);
       return N = new DataView(d.buffer, 0, x), f.copy ? f.copy(d, 0, r, a) : d.set(f.slice(r, a)), i -= r, r = 0, oe = d.length - 10, f = d;
     };
     let v = 100, ae = 1e3;
@@ -1434,7 +1434,7 @@ class St extends me {
       let h = a.constructor;
       if (h === Object) {
         let u = y.useRecords !== !1;
-        u ? X(a, !0) : ct(Object.keys(a).length, 160);
+        u ? X(a, !0) : ut(Object.keys(a).length, 160);
         for (let m in a) {
           let b = a[m];
           u || S(m), b && typeof b == "object" ? x[m] ? yield* ne(b, x[m]) : yield* ue(b, x, m) : S(b);
@@ -1451,7 +1451,7 @@ class St extends me {
         for (let u of a)
           u && (typeof u == "object" || i - r > v) ? x.element ? yield* ne(u, x.element) : yield* ue(u, x, "element") : S(u);
         f[i++] = 255;
-      } else Ie(a) ? (ct(a.size, 64), yield f.subarray(r, i), yield a, se()) : a[Symbol.asyncIterator] ? (f[i++] = 159, yield f.subarray(r, i), yield a, se(), f[i++] = 255) : S(a);
+      } else ke(a) ? (ut(a.size, 64), yield f.subarray(r, i), yield a, se()) : a[Symbol.asyncIterator] ? (f[i++] = 159, yield f.subarray(r, i), yield a, se(), f[i++] = 255) : S(a);
       d && i > r ? yield f.subarray(r, i) : i - r > v && (yield f.subarray(r, i), se());
     }
     function* ue(a, x, d) {
@@ -1465,17 +1465,17 @@ class St extends me {
       }
     }
     function se() {
-      v = ae, y.encode(null, ke);
+      v = ae, y.encode(null, De);
     }
     function be(a, x, d) {
-      return x && x.chunkThreshold ? v = ae = x.chunkThreshold : v = 100, a && typeof a == "object" ? (y.encode(null, ke), d(a, y.iterateProperties || (y.iterateProperties = {}), !0)) : [y.encode(a)];
+      return x && x.chunkThreshold ? v = ae = x.chunkThreshold : v = 100, a && typeof a == "object" ? (y.encode(null, De), d(a, y.iterateProperties || (y.iterateProperties = {}), !0)) : [y.encode(a)];
     }
     async function* _e(a, x) {
       for (let d of ne(a, x, !0)) {
         let h = d.constructor;
-        if (h === at || h === Uint8Array)
+        if (h === ft || h === Uint8Array)
           yield d;
-        else if (Ie(d)) {
+        else if (ke(d)) {
           let u = d.stream().getReader(), m;
           for (; !(m = await u.read()).done; )
             yield m.value;
@@ -1496,17 +1496,17 @@ class St extends me {
   updateSharedData() {
     let e = this.sharedVersion || 0;
     this.sharedVersion = e + 1;
-    let r = this.structures.slice(0), n = new bt(r, this.sharedValues, this.sharedVersion), s = this.saveShared(
+    let r = this.structures.slice(0), n = new _t(r, this.sharedValues, this.sharedVersion), s = this.saveShared(
       n,
       (o) => (o && o.version || 0) == e
     );
     return s === !1 ? (n = this.getShared() || {}, this.structures = n.structures || [], this.sharedValues = n.packedValues, this.sharedVersion = n.version, this.structures.nextId = this.structures.length) : r.forEach((o, l) => this.structures[l] = o), s;
   }
 }
-function ct(t, e) {
+function ut(t, e) {
   t < 24 ? f[i++] = e | t : t < 256 ? (f[i++] = e | 24, f[i++] = t) : t < 65536 ? (f[i++] = e | 25, f[i++] = t >> 8, f[i++] = t & 255) : (f[i++] = e | 26, N.setUint32(i, t), i += 4);
 }
-class bt {
+class _t {
   constructor(e, r, n) {
     this.structures = e, this.packedValues = r, this.version = n;
   }
@@ -1514,15 +1514,15 @@ class bt {
 function te(t) {
   t < 24 ? f[i++] = 128 | t : t < 256 ? (f[i++] = 152, f[i++] = t) : t < 65536 ? (f[i++] = 153, f[i++] = t >> 8, f[i++] = t & 255) : (f[i++] = 154, N.setUint32(i, t), i += 4);
 }
-const xr = typeof Blob > "u" ? function() {
+const Er = typeof Blob > "u" ? function() {
 } : Blob;
-function Ie(t) {
-  if (t instanceof xr)
+function ke(t) {
+  if (t instanceof Er)
     return !0;
   let e = t[Symbol.toStringTag];
   return e === "Blob" || e === "File";
 }
-function Ae(t, e) {
+function Ue(t, e) {
   switch (typeof t) {
     case "string":
       if (t.length > 3) {
@@ -1545,19 +1545,19 @@ function Ae(t, e) {
       if (t)
         if (t instanceof Array)
           for (let n = 0, s = t.length; n < s; n++)
-            Ae(t[n], e);
+            Ue(t[n], e);
         else {
           let n = !e.encoder.useRecords;
           for (var r in t)
-            t.hasOwnProperty(r) && (n && Ae(r, e), Ae(t[r], e));
+            t.hasOwnProperty(r) && (n && Ue(r, e), Ue(t[r], e));
         }
       break;
     case "function":
       console.log(t);
   }
 }
-const Er = new Uint8Array(new Uint16Array([1]).buffer)[0] == 1;
-mt = [
+const gr = new Uint8Array(new Uint16Array([1]).buffer)[0] == 1;
+St = [
   Date,
   Set,
   Error,
@@ -1577,9 +1577,9 @@ mt = [
   } : BigInt64Array,
   Float32Array,
   Float64Array,
-  bt
+  _t
 ];
-qe = [
+$e = [
   {
     // Date
     tag: 1,
@@ -1625,7 +1625,7 @@ qe = [
   {
     // ArrayBuffer
     encode(t, e, r) {
-      $e(t, r);
+      ve(t, r);
     }
   },
   {
@@ -1635,7 +1635,7 @@ qe = [
         return 64;
     },
     encode(t, e, r) {
-      $e(t, r);
+      ve(t, r);
     }
   },
   ee(68, 1),
@@ -1668,19 +1668,19 @@ qe = [
   }
 ];
 function ee(t, e) {
-  return !Er && e > 1 && (t -= 4), {
+  return !gr && e > 1 && (t -= 4), {
     tag: t,
     encode: function(n, s) {
       let o = n.byteLength, l = n.byteOffset || 0, p = n.buffer || n;
-      s(Se ? Ne.from(p, l, o) : new Uint8Array(p, l, o));
+      s(Se ? Be.from(p, l, o) : new Uint8Array(p, l, o));
     }
   };
 }
-function $e(t, e) {
+function ve(t, e) {
   let r = t.byteLength;
   r < 24 ? f[i++] = 64 + r : r < 256 ? (f[i++] = 88, f[i++] = r) : r < 65536 ? (f[i++] = 89, f[i++] = r >> 8, f[i++] = r & 255) : (f[i++] = 90, N.setUint32(i, r), i += 4), i + r >= f.length && e(i + r), f.set(t.buffer ? t : new Uint8Array(t), i), i += r;
 }
-function gr(t, e) {
+function mr(t, e) {
   let r, n = e.length * 2, s = t.length - n;
   e.sort((o, l) => o.offset > l.offset ? 1 : -1);
   for (let o = 0; o < e.length; o++) {
@@ -1697,16 +1697,16 @@ function gr(t, e) {
   }
   return t;
 }
-function ut(t, e) {
+function dt(t, e) {
   N.setUint32(M.position + t, i - M.position - t + 1);
   let r = M;
   M = null, e(r[0]), e(r[1]);
 }
-let Ze = new St({ useRecords: !1 });
-const mr = Ze.encode;
-Ze.encodeAsIterable;
-Ze.encodeAsAsyncIterable;
-const dt = 512, Sr = 1024, ke = 2048, K = new St({ tagUint8Array: !1 }), E = {
+let Ye = new bt({ useRecords: !1 });
+const Sr = Ye.encode;
+Ye.encodeAsIterable;
+Ye.encodeAsAsyncIterable;
+const ht = 512, br = 1024, De = 2048, K = new bt({ tagUint8Array: !1 }), E = {
   PUT_REQUEST: 1,
   PUT_DATA: 2,
   PUT_END: 3,
@@ -1743,7 +1743,7 @@ const dt = 512, Sr = 1024, ke = 2048, K = new St({ tagUint8Array: !1 }), E = {
   CONFIG_SET_RESPONSE: 36,
   CONFIG_RELOAD_REQUEST: 37,
   CONFIG_RELOAD_RESPONSE: 38
-}, br = {
+}, _r = {
   OK: 0,
   BAD_REQUEST: 1,
   NOT_FOUND: 2,
@@ -1751,15 +1751,15 @@ const dt = 512, Sr = 1024, ke = 2048, K = new St({ tagUint8Array: !1 }), E = {
   RANGE_NOT_SATISFIABLE: 4,
   UNAUTHORIZED: 5
 };
-function Ye(t) {
+function Xe(t) {
   const e = $(t);
   return Array.isArray(e) ? e[0] : null;
 }
-function Xe(t) {
+function et(t) {
   const e = new TextEncoder().encode(t);
   return K.encode([E.AUTH_REQUEST, e]);
 }
-function ve(t, e = null) {
+function Ve(t, e = null) {
   const r = t.recyclerUrls || [], n = [
     E.PUT_REQUEST,
     t.contentType,
@@ -1772,22 +1772,22 @@ function ve(t, e = null) {
   ];
   return t.tupleSize !== void 0 && n.push(t.tupleSize), K.encode(n);
 }
-function _t(t) {
+function Rt(t) {
   return K.encode([E.PUT_DATA, t]);
 }
-function Rt() {
+function Ot() {
   return K.encode([E.PUT_END]);
 }
-function Ve(t) {
+function We(t) {
   const e = $(t);
   if (e[0] !== E.PUT_RESPONSE) throw new Error("Not a put response");
   return { oriString: e[1] };
 }
-function Ot(t, e) {
+function Tt(t, e) {
   const r = e && (e.start !== void 0 || e.end !== void 0), n = [E.GET_REQUEST, t, r ? 1 : 0];
   return r && (n.push(e.start || 0), n.push(e.end || 0)), K.encode(n);
 }
-function Tt(t) {
+function At(t) {
   const e = $(t);
   if (e[0] !== E.GET_RESPONSE_START) throw new Error("Not a get response start");
   return {
@@ -1798,154 +1798,154 @@ function Tt(t) {
     rangeEnd: e[3] ? e[5] : void 0
   };
 }
-function At(t) {
+function Ut(t) {
   const e = $(t);
   if (e[0] !== E.GET_DATA) throw new Error("Not a get data");
   return e[1];
 }
-function Ut(t) {
+function Pt(t) {
   const e = $(t);
   return Array.isArray(e) && e[0] === E.GET_END;
 }
-function Pt(t) {
+function Nt(t) {
   const e = $(t);
   return !Array.isArray(e) || e[0] !== E.ERROR ? null : { statusCode: e[1], message: e[2] };
 }
-function Nt(t, e = 0) {
+function Bt(t, e = 0) {
   return K.encode([E.BLOCK_PUT_REQUEST, t, e]);
 }
-function Bt(t) {
+function Ct(t) {
   const e = $(t);
   if (e[0] !== E.BLOCK_PUT_RESPONSE) throw new Error("Not a block put response");
   return { status: e[1], hash: e[2] };
 }
-function Ct(t) {
+function It(t) {
   return K.encode([E.BLOCK_GET_REQUEST, t]);
 }
-function It(t) {
+function kt(t) {
   const e = $(t);
   if (e[0] !== E.BLOCK_GET_RESPONSE) throw new Error("Not a block get response");
   return { status: e[1], data: e[2] };
 }
-function kt(t) {
+function Dt(t) {
   return K.encode([E.BLOCK_DELETE_REQUEST, t]);
 }
-function Dt(t) {
+function Ft(t) {
   const e = $(t);
   if (e[0] !== E.BLOCK_DELETE_RESPONSE) throw new Error("Not a block delete response");
   return { status: e[1] };
 }
-function Ft() {
+function Lt() {
   return K.encode([E.HEALTH_REQUEST]);
 }
-function Lt(t) {
+function Mt(t) {
   const e = $(t);
   if (e[0] !== E.HEALTH_RESPONSE) throw new Error("Not a health response");
   return { json: e[1] };
 }
-function Mt() {
+function Ht() {
   return K.encode([E.PEER_INFO_REQUEST]);
 }
-function Ht(t) {
+function jt(t) {
   const e = $(t);
   if (e[0] !== E.PEER_INFO_RESPONSE) throw new Error("Not a peer info response");
   return { format: e[1], data: e[2] };
 }
-function jt(t, e) {
+function Kt(t, e) {
   return K.encode([E.PEER_CONNECT, t, e]);
 }
-function Kt(t) {
+function Gt(t) {
   const e = $(t);
   if (e[0] !== E.PEER_CONNECT_RESULT) throw new Error("Not a peer connect result");
   return { status: e[1] };
 }
-function Gt() {
+function qt() {
   return K.encode([E.PEER_LIST_REQUEST]);
 }
-function qt(t) {
+function $t(t) {
   const e = $(t);
   if (e[0] !== E.PEER_LIST_RESPONSE) throw new Error("Not a peer list response");
   return e[1];
 }
-function $t(t, e) {
+function vt(t, e) {
   return K.encode([E.FRIEND_ADD, t, e]);
 }
-function vt(t) {
+function Vt(t) {
   return K.encode([E.FRIEND_REMOVE, t]);
 }
-function Vt() {
+function Wt() {
   return K.encode([E.FRIEND_LIST]);
 }
-function Wt(t) {
+function zt(t) {
   const e = $(t);
   if (e[0] !== E.FRIEND_LIST_RESPONSE) throw new Error("Not a friend list response");
   return e[1];
 }
-function zt() {
+function Qt() {
   return K.encode([E.CONFIG_SHOW_REQUEST]);
 }
-function Qt(t) {
+function Jt(t) {
   const e = $(t);
   if (e[0] !== E.CONFIG_SHOW_RESPONSE) throw new Error("Not a config show response");
   return { json: e[1] };
 }
-function Jt(t, e) {
+function Zt(t, e) {
   return K.encode([E.CONFIG_SET_REQUEST, t, e]);
 }
-function Zt(t) {
+function Yt(t) {
   const e = $(t);
   if (e[0] !== E.CONFIG_SET_RESPONSE) throw new Error("Not a config set response");
   return { status: e[1], restartRequired: e[2] === 1, message: e[3] };
 }
-function Yt() {
+function Xt() {
   return K.encode([E.CONFIG_RELOAD_REQUEST]);
 }
-function Xt(t) {
+function er(t) {
   const e = $(t);
   if (e[0] !== E.CONFIG_RELOAD_RESPONSE) throw new Error("Not a config reload response");
   return { status: e[1], message: e[2] };
 }
-const Kr = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+const Gr = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
   MSG: E,
-  STATUS: br,
-  decodeBlockDeleteResponse: Dt,
-  decodeBlockGetResponse: It,
-  decodeBlockPutResponse: Bt,
-  decodeConfigReloadResponse: Xt,
-  decodeConfigSetResponse: Zt,
-  decodeConfigShowResponse: Qt,
-  decodeError: Pt,
-  decodeFriendListResponse: Wt,
-  decodeGetData: At,
-  decodeGetResponseStart: Tt,
-  decodeHealthResponse: Lt,
-  decodePeerConnectResult: Kt,
-  decodePeerInfoResponse: Ht,
-  decodePeerListResponse: qt,
-  decodePutResponse: Ve,
-  encodeAuthRequest: Xe,
-  encodeBlockDeleteRequest: kt,
-  encodeBlockGetRequest: Ct,
-  encodeBlockPutRequest: Nt,
-  encodeConfigReloadRequest: Yt,
-  encodeConfigSetRequest: Jt,
-  encodeConfigShowRequest: zt,
-  encodeFriendAdd: $t,
-  encodeFriendListRequest: Vt,
-  encodeFriendRemove: vt,
-  encodeGetRequest: Ot,
-  encodeHealthRequest: Ft,
-  encodePeerConnect: jt,
-  encodePeerInfoRequest: Mt,
-  encodePeerListRequest: Gt,
-  encodePutData: _t,
-  encodePutEnd: Rt,
-  encodePutRequest: ve,
-  getMessageType: Ye,
-  isGetEnd: Ut
+  STATUS: _r,
+  decodeBlockDeleteResponse: Ft,
+  decodeBlockGetResponse: kt,
+  decodeBlockPutResponse: Ct,
+  decodeConfigReloadResponse: er,
+  decodeConfigSetResponse: Yt,
+  decodeConfigShowResponse: Jt,
+  decodeError: Nt,
+  decodeFriendListResponse: zt,
+  decodeGetData: Ut,
+  decodeGetResponseStart: At,
+  decodeHealthResponse: Mt,
+  decodePeerConnectResult: Gt,
+  decodePeerInfoResponse: jt,
+  decodePeerListResponse: $t,
+  decodePutResponse: We,
+  encodeAuthRequest: et,
+  encodeBlockDeleteRequest: Dt,
+  encodeBlockGetRequest: It,
+  encodeBlockPutRequest: Bt,
+  encodeConfigReloadRequest: Xt,
+  encodeConfigSetRequest: Zt,
+  encodeConfigShowRequest: Qt,
+  encodeFriendAdd: vt,
+  encodeFriendListRequest: Wt,
+  encodeFriendRemove: Vt,
+  encodeGetRequest: Tt,
+  encodeHealthRequest: Lt,
+  encodePeerConnect: Kt,
+  encodePeerInfoRequest: Ht,
+  encodePeerListRequest: qt,
+  encodePutData: Rt,
+  encodePutEnd: Ot,
+  encodePutRequest: Ve,
+  getMessageType: Xe,
+  isGetEnd: Pt
 }, Symbol.toStringTag, { value: "Module" }));
-class _r {
+class Rr {
   /**
    * @param {string} url
    * @param {string} [apiKey]
@@ -1970,7 +1970,7 @@ class _r {
       const n = this.socket;
       if (!n) return r(new Error("Socket not created"));
       n.onopen = () => {
-        this.apiKey && this.send(Xe(this.apiKey)), e();
+        this.apiKey && this.send(et(this.apiKey)), e();
       }, n.onerror = (s) => {
         var l;
         const o = s.message || ((l = s.error) == null ? void 0 : l.message) || "unknown";
@@ -1979,7 +1979,7 @@ class _r {
         this.socket = null, this.openPromise = null;
       }, n.onmessage = (s) => {
         var p;
-        const o = new Uint8Array(s.data), l = Ye(o);
+        const o = new Uint8Array(s.data), l = Xe(o);
         l !== null && ((p = this.messageHandler) == null || p.call(this, l, o));
       };
     }), this.openPromise);
@@ -2005,7 +2005,7 @@ class _r {
     this.messageHandler = e;
   }
 }
-class Rr {
+class Or {
   /**
    * @param {string} url
    * @param {string} [apiKey]
@@ -2034,7 +2034,7 @@ class Rr {
   async connect() {
     return this.transport ? this.openPromise || Promise.resolve() : (this.transport = new WebTransport(this.url), this.openPromise = this.transport.ready.then(async () => {
       const e = await this.transport.createBidirectionalStream();
-      this.writer = e.writable.getWriter(), this.reader = e.readable.getReader(), this.running = !0, this._readLoop(), this.apiKey && await this.send(Xe(this.apiKey));
+      this.writer = e.writable.getWriter(), this.reader = e.readable.getReader(), this.running = !0, this._readLoop(), this.apiKey && await this.send(et(this.apiKey));
     }), this.openPromise);
   }
   disconnect() {
@@ -2066,10 +2066,10 @@ class Rr {
         const { done: n, value: s } = await this.reader.read();
         if (n) break;
         const o = s instanceof Uint8Array ? s : new Uint8Array(s.buffer, s.byteOffset, s.byteLength);
-        for (e = e ? Or(e, o) : o; e.length >= 4; ) {
+        for (e = e ? Tr(e, o) : o; e.length >= 4; ) {
           const p = new DataView(e.buffer, e.byteOffset, e.length).getUint32(0, !1);
           if (e.length < 4 + p) break;
-          const y = e.subarray(4, 4 + p), _ = Ye(y);
+          const y = e.subarray(4, 4 + p), _ = Xe(y);
           _ !== null && ((r = this.messageHandler) == null || r.call(this, _, y)), e = e.subarray(4 + p);
         }
       }
@@ -2077,14 +2077,14 @@ class Rr {
     }
   }
 }
-function Or(t, e) {
+function Tr(t, e) {
   const r = new Uint8Array(t.length + e.length);
   return r.set(t, 0), r.set(e, t.length), r;
 }
-const We = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz", et = new Int8Array(128);
-et.fill(-1);
-for (let t = 0; t < We.length; t++)
-  et[We.charCodeAt(t)] = t;
+const ze = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz", tt = new Int8Array(128);
+tt.fill(-1);
+for (let t = 0; t < ze.length; t++)
+  tt[ze.charCodeAt(t)] = t;
 function xe(t) {
   if (t.length === 0) return null;
   let e = 0;
@@ -2094,7 +2094,7 @@ function xe(t) {
   for (let n = e; n < t.length; n++) {
     const s = t.charCodeAt(n);
     if (s >= 128) return null;
-    const o = et[s];
+    const o = tt[s];
     if (o < 0) return null;
     let l = o;
     for (let p = 0; p < r.length; p++)
@@ -2106,7 +2106,7 @@ function xe(t) {
     r.push(0);
   return r.reverse(), new Uint8Array(r);
 }
-function De(t) {
+function Fe(t) {
   if (t.length === 0) return "";
   const e = Array.from(t);
   let r = 0;
@@ -2120,9 +2120,9 @@ function De(t) {
     for (; l > 0; )
       n.push(l % 58), l = Math.floor(l / 58);
   }
-  return "1".repeat(r) + n.reverse().map((o) => We[o]).join("");
+  return "1".repeat(r) + n.reverse().map((o) => ze[o]).join("");
 }
-function ht(t) {
+function pt(t) {
   const e = t.indexOf("/offsystem/v3/");
   if (e < 0) return null;
   const n = t.slice(e + 14).split("/");
@@ -2135,7 +2135,7 @@ function ht(t) {
     fileName: decodeURIComponent(p)
   };
 }
-function Tr(t) {
+function Ar(t) {
   const e = {
     html: "text/html",
     htm: "text/html",
@@ -2191,13 +2191,17 @@ function Tr(t) {
   const n = t.slice(r + 1).toLowerCase();
   return e[n] || "application/octet-stream";
 }
-function Ar(t) {
+function Ur(t) {
   return typeof t.arrayBuffer == "function" ? t.arrayBuffer().then((e) => new Uint8Array(e)) : new Promise((e, r) => {
     const n = new FileReader();
     n.onload = () => e(new Uint8Array(n.result)), n.onerror = () => r(n.error), n.readAsArrayBuffer(t);
   });
 }
-function pt(t, e = 65536) {
+function Te(t) {
+  const r = t.replace(/\\\\/g, "/").split("/").filter(Boolean);
+  return r.length > 0 ? r[r.length - 1] : "file";
+}
+function yt(t, e = 65536) {
   let r = 0;
   return new ReadableStream({
     pull(n) {
@@ -2206,13 +2210,13 @@ function pt(t, e = 65536) {
         return;
       }
       const s = Math.min(r + e, t.size), o = t.slice(r, s);
-      return Ar(o).then((l) => {
+      return Ur(o).then((l) => {
         n.enqueue(l), r = s;
       });
     }
   });
 }
-function Ur(t) {
+function Pr(t) {
   if (typeof FileList < "u" && t instanceof FileList) {
     const e = [];
     for (let r = 0; r < t.length; r++) {
@@ -2224,21 +2228,21 @@ function Ur(t) {
   }
   return Array.isArray(t) ? t.map((e) => e instanceof File || e instanceof Blob ? { path: e.webkitRelativePath || e.name, file: e } : { path: e.path, file: e.file }) : Object.entries(t).map(([e, r]) => ({ path: e, file: r }));
 }
-function Pr(t, e = "http://localhost:23402") {
+function Nr(t, e = "http://localhost:23402") {
   if (!t || /^https?:\/\//i.test(t)) return t;
   let r = t;
   r.startsWith("offs://") && (r = r.slice(7));
   const n = "/offsystem/v3/", s = r.indexOf(n);
   return s >= 0 && (r = r.slice(s)), r.startsWith(n) ? `${e.replace(/\/$/, "")}${r}` : t;
 }
-const Nr = 128e3, Br = 3;
-function Cr({
+const Br = 128e3, Cr = 3;
+function Ir({
   name: t,
   fileHash: e,
   descriptorHash: r,
   finalByte: n,
-  blockType: s = Nr,
-  tupleSize: o = Br,
+  blockType: s = Br,
+  tupleSize: o = Cr,
   fileOffset: l = 0
 }) {
   return {
@@ -2252,10 +2256,10 @@ function Cr({
     fileOffset: l
   };
 }
-function Ir({ name: t, dirHash: e }) {
+function kr({ name: t, dirHash: e }) {
   return { name: t, isDirectory: !0, dirHash: e };
 }
-function kr(t) {
+function Dr(t) {
   const e = t.map((r) => {
     const n = {
       n: r.name,
@@ -2263,18 +2267,18 @@ function kr(t) {
     };
     return r.isDirectory ? n.d = r.dirHash : (n.f = r.fileHash, n.D = r.descriptorHash, n.s = r.finalByte, n.B = r.blockType, n.T = r.tupleSize, n.o = r.fileOffset), n;
   });
-  return mr({ v: 1, entries: e });
+  return Sr({ v: 1, entries: e });
 }
-function Dr() {
+function Fr() {
   return {
     connectTimeoutMs: 5e3,
     requestTimeoutMs: 3e4
   };
 }
-function Fr(t, e, r) {
-  return t.startsWith("ws://") || t.startsWith("wss://") ? new _r(t, e, r) : t.startsWith("wt://") || t.startsWith("wts://") ? new Rr(t, e, r) : new D(t, e, r);
+function Lr(t, e, r) {
+  return t.startsWith("ws://") || t.startsWith("wss://") ? new Rr(t, e, r) : t.startsWith("wt://") || t.startsWith("wts://") ? new Or(t, e, r) : new D(t, e, r);
 }
-class Gr {
+class qr {
   /**
    * @param {string} url
    * @param {string} [apiKey]
@@ -2301,7 +2305,7 @@ class Gr {
     B(this, "streamOptions", null);
     /** @type {boolean} */
     B(this, "connected", !1);
-    this.url = e, this.apiKey = r, this.config = { ...Dr(), ...n }, this.transport = (n == null ? void 0 : n.transport) || Fr(e, r, n), this.transport.setMessageHandler(this._onMessage.bind(this));
+    this.url = e, this.apiKey = r, this.config = { ...Fr(), ...n }, this.transport = (n == null ? void 0 : n.transport) || Lr(e, r, n), this.transport.setMessageHandler(this._onMessage.bind(this));
   }
   /**
    * @returns {Promise<void>}
@@ -2369,7 +2373,7 @@ class Gr {
    */
   _onMessage(e, r) {
     if (e === E.ERROR) {
-      const n = Pt(r);
+      const n = Nt(r);
       if (n)
         for (const s of this.pending.values())
           this._reject(s.id, new Error(`Server error ${n.statusCode}: ${n.message}`));
@@ -2411,12 +2415,16 @@ class Gr {
   async put(e, r) {
     if (typeof e == "string")
       throw new Error("Use object options (contentType, fileName, streamLength)");
+    const n = {
+      ...e,
+      fileName: Te(e.fileName)
+    };
     if (this.transport instanceof D) {
-      const o = r || new Uint8Array(0);
-      return this.transport.put(e, o);
+      const l = r || new Uint8Array(0);
+      return this.transport.put(n, l);
     }
-    const n = ve(e, r), s = await this._sendAndWait(n, E.PUT_RESPONSE);
-    return Ve(s);
+    const s = Ve(n, r), o = await this._sendAndWait(s, E.PUT_RESPONSE);
+    return We(o);
   }
   /**
    * @param {OffsPutOptions} options
@@ -2425,7 +2433,7 @@ class Gr {
   async putStreamStart(e) {
     if (this.streamingPut = !0, this.streamOptions = e, this.transport instanceof D)
       return;
-    const r = ve(e);
+    const r = Ve(e);
     await this.transport.send(r);
   }
   /**
@@ -2435,7 +2443,7 @@ class Gr {
   async putStreamData(e) {
     if (this.transport instanceof D)
       throw new Error("HTTP transport does not support putStreamData; use put with ReadableStream");
-    await this.transport.send(_t(e));
+    await this.transport.send(Rt(e));
   }
   /**
    * @returns {Promise<{oriString: string}>}
@@ -2447,9 +2455,9 @@ class Gr {
       if (!e) throw new Error("No stream in progress");
       return this.transport.put(e, new Uint8Array(0));
     }
-    await this.transport.send(Rt());
+    await this.transport.send(Ot());
     const r = await this._request(this.nextRequestId - 1, E.PUT_RESPONSE);
-    return Ve(r);
+    return We(r);
   }
   /**
    * @param {string} oriString
@@ -2460,11 +2468,11 @@ class Gr {
     var p, y;
     if (this.transport instanceof D)
       return this.transport.get(e, r);
-    const s = Ot(e, n), o = await this._sendAndWait(s, E.GET_RESPONSE_START), l = Tt(o);
+    const s = Tt(e, n), o = await this._sendAndWait(s, E.GET_RESPONSE_START), l = At(o);
     for ((p = r.onStart) == null || p.call(r, l.contentType, l.contentLength, l.hasRange, l.rangeStart, l.rangeEnd); ; ) {
       const _ = await this._waitForResponse([E.GET_DATA, E.GET_END]);
-      if (Ut(_)) break;
-      const g = At(_);
+      if (Pt(_)) break;
+      const g = Ut(_);
       r.onData(g);
     }
     (y = r.onEnd) == null || y.call(r);
@@ -2477,8 +2485,8 @@ class Gr {
   async blockPut(e, r = 0) {
     if (this.transport instanceof D)
       return this.transport.blockPut(e, r);
-    const n = Nt(e, r), s = await this._sendAndWait(n, E.BLOCK_PUT_RESPONSE);
-    return Bt(s);
+    const n = Bt(e, r), s = await this._sendAndWait(n, E.BLOCK_PUT_RESPONSE);
+    return Ct(s);
   }
   /**
    * @param {string|Uint8Array} hash
@@ -2487,9 +2495,9 @@ class Gr {
   async blockGet(e) {
     if (typeof e == "string") return this.transport.blockGet(e);
     if (this.transport instanceof D)
-      return this.transport.blockGet(De(e));
-    const r = Ct(e), n = await this._sendAndWait(r, E.BLOCK_GET_RESPONSE);
-    return It(n);
+      return this.transport.blockGet(Fe(e));
+    const r = It(e), n = await this._sendAndWait(r, E.BLOCK_GET_RESPONSE);
+    return kt(n);
   }
   /**
    * @param {string|Uint8Array} hash
@@ -2498,9 +2506,9 @@ class Gr {
   async blockDelete(e) {
     if (typeof e == "string") return this.transport.blockDelete(e);
     if (this.transport instanceof D)
-      return this.transport.blockDelete(De(e));
-    const r = kt(e), n = await this._sendAndWait(r, E.BLOCK_DELETE_RESPONSE);
-    return Dt(n);
+      return this.transport.blockDelete(Fe(e));
+    const r = Dt(e), n = await this._sendAndWait(r, E.BLOCK_DELETE_RESPONSE);
+    return Ft(n);
   }
   /**
    * @returns {Promise<any>}
@@ -2508,7 +2516,7 @@ class Gr {
   async health() {
     if (this.transport instanceof D)
       return this.transport.health();
-    const e = Ft(), r = await this._sendAndWait(e, E.HEALTH_RESPONSE), { json: n } = Lt(r);
+    const e = Lt(), r = await this._sendAndWait(e, E.HEALTH_RESPONSE), { json: n } = Mt(r);
     return JSON.parse(n);
   }
   /**
@@ -2518,8 +2526,8 @@ class Gr {
   async peerInfo(e = "cbor") {
     if (this.transport instanceof D)
       return this.transport.peerInfo(e);
-    const r = Mt(), n = await this._sendAndWait(r, E.PEER_INFO_RESPONSE);
-    return Ht(n);
+    const r = Ht(), n = await this._sendAndWait(r, E.PEER_INFO_RESPONSE);
+    return jt(n);
   }
   /**
    * @param {Uint8Array} peerInfo
@@ -2529,8 +2537,8 @@ class Gr {
   async peerConnect(e, r = 0) {
     if (this.transport instanceof D)
       return this.transport.peerConnect(e, r);
-    const n = jt(r, e), s = await this._sendAndWait(n, E.PEER_CONNECT_RESULT);
-    return Kt(s);
+    const n = Kt(r, e), s = await this._sendAndWait(n, E.PEER_CONNECT_RESULT);
+    return Gt(s);
   }
   /**
    * Convert an OFF URL/URI string into an HTTP URL usable by a browser.
@@ -2539,7 +2547,7 @@ class Gr {
    * @returns {string}
    */
   static offUrlToHttpUrl(e, r) {
-    return Pr(e, r);
+    return Nr(e, r);
   }
   /**
    * @returns {Promise<any[]>}
@@ -2547,8 +2555,8 @@ class Gr {
   async peerList() {
     if (this.transport instanceof D)
       return this.transport.peerList();
-    const e = Gt(), r = await this._sendAndWait(e, E.PEER_LIST_RESPONSE);
-    return qt(r);
+    const e = qt(), r = await this._sendAndWait(e, E.PEER_LIST_RESPONSE);
+    return $t(r);
   }
   /**
    * @param {Uint8Array} peerInfo
@@ -2558,7 +2566,7 @@ class Gr {
   async friendAdd(e, r = 0) {
     if (this.transport instanceof D)
       return this.transport.friendAdd(e, r);
-    const n = $t(r, e);
+    const n = vt(r, e);
     await this.transport.send(n);
   }
   /**
@@ -2567,8 +2575,8 @@ class Gr {
    */
   async friendRemove(e) {
     if (this.transport instanceof D)
-      return this.transport.friendRemove(typeof e == "string" ? e : De(e));
-    const r = typeof e == "string" ? new TextEncoder().encode(e) : e, n = vt(r);
+      return this.transport.friendRemove(typeof e == "string" ? e : Fe(e));
+    const r = typeof e == "string" ? new TextEncoder().encode(e) : e, n = Vt(r);
     await this.transport.send(n);
   }
   /**
@@ -2577,8 +2585,8 @@ class Gr {
   async friendList() {
     if (this.transport instanceof D)
       return this.transport.friendList();
-    const e = Vt(), r = await this._sendAndWait(e, E.FRIEND_LIST_RESPONSE);
-    return Wt(r);
+    const e = Wt(), r = await this._sendAndWait(e, E.FRIEND_LIST_RESPONSE);
+    return zt(r);
   }
   /**
    * @returns {Promise<any>}
@@ -2586,7 +2594,7 @@ class Gr {
   async configShow() {
     if (this.transport instanceof D)
       return this.transport.configShow();
-    const e = zt(), r = await this._sendAndWait(e, E.CONFIG_SHOW_RESPONSE), { json: n } = Qt(r);
+    const e = Qt(), r = await this._sendAndWait(e, E.CONFIG_SHOW_RESPONSE), { json: n } = Jt(r);
     return JSON.parse(n);
   }
   /**
@@ -2597,8 +2605,8 @@ class Gr {
   async configSet(e, r) {
     if (this.transport instanceof D)
       return this.transport.configSet(e, r);
-    const n = Jt(e, r), s = await this._sendAndWait(n, E.CONFIG_SET_RESPONSE);
-    return Zt(s);
+    const n = Zt(e, r), s = await this._sendAndWait(n, E.CONFIG_SET_RESPONSE);
+    return Yt(s);
   }
   /**
    * @returns {Promise<{status: number, message: string}>}
@@ -2606,8 +2614,8 @@ class Gr {
   async configReload() {
     if (this.transport instanceof D)
       return this.transport.configReload();
-    const e = Yt(), r = await this._sendAndWait(e, E.CONFIG_RELOAD_RESPONSE);
-    return Xt(r);
+    const e = Xt(), r = await this._sendAndWait(e, E.CONFIG_RELOAD_RESPONSE);
+    return er(r);
   }
   /**
    * Upload a folder recursively and return the root directory's ORI URL.
@@ -2623,7 +2631,7 @@ class Gr {
    * @returns {Promise<{oriString: string}>}
    */
   async putFolder(e, r = {}) {
-    const n = Ur(e);
+    const n = Pr(e);
     if (n.length === 0)
       throw new Error("No files to upload");
     const s = r.recyclerUrls || [], o = n.length;
@@ -2631,25 +2639,25 @@ class Gr {
     const p = (g) => {
       var P;
       l++, (P = r.onProgress) == null || P.call(r, g, l, o);
-    }, y = Lr(n.map((g) => g.path)), _ = async (g) => {
-      const P = g ? g.split("/").pop() : y.split("/").pop() || "root", G = Mr(n, g), V = Hr(n, g), I = [];
-      for (const C of V) {
-        const X = (await _(C)).oriString, J = ht(X);
+    }, y = Mr(n.map((g) => g.path)), _ = async (g) => {
+      const P = Te(g || y || "root"), G = Hr(n, g), V = jr(n, g), C = [];
+      for (const I of V) {
+        const X = (await _(I)).oriString, J = pt(X);
         if (!J)
           throw new Error(`Failed to parse subdirectory URL: ${X}`);
         const v = xe(J.fileHashB58);
         if (!v)
           throw new Error(`Invalid directory hash in URL: ${X}`);
-        I.push(Ir({
-          name: C.split("/").pop() || C,
+        C.push(kr({
+          name: Te(I),
           dirHash: v
         }));
       }
-      for (const C of G) {
-        const S = C.path.split("/").pop() || C.path, X = Tr(S), J = C.file.size;
+      for (const I of G) {
+        const S = Te(I.path), X = Ar(S), J = I.file.size;
         let v;
         if (this.transport instanceof D) {
-          const se = pt(C.file);
+          const se = yt(I.file);
           v = (await this.put({
             contentType: X,
             fileName: S,
@@ -2667,7 +2675,7 @@ class Gr {
             recyclerUrls: s,
             temporary: r.temporary
           });
-          const se = pt(C.file).getReader();
+          const se = yt(I.file).getReader();
           for (; ; ) {
             const { done: _e, value: a } = await se.read();
             if (_e) break;
@@ -2675,22 +2683,22 @@ class Gr {
           }
           v = (await this.putStreamEnd()).oriString;
         }
-        const ae = ht(v);
+        const ae = pt(v);
         if (!ae)
           throw new Error(`Failed to parse file URL: ${v}`);
         const ne = xe(ae.fileHashB58), ue = xe(ae.descriptorHashB58);
         if (!ne || !ue)
           throw new Error(`Invalid hash in file URL: ${v}`);
-        I.push(Cr({
+        C.push(Ir({
           name: S,
           fileHash: ne,
           descriptorHash: ue,
           finalByte: ae.streamLength
         })), p(S);
       }
-      if (I.length === 0)
+      if (C.length === 0)
         throw new Error(`Empty directory: ${g || y}`);
-      const q = kr(I), re = `${P}.ofd`;
+      const q = Dr(C), re = `${P}.ofd`;
       return this.transport instanceof D ? this.put({
         contentType: "offsystem/directory",
         fileName: re,
@@ -2710,7 +2718,7 @@ class Gr {
     return _(y);
   }
 }
-function Lr(t) {
+function Mr(t) {
   if (t.length === 0) return "";
   const e = t.map((o) => o.split("/").filter(Boolean)), r = e[0];
   let n = r.length;
@@ -2724,7 +2732,7 @@ function Lr(t) {
   const s = Math.min(n, r.length - 1);
   return r.slice(0, s).join("/");
 }
-function Mr(t, e) {
+function Hr(t, e) {
   const r = e ? `${e}/` : "";
   return t.filter((n) => {
     if (!n.path.startsWith(r)) return !1;
@@ -2732,7 +2740,7 @@ function Mr(t, e) {
     return s.length > 0 && !s.includes("/");
   });
 }
-function Hr(t, e) {
+function jr(t, e) {
   const r = e ? `${e}/` : "", n = /* @__PURE__ */ new Set();
   for (const s of t) {
     if (!s.path.startsWith(r)) continue;
@@ -2743,15 +2751,15 @@ function Hr(t, e) {
   }
   return Array.from(n);
 }
-var Fe = globalThis.OffsClient;
-Fe && Fe.OffsClient && (globalThis.OffsClient = Fe.OffsClient);
+var Le = globalThis.OffsClient;
+Le && Le.OffsClient && (globalThis.OffsClient = Le.OffsClient);
 export {
-  Gr as OffsClient,
+  qr as OffsClient,
   xe as base58Decode,
-  De as base58Encode,
-  Tr as mimeFromExtension,
-  Pr as offUrlToHttpUrl,
-  ht as parseOffUrl,
-  Kr as wire
+  Fe as base58Encode,
+  Ar as mimeFromExtension,
+  Nr as offUrlToHttpUrl,
+  pt as parseOffUrl,
+  Gr as wire
 };
 //# sourceMappingURL=offs-client.esm.js.map

@@ -99,16 +99,19 @@ describe('OffsClient HTTP integration', () => {
     expect(ofdBytes.length).toBeGreaterThan(0);
   });
 
-  it('rejects a file-name containing a slash with 400 instead of hanging up', async () => {
+  it('sanitizes a file-name containing a slash to its basename', async () => {
     const client = new OffsClient(baseUrl);
     await client.connect();
 
     const payload = new TextEncoder().encode('hello world');
-    await expect(client.put({
+    const { oriString } = await client.put({
       contentType: 'text/plain',
       fileName: 'sub/dir/file.txt',
       streamLength: payload.length
-    }, payload)).rejects.toThrow(/400/);
+    }, payload);
+    expect(oriString).toContain('/offsystem/v3/');
+    expect(oriString).toContain('file.txt');
+    expect(oriString).not.toContain('sub');
   });
 
   it('returns 400 on a chunked PUT with an invalid file-name', async () => {
