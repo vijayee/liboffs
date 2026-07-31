@@ -121,6 +121,15 @@ const slides = [
     ]
   },
   {
+    title: 'Why are we doing this?',
+    type: 'content',
+    fragments: [
+      '<p>BitTorrent files\' life span stems from the popularity of individual files. Files represented in the OFF System are constantly extending their availability as new files are being represented.</p>',
+      '<p>IPFS has no inherent mechanism that creates redundancy or popularity of data. This method creates a universal public storage cloud with similar properties to national public radio or public broadcasting.</p>',
+      '<p>It reduces the security burden of data to its ORI rather than the complete file. It is censorship proof and decentralized.</p>'
+    ]
+  },
+  {
     title: 'Client libraries',
     type: 'content',
     fragments: [
