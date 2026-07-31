@@ -47,6 +47,10 @@ test_run.log
 .playwright-mcp/
 robin/
 
+# JavaScript client package artifacts
+src/ClientLibs/js/**/node_modules/
+src/ClientLibs/js/**/dist/
+
 # Flutter off_client generated/binary artifacts
 examples/off_client/android/
 examples/off_client/ios/
