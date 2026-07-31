@@ -848,7 +848,11 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
       n = pd_watcher_drain_read(watcher, buffer, sizeof(buffer));
     }
     if (total_read == 0) {
-      /* POSIX path: synchronous recv. */
+      /* POSIX path: synchronous recv. The socket may already be closed if the
+         connection was torn down concurrently with a pending READ event. */
+      if (connection->sock == NULL) {
+        return;
+      }
       ssize_t bytes_read = platform_socket_recv(connection->sock, buffer, sizeof(buffer));
       if (bytes_read <= 0) {
         if (bytes_read == 0) {
