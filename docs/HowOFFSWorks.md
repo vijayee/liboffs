@@ -40,7 +40,7 @@ OFFS ships as three cooperating artifacts: a C library, a long-running daemon, a
 ```
 ┌───────────────────────────────────────────────┐
 │                 APPLICATIONS                  │
-│  offs CLI │ Flutter example │ future bindings │
+│ offs CLI │ Flutter example │ JS client │ future bindings │
 └───────────────────────┬───────────────────────┘
                         │
 ┌───────────────────────┴───────────────────────┐
@@ -227,7 +227,9 @@ offs_client_disconnect(client);
 
 The Flutter example in `examples/off_client/lib/services/off_api.dart` takes the HTTP route. Its `OffApi` class streams a file to `PUT /offsystem`, fetches data with `GET` on an OFF URL, and wraps `/health`, `/peer/info`, `/peer/connect`, and `/friends` for health checks and peer management. API-key authentication is carried on admin endpoints via an `Authorization: Bearer` header.
 
-Other languages can wrap the C API with FFI, cgo, or similar interfaces, while mobile or web clients can follow the Flutter pattern and use the HTTP endpoints directly.
+A browser-only JavaScript client in `src/ClientLibs/js/offs-client/` follows the same pattern and adds folder uploads. It supports `http://`, `https://`, `ws://`, `wss://`, `wt://`, and `wts://` URLs, encodes the same CBOR wire protocol as the C client, and can recursively upload a folder tree by producing an OFF File Descriptor (OFD) with `contentType: 'offsystem/directory'` — the same algorithm used by the Flutter example. The server exposes HTTP/3 WebTransport on `--wt-h3-port` (off_server) or `--wt-h3-port` (offsd). The JS package includes Node-based integration tests for HTTP and WebSocket, plus a 1.7 GB video round-trip test, and a skipped placeholder for browser WebTransport tests.
+
+Other languages can wrap the C API with FFI, cgo, or similar interfaces, while mobile or web clients can follow the Flutter or JavaScript clients and use the HTTP endpoints directly.
 
 ## 10. Security and trust model
 
