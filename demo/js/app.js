@@ -9,10 +9,11 @@ const slides = [
     title: 'What is OFFS?',
     type: 'content',
     fragments: [
-      '<p>OFFS is a peer-to-peer storage system built around a <strong>brightnet</strong> idea: instead of hiding network routes, it anonymizes the stored data itself.</p>',
-      '<p>Files are never kept whole. They are split into fixed-size blocks that look like random noise, plus separate recipes that describe how to recombine them.</p>',
-      '<p>The same block can belong to many unrelated files, so a node cannot inspect its cache and know what it is holding.</p>',
-      '<p>Retrieval is driven by an <strong>OFF URL / ORI</strong>: a compact identifier that names a representation and tells the client which blocks to fetch and how to XOR them back together.</p>'
+      '<p>The <strong>Owner-Free File System</strong> is the world\'s first <strong>brightnet</strong>: a network that does not hide its routes, but anonymizes the data itself.</p>',
+      '<p>OFFS never stores whole files. It stores only fixed-size blocks of random data — large random numbers that have no discrete mapping to any single file.</p>',
+      '<p>Those blocks are shared across an infinite number of user-created representations, forming a universal public storage cloud with the longevity of public broadcasting rather than the popularity-driven lifespan of torrents.</p>',
+      '<p>Because no one can own mathematics or numbers, no one can own the blocks. The system is therefore <strong>owner free</strong>.</p>',
+      '<p>The key to retrieving a representation is its OFF URL. The URL supplies the variables to the retrieval equation and can be used by any web browser or HTTP client. No tangible file ever crosses the network or sits complete in local storage.</p>'
     ]
   },
   {
