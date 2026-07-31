@@ -887,6 +887,15 @@ static void _set_cors_headers(http_response_t* response) {
                              "Content-Type, Content-Range, Content-Length");
 }
 
+static int _off_put_headers_complete_error(http_response_t* response, int status, const char* message) {
+    _set_cors_headers(response);
+    http_response_set_status(response, status);
+    http_response_set_header(response, "Content-Type", "text/plain");
+    http_response_write(response, message, strlen(message));
+    http_response_end(response);
+    return 1;
+}
+
 static int _off_put_headers_complete(http_connection_t* connection,
                                       http_request_t* request,
                                       http_response_t* response) {
@@ -904,16 +913,20 @@ static int _off_put_headers_complete(http_connection_t* connection,
     const char* server_address = http_request_header(request, "server-address");
 
     if (!type || !file_name || !stream_length_str) {
-        return 0;
+        return _off_put_headers_complete_error(response, 400,
+            "Missing required headers: type, file-name, stream-length");
     }
 
-    if (validate_content_type(type) != 0 || validate_file_name(file_name) != 0) {
-        return 0;
+    if (validate_content_type(type) != 0) {
+        return _off_put_headers_complete_error(response, 400, "Invalid content type");
+    }
+    if (validate_file_name(file_name) != 0) {
+        return _off_put_headers_complete_error(response, 400, "Invalid file name");
     }
 
     size_t stream_length = (size_t)atol(stream_length_str);
     if (stream_length == 0) {
-        return 0;
+        return _off_put_headers_complete_error(response, 400, "Invalid stream length");
     }
 
     // Get the off_routes_context from the matched route
@@ -935,13 +948,14 @@ static int _off_put_headers_complete(http_connection_t* connection,
         }
     }
 
-    /* Pre-flight space check: reject if the cache cannot fit the estimated bytes.
-     * On failure, fall back to the buffered path (return 0) — the buffered
-     * _off_put_handler re-runs the same check and sends the 500 response. */
+    /* Pre-flight space check: reject immediately if the cache cannot fit the
+     * estimated bytes. Returning the error from the streaming handler avoids
+     * buffering a chunked body only to discard it later. */
     size_t required = writeable_off_stream_estimate_required_bytes(
         stream_length, tuple_size, /*descriptor_pad=*/32);
     if (block_cache_can_fit(routes_ctx->bc, required) != CACHE_FIT_OK) {
-        return 0;
+        return _off_put_headers_complete_error(response, 500,
+            "cache full: configure larger max_capacity_bytes");
     }
 
     vec_block_recipe_t recipes;

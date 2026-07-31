@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import http from 'node:http';
 import { OffsClient } from '../../src/index.js';
 
 /**
@@ -96,6 +97,43 @@ describe('OffsClient HTTP integration', () => {
     expect(response.ok).toBe(true);
     const ofdBytes = new Uint8Array(await response.arrayBuffer());
     expect(ofdBytes.length).toBeGreaterThan(0);
+  });
+
+  it('rejects a file-name containing a slash with 400 instead of hanging up', async () => {
+    const client = new OffsClient(baseUrl);
+    await client.connect();
+
+    const payload = new TextEncoder().encode('hello world');
+    await expect(client.put({
+      contentType: 'text/plain',
+      fileName: 'sub/dir/file.txt',
+      streamLength: payload.length
+    }, payload)).rejects.toThrow(/400/);
+  });
+
+  it('returns 400 on a chunked PUT with an invalid file-name', async () => {
+    const result = await new Promise((resolve, reject) => {
+      const req = http.request(`${baseUrl}/offsystem`, {
+        method: 'PUT',
+        agent: false,
+        headers: {
+          'type': 'text/plain',
+          'file-name': 'sub/dir/file.txt',
+          'stream-length': '11',
+          'Content-Type': 'application/octet-stream',
+          'Transfer-Encoding': 'chunked'
+        }
+      }, (res) => {
+        let body = '';
+        res.on('data', (chunk) => body += chunk);
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      });
+      req.on('error', reject);
+      req.write('hello world');
+      req.end();
+    });
+    expect(result.status).toBe(400);
+    expect(result.body).toContain('Invalid file name');
   });
 });
 
