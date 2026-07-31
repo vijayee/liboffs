@@ -73,6 +73,44 @@ const slides = [
     ]
   },
   {
+    title: 'The Architecture',
+    type: 'content',
+    fragments: [
+      '<div class="arch-diagram">' +
+        '<div class="arch-layer">' +
+          '<div class="arch-title">Applications</div>' +
+          '<div class="arch-boxes">' +
+            '<div class="arch-box">offs CLI</div>' +
+            '<div class="arch-box">Flutter example</div>' +
+            '<div class="arch-box">JS client</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="arch-connector"></div>' +
+        '<div class="arch-layer">' +
+          '<div class="arch-title">ClientAPI</div>' +
+          '<div class="arch-boxes">' +
+            '<div class="arch-box">HTTP</div>' +
+            '<div class="arch-box">Unix</div>' +
+            '<div class="arch-box">TCP</div>' +
+            '<div class="arch-box">WebSocket</div>' +
+            '<div class="arch-box">WebTransport</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="arch-connector"></div>' +
+        '<div class="arch-layer">' +
+          '<div class="arch-title">offsd / liboffs</div>' +
+          '<div class="arch-boxes">' +
+            '<div class="arch-box">BlockCache</div>' +
+            '<div class="arch-box">OFFStreams</div>' +
+            '<div class="arch-box">Network</div>' +
+            '<div class="arch-box">Actor/Scheduler</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<p>Clients connect through the ClientAPI transports into the daemon, which is built on liboffs. The core layers handle block storage, OFF stream encoding, peer-to-peer networking, and asynchronous execution.</p>'
+    ]
+  },
+  {
     title: 'The network layer',
     type: 'content',
     fragments: [
