@@ -121,16 +121,6 @@ const slides = [
     ]
   },
   {
-    title: 'Security and trust',
-    type: 'content',
-    fragments: [
-      '<p>Transport-level TLS protects peer and client connections; optional CA-based client certificates add access control.</p>',
-      '<p>Admin endpoints use bcrypt-secured API keys; the <code>offs</code> CLI connects over a Unix socket and sends CBOR messages.</p>',
-      '<p>Content is anonymized through the OFF block transform: possession and meaning are separated, so stored blocks look like random noise.</p>',
-      '<p>No central authority knows what any node is storing; the brightnet model anonymizes data rather than hiding routes.</p>'
-    ]
-  },
-  {
     title: 'Client libraries',
     type: 'content',
     fragments: [
