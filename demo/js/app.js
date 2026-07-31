@@ -115,11 +115,9 @@ const slides = [
     title: 'The network layer',
     type: 'content',
     fragments: [
-      '<p>Each node has a stable identity derived from its public key. The authority subsystem signs salutation messages and loads the node certificate.</p>',
-      '<p>Peer discovery uses a Meridian-style ring overlay: bootstrap, copy rings, measure latency, place peers into concentric latency rings.</p>',
-      '<p>Block lookup sends <code>WIRE_FIND_BLOCK</code>; recipients check local cache and peers\' EABFs, then return the block or forward the request with a visited filter to prevent loops.</p>',
-      '<p>Hebbian learning strengthens weights along successful routes; faster responses get larger positive updates, while stale weights decay.</p>',
-      '<p>NAT traversal uses relays for address discovery and forwarding, then attempts UDP hole punching. mDNS handles same-LAN discovery without a relay.</p>'
+      '<p>The network of the modern implementation uses a modified version of the Meridian routing protocol. It is a self-organizing peer-to-peer network.</p>',
+      '<p>It uses Hebbian learning and short-term memory to optimize connections and the usage of storage.</p>',
+      '<p>Data migrates where it is needed most through respiration.</p>'
     ]
   },
   {
