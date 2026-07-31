@@ -11,7 +11,8 @@ export default defineConfig({
     rollupOptions: {
       external: [],
       output: {
-        globals: {}
+        globals: {},
+        footer: 'var _oc = globalThis.OffsClient; if (_oc && _oc.OffsClient) { globalThis.OffsClient = _oc.OffsClient; }'
       }
     },
     sourcemap: true
