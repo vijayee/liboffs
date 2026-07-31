@@ -18,10 +18,9 @@ const slides = [
     title: 'A brief history',
     type: 'content',
     fragments: [
-      '<p>The OFF System grew out of the hacktivist collective The Big Hack around 2003.</p>',
-      '<p>SpectralMorning re-implemented it in C++; CaptainMorgan announced the public launch in 2006 as a <em>copyless</em> file system.</p>',
-      '<p>By April 2008 a beta reached more than one hundred nodes; active development paused when SpectralMorning halted work later that year.</p>',
-      '<p>Today, <strong>liboffs / OFFS</strong> is a modern reinterpretation by Prometheus-SCN, continuing the idea that no one can own mathematics or numbers.</p>'
+      '<p>The original Owner Free File System was created by the hacktivist organization Big Hack in 2003.</p>',
+      '<p>Since then it has been maintained by Prometheus, the social currency network.</p>',
+      '<p>It is a keystone implementation in the Earth Services model, representing layer one storage.</p>'
     ]
   },
   {
