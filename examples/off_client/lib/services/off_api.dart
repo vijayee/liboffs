@@ -95,6 +95,14 @@ class OffApi extends ChangeNotifier {
 
   /// Stream a file upload without loading the entire file into memory.
   /// The server processes data as it arrives via the streaming PUT pipeline.
+  /// Return the last path segment, ensuring no directory separators or parent
+  /// references leak into the `file-name` header.
+  static String _basename(String path) {
+    final separators = RegExp(r'[\\/]');
+    return path.split(separators).lastWhere((segment) => segment.isNotEmpty,
+        orElse: () => 'file');
+  }
+
   Future<String> uploadFile({
     required String fileName,
     required int streamLength,
@@ -105,14 +113,15 @@ class OffApi extends ChangeNotifier {
     required String filePath,
     void Function(double progress)? onProgress,
   }) async {
-    final type = contentType ?? mimeFromExtension(fileName);
+    final safeFileName = _basename(fileName);
+    final type = contentType ?? mimeFromExtension(safeFileName);
     final uri = Uri.parse('$baseUrl/offsystem');
     final file = File(filePath);
     final fileStream = file.openRead();
 
     final request = http.StreamedRequest('PUT', uri);
     request.headers['type'] = type;
-    request.headers['file-name'] = fileName;
+    request.headers['file-name'] = safeFileName;
     request.headers['stream-length'] = streamLength.toString();
     request.headers['Content-Type'] = 'application/octet-stream';
     if (serverAddress != null) {
@@ -157,11 +166,12 @@ class OffApi extends ChangeNotifier {
     bool temporary = false,
     required List<int> bodyBytes,
   }) async {
-    final type = contentType ?? mimeFromExtension(fileName);
+    final safeFileName = _basename(fileName);
+    final type = contentType ?? mimeFromExtension(safeFileName);
     final uri = Uri.parse('$baseUrl/offsystem');
     final request = http.Request('PUT', uri);
     request.headers['type'] = type;
-    request.headers['file-name'] = fileName;
+    request.headers['file-name'] = safeFileName;
     request.headers['stream-length'] = streamLength.toString();
     request.headers['Content-Type'] = 'application/octet-stream';
     if (serverAddress != null) {
