@@ -124,7 +124,13 @@ const slides = [
     title: 'Why are we doing this?',
     type: 'content',
     fragments: [
-      '<p>Bit torrent files\' life span stems from the popularity of individual files. Files represented in the off system are constantly extending their availability as new files are being represented. IPFS has no inherent mechanisme that creates redundancy or popularity of data. The OFF System\'s method creates a universal public storage cloud with similar properties as national public radio or public broadcasting. It reduces the security burden of datat to its ORI rather than the complete file. It is censorship proof and decentralized.</p>'
+      '<ul>' +
+      '<li>Bit torrent files\' life span stems from the popularity of individual files. Files represented in the off system are constantly extending their availability as new files are being represented.</li>' +
+      '<li>IPFS has no inherent mechanisme that creates redundancy or popularity of data.</li>' +
+      '<li>The OFF System\'s method creates a universal public storage cloud with similar properties as national public radio or public broadcasting.</li>' +
+      '<li>It reduces the security burden of datat to its ORI rather than the complete file.</li>' +
+      '<li>It is censorship proof and decentralized.</li>' +
+      '</ul>'
     ]
   },
   {
