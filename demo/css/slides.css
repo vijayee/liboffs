@@ -39,6 +39,8 @@ html, body {
   top: 0; left: 0; right: 0;
   z-index: 10;
   padding: 1.5rem 2rem;
+  display: flex;
+  align-items: center;
 }
 
 .logo {
@@ -52,7 +54,6 @@ html, body {
   font-size: 1.25rem;
   font-weight: 600;
   color: var(--off-muted);
-  vertical-align: middle;
 }
 
 .slide {
