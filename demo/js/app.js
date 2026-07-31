@@ -109,6 +109,15 @@ const slides = [
     type: 'result',
     demoType: 'site',
     fragments: []
+  },
+  {
+    title: 'Contact & Code',
+    type: 'content',
+    fragments: [
+      '<p><strong>GitHub:</strong> <a href="https://github.com/Prometheus-SCN/OFFS" target="_blank">Prometheus-SCN/OFFS</a></p>',
+      '<p><strong>Contact:</strong> Victor Morrow &lt;victor.j.morrow@gmail.com&gt;</p>',
+      '<p>Thank you.</p>'
+    ]
   }
 ];
 
