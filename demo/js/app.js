@@ -27,11 +27,9 @@ const slides = [
     title: 'Core data model',
     type: 'content',
     fragments: [
-      '<p>Data lives in fixed-size blocks: Mega (1 MB), Standard (128 KB), Mini (64 KB), and Nano (136 bytes).</p>',
-      '<p>Every block is identified by its BLAKE3 hash. Identical blocks collapse to one physical copy and are referenced many times.</p>',
-      '<p>An <strong>ORI</strong> records the descriptor hash, block type, tuple size, file offset, and final byte count. Its string form is the OFF URL people pass around.</p>',
-      '<p>A <strong>tuple</strong> is the ordered list of block hashes. Writing XORs source blocks with randomizer blocks; reading fetches them and XORs back.</p>',
-      '<p><strong>OFDs</strong> (OFF File Directories) map names to file ORIs or nested OFD hashes, so one OFF URL can name an entire directory tree.</p>'
+      '<p>The unit of storage in the Owner Free File System is the <strong>block</strong>. A block is a 128 KB chunk of data.</p>',
+      '<p>Blocks are grouped into <strong>tuples</strong>, and tuples are grouped into <strong>descriptors</strong>. Descriptors reveal the representation of a file.</p>',
+      '<p>When the correct math is applied along with the user\'s ORI, you can get the original file from these underlying structures.</p>'
     ]
   },
   {
