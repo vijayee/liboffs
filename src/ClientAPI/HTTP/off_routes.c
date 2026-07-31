@@ -881,9 +881,17 @@ static void _put_on_request_close(void* ctx, void* unused) {
     put_ctx->request = NULL;
 }
 
+static void _set_cors_headers(http_response_t* response) {
+    http_response_set_header(response, "Access-Control-Allow-Origin", "*");
+    http_response_set_header(response, "Access-Control-Expose-Headers",
+                             "Content-Type, Content-Range, Content-Length");
+}
+
 static int _off_put_headers_complete(http_connection_t* connection,
                                       http_request_t* request,
                                       http_response_t* response) {
+    _set_cors_headers(response);
+
     // Fall back to buffered path for multipart uploads
     const char* content_type_header = http_request_header(request, "Content-Type");
     if (content_type_header && strncmp(content_type_header, "multipart/form-data", 19) == 0) {

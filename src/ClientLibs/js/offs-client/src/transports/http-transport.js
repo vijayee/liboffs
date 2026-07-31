@@ -91,13 +91,16 @@ export class HttpTransport {
     if (options.temporary) headers['temporary'] = 'true';
     if (options.tupleSize !== undefined) headers['tuple-size'] = String(options.tupleSize);
 
-    const isStream = body && typeof body.getReader === 'function';
+    let requestBody = body;
+    if (body && typeof body.getReader === 'function') {
+      requestBody = await this._readStream(body);
+    }
+
     const response = await fetch(this.url('/offsystem'), {
       method: 'PUT',
       headers,
-      body,
-      signal: this.abortController?.signal,
-      ...(isStream ? { duplex: 'half' } : {})
+      body: requestBody,
+      signal: this.abortController?.signal
     });
     if (!response.ok) {
       const text = await response.text();
@@ -105,6 +108,32 @@ export class HttpTransport {
     }
     const oriString = await response.text();
     return { oriString };
+  }
+
+  /**
+   * Read a ReadableStream into a Uint8Array.
+   * The OFFS HTTP server is HTTP/1.1, so request streaming via duplex: 'half'
+   * causes ERR_ALPN_NEGOTIATION_FAILED. Buffering the body avoids that.
+   * @param {ReadableStream<Uint8Array>} stream
+   * @returns {Promise<Uint8Array>}
+   */
+  async _readStream(stream) {
+    const reader = stream.getReader();
+    const chunks = [];
+    let totalLength = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      totalLength += value.length;
+    }
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return result;
   }
 
   /**
