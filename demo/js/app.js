@@ -9,11 +9,9 @@ const slides = [
     title: 'What is OFFS?',
     type: 'content',
     fragments: [
-      '<p>The <strong>Owner-Free File System</strong> is the world\'s first <strong>brightnet</strong>: a network that does not hide its routes, but anonymizes the data itself.</p>',
-      '<p>OFFS never stores whole files. It stores only fixed-size blocks of random data — large random numbers that have no discrete mapping to any single file.</p>',
-      '<p>Those blocks are shared across an infinite number of user-created representations, forming a universal public storage cloud with the longevity of public broadcasting rather than the popularity-driven lifespan of torrents.</p>',
-      '<p>Because no one can own mathematics or numbers, no one can own the blocks. The system is therefore <strong>owner free</strong>.</p>',
-      '<p>The key to retrieving a representation is its OFF URL. The URL supplies the variables to the retrieval equation and can be used by any web browser or HTTP client. No tangible file ever crosses the network or sits complete in local storage.</p>'
+      '<p>The <strong>Owner Free File System</strong> (OFF System)(OFFS) is the world\'s first "brightnet". It facilitates legal data sharing.</p>',
+      '<p>The storage mechanism is unique in that it never stores whole files but instead stores completely random data blocks which contain large randomly generated numbers.</p>',
+      '<p>These blocks have no discrete mapping to any single file but instead are shared by infinite combinations of data.</p>'
     ]
   },
   {
