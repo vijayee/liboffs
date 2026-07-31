@@ -1,7 +1,7 @@
 const slides = [
   {
     title: 'The OFF System',
-    subtitle: 'Decentralized, content-addressed storage with OFF streams',
+    subtitle: 'Owner-Free File System — a brightnet for content-addressed storage',
     type: 'title',
     fragments: []
   },
@@ -9,62 +9,75 @@ const slides = [
     title: 'What is OFFS?',
     type: 'content',
     fragments: [
-      '<p>The OFF System splits files into fixed-size, content-addressed blocks.</p>',
-      '<p>Blocks are obfuscated and reassembled on demand using descriptors and ORIs.</p>',
-      '<p>No central authority knows what any node is holding.</p>'
+      '<p>OFFS is a peer-to-peer storage system built around a <strong>brightnet</strong> idea: instead of hiding network routes, it anonymizes the stored data itself.</p>',
+      '<p>Files are never kept whole. They are split into fixed-size blocks that look like random noise, plus separate recipes that describe how to recombine them.</p>',
+      '<p>The same block can belong to many unrelated files, so a node cannot inspect its cache and know what it is holding.</p>',
+      '<p>Retrieval is driven by an <strong>OFF URL / ORI</strong>: a compact identifier that names a representation and tells the client which blocks to fetch and how to XOR them back together.</p>'
     ]
   },
   {
-    title: 'Core Data Model',
+    title: 'A brief history',
+    type: 'content',
+    fragments: [
+      '<p>The OFF System grew out of the hacktivist collective The Big Hack around 2003.</p>',
+      '<p>SpectralMorning re-implemented it in C++; CaptainMorgan announced the public launch in 2006 as a <em>copyless</em> file system.</p>',
+      '<p>By April 2008 a beta reached more than one hundred nodes; active development paused when SpectralMorning halted work later that year.</p>',
+      '<p>Today, <strong>liboffs / OFFS</strong> is a modern reinterpretation by Prometheus-SCN, continuing the idea that no one can own mathematics or numbers.</p>'
+    ]
+  },
+  {
+    title: 'Core data model',
+    type: 'content',
+    fragments: [
+      '<p>Data lives in fixed-size blocks: Mega (1 MB), Standard (128 KB), Mini (64 KB), and Nano (136 bytes).</p>',
+      '<p>Every block is identified by its BLAKE3 hash. Identical blocks collapse to one physical copy and are referenced many times.</p>',
+      '<p>An <strong>ORI</strong> records the descriptor hash, block type, tuple size, file offset, and final byte count. Its string form is the OFF URL people pass around.</p>',
+      '<p>A <strong>tuple</strong> is the ordered list of block hashes. Writing XORs source blocks with randomizer blocks; reading fetches them and XORs back.</p>',
+      '<p><strong>OFDs</strong> (OFF File Directories) map names to file ORIs or nested OFD hashes, so one OFF URL can name an entire directory tree.</p>'
+    ]
+  },
+  {
+    title: 'Architecture layers',
     type: 'content',
     fragments: [
       '<ul>' +
-      '<li><strong>Block</strong>: a fixed-size chunk of transformed data.</li>' +
-      '<li><strong>Descriptor</strong>: the recipe that turns blocks back into a file.</li>' +
-      '<li><strong>ORI</strong>: an OFF Resource Identifier (URL) pointing to a descriptor.</li>' +
-      '<li><strong>OFD</strong>: an OFF File Descriptor for directories and archives.</li>' +
+      '<li><strong>BlockCache</strong> — fixed-size block storage with LRU, index, section files, and a write-ahead log.</li>' +
+      '<li><strong>OFFStreams</strong> — readable/writeable descriptors, tuple encoding, ORI/OFD handling.</li>' +
+      '<li><strong>Network</strong> — QUIC peer connections, gossip rings, EABF block routing, relay-assisted NAT traversal.</li>' +
+      '<li><strong>ClientAPI</strong> — HTTP, Unix socket, TCP, WebSocket, and WebTransport servers.</li>' +
+      '<li><strong>Actor / Scheduler / Timer</strong> — async actor runtime that makes every put/get a promise.</li>' +
       '</ul>'
     ]
   },
   {
-    title: 'Architecture',
+    title: 'The network layer',
+    type: 'content',
+    fragments: [
+      '<p>Each node has a stable identity derived from its public key. The authority subsystem signs salutation messages and loads the node certificate.</p>',
+      '<p>Peer discovery uses a Meridian-style ring overlay: bootstrap, copy rings, measure latency, place peers into concentric latency rings.</p>',
+      '<p>Block lookup sends <code>WIRE_FIND_BLOCK</code>; recipients check local cache and peers\' EABFs, then return the block or forward the request with a visited filter to prevent loops.</p>',
+      '<p>Hebbian learning strengthens weights along successful routes; faster responses get larger positive updates, while stale weights decay.</p>',
+      '<p>NAT traversal uses relays for address discovery and forwarding, then attempts UDP hole punching. mDNS handles same-LAN discovery without a relay.</p>'
+    ]
+  },
+  {
+    title: 'Security and trust',
+    type: 'content',
+    fragments: [
+      '<p>Transport-level TLS protects peer and client connections; optional CA-based client certificates add access control.</p>',
+      '<p>Admin endpoints use bcrypt-secured API keys; the <code>offs</code> CLI connects over a Unix socket and sends CBOR messages.</p>',
+      '<p>Content is anonymized through the OFF block transform: possession and meaning are separated, so stored blocks look like random noise.</p>',
+      '<p>No central authority knows what any node is storing; the brightnet model anonymizes data rather than hiding routes.</p>'
+    ]
+  },
+  {
+    title: 'Client libraries',
     type: 'content',
     fragments: [
       '<ul>' +
-      '<li><strong>BlockCache</strong>: fixed-size block storage, LRU, index, sections.</li>' +
-      '<li><strong>OFFStreams</strong>: ORI/OFD/tuple encoding and stream descriptors.</li>' +
-      '<li><strong>Network</strong>: QUIC/P2P, gossip, relay, peer discovery.</li>' +
-      '<li><strong>ClientAPI</strong>: HTTP, Unix, TCP, WebSocket, WebTransport servers.</li>' +
-      '<li><strong>Actor/Scheduler</strong>: async actor system and timing.</li>' +
-      '</ul>'
-    ]
-  },
-  {
-    title: 'Network',
-    type: 'content',
-    fragments: [
-      '<p>Direct peer connections over QUIC for same-LAN fast path.</p>',
-      '<p>Gossip and relay support NAT traversal and multi-hop lookups.</p>',
-      '<p>Content is fetched by block hash, not by server identity.</p>'
-    ]
-  },
-  {
-    title: 'Security & Trust',
-    type: 'content',
-    fragments: [
-      '<p>Transport-level TLS and optional CA-based client certificates.</p>',
-      '<p>Admin endpoints use bcrypt-secured API keys.</p>',
-      '<p>Content is anonymized through the OFF block transform.</p>'
-    ]
-  },
-  {
-    title: 'Client Libraries',
-    type: 'content',
-    fragments: [
-      '<ul>' +
-      '<li><strong>C client</strong>: unix://, tcp://, ws://, wss://, wt://, wts://.</li>' +
-      '<li><strong>Flutter example</strong>: uses the HTTP REST API.</li>' +
-      '<li><strong>JavaScript client</strong>: browser-only, supports HTTP, WebSocket, and WebTransport.</li>' +
+      '<li><strong>C client</strong> — connects over unix://, tcp://, ws://, wss://, wt://, wts://; supports buffered and streaming put, get, block, peer, friend, and config operations.</li>' +
+      '<li><strong>Flutter example</strong> — talks to the HTTP REST API for imports, exports, and folder uploads.</li>' +
+      '<li><strong>JavaScript client</strong> — browser-only, supports HTTP fetch, WebSocket binary CBOR, and WebTransport over HTTP/3.</li>' +
       '</ul>'
     ]
   },
@@ -122,7 +135,6 @@ const slides = [
 ];
 
 let current = 0;
-let fragmentIndex = 0;
 
 function getSlideContent() {
   return document.getElementById('slide-content');
@@ -253,7 +265,7 @@ function renderSlide() {
 
   slideContent.className = 'slide slide-transition-enter';
   const fragmentHtml = (slide.fragments || [])
-    .map((html, index) => `<div class="fragment ${index < fragmentIndex ? 'visible' : ''}" data-index="${index}">${html}</div>`)
+    .map((html) => `<div class="fragment visible">${html}</div>`)
     .join('');
 
   let demoHtml = '';
@@ -288,30 +300,15 @@ function renderSlide() {
 }
 
 function next() {
-  const slide = slides[current];
-  const totalFragments = slide.fragments ? slide.fragments.length : 0;
-  if (fragmentIndex < totalFragments) {
-    fragmentIndex++;
-    renderSlide();
-    return;
-  }
   if (current < slides.length - 1) {
     current++;
-    fragmentIndex = 0;
     renderSlide();
   }
 }
 
 function previous() {
-  if (fragmentIndex > 0) {
-    fragmentIndex--;
-    renderSlide();
-    return;
-  }
   if (current > 0) {
     current--;
-    const prevSlide = slides[current];
-    fragmentIndex = prevSlide.fragments ? prevSlide.fragments.length : 0;
     renderSlide();
   }
 }
