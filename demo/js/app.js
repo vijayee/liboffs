@@ -139,7 +139,6 @@ const slides = [
     fragments: [
       '<ul>' +
       '<li><strong>C client</strong> — connects over unix://, tcp://, ws://, wss://, wt://, wts://; supports buffered and streaming put, get, block, peer, friend, and config operations.</li>' +
-      '<li><strong>Flutter example</strong> — talks to the HTTP REST API for imports, exports, and folder uploads.</li>' +
       '<li><strong>JavaScript client</strong> — browser-only, supports HTTP fetch, WebSocket binary CBOR, and WebTransport over HTTP/3.</li>' +
       '</ul>'
     ]
