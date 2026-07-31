@@ -81,8 +81,9 @@ const slides = [
           '<div class="arch-title">Applications</div>' +
           '<div class="arch-boxes">' +
             '<div class="arch-box">offs CLI</div>' +
-            '<div class="arch-box">Flutter example</div>' +
+            '<div class="arch-box">C client library</div>' +
             '<div class="arch-box">JS client</div>' +
+            '<div class="arch-box">your application</div>' +
           '</div>' +
         '</div>' +
         '<div class="arch-connector"></div>' +
