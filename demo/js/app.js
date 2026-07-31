@@ -29,7 +29,7 @@ const slides = [
     fragments: [
       '<p>The unit of storage in the Owner Free File System is the <strong>block</strong>. A block is a 128 KB chunk of data.</p>',
       '<p>Blocks are grouped into <strong>tuples</strong>, and tuples are grouped into <strong>descriptors</strong>. Descriptors reveal the representation of a file.</p>',
-      '<p>When the correct math is applied along with the user\'s ORI, you can get the original file from these underlying structures.</p>'
+      '<p>When the correct math is applied along with the user\'s <strong>ORI</strong>, you can get the original file from these underlying structures.</p>'
     ]
   },
   {
