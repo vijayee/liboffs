@@ -95,6 +95,20 @@ const slides = [
     type: 'result',
     demoType: 'video',
     fragments: []
+  },
+  {
+    title: 'Demo 3: Upload a Static Site',
+    type: 'demo',
+    demoType: 'site',
+    fragments: [
+      '<p>Select a folder containing a static site with index.html.</p>'
+    ]
+  },
+  {
+    title: 'Demo 3 Result',
+    type: 'result',
+    demoType: 'site',
+    fragments: []
   }
 ];
 
@@ -124,6 +138,16 @@ function getButtonNext() {
 const client = typeof OffsClient !== 'undefined' ? new OffsClient('http://localhost:23402') : null;
 const demoResults = { pdf: null, video: null, site: null };
 
+function prepareSiteEntries(fileInput) {
+  const files = Array.from(fileInput.files || []);
+  const entries = {};
+  for (const file of files) {
+    const path = file.webkitRelativePath || file.name;
+    entries[path] = file;
+  }
+  return entries;
+}
+
 function updateProgress() {
   const progressFill = getProgressFill();
   const slideCounter = getSlideCounter();
@@ -151,20 +175,31 @@ function wireDemoControls(slide) {
   });
 
   uploadBtn.addEventListener('click', async () => {
-    const file = fileInput.files[0];
-    if (!file) return;
     uploadBtn.disabled = true;
     status.textContent = 'Uploading…';
     status.className = 'status';
     try {
       await client.connect();
-      const arrayBuffer = await file.arrayBuffer();
-      const data = new Uint8Array(arrayBuffer);
-      const { oriString } = await client.put({
-        contentType: file.type || 'application/pdf',
-        fileName: file.name,
-        streamLength: data.length
-      }, data);
+      let oriString;
+      if (slide.demoType === 'site') {
+        const entries = prepareSiteEntries(fileInput);
+        const result = await client.putFolder(entries, {
+          onProgress: (name, uploaded, total) => {
+            status.textContent = `Uploading ${uploaded}/${total}: ${name}`;
+          }
+        });
+        oriString = result.oriString;
+      } else {
+        const file = fileInput.files[0];
+        const arrayBuffer = await file.arrayBuffer();
+        const data = new Uint8Array(arrayBuffer);
+        const result = await client.put({
+          contentType: file.type || 'application/octet-stream',
+          fileName: file.name,
+          streamLength: data.length
+        }, data);
+        oriString = result.oriString;
+      }
       demoResults[slide.demoType] = oriString;
       status.textContent = 'Upload complete. Advancing to result…';
       status.className = 'status success';
