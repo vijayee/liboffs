@@ -47,6 +47,14 @@ html, body {
   filter: drop-shadow(0 2px 4px rgba(74, 28, 42, 0.2));
 }
 
+.logo-tagline {
+  margin-left: 1rem;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--off-muted);
+  vertical-align: middle;
+}
+
 .slide {
   flex: 1;
   display: flex;
