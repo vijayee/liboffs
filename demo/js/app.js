@@ -147,6 +147,13 @@ function getButtonNext() {
 const client = typeof OffsClient !== 'undefined' ? new OffsClient('http://localhost:23402') : null;
 const demoResults = { pdf: null, video: null, site: null };
 
+function toHttpUrl(oriString) {
+  if (typeof OffsClient !== 'undefined' && OffsClient.offUrlToHttpUrl) {
+    return OffsClient.offUrlToHttpUrl(oriString, 'http://localhost:23402');
+  }
+  return oriString;
+}
+
 function prepareSiteEntries(fileInput) {
   const files = Array.from(fileInput.files || []);
   const entries = {};
@@ -228,13 +235,14 @@ function renderSlide() {
 
   if (slide.type === 'result') {
     const ori = demoResults[slide.demoType];
+    const httpUrl = ori ? toHttpUrl(ori) : null;
     slideContent.className = 'slide slide-transition-enter';
     slideContent.innerHTML = `
       <div class="slide-content" style="display:flex;flex-direction:column;height:100%">
         <h2>${slide.title}</h2>
-        ${ori ?
-          `<div class="ori-url">${ori}</div>
-           <div class="iframe-wrapper"><iframe src="${ori}" title="${slide.demoType} result"></iframe></div>` :
+        ${httpUrl ?
+          `<div class="ori-url">${httpUrl}</div>
+           <div class="iframe-wrapper"><iframe src="${httpUrl}" title="${slide.demoType} result"></iframe></div>` :
           '<p class="status error">No upload result available. Go back and run the demo first.</p>'}
       </div>
     `;
