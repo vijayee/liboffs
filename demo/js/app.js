@@ -33,16 +33,43 @@ const slides = [
     ]
   },
   {
-    title: 'Architecture layers',
+    title: 'The algorithms',
     type: 'content',
     fragments: [
-      '<ul>' +
-      '<li><strong>BlockCache</strong> — fixed-size block storage with LRU, index, section files, and a write-ahead log.</li>' +
-      '<li><strong>OFFStreams</strong> — readable/writeable descriptors, tuple encoding, ORI/OFD handling.</li>' +
-      '<li><strong>Network</strong> — QUIC peer connections, gossip rings, EABF block routing, relay-assisted NAT traversal.</li>' +
-      '<li><strong>ClientAPI</strong> — HTTP, Unix socket, TCP, WebSocket, and WebTransport servers.</li>' +
-      '<li><strong>Actor / Scheduler / Timer</strong> — async actor runtime that makes every put/get a promise.</li>' +
-      '</ul>'
+      '<h3>Store Procedure</h3>' +
+      '<ol>' +
+      '<li>Choose tuple size <strong>t</strong> (default 3) and split the source file into 128 KiB blocks <strong>sᵢ</strong>.</li>' +
+      '<li>For each block, pick <strong>t − 1</strong> randomizer blocks <strong>r₁, r₂, ...</strong> from cache, or generate fresh random data.</li>' +
+      '<li>Store <strong>oᵢ = sᵢ ⊕ r₁ ⊕ r₂ ⊕ ... ⊕ rₜ₋₁</strong> in the cache (⊕ is XOR).</li>' +
+      '<li>Record the set <strong>{ oᵢ, r₁, r₂, ..., rₜ₋₁ }</strong> in the descriptor list.</li>' +
+      '<li>Store the descriptor list in its own block(s) and output the OFFS URL.</li>' +
+      '</ol>' +
+      '<div class="algo-diagram">' +
+        '<div class="algo-box"><strong>sᵢ</strong><br>(source block)</div>' +
+        '<span class="algo-op">⊕</span>' +
+        '<div class="algo-box"><strong>r₁</strong><br>(randomizer)</div>' +
+        '<span class="algo-op">⊕</span>' +
+        '<div class="algo-box"><strong>r₂</strong><br>(randomizer)</div>' +
+        '<span class="algo-arrow">→</span>' +
+        '<div class="algo-box algo-result"><strong>oᵢ</strong><br>(stored block)</div>' +
+      '</div>',
+
+      '<h3>Retrieve Procedure</h3>' +
+      '<ol>' +
+      '<li>Obtain the descriptor block(s) for the requested OFFS URL.</li>' +
+      '<li>For each stored set <strong>{ oᵢ, r₁, r₂, ..., rₜ₋₁ }</strong>, fetch all listed blocks from cache or network.</li>' +
+      '<li>Recover the source block by XORing them together: <strong>sᵢ = oᵢ ⊕ r₁ ⊕ r₂ ⊕ ... ⊕ rₜ₋₁</strong>.</li>' +
+      '<li>Assemble the recovered blocks into the original file.</li>' +
+      '</ol>' +
+      '<div class="algo-diagram">' +
+        '<div class="algo-box algo-result"><strong>oᵢ</strong><br>(stored block)</div>' +
+        '<span class="algo-op">⊕</span>' +
+        '<div class="algo-box"><strong>r₁</strong><br>(randomizer)</div>' +
+        '<span class="algo-op">⊕</span>' +
+        '<div class="algo-box"><strong>r₂</strong><br>(randomizer)</div>' +
+        '<span class="algo-arrow">→</span>' +
+        '<div class="algo-box"><strong>sᵢ</strong><br>(source block)</div>' +
+      '</div>'
     ]
   },
   {
