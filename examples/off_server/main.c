@@ -25,6 +25,7 @@
 #include "Configuration/config.h"
 #include "Platform/platform.h"
 #include "Network/peer_verify.h"
+#include "Util/path_join.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -154,6 +155,7 @@ int main(int argc, char** argv) {
   health_ctx.draining = &draining_val;
 
   authority_t* authority = authority_create(&config);
+  authority->peer_store_path = path_join(cache_dir, "peer_store.cbor");
   authority_init_local_id(authority);
 
   network_t* network = network_create(authority, bc, timer, pool, &config);
