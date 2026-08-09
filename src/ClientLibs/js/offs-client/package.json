@@ -1,0 +1,37 @@
+{
+  "name": "offs-client",
+  "version": "0.1.0",
+  "description": "Browser-only JavaScript client for the OFFS daemon",
+  "type": "module",
+  "main": "dist/offs-client.umd.js",
+  "module": "dist/offs-client.esm.js",
+  "exports": {
+    ".": {
+      "import": "./dist/offs-client.esm.js",
+      "require": "./dist/offs-client.umd.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "vite build",
+    "test:unit": "vitest run test/unit --environment node --browser=false",
+    "test:integration": "vitest run test/integration --environment node --browser=false --exclude '**/large.test.js'",
+    "test:integration:large": "vitest run test/integration/large.test.js --environment node --browser=false",
+    "test": "npm run test:unit && npm run test:integration",
+    "lint": "eslint src test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@playwright/test": "^1.45.0",
+    "cbor-x": "^1.6.0",
+    "eslint": "^9.7.0",
+    "globals": "^17.8.0",
+    "playwright": "^1.45.0",
+    "vite": "^5.3.0",
+    "vitest": "^2.0.0",
+    "ws": "^8.21.1"
+  }
+}

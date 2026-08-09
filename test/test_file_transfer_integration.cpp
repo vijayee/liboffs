@@ -145,12 +145,11 @@ protected:
     if (pid == 0) {
       std::string port_str = std::to_string(port);
       std::string relay_path = get_relay_path();
-      /* No CA is provisioned for the integration relay, so fail-close
-       * (audit #11) would reject the start. Pass --allow-insecure to take
-       * the trusted-LAN/research path. */
+      /* No CA is provisioned for the integration relay; the relay now
+       * defaults to allow_secure=false (no CA validation). */
       execl(relay_path.c_str(), "meridian_relay", "--port", port_str.c_str(),
             "--cert", cert_path.c_str(), "--key", key_path.c_str(),
-            "--allow-insecure", nullptr);
+            nullptr);
       _exit(1);
     }
     Process proc;

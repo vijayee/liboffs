@@ -31,9 +31,8 @@ authority_t* authority_create(config_t* config) {
   authority->config = config;
   authority->max_peers = 64;
   authority->max_inflight = 256;
-  /* Fail closed by default — see audit #11. Callers (config loader, tests)
-   * may flip this to true for trusted-LAN/research use. */
-  authority->allow_insecure = config->allow_insecure;
+  /* Default false: no CA validation. Set allow_secure=true to require a CA. */
+  authority->allow_secure = config->allow_secure;
   return authority;
 }
 

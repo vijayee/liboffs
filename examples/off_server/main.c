@@ -9,6 +9,9 @@
 #include "ClientAPI/Unix/unix_transport.h"
 #include "ClientAPI/HTTP/health_routes.h"
 #include "ClientAPI/health_handler.h"
+#include "ClientAPI/WS/ws_transport.h"
+#include "ClientAPI/WT/wt_transport.h"
+#include "ClientAPI/WT/webtransport_h3.h"
 #include "../../src/ClientAPI/HTTP/peer_routes.h"
 #include "../../src/ClientAPI/HTTP/config_routes.h"
 #include "../../src/Node/node.h"
@@ -21,6 +24,8 @@
 #include "Timer/timer_actor.h"
 #include "Configuration/config.h"
 #include "Platform/platform.h"
+#include "Network/peer_verify.h"
+#include "Util/path_join.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +46,13 @@ static void _print_usage(const char* program) {
   fprintf(stderr, "  --unix <path>        Unix socket path (default: off)\n");
   fprintf(stderr, "  --cache-dir <dir>    Block cache directory (default: ./offs_cache)\n");
   fprintf(stderr, "  --workers <n>        Worker thread count (default: 4)\n");
+  fprintf(stderr, "  --ws-port <port>    WebSocket port (0 to disable, default: 0)\n");
+  fprintf(stderr, "  --wt-port <port>    WebTransport (custom QUIC) port (0 to disable, default: 0)\n");
+  fprintf(stderr, "  --wt-h3-port <port> HTTP/3 WebTransport port (0 to disable, default: 0)\n");
+  fprintf(stderr, "  --cert <path>        TLS certificate for WebSocket/WebTransport\n");
+  fprintf(stderr, "  --key <path>         TLS private key for WebSocket/WebTransport\n");
+  fprintf(stderr, "  --ca-cert <path>    CA certificate for client validation\n");
+  fprintf(stderr, "  --allow-secure       Require CA validation for TLS transports\n");
   fprintf(stderr, "  --help               Show this help\n");
 }
 
@@ -52,6 +64,13 @@ int main(int argc, char** argv) {
   const char* unix_path = NULL;
   const char* cache_dir = "./offs_cache";
   int worker_count = 4;
+  uint16_t ws_port = 0;
+  uint16_t wt_port = 0;
+  uint16_t wt_h3_port = 0;
+  const char* cert_path = NULL;
+  const char* key_path = NULL;
+  const char* ca_path = NULL;
+  uint8_t allow_secure = 0;
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
@@ -65,6 +84,20 @@ int main(int argc, char** argv) {
     } else if (strcmp(argv[i], "--workers") == 0 && i + 1 < argc) {
       worker_count = atoi(argv[++i]);
       if (worker_count < 1) worker_count = 1;
+    } else if (strcmp(argv[i], "--ws-port") == 0 && i + 1 < argc) {
+      ws_port = (uint16_t)atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--wt-port") == 0 && i + 1 < argc) {
+      wt_port = (uint16_t)atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--wt-h3-port") == 0 && i + 1 < argc) {
+      wt_h3_port = (uint16_t)atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--cert") == 0 && i + 1 < argc) {
+      cert_path = argv[++i];
+    } else if (strcmp(argv[i], "--key") == 0 && i + 1 < argc) {
+      key_path = argv[++i];
+    } else if (strcmp(argv[i], "--ca-cert") == 0 && i + 1 < argc) {
+      ca_path = argv[++i];
+    } else if (strcmp(argv[i], "--allow-secure") == 0) {
+      allow_secure = 1;
     } else if (strcmp(argv[i], "--help") == 0) {
       _print_usage(argv[0]);
       return 0;
@@ -77,7 +110,10 @@ int main(int argc, char** argv) {
 
   printf("OFF System Server\n");
   printf("  Host: %s\n", host);
-  printf("  Port: %u\n", port);
+  printf("  HTTP Port: %u\n", port);
+  printf("  WebSocket Port: %u\n", ws_port);
+  printf("  WebTransport Port: %u\n", wt_port);
+  printf("  WebTransport H3 Port: %u\n", wt_h3_port);
   printf("  Cache: %s\n", cache_dir);
   printf("  Workers: %d\n", worker_count);
   if (unix_path != NULL) {
@@ -119,6 +155,7 @@ int main(int argc, char** argv) {
   health_ctx.draining = &draining_val;
 
   authority_t* authority = authority_create(&config);
+  authority->peer_store_path = path_join(cache_dir, "peer_store.cbor");
   authority_init_local_id(authority);
 
   network_t* network = network_create(authority, bc, timer, pool, &config);
@@ -151,6 +188,106 @@ int main(int argc, char** argv) {
   peer_routes_register(server, &node_obj, &config, NULL);
   config_routes_register(server, &node_obj, &config, ".", NULL, NULL);
 
+  ws_transport_t* ws_transport = NULL;
+  if (ws_port != 0) {
+    ws_transport = ws_transport_create(pool, bc, ofd_cache, tc, host, ws_port,
+                                       cert_path, key_path, 0, NULL, &health_ctx);
+    if (ws_transport == NULL) {
+      fprintf(stderr, "Failed to create WebSocket transport on %s:%u\n", host, ws_port);
+      authority_save_peers(authority, network);
+      network_destroy(network);
+      authority_destroy(authority);
+      http_server_destroy(server);
+      tuple_cache_destroy(tc);
+      ofd_cache_destroy(ofd_cache);
+      block_cache_destroy(bc);
+      timer_actor_destroy(timer);
+      scheduler_pool_stop(pool);
+      scheduler_pool_destroy(pool);
+      return 1;
+    }
+  }
+
+  wt_transport_t* wt_transport = NULL;
+  if (wt_port != 0) {
+    peer_verify_ctx_t* peer_verify = NULL;
+    if (ca_path != NULL) {
+      peer_verify = peer_verify_ctx_create_from_pem_file(ca_path);
+      if (peer_verify == NULL) {
+        fprintf(stderr, "Failed to load CA certificate from %s\n", ca_path);
+        if (ws_transport != NULL) {
+          ws_transport_destroy(ws_transport);
+        }
+        authority_save_peers(authority, network);
+        network_destroy(network);
+        authority_destroy(authority);
+        http_server_destroy(server);
+        tuple_cache_destroy(tc);
+        ofd_cache_destroy(ofd_cache);
+        block_cache_destroy(bc);
+        timer_actor_destroy(timer);
+        scheduler_pool_stop(pool);
+        scheduler_pool_destroy(pool);
+        return 1;
+      }
+    }
+
+    wt_transport = wt_transport_create(pool, bc, ofd_cache, tc, host, wt_port,
+                                       cert_path, key_path, ca_path,
+                                       allow_secure != 0, 0, NULL, &health_ctx);
+    if (wt_transport == NULL) {
+      fprintf(stderr, "Failed to create WebTransport transport on %s:%u\n", host, wt_port);
+      if (peer_verify != NULL) {
+        peer_verify_ctx_destroy(peer_verify);
+      }
+      if (ws_transport != NULL) {
+        ws_transport_destroy(ws_transport);
+      }
+      authority_save_peers(authority, network);
+      network_destroy(network);
+      authority_destroy(authority);
+      http_server_destroy(server);
+      tuple_cache_destroy(tc);
+      ofd_cache_destroy(ofd_cache);
+      block_cache_destroy(bc);
+      timer_actor_destroy(timer);
+      scheduler_pool_stop(pool);
+      scheduler_pool_destroy(pool);
+      return 1;
+    }
+
+    if (peer_verify != NULL) {
+      peer_verify_ctx_destroy(peer_verify);
+    }
+  }
+
+  webtransport_h3_t* wt_h3_transport = NULL;
+  if (wt_h3_port != 0) {
+    wt_h3_transport = webtransport_h3_create(pool, bc, ofd_cache, tc, host, wt_h3_port,
+                                                cert_path, key_path, ca_path,
+                                                allow_secure != 0, NULL, &health_ctx);
+    if (wt_h3_transport == NULL) {
+      fprintf(stderr, "Failed to create WebTransport H3 transport on %s:%u\n", host, wt_h3_port);
+      if (wt_transport != NULL) {
+        wt_transport_destroy(wt_transport);
+      }
+      if (ws_transport != NULL) {
+        ws_transport_destroy(ws_transport);
+      }
+      authority_save_peers(authority, network);
+      network_destroy(network);
+      authority_destroy(authority);
+      http_server_destroy(server);
+      tuple_cache_destroy(tc);
+      ofd_cache_destroy(ofd_cache);
+      block_cache_destroy(bc);
+      timer_actor_destroy(timer);
+      scheduler_pool_stop(pool);
+      scheduler_pool_destroy(pool);
+      return 1;
+    }
+  }
+
   unix_transport_t* unix_transport = NULL;
   if (unix_path != NULL) {
     unix_transport = unix_transport_create(pool, bc, ofd_cache, tc, unix_path, NULL, &health_ctx);
@@ -181,12 +318,35 @@ int main(int argc, char** argv) {
   signal_action.sa_handler = _signal_handler;
   sigaction(SIGINT, &signal_action, NULL);
   sigaction(SIGTERM, &signal_action, NULL);
+  signal(SIGPIPE, SIG_IGN);
 #else
   signal(SIGINT, _signal_handler);
   signal(SIGTERM, _signal_handler);
+  signal(SIGPIPE, SIG_IGN);
 #endif
 
   http_server_listen(server);
+  if (ws_transport != NULL) {
+    ws_transport_start(ws_transport);
+    printf("Listening on ws://%s:%u\n", host, ws_port);
+    if (cert_path != NULL && key_path != NULL) {
+      printf("Listening on wss://%s:%u\n", host, ws_port);
+    }
+  }
+  if (wt_transport != NULL) {
+    wt_transport_start(wt_transport);
+    printf("Listening on wt://%s:%u\n", host, wt_port);
+    if (cert_path != NULL && key_path != NULL) {
+      printf("Listening on wts://%s:%u\n", host, wt_port);
+    }
+  }
+  if (wt_h3_transport != NULL) {
+    webtransport_h3_start(wt_h3_transport);
+    printf("Listening on wt://%s:%u (HTTP/3)\n", host, wt_h3_port);
+    if (cert_path != NULL && key_path != NULL) {
+      printf("Listening on wts://%s:%u (HTTP/3)\n", host, wt_h3_port);
+    }
+  }
   if (unix_transport != NULL) {
     unix_transport_start(unix_transport);
     printf("Listening on unix://%s\n", unix_path);
@@ -205,6 +365,18 @@ int main(int argc, char** argv) {
   if (unix_transport != NULL) {
     unix_transport_stop(unix_transport);
     unix_transport_destroy(unix_transport);
+  }
+  if (ws_transport != NULL) {
+    ws_transport_stop(ws_transport);
+    ws_transport_destroy(ws_transport);
+  }
+  if (wt_transport != NULL) {
+    wt_transport_stop(wt_transport);
+    wt_transport_destroy(wt_transport);
+  }
+  if (wt_h3_transport != NULL) {
+    webtransport_h3_stop(wt_h3_transport);
+    webtransport_h3_destroy(wt_h3_transport);
   }
   ATOMIC_STORE(&network->running, 0);
   network_shutdown_connections(network);

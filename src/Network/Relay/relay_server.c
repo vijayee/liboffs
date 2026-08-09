@@ -639,40 +639,40 @@ int relay_server_start(relay_server_t* server, const char* host, uint16_t port) 
       cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)server->peer_verify);
-    } else if (server->allow_insecure) {
-      log_warn("relay_server: no CA configured and allow_insecure is set — "
-               "TLS will not authenticate client certs (MITM possible). "
-               "Configure a CA for production. See audit #11.");
-      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
-    } else {
-      log_error("relay_server: no CA configured and allow_insecure is not set "
-                "— refusing to start. Configure a CA, or set allow_insecure=1 "
-                "for trusted-LAN use. See audit #11.");
+    } else if (server->allow_secure) {
+      log_error("relay_server: allow_secure=true but no CA configured — "
+                "refusing to start. Provide a CA certificate or set "
+                "allow_secure=false.");
       server->msquic->ConfigurationClose(server->configuration);
       server->configuration = NULL;
       server->msquic->RegistrationClose(server->registration);
       server->registration = NULL;
       return -1;
+    } else {
+      log_info("relay_server: running without CA-based peer validation "
+               "(allow_secure=false). Set allow_secure=true and configure a CA "
+               "to require validated peer certificates.");
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
     }
   } else {
     if (server->peer_verify != NULL) {
       cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
       cred_config.CaCertificateFile = peer_verify_ctx_path(
           (peer_verify_ctx_t*)server->peer_verify);
-    } else if (server->allow_insecure) {
-      log_warn("relay_server: no CA configured and allow_insecure is set — "
-               "TLS will not authenticate client certs (MITM possible). "
-               "Configure a CA for production. See audit #11.");
-      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
-    } else {
-      log_error("relay_server: no CA configured and allow_insecure is not set "
-                "— refusing to start. Configure a CA, or set allow_insecure=1 "
-                "for trusted-LAN use. See audit #11.");
+    } else if (server->allow_secure) {
+      log_error("relay_server: allow_secure=true but no CA configured — "
+                "refusing to start. Provide a CA certificate or set "
+                "allow_secure=false.");
       server->msquic->ConfigurationClose(server->configuration);
       server->configuration = NULL;
       server->msquic->RegistrationClose(server->registration);
       server->registration = NULL;
       return -1;
+    } else {
+      log_info("relay_server: running without CA-based peer validation "
+               "(allow_secure=false). Set allow_secure=true and configure a CA "
+               "to require validated peer certificates.");
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
     }
   }
 

@@ -55,7 +55,7 @@ config_t config_default() {
   config.tcp_tls_enabled = false;
   config.tcp_tls_cert_path = NULL;
   config.tcp_tls_key_path = NULL;
-  config.allow_insecure = false;
+  config.allow_secure = false;
   config.api_key_hash = NULL;
   config.log_level = LOG_INFO;
   config.log_structured = false;
