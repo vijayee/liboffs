@@ -124,21 +124,6 @@ static int _decode_peer_info_body(http_request_t* request, peer_info_t* info) {
   return rc;
 }
 
-/* --- Find first direct address --- */
-
-static int _find_first_direct_addr(peer_info_t* info, const char** out_host,
-                                   uint16_t* out_port) {
-  for (size_t index = 0; index < info->address_count; index++) {
-    peer_address_t* addr = &info->addresses[index];
-    if (addr->type == PEER_ADDR_DIRECT && addr->host != NULL) {
-      *out_host = addr->host;
-      *out_port = addr->port;
-      return 0;
-    }
-  }
-  return -1;
-}
-
 /* --- Connect to peer and return status code --- */
 
 static int _connect_to_peer(offs_node_t* node, peer_info_t* info) {
@@ -147,13 +132,17 @@ static int _connect_to_peer(offs_node_t* node, peer_info_t* info) {
     return CONNECT_STATUS_ALREADY;
   }
 
-  const char* host = NULL;
-  uint16_t port = 0;
-  if (_find_first_direct_addr(info, &host, &port) != 0) {
+  if (info->address_count == 0 || info->addresses == NULL) {
     return CONNECT_STATUS_FAILED;
   }
 
-  int rc = network_connect_peer(node->network, host, port);
+  /* Try all candidate addresses in priority order (HOST -> SRFLX -> DIRECT ->
+     RELAY). network_connect_peer_candidates handles the fallback chain and
+     relay-mediated rendezvous; the old code only looked for PEER_ADDR_DIRECT
+     which peer_info_from_node never produces, so /peer/connect always failed. */
+  int rc = network_connect_peer_candidates(node->network, &info->node_id,
+                                            info->addresses,
+                                            info->address_count, false);
   if (rc != 0) {
     return CONNECT_STATUS_FAILED;
   }
