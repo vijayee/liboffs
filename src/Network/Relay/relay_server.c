@@ -385,7 +385,31 @@ static QUIC_STATUS QUIC_API _relay_connection_callback(
       }
 
       server->num_clients++;
-      log_info("relay: client connected with endpoint_id=%u, stream pending", endpoint_id);
+      /* Log the peer's remote address as seen by the QUIC stack. If this is a
+         private/RFC1918 IP, the deployment is SNATing inbound traffic (e.g.
+         Azure ACI does this), which breaks NAT hole-punching because the
+         reflexive address advertised back to the client is unroutable. A
+         VM with a public IP attached to the NIC sees the real client IP. */
+      QUIC_ADDR peer_addr;
+      uint32_t peer_addr_len = sizeof(peer_addr);
+      if (QUIC_SUCCEEDED(server->msquic->GetParam(
+              connection, QUIC_PARAM_CONN_REMOTE_ADDRESS,
+              &peer_addr_len, &peer_addr))) {
+        QUIC_ADDRESS_FAMILY fam = QuicAddrGetFamily(&peer_addr);
+        if (fam == QUIC_ADDRESS_FAMILY_INET) {
+          uint8_t* ip = (uint8_t*)&peer_addr.Ipv4.sin_addr.s_addr;
+          uint16_t port = ntohs(peer_addr.Ipv4.sin_port);
+          log_info("relay: client connected with endpoint_id=%u, peer=%u.%u.%u.%u:%u, stream pending",
+                   endpoint_id, ip[0], ip[1], ip[2], ip[3], port);
+        } else if (fam == QUIC_ADDRESS_FAMILY_INET6) {
+          log_info("relay: client connected with endpoint_id=%u, peer=[ipv6], stream pending",
+                   endpoint_id);
+        } else {
+          log_info("relay: client connected with endpoint_id=%u, stream pending", endpoint_id);
+        }
+      } else {
+        log_info("relay: client connected with endpoint_id=%u, stream pending", endpoint_id);
+      }
       platform_mutex_unlock(server->clients_lock);
       break;
     }

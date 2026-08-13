@@ -618,6 +618,7 @@ int network_connect_peer(network_t* network, const char* host, uint16_t port) {
     log_error("network_connect_peer: no QUIC listener available");
     return -1;
   }
+  log_info("network_connect_peer: connecting to %s:%u", host, port);
   return quic_listener_connect(listener, host, port);
 #else
   (void)port;
@@ -642,6 +643,25 @@ int network_connect_peer_candidates(network_t* network, const node_id_t* remote_
   if (network == NULL || remote_id == NULL) return -1;
   if (addresses == NULL || address_count == 0) return -1;
 
+  /* Pre-admit the peer to the connection manager so that the CONNECTED
+     callback can find it when an async QUIC connection completes. Without
+     this, the first network_connect_peer returns 0 (async "started") and the
+     peer is admitted only on CONNECTED — but if the connection fails, no
+     retry happens because the peer isn't in the manager. Pre-admitting also
+     lets us record the SRFLX address before any connection attempt. */
+  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr,
+                                                       remote_id);
+  if (peer == NULL) {
+    if (is_friend) {
+      peer = connection_manager_add_friend(&network->conn_mgr, remote_id,
+                                            NULL, network->pool);
+    } else {
+      peer = connection_manager_add(&network->conn_mgr, remote_id,
+                                    NULL, network->pool);
+    }
+  }
+  if (peer == NULL) return -1;
+
   /* Pre-scan for the SRFLX candidate so we can record it on the peer (used
      by the periodic direct-upgrade tick). We pick the first SRFLX entry. */
   const peer_address_t* srfx_candidate = NULL;
@@ -651,67 +671,50 @@ int network_connect_peer_candidates(network_t* network, const node_id_t* remote_
       break;
     }
   }
+  if (srfx_candidate != NULL) {
+    peer_connection_set_peer_reflexive(peer, srfx_candidate->host,
+                                        srfx_candidate->port);
+  }
 
+  int started_any = 0;
   for (size_t index = 0; index < address_count; index++) {
     const peer_address_t* addr = &addresses[index];
     if (addr->type == PEER_ADDR_HOST || addr->type == PEER_ADDR_SRFLX ||
         addr->type == PEER_ADDR_DIRECT) {
+      /* network_connect_peer is async — it returns 0 when the QUIC
+         connection is STARTED, not COMPLETED. Start ALL direct candidates
+         in parallel; the first to actually connect fires CONNECTED, which
+         updates the peer's connection handle. The others fail and are
+         cleaned up by the SHUTDOWN_COMPLETE callback. Previously the
+         function returned on the first "started" candidate, so if that
+         candidate failed 10-12s later, no retry happened. */
       if (network_connect_peer(network, addr->host, addr->port) == 0) {
-        /* Direct connect succeeded — store the SRFLX candidate on the peer
-           (if any) so the periodic upgrade tick can re-establish direct if
-           the connection drops. */
-        peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr,
-                                                              remote_id);
-        if (peer != NULL && srfx_candidate != NULL) {
-          peer_connection_set_peer_reflexive(peer, srfx_candidate->host,
-                                              srfx_candidate->port);
-        }
-        return 0;
+        started_any = 1;
       }
-      /* Try the next candidate — keep iterating priority order. */
     } else if (addr->type == PEER_ADDR_RELAY) {
-      /* Admit the peer to the connection manager with the relay endpoint
-         id so conn_state_send routes outbound traffic via the relay. This
-         mirrors the RELAY_RECEIVED admission path (network.c around the
-         NETWORK_RELAY_RECEIVED handler). No QUIC connection is needed —
+      /* Set the relay endpoint id so conn_state_send routes outbound traffic
+         via the relay. This is a fallback: if all direct candidates fail, the
+         peer is still reachable via the relay. No QUIC connection is needed —
          the relay proxies. */
-      peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, remote_id);
-      if (peer == NULL) {
-        if (is_friend) {
-          peer = connection_manager_add_friend(&network->conn_mgr, remote_id,
-                                               NULL, network->pool);
-        } else {
-          peer = connection_manager_add(&network->conn_mgr, remote_id,
-                                        NULL, network->pool);
-        }
-      }
-      if (peer != NULL && addr->relay_id != 0) {
+      if (addr->relay_id != 0) {
         peer->relay_endpoint_id = addr->relay_id;
       }
-      if (peer != NULL) {
-        /* Record the peer's SRFLX address (if any) so the periodic
-           direct-upgrade tick can attempt a QUIC connect to it. Then
-           initialize conn_state from our local NAT type — for non-symmetric
-           local NAT this bumps the peer to TRYING_DIRECT. See audit #18. */
-        if (srfx_candidate != NULL) {
-          peer_connection_set_peer_reflexive(peer, srfx_candidate->host,
-                                              srfx_candidate->port);
+      /* Initialize conn_state from our local NAT type — for non-symmetric
+         local NAT this bumps the peer to TRYING_DIRECT. See audit #18. */
+      if (peer->conn_state != CONN_STATE_DIRECT) {
+        conn_state_set_peer_nat_type(peer, network->local_nat_type);
+        if (network->local_nat_type != NAT_TYPE_SYMMETRIC &&
+            peer->conn_state == CONN_STATE_RELAY) {
+          conn_state_upgrade_to_direct(peer);
         }
-        if (peer->conn_state != CONN_STATE_DIRECT) {
-          conn_state_set_peer_nat_type(peer, network->local_nat_type);
-          if (network->local_nat_type != NAT_TYPE_SYMMETRIC &&
-              peer->conn_state == CONN_STATE_RELAY) {
-            conn_state_upgrade_to_direct(peer);
-          }
-        }
-        log_info("network_connect_peer_candidates: relay candidate admitted "
-                 "(endpoint=%u)", addr->relay_id);
-        return 0;
       }
-      /* If admission failed, fall through to try the next candidate. */
+      log_info("network_connect_peer_candidates: relay candidate admitted "
+               "(endpoint=%u)", addr->relay_id);
+      started_any = 1;
     }
   }
-  return -1;
+
+  return started_any ? 0 : -1;
 }
 
 // --- Pending QUIC connection helpers ---

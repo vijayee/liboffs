@@ -443,7 +443,26 @@ int peer_info_from_node(peer_info_t* info, const struct network_t* network,
 
   /* SRFLX candidate: the relay-learned reflexive address. The relay emits
      the address in host byte order (see relay_server.c), so we convert via
-     _peer_info_ipv4_to_string rather than inet_ntop. */
+     _peer_info_ipv4_to_string rather than inet_ntop.
+
+     We advertise TWO SRFLX candidates when the QUIC listener port differs
+     from the reflexive port:
+
+     1. reflexive_port — correct for nodes behind NAT. The NAT maps the
+        listener port to the reflexive port; hole punching targets it.
+
+     2. listener_port on the reflexive IP — correct for nodes on a public
+        IP with 1:1 DNAT (e.g. Azure/AWS VMs). The infrastructure NAT
+        forwards inbound traffic on the listener port directly to the VM,
+        so the public IP + listener port is reachable. The reflexive port
+        (the relay connection's ephemeral source port) is NOT reachable
+        for incoming connections on these deployments.
+
+     For nodes behind NAT, candidate (2) will fail (NAT blocks inbound to
+     the listener port) and (1) succeeds via hole punching. For public-IP
+     nodes, (1) fails (nothing listening on the reflexive port) and (2)
+     succeeds via direct connection. Advertising both lets the connecting
+     node try each in turn. */
   if (network->relay != NULL && network->relay->reflexive_port != 0 &&
       network->relay->reflexive_addr != 0) {
     char ip_str[INET_ADDRSTRLEN];
@@ -452,6 +471,14 @@ int peer_info_from_node(peer_info_t* info, const struct network_t* network,
     if (_peer_info_append_address(info, PEER_ADDR_SRFLX, ip_str,
                                   network->relay->reflexive_port, 0) != 0) {
       log_warn("peer_info_from_node: failed to append SRFLX candidate");
+    }
+    if (network->quic_listener != NULL &&
+        network->quic_listener->listen_port > 0 &&
+        network->quic_listener->listen_port != network->relay->reflexive_port) {
+      if (_peer_info_append_address(info, PEER_ADDR_SRFLX, ip_str,
+                                    network->quic_listener->listen_port, 0) != 0) {
+        log_warn("peer_info_from_node: failed to append SRFLX listener candidate");
+      }
     }
   }
 

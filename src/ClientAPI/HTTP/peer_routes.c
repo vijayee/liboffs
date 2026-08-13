@@ -47,23 +47,31 @@ static int _check_auth(http_request_t* request, http_response_t* response) {
 
 /* --- Build local peer info --- */
 
-static peer_info_t* _build_local_peer_info(offs_node_t* node) {
+static peer_info_t* _build_local_peer_info(offs_node_t* node, bool include_lan) {
   peer_info_t* info = get_clear_memory(sizeof(peer_info_t));
+  if (info == NULL) return NULL;
 
   memcpy(&info->node_id, &node->authority->local_id, sizeof(node_id_t));
 
   if (node->authority->public_key != NULL) {
     info->public_key_len = node->authority->public_key_len;
     info->public_key = get_clear_memory(info->public_key_len);
-    memcpy(info->public_key, node->authority->public_key, info->public_key_len);
+    if (info->public_key != NULL) {
+      memcpy(info->public_key, node->authority->public_key, info->public_key_len);
+    }
   }
 
-  info->addresses = get_clear_memory(PEER_INFO_MAX_ADDRESSES * sizeof(peer_address_t));
-  info->addresses[0].type = PEER_ADDR_DIRECT;
-  info->addresses[0].host = get_clear_memory(10);
-  memcpy(info->addresses[0].host, "127.0.0.1", 9);
-  info->addresses[0].port = 0;
-  info->address_count = 1;
+  /* Populate real candidate addresses (HOST/SRFLX/RELAY) from the network.
+     Previously this returned a hardcoded 127.0.0.1:0 stub, which made
+     /peer/info useless for actual peering — peers would try to connect to
+     127.0.0.1:0 and fail. */
+  if (node->network != NULL) {
+    if (peer_info_from_node(info, node->network, include_lan) != 0) {
+      peer_info_destroy(info);
+      free(info);
+      return NULL;
+    }
+  }
 
   return info;
 }
@@ -116,21 +124,6 @@ static int _decode_peer_info_body(http_request_t* request, peer_info_t* info) {
   return rc;
 }
 
-/* --- Find first direct address --- */
-
-static int _find_first_direct_addr(peer_info_t* info, const char** out_host,
-                                   uint16_t* out_port) {
-  for (size_t index = 0; index < info->address_count; index++) {
-    peer_address_t* addr = &info->addresses[index];
-    if (addr->type == PEER_ADDR_DIRECT && addr->host != NULL) {
-      *out_host = addr->host;
-      *out_port = addr->port;
-      return 0;
-    }
-  }
-  return -1;
-}
-
 /* --- Connect to peer and return status code --- */
 
 static int _connect_to_peer(offs_node_t* node, peer_info_t* info) {
@@ -139,13 +132,17 @@ static int _connect_to_peer(offs_node_t* node, peer_info_t* info) {
     return CONNECT_STATUS_ALREADY;
   }
 
-  const char* host = NULL;
-  uint16_t port = 0;
-  if (_find_first_direct_addr(info, &host, &port) != 0) {
+  if (info->address_count == 0 || info->addresses == NULL) {
     return CONNECT_STATUS_FAILED;
   }
 
-  int rc = network_connect_peer(node->network, host, port);
+  /* Try all candidate addresses in priority order (HOST -> SRFLX -> DIRECT ->
+     RELAY). network_connect_peer_candidates handles the fallback chain and
+     relay-mediated rendezvous; the old code only looked for PEER_ADDR_DIRECT
+     which peer_info_from_node never produces, so /peer/connect always failed. */
+  int rc = network_connect_peer_candidates(node->network, &info->node_id,
+                                            info->addresses,
+                                            info->address_count, false);
   if (rc != 0) {
     return CONNECT_STATUS_FAILED;
   }
@@ -170,7 +167,14 @@ static void _peer_info_handler(http_request_t* request, http_response_t* respons
     }
   }
 
-  peer_info_t* info = _build_local_peer_info(ctx->node);
+  peer_info_t* info = _build_local_peer_info(ctx->node, request->is_authenticated != 0);
+  if (info == NULL) {
+    http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_set_header(response, "Content-Type", "text/plain");
+    http_response_write(response, "Failed to populate local addresses", 32);
+    http_response_end(response);
+    return;
+  }
 
 #ifdef HAS_QRENCODE
   if (strcmp(format, "qrcode") == 0) {
