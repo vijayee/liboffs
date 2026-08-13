@@ -716,6 +716,11 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
   settings.PeerBidiStreamCount = 1;
   settings.IsSet.PeerUnidiStreamCount = TRUE;
   settings.IsSet.PeerBidiStreamCount = TRUE;
+  // Send QUIC keepalive pings every 15s to prevent the idle timeout from
+  // dropping peer connections during quiet periods between gossip ticks.
+  // Without this, the ~30s idle timeout kills all peer connections.
+  settings.KeepAliveIntervalMs = 15000;
+  settings.IsSet.KeepAliveIntervalMs = TRUE;
 
   if (QUIC_FAILED(status = listener->msquic->ConfigurationOpen(
           listener->registration,
