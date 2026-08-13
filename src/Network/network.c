@@ -40,6 +40,9 @@
 #include <openssl/rand.h>
 #include "pem_key.h"
 #include <stdio.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #define TOPOLOGY_METRICS_PUSH_INTERVAL_MS 300000  // 5 minutes
 #define PING_CAPACITY_INTERVAL_MS 900000  // 15 minutes
@@ -862,9 +865,19 @@ static void network_handle_salutation(network_t* network, message_t* msg,
     conn_state_on_direct_connected(peer);
 
     // Insert the authenticated peer into the ring table so find_block_execute
-    // can route FindBlock requests to it. Without this, the ring table only
-    // gets populated via gossip exchanges which may not have run yet.
-    net_node_t* node = net_node_create(&salut->sender_id, 0, 0);
+    // can route FindBlock requests to it. Use the peer's address from the QUIC
+    // connection (pending->peer_addr) so FIND_NODE responses and gossip messages
+    // include a usable address. Previously this used (0, 0) which meant gossip
+    // couldn't propagate peer addresses — nodes discovered via salutation had
+    // no address in the ring set, so FIND_NODE responses were useless.
+    uint32_t ring_addr = 0;
+    uint16_t ring_port = 0;
+    if (pending->peer_addr.ss_family == AF_INET) {
+      struct sockaddr_in* sin = (struct sockaddr_in*)&pending->peer_addr;
+      ring_addr = ntohl(sin->sin_addr.s_addr);
+      ring_port = ntohs(sin->sin_port);
+    }
+    net_node_t* node = net_node_create(&salut->sender_id, ring_addr, ring_port);
     if (node != NULL) {
       node->weight = FIND_BLOCK_MIN_WEIGHT;
       node->last_gossip_time = (uint64_t)time(NULL) * 1000;
