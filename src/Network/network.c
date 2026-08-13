@@ -1800,8 +1800,17 @@ static void network_handle_gossip_tick(network_t* network, message_t* msg) {
     memset(&gossip, 0, sizeof(gossip));
     gossip.message_id = gossip_handle_next_query_id(&network->gossip);
     memcpy(&gossip.sender_id, &network->authority->local_id, sizeof(node_id_t));
-    gossip.rendezvous_addr = 0;  // 0 until NAT detection fills this
-    gossip.rendezvous_port = 0;
+    // Fill in the sender's rendezvous address so the receiver can add us to
+    // its ring_set with a usable address. Use the relay-reflexive IP with the
+    // QUIC listener port — this is the publicly reachable address for nodes
+    // on public IPs (e.g. Azure VMs with 1:1 DNAT). For NAT'd nodes the
+    // reflexive IP is correct but the port may not be directly reachable;
+    // the receiver will try direct QUIC, fail, and fall back to relay.
+    if (network->relay != NULL && network->relay->reflexive_addr != 0 &&
+        network->quic_listener != NULL && network->quic_listener->listen_port > 0) {
+      gossip.rendezvous_addr = network->relay->reflexive_addr;
+      gossip.rendezvous_port = network->quic_listener->listen_port;
+    }
 
     // Fill targets: 1 random node per ring, excluding the target itself
     net_node_t ring_targets[RING_MAX_RINGS];
@@ -1856,6 +1865,12 @@ static void network_handle_gossip_received(network_t* network, message_t* msg) {
     memcpy(&pull.sender_id, &network->authority->local_id, sizeof(node_id_t));
     pull.rendezvous_addr = 0;
     pull.rendezvous_port = 0;
+    // Fill in our rendezvous address (same logic as gossip tick above)
+    if (network->relay != NULL && network->relay->reflexive_addr != 0 &&
+        network->quic_listener != NULL && network->quic_listener->listen_port > 0) {
+      pull.rendezvous_addr = network->relay->reflexive_addr;
+      pull.rendezvous_port = network->quic_listener->listen_port;
+    }
 
     net_node_t ring_targets[RING_MAX_RINGS];
     pull.target_count = (uint8_t)ring_set_get_random_nodes(
