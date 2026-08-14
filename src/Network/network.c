@@ -666,12 +666,15 @@ int network_connect_peer_candidates(network_t* network, const node_id_t* remote_
   if (peer == NULL) return -1;
 
   /* Pre-scan for the SRFLX candidate so we can record it on the peer (used
-     by the periodic direct-upgrade tick). We pick the first SRFLX entry. */
+     by the periodic direct-upgrade tick). We pick the LAST SRFLX entry —
+     peer_info_from_node advertises reflexive_port first, then listener_port.
+     The listener port is the address the peer's QUIC listener is actually on,
+     so the direct-upgrade tick should target it (with SHARE_UDP_BINDING the
+     peer's outbound QUIC connection creates the NAT mapping for that port). */
   const peer_address_t* srfx_candidate = NULL;
   for (size_t scan_idx = 0; scan_idx < address_count; scan_idx++) {
     if (addresses[scan_idx].type == PEER_ADDR_SRFLX) {
       srfx_candidate = &addresses[scan_idx];
-      break;
     }
   }
   if (srfx_candidate != NULL) {
@@ -1348,8 +1351,16 @@ static void network_relay_send_punch(network_t* network,
   wire_relay_punch_t punch;
   memset(&punch, 0, sizeof(punch));
   memcpy(&punch.sender_id, &network->authority->local_id, sizeof(node_id_t));
+  /* Advertise the QUIC listener port (not the relay connection's ephemeral
+     source port) as the reflexive port. The peer will hole-punch to
+     public_ip:listener_port, which reaches the QUIC listener. Using the
+     relay's reflexive_port would point at the relay socket, not the QUIC
+     listener, so the direct connection would never establish. */
   punch.reflexive_addr = network->relay->reflexive_addr;
-  punch.reflexive_port = network->relay->reflexive_port;
+  punch.reflexive_port = (network->quic_listener != NULL &&
+                          network->quic_listener->listen_port > 0)
+                             ? network->quic_listener->listen_port
+                             : network->relay->reflexive_port;
 
   cbor_item_t* punch_cbor = wire_relay_punch_encode(&punch);
   if (punch_cbor == NULL) {
