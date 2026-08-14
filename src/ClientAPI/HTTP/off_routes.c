@@ -136,12 +136,14 @@ static range_request_t parse_range_header(const char* range_header, size_t file_
 off_routes_context_t* off_routes_context_create(scheduler_pool_t* pool,
                                                   block_cache_t* bc,
                                                   ofd_cache_t* ofd_cache,
-                                                  tuple_cache_t* tc) {
+                                                  tuple_cache_t* tc,
+                                                  network_t* network) {
     off_routes_context_t* ctx = get_clear_memory(sizeof(off_routes_context_t));
     ctx->pool = pool;
     ctx->bc = bc;
     ctx->ofd_cache = ofd_cache;
     ctx->tc = tc;
+    ctx->network = network;
     return ctx;
 }
 
@@ -204,9 +206,9 @@ static void _pipeline_on_rs_close(void* ctx, void* unused) {
 
 static void _setup_stream_pipeline(http_response_t* response, scheduler_pool_t* pool,
                                    block_cache_t* bc, tuple_cache_t* tc, ori_t* stream_ori,
-                                   size_t descriptor_pad) {
-    readable_off_stream_t* rs = readable_off_stream_create(pool, bc, tc, stream_ori, descriptor_pad, NULL);
-    readable_descriptor_t* desc = readable_descriptor_create(pool, bc, stream_ori, descriptor_pad, NULL);
+                                   size_t descriptor_pad, network_t* network) {
+    readable_off_stream_t* rs = readable_off_stream_create(pool, bc, tc, stream_ori, descriptor_pad, network);
+    readable_descriptor_t* desc = readable_descriptor_create(pool, bc, stream_ori, descriptor_pad, network);
 
     get_pipeline_t* pipeline = get_clear_memory(sizeof(get_pipeline_t));
     pipeline->desc = desc;
@@ -310,7 +312,7 @@ static void _send_stream_response(http_response_t* response, off_routes_context_
         http_response_set_header(response, "Content-Length", len_str);
     }
 
-    _setup_stream_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32);
+    _setup_stream_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32, ctx->network);
 }
 
 static void _off_get_dispatch(void* state, message_t* msg);
@@ -405,7 +407,7 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
         http_response_set_header(response, "Content-Length", content_length_str);
     }
 
-    _setup_stream_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32);
+    _setup_stream_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32, ctx->network);
     off_url_destroy(url);
 }
 
@@ -1045,6 +1047,7 @@ static void _off_post_handler(http_request_t* request, http_response_t* response
 
 void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
                          block_cache_t* bc, ofd_cache_t* ofd_cache, tuple_cache_t* tc,
+                         network_t* network,
                          const config_t* config, const char* api_key,
                          ATOMIC(uint32_t)* open_stream_count) {
     (void)open_stream_count;
@@ -1053,7 +1056,7 @@ void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
                   (void*)server, (void*)pool, (void*)bc);
         return;
     }
-    off_routes_context_t* ctx = off_routes_context_create(pool, bc, ofd_cache, tc);
+    off_routes_context_t* ctx = off_routes_context_create(pool, bc, ofd_cache, tc, network);
 
     http_server_use(server, _draining_middleware, server, NULL);
 
