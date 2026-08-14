@@ -40,6 +40,9 @@
 #include <openssl/rand.h>
 #include "pem_key.h"
 #include <stdio.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #define TOPOLOGY_METRICS_PUSH_INTERVAL_MS 300000  // 5 minutes
 #define PING_CAPACITY_INTERVAL_MS 900000  // 15 minutes
@@ -862,9 +865,19 @@ static void network_handle_salutation(network_t* network, message_t* msg,
     conn_state_on_direct_connected(peer);
 
     // Insert the authenticated peer into the ring table so find_block_execute
-    // can route FindBlock requests to it. Without this, the ring table only
-    // gets populated via gossip exchanges which may not have run yet.
-    net_node_t* node = net_node_create(&salut->sender_id, 0, 0);
+    // can route FindBlock requests to it. Use the peer's address from the QUIC
+    // connection (pending->peer_addr) so FIND_NODE responses and gossip messages
+    // include a usable address. Previously this used (0, 0) which meant gossip
+    // couldn't propagate peer addresses — nodes discovered via salutation had
+    // no address in the ring set, so FIND_NODE responses were useless.
+    uint32_t ring_addr = 0;
+    uint16_t ring_port = 0;
+    if (pending->peer_addr.ss_family == AF_INET) {
+      struct sockaddr_in* sin = (struct sockaddr_in*)&pending->peer_addr;
+      ring_addr = ntohl(sin->sin_addr.s_addr);
+      ring_port = ntohs(sin->sin_port);
+    }
+    net_node_t* node = net_node_create(&salut->sender_id, ring_addr, ring_port);
     if (node != NULL) {
       node->weight = FIND_BLOCK_MIN_WEIGHT;
       node->last_gossip_time = (uint64_t)time(NULL) * 1000;
@@ -1787,8 +1800,17 @@ static void network_handle_gossip_tick(network_t* network, message_t* msg) {
     memset(&gossip, 0, sizeof(gossip));
     gossip.message_id = gossip_handle_next_query_id(&network->gossip);
     memcpy(&gossip.sender_id, &network->authority->local_id, sizeof(node_id_t));
-    gossip.rendezvous_addr = 0;  // 0 until NAT detection fills this
-    gossip.rendezvous_port = 0;
+    // Fill in the sender's rendezvous address so the receiver can add us to
+    // its ring_set with a usable address. Use the relay-reflexive IP with the
+    // QUIC listener port — this is the publicly reachable address for nodes
+    // on public IPs (e.g. Azure VMs with 1:1 DNAT). For NAT'd nodes the
+    // reflexive IP is correct but the port may not be directly reachable;
+    // the receiver will try direct QUIC, fail, and fall back to relay.
+    if (network->relay != NULL && network->relay->reflexive_addr != 0 &&
+        network->quic_listener != NULL && network->quic_listener->listen_port > 0) {
+      gossip.rendezvous_addr = network->relay->reflexive_addr;
+      gossip.rendezvous_port = network->quic_listener->listen_port;
+    }
 
     // Fill targets: 1 random node per ring, excluding the target itself
     net_node_t ring_targets[RING_MAX_RINGS];
@@ -1843,6 +1865,12 @@ static void network_handle_gossip_received(network_t* network, message_t* msg) {
     memcpy(&pull.sender_id, &network->authority->local_id, sizeof(node_id_t));
     pull.rendezvous_addr = 0;
     pull.rendezvous_port = 0;
+    // Fill in our rendezvous address (same logic as gossip tick above)
+    if (network->relay != NULL && network->relay->reflexive_addr != 0 &&
+        network->quic_listener != NULL && network->quic_listener->listen_port > 0) {
+      pull.rendezvous_addr = network->relay->reflexive_addr;
+      pull.rendezvous_port = network->quic_listener->listen_port;
+    }
 
     net_node_t ring_targets[RING_MAX_RINGS];
     pull.target_count = (uint8_t)ring_set_get_random_nodes(

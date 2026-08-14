@@ -524,6 +524,10 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
   QUIC_SETTINGS settings = {0};
   settings.PeerBidiStreamCount = 1;
   settings.IsSet.PeerBidiStreamCount = TRUE;
+  settings.IdleTimeoutMs = 120000;
+  settings.IsSet.IdleTimeoutMs = TRUE;
+  settings.KeepAliveIntervalMs = 15000;
+  settings.IsSet.KeepAliveIntervalMs = TRUE;
 
   if (QUIC_FAILED(status = client->msquic->ConfigurationOpen(
           client->registration,
