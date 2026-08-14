@@ -381,9 +381,12 @@ static void _peer_list_handler(http_request_t* request, http_response_t* respons
 
   if (_check_auth(request, response) != 0) return;
 
-  connection_manager_t* mgr = &ctx->node->network->conn_mgr;
+  network_t* network = ctx->node->network;
+  connection_manager_t* mgr = &network->conn_mgr;
 
   cJSON* arr = cJSON_CreateArray();
+
+  /* Connection-manager peers (directly connected). */
   for (size_t index = 0; index < mgr->peer_count; index++) {
     peer_connection_t* peer = mgr->peers[index];
     if (!peer->connected) continue;
@@ -391,7 +394,43 @@ static void _peer_list_handler(http_request_t* request, http_response_t* respons
     cJSON_AddStringToObject(entry, "node_id", peer->remote_node_id.str);
     cJSON_AddBoolToObject(entry, "connected", true);
     cJSON_AddBoolToObject(entry, "is_friend", peer->is_friend);
+    cJSON_AddBoolToObject(entry, "in_ring", false);
     cJSON_AddItemToArray(arr, entry);
+  }
+
+  /* Ring-set peers (gossip-discovered, may not have a live connection yet).
+     These are the peers the node knows about via gossip/FIND_NODE but has
+     not necessarily established a direct QUIC connection to. */
+  ring_set_t* rings = network->rings;
+  if (rings != NULL) {
+    for (size_t ring_idx = 0; ring_idx < rings->ring_count; ring_idx++) {
+      ring_t* ring = &rings->rings[ring_idx];
+      /* Primary members */
+      for (int node_idx = 0; node_idx < ring->primary.length; node_idx++) {
+        net_node_t* node = ring->primary.data[node_idx];
+        if (node == NULL) continue;
+        /* Skip if already in the connection manager (dedup) */
+        if (connection_manager_lookup(mgr, &node->id) != NULL) continue;
+        cJSON* entry = cJSON_CreateObject();
+        cJSON_AddStringToObject(entry, "node_id", node->id.str);
+        cJSON_AddBoolToObject(entry, "connected", false);
+        cJSON_AddBoolToObject(entry, "is_friend", false);
+        cJSON_AddBoolToObject(entry, "in_ring", true);
+        cJSON_AddItemToArray(arr, entry);
+      }
+      /* Secondary members */
+      for (int node_idx = 0; node_idx < ring->secondary.length; node_idx++) {
+        net_node_t* node = ring->secondary.data[node_idx];
+        if (node == NULL) continue;
+        if (connection_manager_lookup(mgr, &node->id) != NULL) continue;
+        cJSON* entry = cJSON_CreateObject();
+        cJSON_AddStringToObject(entry, "node_id", node->id.str);
+        cJSON_AddBoolToObject(entry, "connected", false);
+        cJSON_AddBoolToObject(entry, "is_friend", false);
+        cJSON_AddBoolToObject(entry, "in_ring", true);
+        cJSON_AddItemToArray(arr, entry);
+      }
+    }
   }
 
   char* json_str = cJSON_Print(arr);
