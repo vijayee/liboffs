@@ -891,6 +891,19 @@ int quic_listener_connect(quic_listener_t* listener, const char* host, uint16_t 
   // Set the configuration
   listener->msquic->ConnectionSetConfiguration(connection, listener->configuration);
 
+  // Share the listener's UDP binding so this outbound connection uses the
+  // QUIC listener port (23401) as its source port. This is essential for NAT
+  // hole punching: the outbound packet from port 23401 creates a NAT mapping
+  // for that port, so a peer can hole-punch to public_ip:23401 and reach the
+  // QUIC listener directly. Without this, the connection uses an ephemeral
+  // source port and the peer's hole-punch packet reaches the wrong socket.
+  {
+    uint8_t share_udp = TRUE;
+    listener->msquic->SetParam(connection,
+                               QUIC_PARAM_CONN_SHARE_UDP_BINDING,
+                               sizeof(share_udp), &share_udp);
+  }
+
   // Start the connection to the remote peer
   status = listener->msquic->ConnectionStart(
       connection,

@@ -52,6 +52,7 @@ static void _print_usage(const char* program) {
   fprintf(stderr, "  --cert <path>        TLS certificate for WebSocket/WebTransport\n");
   fprintf(stderr, "  --key <path>         TLS private key for WebSocket/WebTransport\n");
   fprintf(stderr, "  --ca-cert <path>    CA certificate for client validation\n");
+  fprintf(stderr, "  --relay-url <url>    Relay server URL (host:port or offs://host:port)\n");
   fprintf(stderr, "  --allow-secure       Require CA validation for TLS transports\n");
   fprintf(stderr, "  --help               Show this help\n");
 }
@@ -70,6 +71,10 @@ int main(int argc, char** argv) {
   const char* cert_path = NULL;
   const char* key_path = NULL;
   const char* ca_path = NULL;
+  const char* relay_url = NULL;
+  const char* node_cert_path = NULL;
+  const char* node_key_path = NULL;
+  uint16_t quic_port = 0;
   uint8_t allow_secure = 0;
 
   for (int i = 1; i < argc; i++) {
@@ -96,6 +101,14 @@ int main(int argc, char** argv) {
       key_path = argv[++i];
     } else if (strcmp(argv[i], "--ca-cert") == 0 && i + 1 < argc) {
       ca_path = argv[++i];
+    } else if (strcmp(argv[i], "--relay-url") == 0 && i + 1 < argc) {
+      relay_url = argv[++i];
+    } else if (strcmp(argv[i], "--quic-port") == 0 && i + 1 < argc) {
+      quic_port = (uint16_t)atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--node-cert") == 0 && i + 1 < argc) {
+      node_cert_path = argv[++i];
+    } else if (strcmp(argv[i], "--node-key") == 0 && i + 1 < argc) {
+      node_key_path = argv[++i];
     } else if (strcmp(argv[i], "--allow-secure") == 0) {
       allow_secure = 1;
     } else if (strcmp(argv[i], "--help") == 0) {
@@ -156,6 +169,8 @@ int main(int argc, char** argv) {
 
   authority_t* authority = authority_create(&config);
   authority->peer_store_path = path_join(cache_dir, "peer_store.cbor");
+  if (node_cert_path != NULL) authority->node_cert_path = strdup(node_cert_path);
+  if (node_key_path != NULL) authority->node_key_path = strdup(node_key_path);
   authority_init_local_id(authority);
 
   network_t* network = network_create(authority, bc, timer, pool, &config);
@@ -350,6 +365,41 @@ int main(int argc, char** argv) {
   if (unix_transport != NULL) {
     unix_transport_start(unix_transport);
     printf("Listening on unix://%s\n", unix_path);
+  }
+
+  /* Start the QUIC/P2P listener so the node can accept direct peer
+     connections. Without this, peer_info_from_node has no HOST candidates
+     and incoming direct QUIC connections cannot be accepted. */
+  if (quic_port > 0 && network != NULL && network->quic_listener != NULL) {
+    if (quic_listener_start(network->quic_listener, host, quic_port) == 0) {
+      printf("Listening on quic://%s:%u\n", host, quic_port);
+    } else {
+      fprintf(stderr, "Warning: failed to start QUIC listener on %s:%u\n",
+              host, quic_port);
+    }
+  }
+
+  /* Connect to the relay server for NAT traversal and server-reflexive
+     address discovery. The relay_url is "host:port" (optionally "offs://"). */
+  if (relay_url != NULL && network != NULL) {
+    const char* url = relay_url;
+    if (strncmp(url, "offs://", 7) == 0) url += 7;
+    const char* colon = strrchr(url, ':');
+    if (colon != NULL) {
+      char* host_buf = strndup(url, (size_t)(colon - url));
+      if (host_buf != NULL) {
+        uint16_t relay_port = (uint16_t)atoi(colon + 1);
+        if (relay_port > 0) {
+          if (network_connect_relay(network, host_buf, relay_port) == 0) {
+            printf("Connected to relay %s:%u\n", host_buf, relay_port);
+          } else {
+            fprintf(stderr, "Warning: failed to connect to relay %s:%u\n",
+                    host_buf, relay_port);
+          }
+        }
+        free(host_buf);
+      }
+    }
   }
 
   authority_load_peers(authority, network);

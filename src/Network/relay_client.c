@@ -639,6 +639,20 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
   // Set configuration on connection
   client->msquic->ConnectionSetConfiguration(client->connection, client->configuration);
 
+  // Share the QUIC listener's UDP binding so the relay connection's source
+  // port equals the QUIC listener port. This makes the relay-learned
+  // reflexive address (public_ip:listener_port) the address that other nodes
+  // can hole-punch to and reach the QUIC listener directly. Without this,
+  // the relay connection uses an ephemeral source port, and hole punching to
+  // that port reaches the relay socket, not the QUIC listener — so direct
+  // QUIC after NAT traversal never succeeds.
+  if (client->shared_registration != NULL) {
+    uint8_t share_udp = TRUE;
+    client->msquic->SetParam(client->connection,
+                             QUIC_PARAM_CONN_SHARE_UDP_BINDING,
+                             sizeof(share_udp), &share_udp);
+  }
+
   // Create framer for stream data — must be ready before ConnectionStart
   // since data can arrive asynchronously once connected
   client->framer = stream_framer_create();
