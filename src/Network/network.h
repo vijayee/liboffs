@@ -216,7 +216,6 @@ void network_shutdown_connections(network_t* network);
 // Start connections to bootstrap and friend peers. Called after node start.
 void network_start_connections(network_t* network);
 
-#ifndef NDEBUG
 /* Test-only accessor for the per-node monotonic message ID counter. Used to
    verify the counter yields unique IDs across rapid calls (audit #6). */
 uint64_t network_next_message_id_for_test(network_t* network);
@@ -241,6 +240,5 @@ void network_relay_challenge_sweep_for_test(network_t* network,
    -1 if the index is out of range. */
 int network_relay_challenge_get_for_test(network_t* network, size_t index,
                                           relay_challenge_t* out);
-#endif
 
 #endif // OFFS_NETWORK_H
