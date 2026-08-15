@@ -106,15 +106,12 @@ static uint64_t network_next_message_id(network_t* network) {
                                    memory_order_relaxed);
 }
 
-#ifndef NDEBUG
 uint64_t network_next_message_id_for_test(network_t* network) {
   return network_next_message_id(network);
 }
 
 /* Test-only wrappers around the static relay-challenge table helpers. The
-   table itself lives in the network_t; the helpers are static above. These
-   thin wrappers are only compiled in debug builds so the release library
-   does not export them. */
+   table itself lives in the network_t; the helpers are static above. */
 int network_relay_challenge_find_for_test(network_t* network,
                                           const node_id_t* sender_id) {
   return network_relay_challenge_find(network, sender_id);
@@ -161,7 +158,6 @@ int network_relay_challenge_get_for_test(network_t* network, size_t index,
   memcpy(out, &network->relay_challenges[index], sizeof(relay_challenge_t));
   return 0;
 }
-#endif
 
 // --- Local FindBlock payload destroy ---
 // Frees the heap-allocated payload and releases the hash buffer reference.

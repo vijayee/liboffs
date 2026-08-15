@@ -250,7 +250,6 @@ static void _conn_track_destroy(quic_listener_t* listener) {
   listener->connection_capacity = 0;
 }
 
-#ifndef NDEBUG
 // Test-only accessors for _conn_track_* — exposed so unit tests can drive
 // the connection tracking array without spinning up a full msquic
 // registration. See test_quic_integration.cpp ConnTrackAddIsIdempotent.
@@ -273,7 +272,6 @@ size_t quic_listener__conn_track_count_for_test(quic_listener_t* listener) {
   platform_mutex_unlock(listener->conn_lock);
   return count;
 }
-#endif // NDEBUG
 
 // Per-stream context carrying the parent connection handle and a framer
 // for deframing received data into complete messages.
