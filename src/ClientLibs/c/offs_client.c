@@ -604,6 +604,27 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
   }
 }
 
+/* Drain all complete frames from the framer. Called after each feed so the
+   framer never accumulates past its cap, which would otherwise make
+   stream_framer_feed reject chunks and silently drop bytes, corrupting the
+   stream alignment. */
+static void _client_extract_frames(offs_client_t* client) {
+  uint8_t* frame_data;
+  size_t frame_len;
+  while ((frame_data = stream_framer_next(client->framer, &frame_len)) != NULL) {
+    struct cbor_load_result load_result;
+    cbor_item_t* cbor_item = cbor_load(frame_data, frame_len, &load_result);
+    free(frame_data);
+    if (cbor_item == NULL || load_result.error.code != CBOR_ERR_NONE) {
+      if (cbor_item != NULL) cbor_decref(&cbor_item);
+      continue;
+    }
+    uint8_t type = client_api_wire_get_type(cbor_item);
+    _handle_frame(client, type, cbor_item);
+    cbor_decref(&cbor_item);
+  }
+}
+
 static void _client_raw_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                        pd_event_t events, void* user_data) {
   offs_client_t* client = (offs_client_t*)user_data;
@@ -641,6 +662,7 @@ static void _client_raw_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
     while (n > 0) {
       stream_framer_feed(client->framer, buf, n);
       total_read += n;
+      _client_extract_frames(client);
       if (n < sizeof(buf)) break;
       n = pd_watcher_drain_read(watcher, buf, sizeof(buf));
     }
@@ -654,24 +676,23 @@ static void _client_raw_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
           }
           break;
         }
-        stream_framer_feed(client->framer, buf, (size_t)bytes_read);
+        int feed_rc = stream_framer_feed(client->framer, buf, (size_t)bytes_read);
+        if (feed_rc != 0) {
+          /* Framer is full; drain complete frames, then retry. A second
+             rejection means the frame itself exceeds the cap (protocol
+             violation) — drop the connection. */
+          _client_extract_frames(client);
+          feed_rc = stream_framer_feed(client->framer, buf, (size_t)bytes_read);
+          if (feed_rc != 0) {
+            client->connected = 0;
+            client->running = 0;
+            break;
+          }
+        }
+        _client_extract_frames(client);
       }
     }
-
-    uint8_t* frame_data;
-    size_t frame_len;
-    while ((frame_data = stream_framer_next(client->framer, &frame_len)) != NULL) {
-      struct cbor_load_result load_result;
-      cbor_item_t* cbor_item = cbor_load(frame_data, frame_len, &load_result);
-      free(frame_data);
-      if (cbor_item == NULL || load_result.error.code != CBOR_ERR_NONE) {
-        if (cbor_item != NULL) cbor_decref(&cbor_item);
-        continue;
-      }
-      uint8_t type = client_api_wire_get_type(cbor_item);
-      _handle_frame(client, type, cbor_item);
-      cbor_decref(&cbor_item);
-    }
+    _client_extract_frames(client);
   }
 }
 
