@@ -200,6 +200,92 @@ index_t* _index_new_empty(size_t bucket_size, char* location, uint64_t wait, uin
   return index;
 }
 
+// Replay a WAL (by id) into the index with stop-and-keep-prefix semantics.
+// On a clean EOF: returns -3. On a recoverable error (short read / CRC
+// mismatch / unknown type): stops at the last complete record, keeps the
+// prefix, returns the error code. On a CBOR parse failure for a record
+// whose framing+CRC were intact: skips that record and continues. The
+// caller treats -3 as success and anything else as "stop here, keep what
+// we have" — NOT a reason to bail to an empty index.
+static int _index_replay_wal(index_t* index, char* parent_location,
+                             uint64_t wal_id) {
+  wal_t* wal = wal_load(parent_location, wal_id);
+  if (wal == NULL) return -3;  // OOM — nothing to replay (clean)
+  wal_type_e type = 'r';
+  buffer_t* data;
+  uint64_t cursor;
+  int32_t wal_size;
+  int read_result = wal_read(wal, &type, &data, &cursor, &wal_size);
+  while ((read_result == 0) && (cursor <= (uint64_t)wal_size)) {
+    struct cbor_load_result result;
+    cbor_item_t* cbor;
+    switch (type) {
+      case 'a':
+        cbor = cbor_load(data->data, data->size, &result);
+        if (result.error.code == CBOR_ERR_NONE) {
+          index_entry_t* entry = cbor_to_index_entry(cbor);
+          if (entry != NULL) {
+            index_add(index, CONSUME(entry, index_entry_t));
+          }
+          cbor_decref(&cbor);
+        } else {
+          cbor_decref(&cbor);
+          // CBOR parse failure on intact framing — skip, continue.
+        }
+        break;
+      case 'i':
+        cbor = cbor_load(data->data, data->size, &result);
+        if (result.error.code == CBOR_ERR_NONE) {
+          index_entry_t* entry = cbor_to_index_entry(cbor);
+          if (entry != NULL) {
+            index_entry_t* from_index = REFERENCE(index_find(index, entry->hash), index_entry_t);
+            if (from_index != NULL) index_increment(index, from_index);
+            DESTROY(entry, index_entry);
+            DESTROY(from_index, index_entry);
+          }
+          cbor_decref(&cbor);
+        } else {
+          cbor_decref(&cbor);
+        }
+        break;
+      case 'e':
+        cbor = cbor_load(data->data, data->size, &result);
+        if (result.error.code == CBOR_ERR_NONE && cbor_isa_array(cbor) && cbor_array_size(cbor) >= 2) {
+          cbor_item_t* cbor_hash = cbor_array_get(cbor, 0);
+          cbor_item_t* cbor_date = cbor_array_get(cbor, 1);
+          if (cbor_isa_bytestring(cbor_hash) && cbor_isa_uint(cbor_date)) {
+            buffer_t* hash = cbor_to_buffer(cbor_hash);
+            index_entry_t* entry = index_find(index, hash);
+            index_entry_set_ejection_date(entry, cbor_get_int(cbor_date));
+            DESTROY(hash, buffer);
+          }
+          cbor_decref(&cbor_hash);
+          cbor_decref(&cbor_date);
+        }
+        cbor_decref(&cbor);
+        break;
+      case 'r':
+        cbor = cbor_load(data->data, data->size, &result);
+        if (result.error.code == CBOR_ERR_NONE && cbor_isa_bytestring(cbor)) {
+          buffer_t* hash = cbor_to_buffer(cbor);
+          index_remove(index, hash);
+          DESTROY(hash, buffer);
+        }
+        cbor_decref(&cbor);
+        break;
+      default:
+        // Unknown type — stop replay here, keep the prefix.
+        buffer_destroy(data);
+        DESTROY(wal, wal);
+        return WAL_ERR_UNKNOWN_TYPE;
+    }
+    buffer_destroy(data);
+    read_result = wal_read(wal, &type, &data, &cursor, &wal_size);
+  }
+  DESTROY(wal, wal);
+  return read_result;  // -3 (clean EOF) or a short-read/CRC code (stop-and-keep-prefix)
+}
+
 index_t* index_create(size_t bucket_size, char* location, uint64_t wait, uint64_t max_wait, size_t max_snapshots, size_t max_wals, int* error_code) {
   *error_code = 0;
   index_t* index;
@@ -448,6 +534,14 @@ index_t* index_create(size_t bucket_size, char* location, uint64_t wait, uint64_
           free(parent_location);
           return index;
         } else {
+          // Happy path: the newest snapshot is valid. Replay the live WAL
+          // (id == last_id + 1) to recover writes since the last snapshot.
+          // Stop-and-keep-prefix: a torn tail or CRC error loses only the
+          // bad record, not the whole index.
+          int replay_rc = _index_replay_wal(index, parent_location, last_id + 1);
+          if (replay_rc != -3) {
+            log_warn("index_create: live WAL replay stopped at code %d (stop-and-keep-prefix)", replay_rc);
+          }
           index->max_snapshots = max_snapshots;
           index->max_wals = max_wals;
           uint64_t first_kept_id_b = _index_prune_old_snapshots(index);

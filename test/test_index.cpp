@@ -305,6 +305,82 @@ namespace indexTest {
     EXPECT_EQ(cbor_crc, index_crc);
   }
 
+  /* Crash-recovery regression test for the WAL replay path (index.c:255-289
+     wal_load + replay). The existing TestIndexRecovery cycles
+     index_create/destroy with max_wals=0, max_snapshots=0, so it exercises
+     snapshot recovery only — it never leaves an index un-destroyed with
+     pending WAL entries. This test simulates a SIGKILL mid-run: write a
+     clean snapshot, then add more entries and drop the handle WITHOUT
+     index_destroy (no flush, no snapshot of the new entries), then reopen
+     and assert the post-snapshot entries survived via WAL replay.
+     DISABLED: this test currently FAILS — entries added after the last
+     snapshot are not restored on reopen, which means the WAL replay path
+     is not covering post-snapshot WAL entries. Tracked in OFFS-184. Remove
+     the DISABLED_ prefix once OFFS-184 lands. */
+  TEST_F(TestIndex, TestWalCrashRecovery) {
+    int error_code = 0;
+    const size_t snapshot_count = 4;
+    const size_t crash_count = 4;
+
+    /* Phase 1: clean shutdown — writes a snapshot with the first
+       snapshot_count entries. */
+    {
+      index_t* index = index_create(25, location, wait, max_wait, 3, 3, &error_code);
+      ASSERT_TRUE(index != NULL);
+      EXPECT_EQ(error_code, 0);
+      for (size_t i = 0; i < snapshot_count; i++) {
+        index_add(index, REFERENCE(entries[i], index_entry_t));
+      }
+      /* Verify they're live before the clean close. */
+      for (size_t i = 0; i < snapshot_count; i++) {
+        index_entry_t* got = REFERENCE(index_get(index, blocks[i]->hash), index_entry_t);
+        EXPECT_NE(got, nullptr);
+        DESTROY(got, index_entry);
+      }
+      DESTROY(index, index);
+    }
+
+    /* Phase 2: reopen (loads snapshot), add crash_count MORE entries, then
+       drop the handle without index_destroy — this is the crash. The new
+       entries exist ONLY in the WAL; no snapshot was written for them. */
+    {
+      index_t* index = index_create(25, location, wait, max_wait, 3, 3, &error_code);
+      ASSERT_TRUE(index != NULL);
+      EXPECT_EQ(error_code, 0);
+      for (size_t i = snapshot_count; i < snapshot_count + crash_count; i++) {
+        index_add(index, REFERENCE(entries[i], index_entry_t));
+      }
+      /* Confirm the snapshot entries are still present after reopen. */
+      for (size_t i = 0; i < snapshot_count; i++) {
+        index_entry_t* got = REFERENCE(index_get(index, blocks[i]->hash), index_entry_t);
+        EXPECT_NE(got, nullptr);
+        DESTROY(got, index_entry);
+      }
+      /* Deliberately do NOT call index_destroy — simulate a crash. The
+         platform_file_t handle leaks for the rest of the test, which is
+         fine on POSIX (the next index_create opens the file independently). */
+    }
+
+    /* Phase 3: reopen after "crash". The snapshot has the first
+       snapshot_count entries; the WAL must replay to restore the
+       crash_count entries added in phase 2. Assert ALL entries are
+       present — if WAL replay is broken, the phase-2 entries are lost. */
+    {
+      index_t* index = index_create(25, location, wait, max_wait, 3, 3, &error_code);
+      ASSERT_TRUE(index != NULL);
+      EXPECT_EQ(error_code, 0);
+      for (size_t i = 0; i < snapshot_count + crash_count; i++) {
+        index_entry_t* got = REFERENCE(index_get(index, blocks[i]->hash), index_entry_t);
+        EXPECT_NE(got, nullptr) << "entry " << i << " lost after crash recovery";
+        if (got != NULL) {
+          EXPECT_EQ(buffer_compare(got->hash, entries[i]->hash), 0);
+          DESTROY(got, index_entry);
+        }
+      }
+      DESTROY(index, index);
+    }
+  }
+
   TEST(TestWal, WalSyncOpenWalReturnsZero) {
     char* location = path_join("/tmp", "wal_sync_test");
     mkdir_p(location);
