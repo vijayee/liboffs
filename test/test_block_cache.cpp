@@ -653,7 +653,8 @@ TEST(SectionsConcurrency, SyncDispatchFromMultipleThreadsDoesNotCorrupt) {
   const size_t max_tuple_size = 8;
   sections_t* sections = sections_create(location, section_size, cache_size,
                                           max_tuple_size, mini, timer_actor,
-                                          pool, /*wait=*/5, /*max_wait=*/5000);
+                                          pool, /*wait=*/5, /*max_wait=*/5000,
+                                          /*fsync_data=*/false);
   ASSERT_NE(sections, nullptr);
 
   const int thread_count = 4;

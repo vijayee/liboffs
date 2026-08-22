@@ -673,7 +673,7 @@ void section_dispatch(void* state, message_t* msg) {
 
 /* ---- section implementation ---- */
 
-section_t* section_create(char* path, char* meta_path, size_t size, size_t id, block_size_e type, scheduler_pool_t* pool) {
+section_t* section_create(char* path, char* meta_path, size_t size, size_t id, block_size_e type, scheduler_pool_t* pool, bool fsync_data) {
   section_t* section = get_clear_memory(sizeof(section_t));
   refcounter_init((refcounter_t*) section);
   actor_init(&section->actor, section, section_dispatch, pool);
@@ -685,6 +685,7 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id, b
   section->size = size;
   section->id = id;
   section->block_size = (size_t)type;
+  section->fsync_data = fsync_data;
 
   if (platform_file_exists(section->meta_path)) {
     /* Existing section -- load metadata */

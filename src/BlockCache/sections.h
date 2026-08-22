@@ -5,6 +5,7 @@
 #ifndef OFFS_SECTIONS_H
 #define OFFS_SECTIONS_H
 #include <stddef.h>
+#include <stdbool.h>
 #include <hashmap.h>
 #include "../Buffer/buffer.h"
 #include "section.h"
@@ -169,6 +170,7 @@ typedef struct {
   block_size_e type;
   size_t wait;
   size_t max_wait;
+  bool fsync_data;
   timer_actor_t* timer_actor;
   struct scheduler_pool_t* pool;
   actor_t actor;
@@ -181,7 +183,7 @@ typedef struct {
                                        docs/concurrency-pass.md F2. */
 } sections_t;
 
-sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t max_tuple_size, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool, size_t wait, size_t max_wait);
+sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t max_tuple_size, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool, size_t wait, size_t max_wait, bool fsync_data);
 void sections_destroy(sections_t* sections);
 void sections_dispatch(void* state, message_t* msg);
 

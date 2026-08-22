@@ -673,6 +673,7 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
   block_cache_t* block_cache = get_clear_memory(sizeof(block_cache_t));
   refcounter_init_actor((refcounter_t*) block_cache);
   block_cache->type = type;
+  block_cache->fsync_data = config.fsync_data;
   block_cache->pool = pool;
   block_cache->timer_actor = timer_actor;
   block_cache->index_wait = config.index_wait;
@@ -696,11 +697,17 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
   }
   actor_init(&block_cache->actor, block_cache, block_cache_dispatch, pool);
   block_cache->lru = block_lru_cache_create(config.lru_size);
-  block_cache->sections = sections_create(folder, config.section_size, config.cache_size, config.max_tuple_size, type, timer_actor, pool, config.section_wait, config.section_max_wait);
+  block_cache->sections = sections_create(folder, config.section_size, config.cache_size, config.max_tuple_size, type, timer_actor, pool, config.section_wait, config.section_max_wait, config.fsync_data);
   int error_code;
   block_cache->index = index_create(config.index_bucket_size, folder, config.index_wait, config.index_max_wait, config.max_snapshots, config.max_wals, &error_code);
   if (block_cache->index == NULL) {
     log_error("block_cache_create: index_create returned NULL (error_code=%d)", error_code);
+  } else {
+    /* Set after index_create so both return paths (normal load and the
+       total-loss _index_new_empty fallback inside index_create) inherit
+       the configured fsync_data. Tests that call index_create directly
+       get a zeroed struct → fsync_data = false → fast path. */
+    block_cache->index->fsync_data = config.fsync_data;
   }
   if (max_capacity_bytes > 0) {
     block_cache->current_bytes = index_count(block_cache->index) * (size_t)type;

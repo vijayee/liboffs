@@ -37,6 +37,7 @@ config_t config_default() {
   config.bad_block_rate_cost = 10.0f;
   config.peer_state_ttl_ms = 604800000u;   // 7 days
   config.peer_state_save_interval_ms = 60000u;
+  config.fsync_data = true;
   config.eabf_base_ttl_ms = 3600000;
   config.eabf_maintenance_ms = 60000;
   config.respiration_tau_min_ms = 5000;

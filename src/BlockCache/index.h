@@ -6,6 +6,7 @@
 #define OFFS_INDEX_H
 #include "../RefCounter/refcounter.h"
 #include "fibonacci.h"
+#include <stdbool.h>
 #include <stdint.h>
 #include "../Buffer/buffer.h"
 #include <hashmap.h>
@@ -65,6 +66,7 @@ typedef struct {
   uint64_t max_wait;
   size_t max_snapshots;
   size_t max_wals;
+  bool fsync_data;
 } index_t;
 
 index_t* index_create(size_t bucket_size, char* location, uint64_t wait, uint64_t max_wait, size_t max_snapshots, size_t max_wals, int* error_code);

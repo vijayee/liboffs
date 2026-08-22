@@ -272,7 +272,7 @@ TEST_F(TestSection, TestSectionFunction) {
 
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 20, 4000, mini, pool);
+  section_t* section = section_create(section_location, meta_location, 20, 4000, mini, pool, false);
   for (size_t i = 0; i < block_count; i++) {
     size_t section_index = 0;
     int result = section_write_sync(section, blocks[i]->data, &section_index, &full);
@@ -307,7 +307,7 @@ TEST_F(TestSection, TestSectionFunction) {
   }
 
   section_destroy(section);
-  section = section_create(section_location, meta_location, 20, 4000, mini, pool);
+  section = section_create(section_location, meta_location, 20, 4000, mini, pool, false);
 
   for (size_t i = 0; i < block_count; i++) {
     index_entry_t* entry =  entries[i];
@@ -374,7 +374,7 @@ TEST_F(TestSection, TestSectionFunction) {
 TEST_F(TestSection, TestSectionAsyncWrite) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 20, 5000, mini, pool);
+  section_t* section = section_create(section_location, meta_location, 20, 5000, mini, pool, false);
 
   /* Create completion actor for async results */
   section_completion_state_t completion_state;
@@ -488,7 +488,7 @@ public:
     mkdir_p(meta_location);
 
     for (size_t i = 0; i < 8; i++) {
-      sections[i] = section_create(section_location, meta_location, 20, id, mini, NULL);
+      sections[i] = section_create(section_location, meta_location, 20, id, mini, NULL, false);
       id++;
     }
   }
@@ -650,7 +650,7 @@ public:
       blocks[i] = block_create_random_block_by_type(block_type);
       entries[i] = index_entry_create(blocks[i]->hash);
     }
-    sections = sections_create(path, size, cache_size, max_tuple_size, block_type, timer_actor_inst, pool, wait, max_wait);
+    sections = sections_create(path, size, cache_size, max_tuple_size, block_type, timer_actor_inst, pool, wait, max_wait, false);
   }
   void TearDown() override {
     sections_destroy(sections);
@@ -703,7 +703,7 @@ TEST_F(TestSections, SectionsFunctions) {
 TEST_F(TestSection, TestBitmapAllocationOrder) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 32, 6000, mini, pool);
+  section_t* section = section_create(section_location, meta_location, 32, 6000, mini, pool, false);
 
   uint8_t full;
   for (size_t i = 0; i < 32; i++) {
@@ -724,7 +724,7 @@ TEST_F(TestSection, TestBitmapAllocationOrder) {
 TEST_F(TestSection, TestBitmapFullDetection) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 5, 7000, mini, pool);
+  section_t* section = section_create(section_location, meta_location, 5, 7000, mini, pool, false);
 
   EXPECT_EQ(section_full(section), 0);
 
@@ -759,7 +759,7 @@ TEST_F(TestSection, TestBitmapFullDetection) {
 TEST_F(TestSection, TestBitmapDeallocateDoubleFree) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 10, 8000, mini, pool);
+  section_t* section = section_create(section_location, meta_location, 10, 8000, mini, pool, false);
 
   uint8_t full;
   block_t* block = block_create_random_block_by_type(mini);
@@ -782,7 +782,7 @@ TEST_F(TestSection, TestBitmapDeallocateDoubleFree) {
 TEST_F(TestSection, TestBitmapPersistenceRoundTrip) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 10, 9000, mini, pool);
+  section_t* section = section_create(section_location, meta_location, 10, 9000, mini, pool, false);
 
   uint8_t full;
   block_t* blocks[7];
@@ -798,7 +798,7 @@ TEST_F(TestSection, TestBitmapPersistenceRoundTrip) {
   section_save_meta(section);
 
   section_destroy(section);
-  section = section_create(section_location, meta_location, 10, 9000, mini, pool);
+  section = section_create(section_location, meta_location, 10, 9000, mini, pool, false);
 
   size_t new_index1, new_index2;
   int result = section_write_sync(section, blocks[1]->data, &new_index1, &full);
@@ -822,7 +822,7 @@ TEST_F(TestSection, TestBitmapPersistenceRoundTrip) {
 TEST_F(TestSection, TestActorMultipleMessagesQueued) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 10, 10000, mini, pool);
+  section_t* section = section_create(section_location, meta_location, 10, 10000, mini, pool, false);
 
   section_completion_state_t completion_state;
 
@@ -860,7 +860,7 @@ TEST_F(TestSection, TestActorMultipleMessagesQueued) {
 TEST_F(TestSection, TestDefragmentMovesBlocksToFront) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 10, 11000, mini, pool);
+  section_t* section = section_create(section_location, meta_location, 10, 11000, mini, pool, false);
 
   /* Write blocks to slots 0-4 */
   uint8_t full;
@@ -936,7 +936,7 @@ TEST_F(TestSection, TestDefragmentMovesBlocksToFront) {
 TEST_F(TestSection, TestDefragmentAlreadyCompact) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 10, 12000, mini, pool);
+  section_t* section = section_create(section_location, meta_location, 10, 12000, mini, pool, false);
 
   /* Write 3 blocks to slots 0-2 (already compact) */
   uint8_t full;
@@ -975,7 +975,7 @@ TEST_F(TestSection, TestDefragmentAlreadyCompact) {
 TEST_F(TestSection, TestDefragmentEmptySection) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
-  section_t* section = section_create(section_location, meta_location, 10, 13000, mini, pool);
+  section_t* section = section_create(section_location, meta_location, 10, 13000, mini, pool, false);
 
   /* Defragment an empty section — should be a no-op */
   section_defragment_payload_t defrag_payload;
@@ -1002,7 +1002,7 @@ TEST_F(TestSection, TestDefragmentNonPowerOf2Compact) {
   mkdir_p(section_location);
   mkdir_p(meta_location);
   /* 5 slots — non-power-of-2, triggers the padding bit bug in highest_used */
-  section_t* section = section_create(section_location, meta_location, 5, 14000, mini, pool);
+  section_t* section = section_create(section_location, meta_location, 5, 14000, mini, pool, false);
 
   /* Write 1 block to slot 0 (already compact position) */
   block_t* block = block_create_random_block_by_type(mini);

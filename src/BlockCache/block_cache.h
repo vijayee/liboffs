@@ -95,6 +95,7 @@ typedef struct block_cache_t {
   sections_t* sections;
   index_t* index;
   block_size_e type;
+  bool fsync_data;
   struct scheduler_pool_t* pool;
   timer_actor_t* timer_actor;
   uint64_t index_wait;

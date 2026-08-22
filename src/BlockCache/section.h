@@ -5,6 +5,7 @@
 #ifndef OFFS_SECTION_H
 #define OFFS_SECTION_H
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include "../Actor/actor.h"
 #include "../Scheduler/scheduler.h"
@@ -125,6 +126,7 @@ typedef struct section_t {
   free_map_t free_map;
   size_t size;
   block_size_e block_size;
+  bool fsync_data;
   ATOMIC(uint8_t) dirty;
   /* Callback invoked when section metadata changes (write/deallocate).
      The context is typically a sections_t pointer. Used for debounced saves. */
@@ -132,7 +134,7 @@ typedef struct section_t {
   void* on_dirty_context;
 } section_t;
 
-section_t* section_create(char* path, char* meta_path, size_t size, size_t id, block_size_e type, scheduler_pool_t* pool);
+section_t* section_create(char* path, char* meta_path, size_t size, size_t id, block_size_e type, scheduler_pool_t* pool, bool fsync_data);
 void section_destroy(section_t* section);
 uint8_t section_full(section_t* section);
 size_t section_count_free(section_t* section);

@@ -202,7 +202,8 @@ void sections_dispatch(void* state, message_t* msg) {
         section_t* section = sections_lru_cache_get(sections->lru, p->section_id);
         if (section == NULL) {
           section = section_create(sections->data_path, sections->meta_path,
-                                   sections->size, p->section_id, sections->type, sections->pool);
+                                   sections->size, p->section_id, sections->type, sections->pool,
+                                   sections->fsync_data);
           section->on_dirty = section_on_dirty;
           section->on_dirty_context = sections;
           refcounter_yield((refcounter_t*) section);
@@ -252,7 +253,8 @@ void sections_dispatch(void* state, message_t* msg) {
       section_t* section = sections_lru_cache_get(sections->lru, p->section_id);
       if (section == NULL) {
         section = section_create(sections->data_path, sections->meta_path,
-                                 sections->size, p->section_id, sections->type, sections->pool);
+                                 sections->size, p->section_id, sections->type, sections->pool,
+                                 sections->fsync_data);
         section->on_dirty = section_on_dirty;
         section->on_dirty_context = sections;
         refcounter_yield((refcounter_t*) section);
@@ -291,7 +293,8 @@ void sections_dispatch(void* state, message_t* msg) {
       section_t* section = sections_lru_cache_get(sections->lru, p->section_id);
       if (section == NULL) {
         section = section_create(sections->data_path, sections->meta_path,
-                                 sections->size, p->section_id, sections->type, sections->pool);
+                                 sections->size, p->section_id, sections->type, sections->pool,
+                                 sections->fsync_data);
         section->on_dirty = section_on_dirty;
         section->on_dirty_context = sections;
         refcounter_yield((refcounter_t*) section);
@@ -710,7 +713,7 @@ void round_robin_save(void* ctx) {
 
 /* ---- sections implementation ---- */
 
-sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t max_tuple_size, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool, size_t wait, size_t max_wait) {
+sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t max_tuple_size, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool, size_t wait, size_t max_wait, bool fsync_data) {
   char* robin_folder = path_join(path, "robin");
   mkdir_p(robin_folder);
   char* robin_path = path_join(robin_folder, ".robin");
@@ -720,6 +723,7 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
   sections->pool = pool;
   sections->wait = wait;
   sections->max_wait = max_wait;
+  sections->fsync_data = fsync_data;
   sections->type = type;
   sections->max_tuple_size = max_tuple_size;
   sections->size = size;
@@ -796,7 +800,8 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
       }
       for (size_t i = 0; i < robin_size; i++) {
         section_t* section = section_create(sections->data_path, sections->meta_path,
-                                            sections->size, ids[i], sections->type, sections->pool);
+                                            sections->size, ids[i], sections->type, sections->pool,
+                                            sections->fsync_data);
         section->on_dirty = section_on_dirty;
         section->on_dirty_context = sections;
         refcounter_yield((refcounter_t*) section);
@@ -812,7 +817,7 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
   }
 
   while (sections->robin->size < sections->max_tuple_size) {
-    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type, sections->pool);
+    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type, sections->pool, sections->fsync_data);
     section->on_dirty = section_on_dirty;
     section->on_dirty_context = sections;
     refcounter_yield((refcounter_t*) section);
@@ -859,7 +864,7 @@ void sections_destroy(sections_t* sections) {
 void sections_full(sections_t* sections, size_t section_id) {
   round_robin_remove(sections->robin, section_id);
   while (sections->robin->size < sections->max_tuple_size) {
-    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type, sections->pool);
+    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type, sections->pool, sections->fsync_data);
     section->on_dirty = section_on_dirty;
     section->on_dirty_context = sections;
     refcounter_yield((refcounter_t*) section);
