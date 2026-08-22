@@ -1138,14 +1138,41 @@ void index_debounce(index_t* index) {
   wal_t* wal = index->wal;
   index->wal = wal_create_next(index->parent_location, wal->next_id, wal->last_file);
 
-  uint8_t *cbor_data;
+  uint8_t* cbor_data;
   size_t cbor_size;
   cbor_serialize_alloc(cbor, &cbor_data, &cbor_size);
   platform_file_t* index_file = platform_file_open(file, PLATFORM_O_WRONLY | PLATFORM_O_CREAT, 0644);
-  platform_file_write(index_file, cbor_data, cbor_size);
+  ssize_t written = platform_file_write(index_file, cbor_data, cbor_size);
+  int sync_rc = 0;
+  if (written == (ssize_t)cbor_size && index->fsync_data) {
+    sync_rc = platform_file_sync(index_file);
+  }
   platform_file_close(index_file);
   free(cbor_data);
   free(file);
+  if (written != (ssize_t)cbor_size || sync_rc != 0) {
+    // Snapshot write/sync failed. Do NOT destroy the old WAL — it still
+    // holds the entries the (now-missing/empty) snapshot was supposed to
+    // capture. Revert the rollover so the old WAL stays live.
+    log_error("index_debounce: snapshot write/sync failed (written=%zd sync=%d) — keeping old WAL",
+              written, sync_rc);
+    wal_destroy(index->wal);       // destroy the just-created empty new WAL
+    index->wal = wal;              // revert to the old WAL
+    // Revert current_file/last_file to pre-debounce state. At this point
+    // index->last_file = old current_file, index->current_file = new path.
+    // We want: index->current_file = old current_file (= index->last_file),
+    // and index->last_file restored. Free the new current_file path.
+    free(index->current_file);
+    index->current_file = index->last_file;  // restore old current_file
+    index->last_file = NULL;
+    cbor_intermediate_decref(cbor);
+    return;
+  }
+  // Snapshot is durable. fsync the old WAL (its entries are now in the
+  // snapshot) before destroying it, so a crash here doesn't lose them.
+  if (index->fsync_data) {
+    wal_sync(wal);
+  }
   wal_destroy(wal);
   cbor_intermediate_decref(cbor);
   uint64_t first_kept_id = _index_prune_old_snapshots(index);
