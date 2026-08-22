@@ -12,6 +12,7 @@
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include "../Util/base58.h"
+#include "../Platform/platform_atomic.h"
 #include "peer_info.h"
 #include <string.h>
 #include <stdio.h>
@@ -390,15 +391,9 @@ int authority_save_peers(const authority_t* authority, const network_t* network)
   cbor_decref(&root);
   if (length == 0 || buffer == NULL) return -1;
 
-  FILE* file = fopen(authority->peer_store_path, "wb");
-  if (file == NULL) {
-    free(buffer);
-    return -1;
-  }
-  size_t written = fwrite(buffer, 1, length, file);
-  fclose(file);
+  int rc = platform_file_atomic_write(authority->peer_store_path, buffer, length);
   free(buffer);
-  return (written == length) ? 0 : -1;
+  return rc;
 }
 
 int authority_load_peers(authority_t* authority, network_t* network) {
