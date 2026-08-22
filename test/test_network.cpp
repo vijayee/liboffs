@@ -41,11 +41,17 @@ extern "C" {
 #include "Network/wanted_list.h"
 #include "Configuration/config.h"
 #include "Util/allocator.h"
+#include "Metrics/metrics.h"
 }
 
 #include <cstdint>
 #include <set>
 #include <vector>
+
+extern "C" {
+void network_bad_block_received(void);
+uint64_t network_bad_blocks_received_value(void);
+}
 
 // === Monotonic message ID counter tests (audit #6) ===
 //
@@ -3715,4 +3721,11 @@ TEST(ClosestNodesVisitedTest, DifferentHashNotVisited) {
   closest_nodes_add_visited(bloom, &count, hash1);
   EXPECT_TRUE(closest_nodes_is_visited(bloom, count, hash1));
   EXPECT_FALSE(closest_nodes_is_visited(bloom, count, hash2));
+}
+
+TEST(NetworkBadBlockMetric, CounterIncrementsOnBadBlock) {
+  uint64_t before = network_bad_blocks_received_value();
+  network_bad_block_received();
+  network_bad_block_received();
+  EXPECT_EQ(network_bad_blocks_received_value(), before + 2);
 }

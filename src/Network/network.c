@@ -30,6 +30,7 @@
 #include "../BlockCache/block_cache.h"
 #include "../BlockCache/index.h"
 #include "../Buffer/buffer.h"
+#include "../Metrics/metrics.h"
 #include "../RefCounter/refcounter.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
@@ -47,6 +48,19 @@
 #define TOPOLOGY_METRICS_PUSH_INTERVAL_MS 300000  // 5 minutes
 #define PING_CAPACITY_INTERVAL_MS 900000  // 15 minutes
 #define FRIEND_RECONNECT_INTERVAL_MS 5000
+
+/* Process-global counter for peer-supplied blocks whose hash did not match
+   the requested hash. Registered once in network_create. File-scope static;
+   external callers read the value via network_bad_blocks_received_value. */
+static metrics_counter_t bad_blocks_received_counter;
+
+void network_bad_block_received(void) {
+  metrics_counter_inc(&bad_blocks_received_counter);
+}
+
+uint64_t network_bad_blocks_received_value(void) {
+  return metrics_counter_value(&bad_blocks_received_counter);
+}
 
 /* Format an IPv4 address (host byte order) as a dotted-quad string. Writes
    into the caller-provided buffer of at least 16 bytes. Returns 0 on success,
@@ -241,6 +255,17 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   // Cap per-peer tables so a malicious peer can't mint fake node_ids and
   // grow them unbounded. See audit #14.
   hebbian_table_set_max_count(&network->hebbian, 1024);
+  /* Register the process-global bad-blocks counter once; the counter is
+     process-global so re-registration across multiple network_create calls
+     would duplicate registry entries. */
+  static bool counter_registered = false;
+  if (!counter_registered) {
+    metrics_counter_init(&bad_blocks_received_counter,
+                         "network_bad_blocks_received",
+                         "Number of peer-supplied blocks whose hash did not match the requested hash");
+    metrics_registry_register_counter(&bad_blocks_received_counter);
+    counter_registered = true;
+  }
   rate_limit_table_init(&network->rate_limits, 32);
   rate_limit_table_set_max_count(&network->rate_limits, 1024);
   eabf_table_set_max_count(&network->eabf_table, 256);
