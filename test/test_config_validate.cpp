@@ -126,3 +126,27 @@ TEST(TestConfigValidate, RejectsZeroGossipInitCount) {
   config.gossip_init_count = 0;
   EXPECT_NE(config_validate(&config), 0);
 }
+
+TEST(ConfigValidate, BadBlockTunablesHaveDefaults) {
+  config_t config = config_default();
+  EXPECT_NEAR(config.bad_block_multiplier, 5.0f, 0.001f);
+  EXPECT_NEAR(config.bad_block_rate_cost, 10.0f, 0.001f);
+  EXPECT_EQ(config.peer_state_ttl_ms, 604800000u);  // 7 days
+  EXPECT_EQ(config.peer_state_save_interval_ms, 60000u);
+  ASSERT_EQ(config_validate(&config), 0);
+}
+
+TEST(ConfigValidate, BadBlockMultiplierMustBePositive) {
+  config_t config = config_default();
+  config.bad_block_multiplier = 0.0f;
+  EXPECT_NE(config_validate(&config), 0);
+}
+
+TEST(ConfigValidate, PeerStateSaveIntervalBounded) {
+  config_t config = config_default();
+  config.peer_state_save_interval_ms = 0;
+  EXPECT_NE(config_validate(&config), 0);
+  config = config_default();
+  config.peer_state_save_interval_ms = 5000;  // below 10s floor
+  EXPECT_NE(config_validate(&config), 0);
+}

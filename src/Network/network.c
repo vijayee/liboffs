@@ -271,7 +271,19 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   eabf_table_set_max_count(&network->eabf_table, 256);
   network->log = NULL;
   network->topology_metrics = topology_metrics_create(pool);
-  connection_manager_init(&network->conn_mgr, 16, NULL);
+  /* Wire the bad-block tunables from config_t into the connection manager's
+   * hebbian config. The other hebbian_config fields keep their
+   * hebbian_config_init defaults; only the two bad-block fields are
+   * overridden here. peer_state_ttl_ms and peer_state_save_interval_ms are
+   * consumed in later tasks (peer-state save/load) and are not stored on
+   * network_t yet. */
+  hebbian_config_t hebbian_cfg;
+  hebbian_config_init(&hebbian_cfg);
+  if (config != NULL) {
+    hebbian_cfg.bad_block_multiplier = config->bad_block_multiplier;
+    hebbian_cfg.bad_block_rate_cost = config->bad_block_rate_cost;
+  }
+  connection_manager_init(&network->conn_mgr, 16, &hebbian_cfg);
   network->hebbian_decay_timer_id = 0;
   network->metrics_push_timer_id = 0;
   network->ping_capacity_timer_id = 0;

@@ -33,6 +33,10 @@ config_t config_default() {
   config.gossip_steady_interval_s = 30;
   config.gossip_timeout_ms = 5000;
   config.hebbian_decay_factor = 0.999f;
+  config.bad_block_multiplier = 5.0f;
+  config.bad_block_rate_cost = 10.0f;
+  config.peer_state_ttl_ms = 604800000u;   // 7 days
+  config.peer_state_save_interval_ms = 60000u;
   config.eabf_base_ttl_ms = 3600000;
   config.eabf_maintenance_ms = 60000;
   config.respiration_tau_min_ms = 5000;
@@ -168,6 +172,19 @@ int config_validate(const config_t* config) {
               config->hebbian_decay_factor);
     valid = false;
   }
+  if (config->bad_block_multiplier <= 0.0f) {
+    log_error("config_validate: bad_block_multiplier (%f) must be > 0", config->bad_block_multiplier);
+    valid = false;
+  }
+  if (config->bad_block_rate_cost < 0.0f) {
+    log_error("config_validate: bad_block_rate_cost (%f) must be >= 0", config->bad_block_rate_cost);
+    valid = false;
+  }
+  if (config->peer_state_save_interval_ms < 10000u) {
+    log_error("config_validate: peer_state_save_interval_ms (%u) must be >= 10000", config->peer_state_save_interval_ms);
+    valid = false;
+  }
+  // peer_state_ttl_ms == 0 means "never expire" — allowed.
   if (config->eabf_base_ttl_ms < config->eabf_maintenance_ms) {
     log_error("config_validate: eabf_base_ttl_ms (%u) must be >= eabf_maintenance_ms (%u)",
               config->eabf_base_ttl_ms, config->eabf_maintenance_ms);

@@ -30,6 +30,10 @@ typedef struct {
   uint32_t gossip_steady_interval_s;
   uint32_t gossip_timeout_ms;
   float hebbian_decay_factor;
+  float bad_block_multiplier;          // Hebbian failure_penalty multiplier for a bad block
+  float bad_block_rate_cost;           // extra FIND_BLOCK tokens charged to a bad-block supplier
+  uint32_t peer_state_ttl_ms;          // drop persisted peers not seen for this long on load (0 = never expire)
+  uint32_t peer_state_save_interval_ms; // debounced peer-state save cadence
   uint32_t eabf_base_ttl_ms;
   uint32_t eabf_maintenance_ms;
   uint32_t respiration_tau_min_ms;
