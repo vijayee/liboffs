@@ -150,21 +150,42 @@ The durability contract is **data → WAL → snapshot**.
 - `index_debounce` (`src/BlockCache/index.c:1131-1141`): `platform_file_sync` the snapshot file after writing, **check the `platform_file_write` return** (propagate short-write/ENOSPC as an error and leave the old WAL intact rather than destroying it), then destroy the old WAL.
 - `section_save_meta` (`src/BlockCache/section.c:853-868`): fsync the free-map write; a stale free-map on crash either overwrites live data or leaks slots.
 
-### 5.3 Recovery-path input validation
+### 5.3 Recovery-path input validation and WAL error handling
 
-Treat on-disk state as hostile.
+Treat on-disk state as hostile. The WAL record format is already self-framing — `[type:1][crc:4][payload:size]` with `size` fixed per type (78/44/34) — and already carries a per-record XXH32 CRC. The machinery for safe recovery exists; it is just not used.
 
-- `wal_read` (`src/BlockCache/wal.c:111-124`): add a `default:` branch that returns an error instead of using uninitialized `size`; reject unknown type bytes.
+**WAL read correctness** (`src/BlockCache/wal.c`):
+
+- **Verify the CRC on read.** `wal_read` currently computes `crc2` at line 132 and discards it; the stored `crc` is never compared. Add the comparison. Mismatch = corrupt record → return a distinct error code (e.g. `WAL_ERR_CRC`).
+- **Add a `default:` to the type switch** (`wal.c:111-123`) that returns a distinct error (e.g. `WAL_ERR_UNKNOWN_TYPE`) instead of using an uninitialized `size`. This closes the UB and bounds the allocation.
+- Distinguish error codes so callers can tell torn-tail (short read) from corruption (CRC/type) from clean EOF (`-3`).
+
+**WAL error response — stop and keep the prefix, not destroy everything.** The current rebuilding path (`index.c:404-411`) destroys the entire in-memory index — including the valid snapshot just loaded — on any non-clean WAL read and returns a fresh empty index. One bad byte at the WAL tail loses the whole cache. Replace this with bounded, prefix-preserving handling:
+
+- **Torn tail** (short read — the common crash-mid-write case): the last record is incomplete. Because records are fixed-size and self-framing, the cursor is exactly at the start of the incomplete record. Stop replay there; keep the valid snapshot + every complete record before it; log the truncation; continue startup normally. This is fully recoverable.
+- **CRC mismatch on a record** (mid-WAL bit rot): stop replay at that record; keep the prefix before it; log the corruption. The suffix after the corruption is lost. Do **not** attempt to resync past a corrupt type byte — a wrong type byte desyncs the stream and the "next record boundary" is no longer trustworthy. Conservative stop-at-first-corruption is the safe choice. (Resync-at-next-fixed-boundary is technically possible with fixed sizes but is rejected as too risky; flagged as a future option if a length-prefixed format is adopted.)
+- **Unknown type byte**: same as CRC mismatch — stop, keep prefix, log.
+- **CBOR parse failure on a record whose framing+CRC were intact**: the record is structurally readable but semantically garbage. Skip that one record (advance cursor past it) and continue replay. The framing is trustworthy (CRC passed), so the next record boundary is known. Log the skip.
+- **Empty index only as last resort**: return a fresh empty index only when there is no valid snapshot *and* the WAL is unreadable — true total loss. A single torn byte or a mid-WAL corruption must not cause total loss.
+
+**Other recovery-side validation:**
+
 - `cbor_to_index_entry` (`src/BlockCache/index.c:96-114`): validate the CBOR array has exactly 5 elements and each has the expected type before reading; return an error (skip the record) on any mismatch. Apply the same shape-validation discipline to every other recovery-side deserializer that currently calls `cbor_array_get` unconditionally.
 - `round_robin_save` (`sections.c:699-706`): propagate `fwrite`/`fflush` errors; add `fsync`.
 
+**Happy-path replay applies the same error handling.** Section 5.1 adds live-WAL replay to the happy path; the same stop-and-keep-prefix rules apply there. A torn tail on the live WAL (the most common crash case) loses only the half-written final record, not the post-snapshot writes before it.
+
 ### 5.4 Tests
 
-- Re-enabled `TestWalCrashRecovery` and the post-snapshot variant.
+- Re-enabled `TestWalCrashRecovery` and the post-snapshot variant (writes after debounce survive a crash, losing at most the torn final record).
 - Torn data write: mock a short `pwrite` → assert cache read returns a hash-mismatch error, not corrupt data.
+- Torn WAL tail: truncate the live WAL mid-record → assert recovery keeps the snapshot + all complete records before the truncation and continues startup; assert the torn record's writes are absent but everything before is present.
+- Mid-WAL CRC corruption: flip a byte in a non-tail record → assert recovery keeps the prefix up to that record and stops; assert total loss does not occur.
+- Unknown WAL type byte → recovery stops at that record, keeps prefix.
+- CBOR parse failure on an intact-framed record → recovery skips that record, continues, keeps the rest.
 - ENOSPC on snapshot write: assert old WAL preserved and in-memory state not lost.
-- Malformed WAL type byte: assert recovery skips the record and continues.
-- Malformed CBOR index entry: assert recovery skips and continues.
+- Malformed CBOR index entry (wrong array shape): assert recovery skips and continues.
+- Total loss: no valid snapshot + unreadable WAL → assert fresh empty index returned.
 - Defrag mid-write crash: assert no slot double-allocation.
 - Run the full BlockCache suite under valgrind (DWARF-4 build); confirm zero leaks.
 
