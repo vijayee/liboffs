@@ -10,6 +10,7 @@ extern "C" {
 #include "../src/Timer/timer_actor.h"
 #include "../src/Platform/platform.h"
 #include "../src/Platform/platform_socket.h"
+#include "../src/Metrics/metrics.h"
 #include <stdlib.h>
 }
 
@@ -268,6 +269,62 @@ TEST(HealthHTTP, HealthResponseContainsExpectedFields) {
   scheduler_pool_stop(pool);
   block_cache_destroy(bc);
   timer_actor_destroy(timer);
+  scheduler_pool_destroy(pool);
+}
+
+// Task 13: confirm /health exposes the bad_blocks_received counter.
+//
+// The production counter `network_bad_blocks_received` is registered in
+// network_create (network.c), which the health HTTP fixture above does not
+// call — msquic + heavy scaffolding is out of scope here. To prove the
+// /health → metrics_registry_to_json → counter-name path end-to-end, we
+// register a counter with the exact production name and hit /health. The
+// counter is function-static so its address stays valid for the lifetime of
+// the process-global registry.
+TEST(HealthHTTP, HealthResponseExposesBadBlocksReceivedCounter) {
+  static metrics_counter_t exposed_counter;
+  metrics_counter_init(&exposed_counter, "network_bad_blocks_received",
+                       "Total blocks rejected for hash/content mismatch");
+  metrics_registry_register_counter(&exposed_counter);
+  metrics_counter_inc(&exposed_counter);
+
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  uint16_t port = _next_port++;
+  http_server_t* server = http_server_create(pool, "127.0.0.1", port);
+  ASSERT_NE(server, nullptr);
+
+  uint8_t running = 1;
+  uint8_t draining = 0;
+  health_context_t ctx;
+  memset(&ctx, 0, sizeof(ctx));
+  ctx.running = &running;
+  ctx.draining = &draining;
+
+  health_routes_register(server, &ctx);
+  http_server_listen(server);
+
+  platform_socket_t* sock = _connect_to_server_with_retry(port, 50);
+  ASSERT_NE(sock, (platform_socket_t*)nullptr);
+
+  const char* request = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+  char response[16384];
+  memset(response, 0, sizeof(response));
+  int ret = _send_and_recv(sock, request, strlen(request), response, sizeof(response), 5000);
+  ASSERT_EQ(ret, 0);
+
+  // The metrics registry is serialized under a "metrics" object, and the
+  // counter appears by name with its current value.
+  EXPECT_NE(strstr(response, "\"metrics\""), nullptr);
+  EXPECT_NE(strstr(response, "network_bad_blocks_received"), nullptr);
+
+  platform_socket_destroy(sock);
+  http_server_stop(server);
+  http_server_destroy(server);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }
 
