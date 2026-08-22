@@ -291,8 +291,7 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
    * hebbian config. The other hebbian_config fields keep their
    * hebbian_config_init defaults; only the two bad-block fields are
    * overridden here. peer_state_ttl_ms and peer_state_save_interval_ms are
-   * consumed in later tasks (peer-state save/load) and are not stored on
-   * network_t yet. */
+   * stored on network_t below for the peer-state save/load paths. */
   hebbian_config_t hebbian_cfg;
   hebbian_config_init(&hebbian_cfg);
   if (config != NULL) {
@@ -1864,7 +1863,8 @@ bool network_verify_and_penalize_bad_block(network_t* network,
   bool supplier_is_meaningful = !node_id_equals(supplier, &zero_id);
   if (block_verify_hash(data, claimed_hash)) {
     if (supplier_is_meaningful) {
-      float reward = network->conn_mgr.hebbian.base_reward;
+      float reward = network->conn_mgr.hebbian.base_reward *
+                     network->conn_mgr.hebbian.rpc_multipliers[wire_type];
       hebbian_frequency(&network->hebbian, supplier, reward);
       if (network->rings != NULL) {
         net_node_t* node = ring_set_find_by_id(network->rings, supplier);
