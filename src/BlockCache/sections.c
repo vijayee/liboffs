@@ -11,6 +11,7 @@
 #include "../Actor/actor.h"
 #include "../Actor/message.h"
 #include "../Platform/platform.h"
+#include "../Platform/platform_atomic.h"
 #include "../Scheduler/scheduler.h"
 #include "block.h"
 #include <stdatomic.h>
@@ -690,7 +691,7 @@ round_robin_t* cbor_to_round_robin(cbor_item_t* cbor, char* robin_path, timer_ac
 }
 
 void round_robin_save(void* ctx) {
-  round_robin_t* robin = (round_robin_t*) ctx;
+  round_robin_t* robin = (round_robin_t*)ctx;
   cbor_item_t* cbor = round_robin_to_cbor(robin);
   if (cbor == NULL) {
     log_error("Failed to save robin file");
@@ -699,14 +700,10 @@ void round_robin_save(void* ctx) {
   uint8_t* cbor_data;
   size_t cbor_size;
   cbor_serialize_alloc(cbor, &cbor_data, &cbor_size);
-  FILE* robin_file = fopen(robin->path,"wb");
-  if (robin_file == NULL) {
-    log_error("Failed to save robin file");
-    return;
+  int rc = platform_file_atomic_write(robin->path, cbor_data, cbor_size);
+  if (rc != 0) {
+    log_error("round_robin_save: atomic write failed (rc=%d) for %s", rc, robin->path);
   }
-  fwrite(cbor_data, cbor_size, 1, robin_file);
-  fflush(robin_file);
-  fclose(robin_file);
   free(cbor_data);
   cbor_decref(&cbor);
 }
