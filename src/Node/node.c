@@ -108,6 +108,25 @@ void offs_node_stop(offs_node_t* node) {
   }
 
   /* Phase 1b: Stop timer actor so recurring timers stop firing. */
+  /* Flush any pending debounced peer-state save before the timer stops,
+     so the final mid-run state is captured. timer_actor_stop sets the
+     DESTROY flag and joins the loop thread — any pending debounce flush
+     sent after that is dropped by the dispatch. The Phase 8
+     authority_save_peers remains the authoritative final save; this
+     flush only matters for mid-run crash durability between graceful
+     shutdowns. */
+  if (node->network != NULL && node->network->timer != NULL) {
+    timer_actor_debounce_flush(node->network->timer,
+                               &node->network->actor,
+                               NETWORK_PEER_STATE_SAVE);
+    /* Give the timer thread + scheduler a chance to process the flush
+       before we stop the timer actor. Matches the block_cache_sync
+       pattern (10ms tick + wait_for_idle). */
+    if (!_shutdown_deadline_exceeded(deadline)) {
+      platform_sleep_ms(10);
+      scheduler_pool_wait_for_idle(node->scheduler);
+    }
+  }
   timer_actor_stop(node->timer);
 
   /* Drain any in-flight timer completion messages from the scheduler. */

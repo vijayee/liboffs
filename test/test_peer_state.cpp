@@ -181,3 +181,17 @@ TEST(PeerStatePersistence, RoundTripPersistsV3PeerFields) {
   connection_manager_deinit(&net2.conn_mgr);
   fs::remove(tmp);
 }
+
+// Debounced mid-run peer-state save: after the Hebbian decay tick changes
+// weights, the gossip-tick handler marks the network dirty and arms a
+// debounced NETWORK_PEER_STATE_SAVE via timer_actor_debounce. The helper
+// must toggle the dirty flag and be safe to call without a timer (the
+// decay tick fires on every gossip tick regardless of timer wiring).
+TEST(PeerStateSaveDebounce, MarkDirtyTogglesFlag) {
+  network_t net;
+  memset(&net, 0, sizeof(net));
+  net.peer_state_dirty = 0;
+  // No timer set, no interval — the helper must guard and not crash.
+  network_mark_peer_state_dirty(&net);
+  EXPECT_EQ(net.peer_state_dirty, 1);
+}

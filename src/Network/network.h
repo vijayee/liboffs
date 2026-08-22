@@ -113,6 +113,8 @@ typedef struct network_t {
                                          closest_pending expiry (#5/#6/#9) */
   uint32_t request_timeout_ms;        /* per-pending-request deadline; default 30s */
   ATOMIC(uint8_t) running;
+  uint8_t peer_state_dirty;              /* set when hebbian/peers change; cleared on save */
+  uint32_t peer_state_save_interval_ms;  /* debounced peer-state save cadence (from config) */
   uint32_t gossip_init_interval_s;
   size_t gossip_init_count;
   uint32_t gossip_steady_interval_s;
@@ -179,6 +181,14 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
                           const config_t* config);
 void network_destroy(network_t* network);
 void network_dispatch(void* state, message_t* msg);
+
+/* Mark the peer state dirty and arm a debounced NETWORK_PEER_STATE_SAVE on
+   the network actor's timer. Called after Hebbian decay (or any other
+   mutation that makes the on-disk peer store stale). Safe to call with a
+   NULL timer or a zero interval — the dirty flag is still set, but no
+   debounce is armed. The authoritative final save remains
+   authority_save_peers in offs_node_stop Phase 8. */
+void network_mark_peer_state_dirty(network_t* network);
 int network_connect_relay(network_t* network, const char* host, uint16_t port);
 int network_connect_peer(network_t* network, const char* host, uint16_t port);
 

@@ -62,6 +62,22 @@ uint64_t network_bad_blocks_received_value(void) {
   return metrics_counter_value(&bad_blocks_received_counter);
 }
 
+void network_mark_peer_state_dirty(network_t* network) {
+  if (network == NULL) return;
+  network->peer_state_dirty = 1;
+  /* Arm a one-shot debounced save. Repeated ticks coalesce — the timer
+     cancels the previous pending save before starting a new one, so only
+     the last tick within the interval window fires. Guarded: tests and
+     early-init paths may call this with no timer / zero interval; the
+     dirty flag is still set so the next authority_save_peers (either the
+     debounced fire or the Phase 8 final save) will persist the state. */
+  if (network->timer != NULL && network->peer_state_save_interval_ms > 0) {
+    timer_actor_debounce(network->timer,
+                         (uint64_t)network->peer_state_save_interval_ms,
+                         0, &network->actor, NETWORK_PEER_STATE_SAVE);
+  }
+}
+
 /* Format an IPv4 address (host byte order) as a dotted-quad string. Writes
    into the caller-provided buffer of at least 16 bytes. Returns 0 on success,
    -1 on error. Uses snprintf for portability (no inet_ntop dependency). */
@@ -307,6 +323,7 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   network->gossip_steady_interval_s = config->gossip_steady_interval_s;
   network->gossip_timeout_ms = config->gossip_timeout_ms;
   network->hebbian_decay_factor = config->hebbian_decay_factor;
+  network->peer_state_save_interval_ms = config->peer_state_save_interval_ms;
   network->eabf_base_ttl_ms = config->eabf_base_ttl_ms;
   network->eabf_maintenance_ms = config->eabf_maintenance_ms;
   network->respiration_tau_min_ms = config->respiration_tau_min_ms;
@@ -1868,6 +1885,12 @@ static void network_handle_gossip_tick(network_t* network, message_t* msg) {
 
   // Apply Hebbian decay on each gossip tick
   hebbian_decay(&network->hebbian);
+
+  // Best-effort debounced peer-state save: decay changed weights, so the
+  // on-disk peer store is now stale. The save fires on the debounce timer
+  // (NETWORK_PEER_STATE_SAVE), coalescing repeated ticks. The authoritative
+  // save is authority_save_peers in offs_node_stop Phase 8.
+  network_mark_peer_state_dirty(network);
 
   // Tick the scheduler to determine if we should gossip
   gossip_scheduler_tick(&network->gossip.scheduler, now_ms);
@@ -5763,6 +5786,17 @@ void network_dispatch(void* state, message_t* msg) {
       /* CACHE_PUT_NEW / CACHE_PUT_EXISTS: the block is in the cache for
        * future GETs. Network announce for CACHE_PUT_NEW is handled by the
        * writable_off_stream path during PUT, not here. */
+      break;
+    }
+    case NETWORK_PEER_STATE_SAVE: {
+      /* Debounced mid-run save fired by network_mark_peer_state_dirty after
+         the Hebbian decay tick. Clearing the dirty flag here coalesces
+         repeated ticks: a later mark re-arms the debounce. The Phase 8
+         authority_save_peers in offs_node_stop remains authoritative. */
+      if (network->authority != NULL && network->peer_state_dirty) {
+        authority_save_peers(network->authority, network);
+        network->peer_state_dirty = 0;
+      }
       break;
     }
     default:

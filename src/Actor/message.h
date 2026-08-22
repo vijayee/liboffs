@@ -152,6 +152,12 @@ typedef enum message_type_e {
      to the network actor so the network actor's worker (and only that
      thread) writes network->local_nat_type. See audit #18. */
   NETWORK_NAT_TYPE_DETECTED,
+  /* Debounced mid-run peer-state save. Armed by network_mark_peer_state_dirty
+     after the Hebbian decay tick (or any other peer/weight mutation); the
+     network actor's dispatch calls authority_save_peers and clears the dirty
+     flag. The authoritative final save is authority_save_peers in
+     offs_node_stop Phase 8. */
+  NETWORK_PEER_STATE_SAVE,
   /* Peer connection messages */
   PEER_SEND_FIND_BLOCK,
   PEER_SEND_STORE_BLOCK,
