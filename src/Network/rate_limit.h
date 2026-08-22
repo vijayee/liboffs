@@ -97,6 +97,13 @@ bool rate_limit_check(rate_limit_table_t* table, const node_id_t* peer_id,
 uint32_t rate_limit_retry_after(rate_limit_table_t* table, const node_id_t* peer_id,
                                 rpc_type_e type, uint64_t now_ms);
 
+// Charge extra tokens to a peer's bucket for a given RPC type, without
+// granting a request. Used to penalize misbehavior (e.g. a bad block costs
+// extra FIND_BLOCK tokens). Tokens are clamped at 0. Refills first so the
+// charge applies to the current effective bucket state.
+void rate_limit_charge(rate_limit_table_t* table, const node_id_t* peer_id,
+                        rpc_type_e type, float extra_cost, uint64_t now_ms);
+
 // Apply capacity multiplier to rate limits
 // If type is StoreBlock and capacity >= 0.80 → multiplier = 0.05
 // If 0.50-0.80 → linear taper

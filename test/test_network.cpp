@@ -1703,6 +1703,38 @@ TEST_F(RateLimitTest, EffectiveRateDifferentTypes) {
   EXPECT_FLOAT_EQ(ping_rate, 240.0f);  // 10 * 24
 }
 
+TEST(RateLimitCharge, ChargingExtraTokensDrainsBucket) {
+  rate_limit_table_t table;
+  rate_limit_table_init(&table, 16);
+  node_id_t peer;
+  memset(&peer, 0xCC, sizeof(peer));
+  uint64_t now_ms = 1000;
+  ASSERT_TRUE(rate_limit_check(&table, &peer, RPC_TYPE_FIND_BLOCK, now_ms));
+  const peer_rate_limits_t* entry = rate_limit_table_find(&table, &peer);
+  ASSERT_NE(entry, nullptr);
+  float tokens_before = entry->buckets[RPC_TYPE_FIND_BLOCK].tokens;
+  rate_limit_charge(&table, &peer, RPC_TYPE_FIND_BLOCK, 5.0f, now_ms);
+  const peer_rate_limits_t* after = rate_limit_table_find(&table, &peer);
+  ASSERT_NE(after, nullptr);
+  EXPECT_NEAR(after->buckets[RPC_TYPE_FIND_BLOCK].tokens, tokens_before - 5.0f, 0.01f);
+  rate_limit_table_deinit(&table);
+}
+
+TEST(RateLimitCharge, ChargeClampsAtZero) {
+  rate_limit_table_t table;
+  rate_limit_table_init(&table, 16);
+  node_id_t peer;
+  memset(&peer, 0xDD, sizeof(peer));
+  uint64_t now_ms = 1000;
+  ASSERT_TRUE(rate_limit_check(&table, &peer, RPC_TYPE_FIND_BLOCK, now_ms));
+  rate_limit_charge(&table, &peer, RPC_TYPE_FIND_BLOCK, 1000.0f, now_ms);
+  const peer_rate_limits_t* after = rate_limit_table_find(&table, &peer);
+  ASSERT_NE(after, nullptr);
+  EXPECT_GE(after->buckets[RPC_TYPE_FIND_BLOCK].tokens, 0.0f);
+  EXPECT_NEAR(after->buckets[RPC_TYPE_FIND_BLOCK].tokens, 0.0f, 0.01f);
+  rate_limit_table_deinit(&table);
+}
+
 // === Authority persistence tests ===
 
 class AuthorityPeerStoreTest : public ::testing::Test {

@@ -192,6 +192,34 @@ bool rate_limit_check(rate_limit_table_t* table, const node_id_t* peer_id,
   return false;
 }
 
+// --- Charge (penalty) ---
+
+void rate_limit_charge(rate_limit_table_t* table, const node_id_t* peer_id,
+                        rpc_type_e type, float extra_cost, uint64_t now_ms) {
+  if (table == NULL || peer_id == NULL) return;
+  if (type < 0 || type >= RPC_TYPE_COUNT) return;
+
+  peer_rate_limits_t* entry = rate_limit_table_get(table, peer_id);
+  if (entry == NULL) return;
+
+  token_bucket_t* bucket = &entry->buckets[type];
+  const token_bucket_config_t* config = &RATE_LIMIT_DEFAULTS[type];
+
+  // Compute effective config with inverse scaling + low-network multiplier
+  // (mirrors rate_limit_check so the charge applies to the same bucket state).
+  token_bucket_config_t effective_config = *config;
+  if (table->peer_count > 0 && table->peer_count < table->reference_peer_count) {
+    float multiplier = ((float)table->reference_peer_count / (float)table->peer_count) * LOW_NETWORK_MULTIPLIER;
+    effective_config.max_rate = config->max_rate * multiplier;
+    effective_config.burst_size = config->burst_size * multiplier;
+  }
+
+  token_bucket_refill(bucket, &effective_config, now_ms);
+
+  bucket->tokens -= extra_cost;
+  if (bucket->tokens < 0.0f) bucket->tokens = 0.0f;
+}
+
 // --- Retry after ---
 
 uint32_t rate_limit_retry_after(rate_limit_table_t* table, const node_id_t* peer_id,
