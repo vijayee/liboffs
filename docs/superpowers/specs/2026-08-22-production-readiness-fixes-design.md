@@ -7,26 +7,33 @@
 
 ## 1. Threat Model and Trust Architecture
 
-This fix pass is governed by one architectural decision made with the user:
+This fix pass supports **two coexisting trust modes**, selected by operator configuration:
 
-> **TLS is for encryption, not identity.** Peers remain anonymous. Trust is established by **content verification at the receive boundary** plus **peer reputation** — not by certificate-verified identity.
+**Default (insecure) mode — `allow_secure=false`, no authority configured.**
+> TLS is for encryption, not identity. Peers remain anonymous. Trust is established by **content verification at the receive boundary** plus **peer reputation** — not by certificate-verified identity.
 
-Consequences:
+- `QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION` stays in place. Connections are encrypted, never authenticated. This is the default and is acceptable for trusted LANs.
+- Content integrity (audit CRITICAL #1) is the load-bearing trust mechanism: every block received from a peer is re-hashed; mismatches are rejected and the supplier's reputation is penalized.
+- Relay-admitted peers (no identity proof available in this mode) are gated by **reputation**: they start at low Hebbian weight and must earn routing weight by serving verified blocks (Section 7.3).
 
-- `allow_secure` default stays `false`; `QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION` stays in place. No CA provisioning is forced on operators. Connections are encrypted, never authenticated. This is accepted as the trust posture.
-- The audit's CRITICAL #2 ("TLS peer auth off by default") is **closed by decision**, not by code. The README disclosure is retained.
-- The audit's HIGH #3 ("relay-admitted peers join routing without identity proof") is **replaced** by reputation-gated routing (Section 4). The previously-deferred signed-nonce challenge is dropped — it does not fit the no-identity model.
-- Content integrity (audit CRITICAL #1) becomes the load-bearing trust mechanism: every block received from a peer is re-hashed; mismatches are rejected and the supplier's reputation is penalized.
+**Secure mode — `allow_secure=true` with an authority (CA + node key) configured.**
+- TLS peer certificates are validated against the CA on the direct-QUIC path (already implemented).
+- The **signed-nonce relay challenge** (`WIRE_RELAY_CHALLENGE` / `WIRE_RELAY_CHALLENGE_RESPONSE`, fully implemented at `network.c:1237/1445/1539`) provides relay-path identity: the challenger sends a nonce, the responder signs it with its private key, the challenger verifies `BLAKE3(public_key)==responder_id` and the signature, then sets `peer->relay_verified=true`. This flow is **kept and completed** — what is missing is the *gating* (routing currently proceeds before verification completes). Section 7.3 adds mode-aware gating: in secure mode, relay-admitted peers are not routed until `relay_verified=true`.
+- Content integrity still applies in secure mode as defense-in-depth.
+
+**Shared consequences (both modes):**
+- The audit's CRITICAL #2 ("TLS peer auth off by default") is addressed by **supporting and documenting secure mode** and recommending it for public-internet exposure, while leaving the default as encryption-only so existing trusted-LAN deployments are not broken. The README disclosure is retained and updated with the secure-mode guidance.
+- The audit's HIGH #3 ("relay-admitted peers join routing without identity proof") is addressed by **mode-aware gating** in Section 7.3 — not by dropping the signed-nonce flow. The signed-nonce flow is vital in secure mode and stays.
 - The Hebbian weight table (`src/Network/hebbian.{c,h}`) **is** the reputation system — these are the project's "SOPPSON numbers". Per-peer directed weights with frequency/feedback/symmetry learning rules, decay, and an eviction cap. Routing gates (`find_block.c:301`, `closest_nodes.c:289`) and the connection manager drop (`connection_manager.c:267`) already consume the weight via `drop_threshold`. The work is wiring, not new machinery.
 
 ## 2. Findings Addressed
 
-Every CRITICAL, HIGH, MEDIUM, and LOW finding from the 2026-08-21 production-readiness audit is addressed, except CRITICAL #2 (closed by the threat-model decision above). The findings map to the five implementation stages in Sections 4-8.
+Every CRITICAL, HIGH, MEDIUM, and LOW finding from the 2026-08-21 production-readiness audit is addressed. CRITICAL #2 is addressed by supporting and documenting secure mode (and recommending it for public exposure) rather than by forcing it as the default. The findings map to the five implementation stages in Sections 4-8.
 
 ## 3. Non-Goals
 
 - Persisting the Hebbian weight table across restart. The table rebuilds from zero on restart; bad peers must re-offend to be re-penalized, which is acceptable because content verification catches them regardless. (Persistence is a future enhancement.)
-- Certificate-verified peer identity. Out of scope per the threat model.
+- Forcing `allow_secure=true` as the default. The default stays encryption-only for backward compatibility; secure mode is opt-in and documented.
 - A separate key server for update signing keys. The release public key is compiled into the binary (fail-closed if unset).
 - ABI/soname versioning. The version bump to `v0.2.0` is a tag/changelog concern; symbol versioning is a future task.
 
@@ -227,12 +234,16 @@ Drop the `if (info->sha256[0] != '\0')` opt-out at `update_download.c:393`. The 
 
 - **Relay rate-limit keying.** `network.c:5230-5241`: key the relay-path rate limiter on the authenticated relay endpoint id (the relay connection), not the spoofable wire `sender_id`. Frame-attack on a victim's `node_id` becomes impossible.
 - **Per-source gossip cap.** Bound insertions from a single gossip source per message (cap at 32 or `RING_MAX_RINGS / N`, whichever is smaller). Apply a small Hebbian penalty to peers that advertise unreachable nodes — the referral penalty wires into the existing reputation system (bad referrals cost the referrer).
-- **Reputation-gated relay routing** (replaces the unimplemented signed-nonce). `network.c:5164-5207`: relay-admitted peers start at `relay_verified=false` and `weight=HEBBIAN_MIN_WEIGHT` (0.01) — **below** `FIND_BLOCK_MIN_WEIGHT`, so they are not routable on admission. `find_block` / `store_block` route toward them only once their Hebbian weight crosses the routing min-weight gate (i.e. after they've served verified blocks). This is consistent with the bootstrap in Section 4.3: new peers (including relay-admitted ones) start low-trust and must earn routing weight. No identity proof required — trust is earned via verified content, matching the "encryption not identity" model. Drop the deferred signed-nonce TODO comment.
+- **Mode-aware relay routing gate** (completes the signed-nonce flow). The signed-nonce challenge mechanism (`WIRE_RELAY_CHALLENGE` / `WIRE_RELAY_CHALLENGE_RESPONSE`, `network.c:1237/1445/1539`) is **already implemented end-to-end** — what is missing is the gating that refuses to route until verification completes. Add mode-aware gating at `network.c:5164-5207` and the routing entry points (`find_block.c:301`, `closest_nodes.c:289`):
+  - **Secure mode** (authority configured, `allow_secure=true`): relay-admitted peers (`relay_verified=false`) are **not routed** until `relay_verified=true` is set by the signed-nonce response handler. The challenge is sent on admission (already the case); unanswered challenges are swept (already the case). This is the identity-gated path and is vital when an authority is configured.
+  - **Default/insecure mode** (no authority): identity verification is unavailable, so relay-admitted peers are gated by **reputation** instead — they start at `weight=HEBBIAN_MIN_WEIGHT` (0.01), below `FIND_BLOCK_MIN_WEIGHT`, and are not routed until their Hebbian weight crosses the routing min-weight gate by serving verified blocks. Consistent with the bootstrap in Section 4.3.
+  - The gate reads the mode from `network->authority` (or equivalent): if an authority/private key is loaded, use the `relay_verified` gate; otherwise use the Hebbian-weight gate. Both gates apply only to relay-admitted peers; direct-QUIC peers (already `relay_verified=true` via the salutation path, `network.c:855`) route normally.
+  - Do **not** drop the signed-nonce flow. Do **not** remove the deferred-gating comment until the gating is implemented and the comment becomes obsolete.
 
 ### 7.4 Tests
 
 - `test_http_server.cpp`: slowloris connection closed after idle timeout; `max_connections` refusal; bearer-over-plaintext rejected by validator; `/config` PUT refused on non-loopback.
-- `test_network.cpp`: relay rate-limit keyed on endpoint (varying `sender_id` does not dodge the bucket); per-source gossip cap enforced; relay-admitted peer not routed until weight crosses the gate.
+- `test_network.cpp`: relay rate-limit keyed on endpoint (varying `sender_id` does not dodge the bucket); per-source gossip cap enforced; **secure mode** — relay-admitted peer not routed until `relay_verified=true` (signed-nonce response received and verified); **insecure mode** — relay-admitted peer not routed until Hebbian weight crosses the gate.
 - Memory-safety fixes: inject `realloc` failure via a test allocator hook → assert no crash, no leak.
 
 ## 8. Stage 5 — Engineering, CI, Packaging, Daemon (liboffs + OFFS)
@@ -274,7 +285,7 @@ Add unit tests for the three untested modules: `test_bloom.cpp`, `test_metrics.c
 
 ### 8.7 No TODOs
 
-Per CLAUDE.md, this pass resolves every `TODO`/`FIXME`/`HACK`/`XXX` in the files it touches — including the admitted-stub comments in `off_routes.c` (tuple-size bound, POST handler) and the deferred signed-nonce comment in `network.c`. The `_deque_grow` "retired arrays never freed" comment is filed as a follow-up ticket rather than left as an in-tree TODO.
+Per CLAUDE.md, this pass resolves every `TODO`/`FIXME`/`HACK`/`XXX` in the files it touches — including the admitted-stub comments in `off_routes.c` (tuple-size bound, POST handler). The deferred-gating comment near `network.c:5172-5178` is resolved by **implementing** the mode-aware gate in Section 7.3 (the comment then becomes obsolete and is removed or replaced with a description of the gate). The `_deque_grow` "retired arrays never freed" comment is filed as a follow-up ticket rather than left as an in-tree TODO.
 
 ### 8.8 De-wonk + leak check
 
