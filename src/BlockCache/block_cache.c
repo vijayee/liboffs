@@ -19,6 +19,10 @@
 #include <stdatomic.h>
 #include <time.h>
 
+bool block_cache_verify_read_hash(const buffer_t* data, const buffer_t* stored_hash) {
+  return block_verify_hash(data, stored_hash);
+}
+
 void respiration_exhale_payload_destroy(void* ptr) {
   respiration_exhale_payload_t* payload = (respiration_exhale_payload_t*)ptr;
   if (payload == NULL) return;
@@ -463,7 +467,12 @@ void block_cache_dispatch(void* state, message_t* msg) {
             sections_dispatch(block_cache->sections, &sections_msg);
             buffer_t* data = read_payload.result;
             if (data != NULL) {
-              block = block_create_existing_data_hash(data, entry->hash);
+              if (block_cache_verify_read_hash(data, entry->hash)) {
+                block = block_create_existing_data_hash(data, entry->hash);
+              } else {
+                log_error("block_cache: read hash mismatch for section %u index %u — treating as miss",
+                          (unsigned)entry->section_id, (unsigned)entry->section_index);
+              }
               buffer_destroy(data);
               if (block != NULL) {
                 index_entry_t* ejection = (index_entry_t*)refcounter_reference(
@@ -549,7 +558,12 @@ void block_cache_dispatch(void* state, message_t* msg) {
         pending_get_t* first_pending = _block_cache_find_pending_get(block_cache,
                                                                       p->section_id, p->section_index);
         if (first_pending != NULL) {
-          block = block_create_existing_data_hash(data, first_pending->entry->hash);
+          if (block_cache_verify_read_hash(data, first_pending->entry->hash)) {
+            block = block_create_existing_data_hash(data, first_pending->entry->hash);
+          } else {
+            log_error("block_cache: async read hash mismatch for section %u index %u — treating as miss",
+                      (unsigned)p->section_id, (unsigned)p->section_index);
+          }
           if (block != NULL) {
             index_entry_t* ejection = (index_entry_t*)refcounter_reference(
                 (refcounter_t*)block_lru_cache_put(block_cache->lru, block, first_pending->entry));

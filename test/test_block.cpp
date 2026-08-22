@@ -6,6 +6,7 @@
 #include <string.h>
 extern "C" {
 #include "../src/BlockCache/block.h"
+#include "../src/BlockCache/block_cache.h"
 #include <cbor.h>
 }
 
@@ -103,4 +104,26 @@ TEST(TestBlock, VerifyHashRejectsNullArgs) {
   EXPECT_FALSE(block_verify_hash(data, NULL));
   DESTROY(data, buffer);
   DESTROY(hash, buffer);
+}
+
+TEST(TestBlockCacheRead, VerifyReadHashRejectsCorruptData) {
+  uint8_t raw[128];
+  for (size_t index = 0; index < sizeof(raw); index++) raw[index] = (uint8_t)(index * 3);
+  buffer_t* data = buffer_create_from_pointer_copy(raw, sizeof(raw));
+  buffer_t* stored_hash = hash_data(data);
+  // Corrupt the data after hashing.
+  data->data[10] ^= 0x80;
+  EXPECT_FALSE(block_cache_verify_read_hash(data, stored_hash));
+  DESTROY(data, buffer);
+  DESTROY(stored_hash, buffer);
+}
+
+TEST(TestBlockCacheRead, VerifyReadHashAcceptsGoodData) {
+  uint8_t raw[128];
+  for (size_t index = 0; index < sizeof(raw); index++) raw[index] = (uint8_t)(index * 3);
+  buffer_t* data = buffer_create_from_pointer_copy(raw, sizeof(raw));
+  buffer_t* stored_hash = hash_data(data);
+  EXPECT_TRUE(block_cache_verify_read_hash(data, stored_hash));
+  DESTROY(data, buffer);
+  DESTROY(stored_hash, buffer);
 }

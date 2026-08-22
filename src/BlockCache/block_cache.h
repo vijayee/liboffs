@@ -169,4 +169,9 @@ void block_cache_remove(block_cache_t* block_cache, buffer_t* hash, actor_t* rep
 int block_cache_can_fit(block_cache_t* block_cache, size_t required_bytes);
 void block_cache_defragment(block_cache_t* block_cache, float occupancy_threshold, actor_t* reply_to);
 
+// Recompute BLAKE3 over read data and compare against the stored hash. Used on
+// the cache read path to reject on-disk corruption (bit rot, torn writes) as a
+// miss rather than returning corrupt data as valid. See design 4.1.
+bool block_cache_verify_read_hash(const buffer_t* data, const buffer_t* stored_hash);
+
 #endif //OFFS_BLOCK_CACHE_H
