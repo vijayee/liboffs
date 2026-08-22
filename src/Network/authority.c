@@ -16,6 +16,7 @@
 #include "peer_info.h"
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 #include <cbor.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
@@ -570,11 +571,32 @@ int authority_load_peers(authority_t* authority, network_t* network) {
                 }
                 // rings may be NULL in a minimal network — drop the node
                 // rather than crash if there's nowhere to insert it.
-                if (network->rings != NULL) {
+                // TTL filter: when peer_state_ttl_ms > 0, drop peers whose
+                // last_seen_ms is older than the TTL. last_seen_ms == 0 means
+                // "never seen" (fresh) — keep. On drop, also remove the peer
+                // from the hebbian table (loaded earlier from index 3) and
+                // fall through to the cbor_decrefs below — do NOT `continue`,
+                // or the cbor items would leak.
+                bool dropped_stale = false;
+                if (network->peer_state_ttl_ms > 0 && node->last_seen_ms != 0) {
+                  uint64_t now_ms = (uint64_t)time(NULL) * 1000ULL;
+                  if (node->last_seen_ms <= now_ms) {
+                    uint64_t age = now_ms - node->last_seen_ms;
+                    if (age > (uint64_t)network->peer_state_ttl_ms) {
+                      dropped_stale = true;
+                    }
+                  }
+                }
+                if (dropped_stale) {
+                  hebbian_table_remove(&network->hebbian, &peer_id);
+                  net_node_destroy(node);
+                  node = NULL;
+                } else if (network->rings != NULL) {
                   uint32_t latency_us = (uint32_t)(node->latency_ms * 1000.0f);
                   ring_set_insert(network->rings, node, latency_us);
                 } else {
                   net_node_destroy(node);
+                  node = NULL;
                 }
               }
             }

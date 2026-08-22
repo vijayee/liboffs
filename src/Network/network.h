@@ -115,6 +115,7 @@ typedef struct network_t {
   ATOMIC(uint8_t) running;
   uint8_t peer_state_dirty;              /* set when hebbian/peers change; cleared on save */
   uint32_t peer_state_save_interval_ms;  /* debounced peer-state save cadence (from config) */
+  uint32_t peer_state_ttl_ms;            /* drop persisted peers not seen for this long on load (0 = never expire) */
   uint32_t gossip_init_interval_s;
   size_t gossip_init_count;
   uint32_t gossip_steady_interval_s;

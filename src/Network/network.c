@@ -324,6 +324,7 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   network->gossip_timeout_ms = config->gossip_timeout_ms;
   network->hebbian_decay_factor = config->hebbian_decay_factor;
   network->peer_state_save_interval_ms = config->peer_state_save_interval_ms;
+  network->peer_state_ttl_ms = config->peer_state_ttl_ms;
   network->eabf_base_ttl_ms = config->eabf_base_ttl_ms;
   network->eabf_maintenance_ms = config->eabf_maintenance_ms;
   network->respiration_tau_min_ms = config->respiration_tau_min_ms;

@@ -195,3 +195,73 @@ TEST(PeerStateSaveDebounce, MarkDirtyTogglesFlag) {
   network_mark_peer_state_dirty(&net);
   EXPECT_EQ(net.peer_state_dirty, 1);
 }
+
+// TTL filtering on peer-state load: a peer whose last_seen_ms is older than
+// network->peer_state_ttl_ms must be dropped from BOTH the ring set and the
+// Hebbian table. A peer with last_seen_ms == 0 ("never seen") is kept —
+// fresh peers loaded for the first time rely on this, as does the Task 9
+// RoundTripPersistsV3PeerFields test (which loads a peer with a far-future
+// last_seen_ms; that peer is also kept because TTL filtering only drops
+// peers older than the TTL, and the future timestamp is never older).
+TEST(PeerStateLoadTtl, DropsStalePeers) {
+  fs::path tmp = fs::temp_directory_path() / "liboffs_peerstate_ttl.cbor";
+  std::string path = tmp.string();
+
+  authority_t auth;
+  memset(&auth, 0, sizeof(auth));
+  auth.peer_store_path = (char*)path.c_str();
+  memset(auth.local_id.hash, 0xAB, NODE_ID_HASH_SIZE);
+
+  network_t net;
+  memset(&net, 0, sizeof(net));
+  hebbian_config_t hcfg;
+  hebbian_config_init(&hcfg);
+  connection_manager_init(&net.conn_mgr, 16, &hcfg);
+  rate_limit_table_init(&net.rate_limits, 16);
+  hebbian_table_init(&net.hebbian, 16, 0.999f);
+  net.rings = ring_set_create(8, 4, 2);
+  ASSERT_NE(net.rings, nullptr);
+
+  node_id_t stale_peer;
+  memset(&stale_peer.hash, 0x7E, NODE_ID_HASH_SIZE);
+  net_node_t* node = net_node_create(&stale_peer, 0x0A000001u, 8080);
+  ASSERT_NE(node, nullptr);
+  uint64_t now_ms = (uint64_t)time(NULL) * 1000ULL;
+  node->last_seen_ms = now_ms - (8ULL * 24ULL * 60ULL * 60ULL * 1000ULL);  // 8 days ago
+  node->relay_verified = true;
+  node->nat_type = NAT_TYPE_FULL_CONE;
+  node->bad_blocks_received = 3;
+  ASSERT_EQ(ring_set_insert(net.rings, node, 1000), 0);
+  hebbian_table_set(&net.hebbian, &stale_peer, 0.5f);
+
+  ASSERT_EQ(authority_save_peers(&auth, &net), 0);
+
+  // Load into a fresh network with a 7-day TTL — stale peer (8 days) must be dropped.
+  network_t net2;
+  memset(&net2, 0, sizeof(net2));
+  hebbian_config_t hcfg2;
+  hebbian_config_init(&hcfg2);
+  connection_manager_init(&net2.conn_mgr, 16, &hcfg2);
+  rate_limit_table_init(&net2.rate_limits, 16);
+  hebbian_table_init(&net2.hebbian, 16, 0.999f);
+  net2.rings = ring_set_create(8, 4, 2);
+  net2.peer_state_ttl_ms = 7u * 24u * 60u * 60u * 1000u;  // 7 days
+
+  ASSERT_EQ(authority_load_peers(&auth, &net2), 0);
+  // Stale peer dropped from hebbian (falls back to HEBBIAN_MIN_WEIGHT)...
+  EXPECT_NEAR(hebbian_table_get(&net2.hebbian, &stale_peer), HEBBIAN_MIN_WEIGHT, 0.001f);
+  // ...and from the ring set.
+  EXPECT_EQ(ring_set_find_by_id(net2.rings, &stale_peer), nullptr);
+
+  ring_set_clear_nodes(net.rings);
+  ring_set_destroy(net.rings);
+  ring_set_clear_nodes(net2.rings);
+  ring_set_destroy(net2.rings);
+  hebbian_table_deinit(&net.hebbian);
+  rate_limit_table_deinit(&net.rate_limits);
+  connection_manager_deinit(&net.conn_mgr);
+  hebbian_table_deinit(&net2.hebbian);
+  rate_limit_table_deinit(&net2.rate_limits);
+  connection_manager_deinit(&net2.conn_mgr);
+  fs::remove(tmp);
+}
