@@ -21,7 +21,7 @@
 #include <openssl/x509.h>
 
 // Peer store format version
-#define PEER_STORE_VERSION 2
+#define PEER_STORE_VERSION 3
 
 // --- Lifecycle ---
 
@@ -266,22 +266,26 @@ int authority_load(authority_t* authority) {
 
 // --- Runtime peer state persistence ---
 
-// CBOR structure (v2 positional array):
+// CBOR structure (v3 positional array; v2 = 8-field peer records, v3 = 12-field):
 // [
-//   uint8 (version = 2),               // index 0
+//   uint8 (version = 3),               // index 0
 //   bytes[32] (local_id),               // index 1
 //   bytes (DER-encoded CA cert),        // index 2 — empty bytestring if none
 //   [ [bytes[32], float], ... ],        // hebbian (index 3)
-//   [ [bytes[32], uint32, uint16, float, float, float, uint8, float], ... ]  // peers (index 4)
+//   [ [bytes[32], uint32, uint16, float, float, float, uint8, float,
+//       uint8, uint8, uint64, uint64], ... ]  // peers (index 4) — v3 12-field record
 //   [ string, ... ]                     // friend peers as Base58 strings (index 5)
 // ]
+// Peer record fields (v3): id, addr, port, latency_ms, weight, capacity, phase,
+// availability, relay_verified, nat_type, last_seen_ms, bad_blocks_received.
+// v2 files (8-field records) are still accepted by authority_load_peers.
 
 int authority_save_peers(const authority_t* authority, const network_t* network) {
   if (authority == NULL || network == NULL) return -1;
   if (authority->peer_store_path == NULL) return -1;
 
   size_t hebbian_count = network->hebbian.count;
-  size_t peer_count = ring_set_total_nodes(network->rings);
+  size_t peer_count = (network->rings != NULL) ? ring_set_total_nodes(network->rings) : 0;
 
   cbor_item_t* root = cbor_new_definite_array(6);
 
@@ -328,44 +332,60 @@ int authority_save_peers(const authority_t* authority, const network_t* network)
   (void)cbor_array_push(root, hebbian_array);
   cbor_decref(&hebbian_array);
 
-  // Index 4: peers
+  // Index 4: peers (v3 = 12-field records; rings may be NULL in a minimal
+  // network — guard the loop so save is safe regardless).
   cbor_item_t* peers_array = cbor_new_definite_array(peer_count);
-  for (size_t ring_idx = 0; ring_idx < network->rings->ring_count; ring_idx++) {
-    ring_t* ring = &network->rings->rings[ring_idx];
-    for (int node_idx = 0; node_idx < ring->primary.length; node_idx++) {
-      net_node_t* node = ring->primary.data[node_idx];
-      if (node == NULL) continue;
-      cbor_item_t* peer = cbor_new_definite_array(8);
-      cbor_item_t* id_bytes = cbor_build_bytestring(node->id.hash, NODE_ID_HASH_SIZE);
-      (void)cbor_array_push(peer, id_bytes);
-      cbor_decref(&id_bytes);
-      cbor_item_t* addr_val = cbor_build_uint32(node->addr);
-      (void)cbor_array_push(peer, addr_val);
-      cbor_decref(&addr_val);
-      cbor_item_t* port_val = cbor_build_uint16(node->port);
-      (void)cbor_array_push(peer, port_val);
-      cbor_decref(&port_val);
-      cbor_item_t* lat = cbor_new_float4();
-      cbor_set_float4(lat, node->latency_ms);
-      (void)cbor_array_push(peer, lat);
-      cbor_decref(&lat);
-      cbor_item_t* wt = cbor_new_float4();
-      cbor_set_float4(wt, node->weight);
-      (void)cbor_array_push(peer, wt);
-      cbor_decref(&wt);
-      cbor_item_t* cap = cbor_new_float4();
-      cbor_set_float4(cap, node->capacity);
-      (void)cbor_array_push(peer, cap);
-      cbor_decref(&cap);
-      cbor_item_t* phase_val = cbor_build_uint8((uint8_t)node->phase);
-      (void)cbor_array_push(peer, phase_val);
-      cbor_decref(&phase_val);
-      cbor_item_t* avail = cbor_new_float4();
-      cbor_set_float4(avail, node->availability);
-      (void)cbor_array_push(peer, avail);
-      cbor_decref(&avail);
-      (void)cbor_array_push(peers_array, peer);
-      cbor_decref(&peer);
+  if (network->rings != NULL) {
+    for (size_t ring_idx = 0; ring_idx < network->rings->ring_count; ring_idx++) {
+      ring_t* ring = &network->rings->rings[ring_idx];
+      for (int node_idx = 0; node_idx < ring->primary.length; node_idx++) {
+        net_node_t* node = ring->primary.data[node_idx];
+        if (node == NULL) continue;
+        cbor_item_t* peer = cbor_new_definite_array(12);
+        cbor_item_t* id_bytes = cbor_build_bytestring(node->id.hash, NODE_ID_HASH_SIZE);
+        (void)cbor_array_push(peer, id_bytes);
+        cbor_decref(&id_bytes);
+        cbor_item_t* addr_val = cbor_build_uint32(node->addr);
+        (void)cbor_array_push(peer, addr_val);
+        cbor_decref(&addr_val);
+        cbor_item_t* port_val = cbor_build_uint16(node->port);
+        (void)cbor_array_push(peer, port_val);
+        cbor_decref(&port_val);
+        cbor_item_t* lat = cbor_new_float4();
+        cbor_set_float4(lat, node->latency_ms);
+        (void)cbor_array_push(peer, lat);
+        cbor_decref(&lat);
+        cbor_item_t* wt = cbor_new_float4();
+        cbor_set_float4(wt, node->weight);
+        (void)cbor_array_push(peer, wt);
+        cbor_decref(&wt);
+        cbor_item_t* cap = cbor_new_float4();
+        cbor_set_float4(cap, node->capacity);
+        (void)cbor_array_push(peer, cap);
+        cbor_decref(&cap);
+        cbor_item_t* phase_val = cbor_build_uint8((uint8_t)node->phase);
+        (void)cbor_array_push(peer, phase_val);
+        cbor_decref(&phase_val);
+        cbor_item_t* avail = cbor_new_float4();
+        cbor_set_float4(avail, node->availability);
+        (void)cbor_array_push(peer, avail);
+        cbor_decref(&avail);
+        // v3 fields 8-11: relay_verified, nat_type, last_seen_ms, bad_blocks_received
+        cbor_item_t* relay_verified_val = cbor_build_uint8(node->relay_verified ? 1 : 0);
+        (void)cbor_array_push(peer, relay_verified_val);
+        cbor_decref(&relay_verified_val);
+        cbor_item_t* nat_type_val = cbor_build_uint8((uint8_t)node->nat_type);
+        (void)cbor_array_push(peer, nat_type_val);
+        cbor_decref(&nat_type_val);
+        cbor_item_t* last_seen_val = cbor_build_uint64(node->last_seen_ms);
+        (void)cbor_array_push(peer, last_seen_val);
+        cbor_decref(&last_seen_val);
+        cbor_item_t* bad_blocks_val = cbor_build_uint64(node->bad_blocks_received);
+        (void)cbor_array_push(peer, bad_blocks_val);
+        cbor_decref(&bad_blocks_val);
+        (void)cbor_array_push(peers_array, peer);
+        cbor_decref(&peer);
+      }
     }
   }
   (void)cbor_array_push(root, peers_array);
@@ -429,18 +449,18 @@ int authority_load_peers(authority_t* authority, network_t* network) {
   if (result.error.code != CBOR_ERR_NONE || root == NULL) return -1;
 
   if (cbor_isa_array(root)) {
-    // v2 positional array format
+    // v2/v3 positional array format — v3 adds 4 fields per peer record.
     size_t arr_size = cbor_array_size(root);
     if (arr_size < 2) {
       cbor_decref(&root);
       return -1;
     }
 
-    // Index 0: version
+    // Index 0: version — accept v2 (8-field peers) and v3 (12-field peers).
     cbor_item_t* version_item = cbor_array_get(root, 0);
     uint8_t version = cbor_isa_uint(version_item) ? (uint8_t)cbor_get_int(version_item) : 0;
     cbor_decref(&version_item);
-    if (version != PEER_STORE_VERSION) {
+    if (version != 2 && version != 3) {
       cbor_decref(&root);
       return -1;
     }
@@ -508,7 +528,9 @@ int authority_load_peers(authority_t* authority, network_t* network) {
         size_t peers_len = cbor_array_size(peers_item);
         for (size_t peer_idx = 0; peer_idx < peers_len; peer_idx++) {
           cbor_item_t* peer = cbor_array_get(peers_item, peer_idx);
-          if (cbor_isa_array(peer) && cbor_array_size(peer) == 8) {
+          // v2 records have 8 fields; v3 records have 12 (4 extra per-peer).
+          size_t field_count = cbor_array_size(peer);
+          if (cbor_isa_array(peer) && (field_count == 8 || field_count == 12)) {
             cbor_item_t* id_item = cbor_array_get(peer, 0);
             cbor_item_t* addr_item = cbor_array_get(peer, 1);
             cbor_item_t* port_item = cbor_array_get(peer, 2);
@@ -517,6 +539,16 @@ int authority_load_peers(authority_t* authority, network_t* network) {
             cbor_item_t* cap_item = cbor_array_get(peer, 5);
             cbor_item_t* phase_item = cbor_array_get(peer, 6);
             cbor_item_t* avail_item = cbor_array_get(peer, 7);
+            cbor_item_t* rv_item = NULL;
+            cbor_item_t* nt_item = NULL;
+            cbor_item_t* ls_item = NULL;
+            cbor_item_t* bb_item = NULL;
+            if (field_count == 12) {
+              rv_item = cbor_array_get(peer, 8);
+              nt_item = cbor_array_get(peer, 9);
+              ls_item = cbor_array_get(peer, 10);
+              bb_item = cbor_array_get(peer, 11);
+            }
             if (cbor_isa_bytestring(id_item) && cbor_bytestring_length(id_item) == NODE_ID_HASH_SIZE) {
               node_id_t peer_id;
               memset(&peer_id, 0, sizeof(peer_id));
@@ -530,8 +562,20 @@ int authority_load_peers(authority_t* authority, network_t* network) {
                 if (cbor_is_float(cap_item)) node->capacity = (float)cbor_float_get_float4(cap_item);
                 if (cbor_isa_uint(phase_item)) node->phase = (node_phase_e)cbor_get_int(phase_item);
                 if (cbor_is_float(avail_item)) node->availability = (float)cbor_float_get_float4(avail_item);
-                uint32_t latency_us = (uint32_t)(node->latency_ms * 1000.0f);
-                ring_set_insert(network->rings, node, latency_us);
+                if (field_count == 12) {
+                  if (cbor_isa_uint(rv_item)) node->relay_verified = (cbor_get_int(rv_item) != 0);
+                  if (cbor_isa_uint(nt_item)) node->nat_type = (nat_type_e)cbor_get_int(nt_item);
+                  if (cbor_isa_uint(ls_item)) node->last_seen_ms = (uint64_t)cbor_get_int(ls_item);
+                  if (cbor_isa_uint(bb_item)) node->bad_blocks_received = (uint64_t)cbor_get_int(bb_item);
+                }
+                // rings may be NULL in a minimal network — drop the node
+                // rather than crash if there's nowhere to insert it.
+                if (network->rings != NULL) {
+                  uint32_t latency_us = (uint32_t)(node->latency_ms * 1000.0f);
+                  ring_set_insert(network->rings, node, latency_us);
+                } else {
+                  net_node_destroy(node);
+                }
               }
             }
             cbor_decref(&id_item);
@@ -542,6 +586,10 @@ int authority_load_peers(authority_t* authority, network_t* network) {
             cbor_decref(&cap_item);
             cbor_decref(&phase_item);
             cbor_decref(&avail_item);
+            if (rv_item != NULL) cbor_decref(&rv_item);
+            if (nt_item != NULL) cbor_decref(&nt_item);
+            if (ls_item != NULL) cbor_decref(&ls_item);
+            if (bb_item != NULL) cbor_decref(&bb_item);
           }
           cbor_decref(&peer);
         }

@@ -25,6 +25,10 @@ net_node_t* net_node_create(const node_id_t* id, uint32_t addr, uint16_t port) {
   node->availability = 0.5f;
   node->consecutive_fails = 0;
   node->last_gossip_time = 0;
+  node->relay_verified = false;
+  node->nat_type = NAT_TYPE_UNKNOWN;
+  node->last_seen_ms = 0;
+  node->bad_blocks_received = 0;
   return node;
 }
 

@@ -7,6 +7,7 @@
 
 #include "node_id.h"
 #include "authority.h"
+#include "conn_state.h"
 #include "../Util/atomic_compat.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -32,6 +33,17 @@ typedef struct net_node_t {
   float availability;          // EWMA availability [0,1]
   uint32_t consecutive_fails;  // consecutive failed requests
   uint64_t last_gossip_time;   // last PingCapacity exchange time (ms)
+
+  // v3 peer-state fields — persisted alongside the 8 legacy fields above.
+  // relay_verified is set once the peer has answered a relay-signed challenge;
+  // nat_type is the peer's advertised/observed NAT classification; last_seen_ms
+  // is a monotonic-ish timestamp of the last successful exchange;
+  // bad_blocks_received is the per-peer counter feeding the Hebbian bad-block
+  // penalty (see content-integrity reputation work).
+  bool relay_verified;
+  nat_type_e nat_type;
+  uint64_t last_seen_ms;
+  uint64_t bad_blocks_received;
 } net_node_t;
 
 net_node_t* net_node_create(const node_id_t* id, uint32_t addr, uint16_t port);
