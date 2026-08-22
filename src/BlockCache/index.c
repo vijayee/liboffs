@@ -212,7 +212,7 @@ static int _index_replay_wal(index_t* index, char* parent_location,
   wal_t* wal = wal_load(parent_location, wal_id);
   if (wal == NULL) return -3;  // OOM — nothing to replay (clean)
   wal_type_e type = 'r';
-  buffer_t* data;
+  buffer_t* data = NULL;
   uint64_t cursor;
   int32_t wal_size;
   int read_result = wal_read(wal, &type, &data, &cursor, &wal_size);
@@ -274,13 +274,24 @@ static int _index_replay_wal(index_t* index, char* parent_location,
         cbor_decref(&cbor);
         break;
       default:
-        // Unknown type — stop replay here, keep the prefix.
-        buffer_destroy(data);
+        // Unknown type — stop replay here, keep the prefix. wal_read already
+        // returned WAL_ERR_UNKNOWN_TYPE without allocating data, so nothing to
+        // free; this branch is defensive (wal_read filters unknown types
+        // before the caller sees them).
         DESTROY(wal, wal);
         return WAL_ERR_UNKNOWN_TYPE;
     }
     buffer_destroy(data);
+    data = NULL;
     read_result = wal_read(wal, &type, &data, &cursor, &wal_size);
+  }
+  // On a non-clean-EOF stop (e.g. WAL_ERR_CRC), wal_read sets *data before
+  // returning the error code. The loop above exits without freeing it, so
+  // reclaim it here. On clean EOF (-3) and short-read codes that do NOT set
+  // *data, data remains NULL (reset after each buffer_destroy above).
+  if (data != NULL) {
+    buffer_destroy(data);
+    data = NULL;
   }
   DESTROY(wal, wal);
   return read_result;  // -3 (clean EOF) or a short-read/CRC code (stop-and-keep-prefix)
@@ -386,128 +397,17 @@ index_t* index_create(size_t bucket_size, char* location, uint64_t wait, uint64_
             uint64_t next_id = 0;
             uint64_t next_crc = 0;
             _index_get_id_crc(next, &next_id, &next_crc);
-            wal_t* wal = wal_load(parent_location, next_id);
-            wal_type_e type = 'r';
-            buffer_t* data;
-            uint64_t cursor;
-            int32_t wal_size;
-            int read_result = wal_read(wal, &type, &data, &cursor, &wal_size);
-            while ((read_result == 0) && (cursor <= (uint64_t)wal_size)) {
-              struct cbor_load_result result;
-              cbor_item_t* cbor;
-              switch (type) {
-                case 'a':
-                  cbor = cbor_load(data->data, data->size, &result);
-                  if (result.error.code == CBOR_ERR_NONE) {
-                    index_entry_t *entry = cbor_to_index_entry(cbor);
-                    index_add(index, CONSUME(entry, index_entry_t));
-                    cbor_decref(&cbor);
-                  } else {
-                    cbor_decref(&cbor);
-                    DESTROY(index, index);
-                    *error_code= -6;
-                    free(index_location);
-                    free(parent_location);
-                    destroy_files(files);
-                    return _index_new_empty(bucket_size, location, wait, max_wait, most_recent_id, max_snapshots, max_wals);
-                  }
-                  break;
-                case 'i':
-                  cbor = cbor_load(data->data, data->size, &result);
-                  if (result.error.code == CBOR_ERR_NONE) {
-                    index_entry_t* entry = cbor_to_index_entry(cbor);
-                    index_entry_t* from_index = REFERENCE(index_find(index, entry->hash), index_entry_t);
-                    index_increment(index, from_index);
-                    cbor_decref(&cbor);
-
-                    DESTROY(entry, index_entry);
-                    DESTROY(from_index, index_entry);
-                  } else {
-                    cbor_decref(&cbor);
-                    DESTROY(index, index);
-                    *error_code= -7;
-                    free(index_location);
-                    free(parent_location);
-                    destroy_files(files);
-                    return _index_new_empty(bucket_size, location, wait, max_wait, most_recent_id, max_snapshots, max_wals);
-                  }
-                  break;
-                case 'e':
-                  cbor = cbor_load(data->data, data->size, &result);
-                  if (result.error.code == CBOR_ERR_NONE) {
-                    if (cbor_isa_array(cbor)) {
-                      cbor_item_t* cbor_hash = cbor_array_get(cbor, 0);
-                      cbor_item_t* cbor_date = cbor_array_get(cbor, 1);
-                      if (cbor_isa_bytestring(cbor_hash) && cbor_isa_uint(cbor_date)) {
-                        buffer_t* hash = cbor_to_buffer(cbor_hash);
-                        index_entry_t* entry = index_find(index, hash);
-                        index_entry_set_ejection_date(entry, cbor_get_int(cbor_date));
-                        DESTROY(hash, buffer);
-                        cbor_decref(&cbor_hash);
-                        cbor_decref(&cbor_date);
-                        cbor_decref(&cbor);
-                      } else {
-                        cbor_decref(&cbor_hash);
-                        cbor_decref(&cbor_date);
-                        cbor_decref(&cbor);
-                        DESTROY(index, index);
-                        *error_code = read_result;
-                        free(index_location);
-                        free(parent_location);
-                        destroy_files(files);
-                        return _index_new_empty(bucket_size, location, wait, max_wait, most_recent_id, max_snapshots, max_wals);
-                      }
-                    }
-                  } else {
-                    cbor_decref(&cbor);
-                    DESTROY(index, index);
-                    *error_code = -8;
-                    free(index_location);
-                    free(parent_location);
-                    destroy_files(files);
-                    return _index_new_empty(bucket_size, location, wait, max_wait, most_recent_id, max_snapshots, max_wals);
-                  }
-                  break;
-                case 'r':
-                  cbor = cbor_load(data->data, data->size, &result);
-                  if (result.error.code == CBOR_ERR_NONE) {
-                    if (cbor_isa_bytestring(cbor)) {
-                      buffer_t* hash = cbor_to_buffer(cbor);
-                      index_remove(index, hash);
-                      DESTROY(hash, buffer);
-                    } else {
-                      cbor_decref(&cbor);
-                      DESTROY(index, index);
-                      *error_code = -9;
-                      free(index_location);
-                      free(parent_location);
-                      destroy_files(files);
-                      return _index_new_empty(bucket_size, location, wait, max_wait, most_recent_id, max_snapshots, max_wals);
-                    }
-                    cbor_decref(&cbor);
-                  } else {
-                    cbor_decref(&cbor);
-                    DESTROY(index, index);
-                    *error_code = -10;
-                    free(index_location);
-                    free(parent_location);
-                    destroy_files(files);
-                    return _index_new_empty(bucket_size, location, wait, max_wait, most_recent_id, max_snapshots, max_wals);
-                  }
-                  break;
-              }
-              buffer_destroy(data);
-              read_result = wal_read(wal, &type, &data, &cursor, &wal_size);
-            }
-
-            DESTROY(wal, wal);
-            if ((read_result != -3) || (cursor != (uint64_t)wal_size)) {
-              DESTROY(index, index);
-              *error_code = read_result;
-              destroy_files(files);
-              free(index_location);
-              free(parent_location);
-              return _index_new_empty(bucket_size, location, wait, max_wait, most_recent_id, max_snapshots, max_wals);
+            int replay_result = _index_replay_wal(index, parent_location, next_id);
+            // Stop-and-keep-prefix: any non-clean-EOF result stops the rebuild
+            // here. The snapshot + earlier WALs are kept; later WALs are not
+            // replayed. Do NOT bail to _index_new_empty — a torn tail or CRC
+            // error in one WAL loses only the bad record and the suffix, not
+            // the entire snapshot + replayed prefix. error_code is left as-is
+            // (a recoverable stop is not an error the caller should act on).
+            if (replay_result != -3) {
+              log_warn("index_create: WAL %lu replay stopped at code %d (stop-and-keep-prefix)",
+                       (unsigned long)next_id, replay_result);
+              break;
             }
           }
 

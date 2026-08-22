@@ -16,6 +16,11 @@ extern "C" {
 #include "../src/BlockCache/wal.h"
 #include "../src/Platform/platform_file.h"
 #include "../src/Util/get_dir.h"
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 }
 
 namespace indexTest {
@@ -182,6 +187,37 @@ namespace indexTest {
     }
     void CorruptOrder() {
 
+    }
+    /* Rename ONLY the newest snapshot file so its stored CRC no longer
+       matches the computed CRC — forces index_create to skip it and fall
+       back to an older snapshot (exercising the rebuilding branch). Unlike
+       CorruptCRC (which has an off-by-one and corrupts count+1 files), this
+       corrupts exactly one file: the newest. */
+    void CorruptNewestSnapshotCRC() {
+      char* index_location = path_join(location, "index");
+      vec_str_t* files = get_dir(index_location);
+      ASSERT_NE(files, nullptr);
+      ASSERT_GE(files->length, 1u);
+      vec_sort(files, _sort_indexes);
+      char* newest = files->data[files->length - 1];
+      char* newest_copy = strdup(newest);
+      char* id_token = strtok(newest_copy, "-");
+      ASSERT_NE(id_token, nullptr);
+      uint64_t id = strtoull(id_token, nullptr, 10);
+      char* crc_token = strtok(nullptr, "-");
+      ASSERT_NE(crc_token, nullptr);
+      uint64_t crc = strtoull(crc_token, nullptr, 10);
+      free(newest_copy);
+      crc++;  // make the stored CRC wrong by 1
+      char new_name[64];
+      snprintf(new_name, sizeof(new_name), "%lu-%lu", id, crc);
+      char* old_path = path_join(index_location, newest);
+      char* new_path = path_join(index_location, new_name);
+      ASSERT_EQ(rename(old_path, new_path), 0) << "rename " << old_path << " -> " << new_path << " failed";
+      free(old_path);
+      free(new_path);
+      destroy_files(files);
+      free(index_location);
     }
   };
 
@@ -379,6 +415,178 @@ namespace indexTest {
       }
       DESTROY(index, index);
     }
+  }
+
+  /* Rebuilding-branch regression test for stop-and-keep-prefix WAL recovery.
+     The setup forces index_create to fall back to an OLDER snapshot and
+     replay a NEWER session's WAL via the rebuilding branch (the
+     i != files->length-1 case in index_create). The newer snapshot is
+     corrupted (CRC mismatch via rename), and the WAL that the rebuilding
+     branch replays is given a torn tail (truncate). Pre-fix, the rebuilding
+     branch bailed to _index_new_empty on any non-clean-EOF — losing the
+     older snapshot's entries too. Post-fix, stop-and-keep-prefix preserves
+     the older snapshot + the intact prefix of the torn WAL. */
+  TEST_F(TestIndex, IndexRecoveryTornTailKeepsPrefix) {
+#ifdef _WIN32
+    GTEST_SKIP() << "POSIX-only test (uses truncate(2)/stat(2))";
+#else
+    int error_code = 0;
+
+    /* Phase 1: create index, add 4 entries, clean destroy -> snapshot A. */
+    index_t* index1 = index_create(25, location, wait, max_wait, 3, 3, &error_code);
+    ASSERT_NE(index1, nullptr);
+    for (int i = 0; i < 4; i++) {
+      index_add(index1, REFERENCE(entries[i], index_entry_t));
+    }
+    DESTROY(index1, index);
+
+    /* Phase 2: reopen, add 4 more entries, clean destroy -> snapshot B.
+       The session-2 WAL (id == snapshot B's id) holds the 4 addition records. */
+    index_t* index2 = index_create(25, location, wait, max_wait, 3, 3, &error_code);
+    ASSERT_NE(index2, nullptr);
+    for (int i = 4; i < 8; i++) {
+      index_add(index2, REFERENCE(entries[i], index_entry_t));
+    }
+    DESTROY(index2, index);
+
+    /* Phase 3: locate the session-2 WAL (the newest snapshot's id == its WAL
+       id) and truncate its tail to simulate a torn-tail storage fault. */
+    char* index_dir = path_join(location, "index");
+    vec_str_t* snap_files = get_dir(index_dir);
+    ASSERT_NE(snap_files, nullptr);
+    ASSERT_GE(snap_files->length, 2u);
+    vec_sort(snap_files, _sort_indexes);
+    char* newest_snap = snap_files->data[snap_files->length - 1];
+    /* Parse "{id}-{crc}" — strtok mutates its input, so work on a copy. */
+    char* snap_copy = strdup(newest_snap);
+    char* id_token = strtok(snap_copy, "-");
+    ASSERT_NE(id_token, nullptr);
+    uint64_t newest_id = strtoull(id_token, nullptr, 10);
+    free(snap_copy);
+    destroy_files(snap_files);
+    free(index_dir);
+
+    char* wal_dir = path_join(location, "wal");
+    char id_str[32];
+    snprintf(id_str, sizeof(id_str), "%lu", (unsigned long)newest_id);
+    char* wal_path = path_join(wal_dir, id_str);
+    free(wal_dir);
+    struct stat st;
+    ASSERT_EQ(stat(wal_path, &st), 0) << "WAL " << wal_path << " must exist";
+    ASSERT_GT(st.st_size, 10) << "WAL must have records to truncate";
+    ASSERT_EQ(truncate(wal_path, st.st_size - 10), 0) << "truncate failed";
+    free(wal_path);
+
+    /* Phase 4: corrupt snapshot B's CRC so recovery falls back to snapshot A
+       and exercises the rebuilding branch (which replays the now-torn WAL). */
+    CorruptNewestSnapshotCRC();
+
+    /* Phase 5: reopen after the simulated storage fault. Stop-and-keep-prefix
+       must preserve snapshot A's 4 entries + the intact prefix of the torn
+       WAL (at minimum the first post-snapshot entry). Pre-fix, the bail-to-
+       empty would lose everything. */
+    index_t* index3 = index_create(25, location, wait, max_wait, 3, 3, &error_code);
+    ASSERT_NE(index3, nullptr);
+    for (int i = 0; i < 4; i++) {
+      index_entry_t* found = index_find(index3, entries[i]->hash);
+      EXPECT_NE(found, nullptr) << "snapshot A entry " << i << " lost (stop-and-keep-prefix must keep the older snapshot)";
+      if (found) DESTROY(found, index_entry);
+    }
+    /* Entry 4 is the first record in the torn WAL; the truncate cut into a
+       later record, so entry 4 must survive. */
+    index_entry_t* found4 = index_find(index3, entries[4]->hash);
+    EXPECT_NE(found4, nullptr) << "first post-snapshot entry lost (torn tail should keep prefix)";
+    if (found4) DESTROY(found4, index_entry);
+    DESTROY(index3, index);
+#endif
+  }
+
+  /* Rebuilding-branch regression test for stop-and-keep-prefix under a CRC
+     mismatch in a replayed WAL (vs. torn tail above). Same setup as the
+     torn-tail test, but instead of truncating the WAL, we flip a byte in
+     the middle of one record's payload so its CRC check fails. The
+     rebuilding branch must stop at the corrupt record and keep the prefix. */
+  TEST_F(TestIndex, IndexRecoveryCrcCorruptionKeepsPrefix) {
+#ifdef _WIN32
+    GTEST_SKIP() << "POSIX-only test (uses open(2)/stat(2))";
+#else
+    int error_code = 0;
+
+    /* Phase 1: snapshot A with 4 entries. */
+    index_t* index1 = index_create(25, location, wait, max_wait, 3, 3, &error_code);
+    ASSERT_NE(index1, nullptr);
+    for (int i = 0; i < 4; i++) {
+      index_add(index1, REFERENCE(entries[i], index_entry_t));
+    }
+    DESTROY(index1, index);
+
+    /* Phase 2: snapshot B with 4 more entries; session-2 WAL has 4 records. */
+    index_t* index2 = index_create(25, location, wait, max_wait, 3, 3, &error_code);
+    ASSERT_NE(index2, nullptr);
+    for (int i = 4; i < 8; i++) {
+      index_add(index2, REFERENCE(entries[i], index_entry_t));
+    }
+    DESTROY(index2, index);
+
+    /* Phase 3: flip a byte in the middle of the session-2 WAL payload. Each
+       'a' record is 1 (type) + 4 (crc) + 78 (payload) = 83 bytes. Offset 50
+       lands inside the first record's payload, so its CRC fails and replay
+       stops at record 0 — losing all 4 session-2 entries but keeping
+       snapshot A. This is the strongest test of stop-and-keep-prefix: the
+       very first replayed record is corrupt, yet the older snapshot is kept. */
+    char* index_dir = path_join(location, "index");
+    vec_str_t* snap_files = get_dir(index_dir);
+    ASSERT_NE(snap_files, nullptr);
+    ASSERT_GE(snap_files->length, 2u);
+    vec_sort(snap_files, _sort_indexes);
+    char* newest_snap = snap_files->data[snap_files->length - 1];
+    /* Parse "{id}-{crc}" — strtok mutates its input, so work on a copy. */
+    char* snap_copy = strdup(newest_snap);
+    char* id_token = strtok(snap_copy, "-");
+    ASSERT_NE(id_token, nullptr);
+    uint64_t newest_id = strtoull(id_token, nullptr, 10);
+    free(snap_copy);
+    destroy_files(snap_files);
+    free(index_dir);
+
+    char* wal_dir = path_join(location, "wal");
+    char id_str[32];
+    snprintf(id_str, sizeof(id_str), "%lu", (unsigned long)newest_id);
+    char* wal_path = path_join(wal_dir, id_str);
+    free(wal_dir);
+    struct stat st;
+    ASSERT_EQ(stat(wal_path, &st), 0) << "WAL must exist";
+    ASSERT_GT(st.st_size, 50) << "WAL must have a record to corrupt";
+
+    int fd = open(wal_path, O_RDWR);
+    ASSERT_GE(fd, 0) << "open WAL failed";
+    uint8_t byte;
+    ASSERT_EQ(pread(fd, &byte, 1, 50), 1) << "pread at offset 50 failed";
+    byte = (uint8_t)(byte ^ 0xFF);
+    ASSERT_EQ(pwrite(fd, &byte, 1, 50), 1) << "pwrite at offset 50 failed";
+    ASSERT_EQ(close(fd), 0) << "close WAL failed";
+    free(wal_path);
+
+    /* Phase 4: corrupt snapshot B's CRC so recovery uses the rebuilding branch. */
+    CorruptNewestSnapshotCRC();
+
+    /* Phase 5: reopen. Snapshot A's 4 entries must survive (stop-and-keep-prefix).
+       The session-2 WAL's first record is corrupt, so entries 4-7 are lost —
+       but the older snapshot is NOT lost. Pre-fix, bail-to-empty lost everything. */
+    index_t* index3 = index_create(25, location, wait, max_wait, 3, 3, &error_code);
+    ASSERT_NE(index3, nullptr);
+    for (int i = 0; i < 4; i++) {
+      index_entry_t* found = index_find(index3, entries[i]->hash);
+      EXPECT_NE(found, nullptr) << "snapshot A entry " << i << " lost (stop-and-keep-prefix must keep the older snapshot)";
+      if (found) DESTROY(found, index_entry);
+    }
+    /* The corrupt first record means entry 4 (and the rest of session 2) is
+       lost — assert this to confirm the corruption had effect. */
+    index_entry_t* found4 = index_find(index3, entries[4]->hash);
+    EXPECT_EQ(found4, nullptr) << "corrupt first record should not be applied";
+    if (found4) DESTROY(found4, index_entry);
+    DESTROY(index3, index);
+#endif
   }
 
   TEST(TestWal, WalSyncOpenWalReturnsZero) {
