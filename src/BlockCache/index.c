@@ -94,23 +94,37 @@ cbor_item_t* index_entry_to_cbor(index_entry_t* entry) {
 }
 
 index_entry_t* cbor_to_index_entry(cbor_item_t* cbor) {
- cbor_item_t* item0 = cbor_array_get(cbor, 0);
- cbor_item_t* item1 = cbor_array_get(cbor, 1);
- cbor_item_t* item2 = cbor_array_get(cbor, 2);
- cbor_item_t* item3 = cbor_array_get(cbor, 3);
- cbor_item_t* item4 = cbor_array_get(cbor, 4);
- fibonacci_hit_counter_t counter = cbor_to_fibonacci_hit_counter(item0);
- buffer_t* hash = cbor_to_buffer(item1);
- size_t section_index = (size_t) cbor_get_int(item2);
- size_t section_id = (size_t) cbor_get_int(item3);
- uint64_t ejection_date = (size_t) cbor_get_int(item4);
- cbor_decref(&item0);
- cbor_decref(&item1);
- cbor_decref(&item2);
- cbor_decref(&item3);
- cbor_decref(&item4);
- refcounter_yield((refcounter_t*) hash);
- return index_entry_from(hash, section_id, section_index, ejection_date, counter);
+  if (cbor == NULL || !cbor_isa_array(cbor) || cbor_array_size(cbor) < 5) {
+    return NULL;
+  }
+  cbor_item_t* item0 = cbor_array_get(cbor, 0);
+  cbor_item_t* item1 = cbor_array_get(cbor, 1);
+  cbor_item_t* item2 = cbor_array_get(cbor, 2);
+  cbor_item_t* item3 = cbor_array_get(cbor, 3);
+  cbor_item_t* item4 = cbor_array_get(cbor, 4);
+  /* item0 = fibonacci counter (array), item1 = hash (bytestring),
+     items 2/3/4 = uints (section_index, section_id, ejection_date). */
+  if (!cbor_isa_array(item0) || !cbor_isa_bytestring(item1) ||
+      !cbor_isa_uint(item2) || !cbor_isa_uint(item3) || !cbor_isa_uint(item4)) {
+    cbor_decref(&item0);
+    cbor_decref(&item1);
+    cbor_decref(&item2);
+    cbor_decref(&item3);
+    cbor_decref(&item4);
+    return NULL;
+  }
+  fibonacci_hit_counter_t counter = cbor_to_fibonacci_hit_counter(item0);
+  buffer_t* hash = cbor_to_buffer(item1);
+  size_t section_index = (size_t) cbor_get_int(item2);
+  size_t section_id = (size_t) cbor_get_int(item3);
+  uint64_t ejection_date = cbor_get_int(item4);
+  cbor_decref(&item0);
+  cbor_decref(&item1);
+  cbor_decref(&item2);
+  cbor_decref(&item3);
+  cbor_decref(&item4);
+  refcounter_yield((refcounter_t*) hash);
+  return index_entry_from(hash, section_id, section_index, ejection_date, counter);
 }
 
 index_node_t* index_node_create(size_t bucket_size) {

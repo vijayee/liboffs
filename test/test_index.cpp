@@ -106,6 +106,23 @@ namespace indexTest {
     index_entry_destroy(from_cbor);
   }
 
+  TEST(CborToIndexEntry, RejectsMalformedArray) {
+    // Too few elements — must return NULL, not crash.
+    cbor_item_t* short_array = cbor_new_definite_array(2);
+    (void)cbor_array_push(short_array, cbor_move(cbor_build_uint8(1)));
+    (void)cbor_array_push(short_array, cbor_move(cbor_build_uint8(2)));
+    EXPECT_EQ(cbor_to_index_entry(short_array), nullptr);
+    cbor_decref(&short_array);
+
+    // Non-array item — must return NULL.
+    cbor_item_t* not_array = cbor_build_uint8(42);
+    EXPECT_EQ(cbor_to_index_entry(not_array), nullptr);
+    cbor_decref(&not_array);
+
+    // NULL input — must return NULL.
+    EXPECT_EQ(cbor_to_index_entry(NULL), nullptr);
+  }
+
   class TestIndex : public testing::Test {
   public:
     block_t* blocks[8];
