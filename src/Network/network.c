@@ -1812,6 +1812,51 @@ static void network_handle_request_timeout_tick(network_t* network,
   }
 }
 
+// --- Content verification + reputation at network receive sites (Task 6) ---
+//
+// Verify a peer-supplied block's data against its claimed hash. On match,
+// strengthen the supplier's Hebbian weight by base_reward (the same positive
+// reinforcement used elsewhere in the network). On mismatch, this is the
+// central integrity gate: bump the process-wide bad_blocks_received counter,
+// weaken the supplier's weight by failure_penalty*bad_block_multiplier (a
+// magnified penalty relative to an ordinary failure), and charge
+// bad_block_rate_cost tokens to the supplier's FIND_BLOCK bucket so repeated
+// bad blocks push the peer toward rate-limiting. Returns false on mismatch so
+// the caller does NOT cache the block; the supplier is still penalized even
+// though the block is dropped.
+bool network_verify_and_penalize_bad_block(network_t* network,
+                                           const buffer_t* data,
+                                           const buffer_t* claimed_hash,
+                                           const node_id_t* supplier) {
+  if (network == NULL || data == NULL || claimed_hash == NULL || supplier == NULL) {
+    return false;
+  }
+  // A zeroed supplier id is not a real peer (e.g. an empty response path at
+  // the call sites). Count a bad block on mismatch so the metric still moves,
+  // but do NOT touch the Hebbian or rate-limit tables — there is no peer to
+  // penalize or reward, and a meaningless entry would pollute both tables.
+  node_id_t zero_id;
+  memset(&zero_id, 0, sizeof(node_id_t));
+  bool supplier_is_meaningful = !node_id_equals(supplier, &zero_id);
+  if (block_verify_hash(data, claimed_hash)) {
+    if (supplier_is_meaningful) {
+      float reward = network->conn_mgr.hebbian.base_reward;
+      hebbian_frequency(&network->hebbian, supplier, reward);
+    }
+    return true;
+  }
+  network_bad_block_received();
+  if (supplier_is_meaningful) {
+    float penalty = network->conn_mgr.hebbian.failure_penalty *
+                    network->conn_mgr.hebbian.bad_block_multiplier;
+    hebbian_frequency(&network->hebbian, supplier, -penalty);
+    uint64_t now_ms = (uint64_t)time(NULL) * 1000;
+    rate_limit_charge(&network->rate_limits, supplier, RPC_TYPE_FIND_BLOCK,
+                      network->conn_mgr.hebbian.bad_block_rate_cost, now_ms);
+  }
+  return false;
+}
+
 // --- Gossip tick handler (Meridian algorithm) ---
 
 static void network_handle_gossip_tick(network_t* network, message_t* msg) {
@@ -2886,12 +2931,22 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
       buffer_t* data_buf = buffer_create_from_pointer_copy(response->block_data, response->block_data_len);
       buffer_t* hash_buf = buffer_create_from_pointer_copy(response->block_hash, 32);
       if (data_buf != NULL && hash_buf != NULL) {
-        block_size_e block_type = network->block_cache->type;
-        if (response->block_data_len == mega) block_type = mega;
-        else if (response->block_data_len == standard) block_type = standard;
-        else if (response->block_data_len == mini) block_type = mini;
-        else if (response->block_data_len == nano) block_type = nano;
-        block = block_create_existing_data_hash_by_type(data_buf, hash_buf, block_type);
+        // Supplier is the last hop in the response path. If the path is empty,
+        // supplier stays zeroed; the helper counts the bad block but skips
+        // Hebbian/rate-limit penalties for the meaningless zero id.
+        node_id_t supplier;
+        memset(&supplier, 0, sizeof(supplier));
+        if (response->path_len > 0) {
+          memcpy(&supplier, &response->path[response->path_len - 1], sizeof(node_id_t));
+        }
+        if (network_verify_and_penalize_bad_block(network, data_buf, hash_buf, &supplier)) {
+          block_size_e block_type = network->block_cache->type;
+          if (response->block_data_len == mega) block_type = mega;
+          else if (response->block_data_len == standard) block_type = standard;
+          else if (response->block_data_len == mini) block_type = mini;
+          else if (response->block_data_len == nano) block_type = nano;
+          block = block_create_existing_data_hash_by_type(data_buf, hash_buf, block_type);
+        }
       }
       if (block != NULL) {
         block_cache_put(network->block_cache, block, response->block_fib, &network->actor);
@@ -3114,8 +3169,18 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
         buffer_t* hash_buf = buffer_create_from_pointer_copy(store->block_hash, 32);
         buffer_t* data_buf = buffer_create_from_pointer_copy(store->block_data, store->block_data_len);
         if (hash_buf != NULL && data_buf != NULL) {
-          block = block_create_existing_data_hash_by_type(
-              data_buf, hash_buf, network->block_cache->type);
+          // Supplier is the last hop in the store path (the peer who pushed
+          // us the block). mirrors the path-end extraction done for the
+          // message_log record above.
+          node_id_t supplier;
+          memset(&supplier, 0, sizeof(supplier));
+          if (store->path_len > 0) {
+            memcpy(&supplier, &store->path[store->path_len - 1], sizeof(node_id_t));
+          }
+          if (network_verify_and_penalize_bad_block(network, data_buf, hash_buf, &supplier)) {
+            block = block_create_existing_data_hash_by_type(
+                data_buf, hash_buf, network->block_cache->type);
+          }
         }
         if (block != NULL) {
           block_cache_put(network->block_cache, block, store->block_fib, &network->actor);
@@ -3815,12 +3880,17 @@ static void network_handle_recall_accept(network_t* network, message_t* msg) {
     buffer_t* data_buf = buffer_create_from_pointer_copy(accept->block_data, accept->block_data_len);
     buffer_t* block_hash_buf = buffer_create_from_pointer_copy(accept->block_hash, 32);
     if (data_buf != NULL && block_hash_buf != NULL) {
-      block_size_e block_type = network->block_cache->type;
-      if (accept->block_data_len == mega) block_type = mega;
-      else if (accept->block_data_len == standard) block_type = standard;
-      else if (accept->block_data_len == mini) block_type = mini;
-      else if (accept->block_data_len == nano) block_type = nano;
-      block = block_create_existing_data_hash_by_type(data_buf, block_hash_buf, block_type);
+      // Supplier for RecallAccept is the named sender_id (the peer answering
+      // our recall with the block data). Verify before caching so a bad block
+      // penalizes the responder and is dropped.
+      if (network_verify_and_penalize_bad_block(network, data_buf, block_hash_buf, &accept->sender_id)) {
+        block_size_e block_type = network->block_cache->type;
+        if (accept->block_data_len == mega) block_type = mega;
+        else if (accept->block_data_len == standard) block_type = standard;
+        else if (accept->block_data_len == mini) block_type = mini;
+        else if (accept->block_data_len == nano) block_type = nano;
+        block = block_create_existing_data_hash_by_type(data_buf, block_hash_buf, block_type);
+      }
     }
     if (block != NULL) {
       block_cache_put(network->block_cache, block, accept->block_fib, &network->actor);

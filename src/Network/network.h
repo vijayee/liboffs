@@ -241,4 +241,15 @@ void network_relay_challenge_sweep_for_test(network_t* network,
 int network_relay_challenge_get_for_test(network_t* network, size_t index,
                                           relay_challenge_t* out);
 
+/* Verify a peer-supplied block's data against its claimed hash. On match:
+   apply base_reward to the supplier's Hebbian weight and return true. On
+   mismatch: bump bad_blocks_received, apply failure_penalty*bad_block_multiplier
+   to the supplier's weight, charge bad_block_rate_cost tokens to the supplier's
+   FIND_BLOCK bucket, and return false. The caller must NOT cache the block on
+   false. See design 4.1-4.2. */
+bool network_verify_and_penalize_bad_block(network_t* network,
+                                           const buffer_t* data,
+                                           const buffer_t* claimed_hash,
+                                           const node_id_t* supplier);
+
 #endif // OFFS_NETWORK_H

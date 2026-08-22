@@ -42,6 +42,7 @@ extern "C" {
 #include "Configuration/config.h"
 #include "Util/allocator.h"
 #include "Metrics/metrics.h"
+#include "BlockCache/block.h"
 }
 
 #include <cstdint>
@@ -120,6 +121,82 @@ TEST(NetworkMessageId, CounterSurvivesSameSecondCalls) {
   uint64_t second_id = network_next_message_id_for_test(network.get());
   EXPECT_NE(first_id, second_id)
       << "same-second queries must not share a message_id";
+}
+
+// === Bad-block verification + reputation tests (Task 6) ===
+//
+// network_verify_and_penalize_bad_block is the central integrity gate at the
+// three network receive sites. On a verified block it strengthens the
+// supplier's Hebbian weight by base_reward; on a hash mismatch it bumps the
+// bad_blocks_received counter, weakens the weight by
+// failure_penalty*bad_block_multiplier, charges bad_block_rate_cost tokens to
+// the supplier's FIND_BLOCK bucket, and returns false so the caller does NOT
+// cache the block. We exercise both paths with a minimal network_t (no msquic,
+// no real network_create) — the same stub pattern as the message-id tests
+// above.
+
+TEST(NetworkBadBlock, VerifyRejectsBadBlockAndPenalizes) {
+  // Minimal network: zeroed struct + manually init hebbian + rate_limits +
+  // conn_mgr. conn_mgr.init allocates the peers array, so we must call
+  // connection_manager_deinit (not just free(network)) to avoid leaking it.
+  network_t* network = (network_t*)get_clear_memory(sizeof(network_t));
+  ASSERT_NE(network, nullptr);
+  hebbian_config_t hcfg;
+  hebbian_config_init(&hcfg);
+  connection_manager_init(&network->conn_mgr, 16, &hcfg);
+  rate_limit_table_init(&network->rate_limits, 16);
+  hebbian_table_init(&network->hebbian, 16, 0.999f);
+
+  // Build a good block + its hash, then a wrong-data buffer with the same
+  // claimed hash. Flipping the first data byte breaks the hash match while
+  // keeping all sizes/lengths identical.
+  uint8_t raw[128];
+  for (size_t index = 0; index < sizeof(raw); index++) raw[index] = (uint8_t)(index * 7);
+  buffer_t* data = buffer_create_from_pointer_copy(raw, sizeof(raw));
+  buffer_t* hash = hash_data(data);
+  buffer_t* wrong_data = buffer_create_from_pointer_copy(raw, sizeof(raw));
+  ASSERT_NE(data, nullptr);
+  ASSERT_NE(hash, nullptr);
+  ASSERT_NE(wrong_data, nullptr);
+  wrong_data->data[0] ^= 0xFF;
+
+  node_id_t supplier;
+  memset(&supplier.hash, 0x11, NODE_ID_HASH_SIZE);
+
+  // Good block: verify true, weight increases by base_reward.
+  float before_good = hebbian_table_get(&network->hebbian, &supplier);
+  bool ok_good = network_verify_and_penalize_bad_block(network, data, hash, &supplier);
+  EXPECT_TRUE(ok_good);
+  float after_good = hebbian_table_get(&network->hebbian, &supplier);
+  EXPECT_GT(after_good, before_good);
+
+  // Bad block: verify false, weight decreases by failure_penalty*multiplier.
+  float before_bad = after_good;
+  bool ok_bad = network_verify_and_penalize_bad_block(network, wrong_data, hash, &supplier);
+  EXPECT_FALSE(ok_bad);
+  float after_bad = hebbian_table_get(&network->hebbian, &supplier);
+  EXPECT_LT(after_bad, before_bad);
+
+  // Rate-limit entry exists for the supplier (charged on the bad block).
+  const peer_rate_limits_t* entry = rate_limit_table_find(&network->rate_limits, &supplier);
+  ASSERT_NE(entry, nullptr);
+
+  // Zero-supplier bad block: counted (returns false) but no spurious Hebbian
+  // entry is created for the meaningless zero id.
+  node_id_t zero_supplier;
+  memset(&zero_supplier, 0, sizeof(zero_supplier));
+  float zero_before = hebbian_table_get(&network->hebbian, &zero_supplier);
+  bool ok_zero = network_verify_and_penalize_bad_block(network, wrong_data, hash, &zero_supplier);
+  EXPECT_FALSE(ok_zero);
+  EXPECT_NEAR(hebbian_table_get(&network->hebbian, &zero_supplier), zero_before, 0.0001f);
+
+  DESTROY(data, buffer);
+  DESTROY(hash, buffer);
+  DESTROY(wrong_data, buffer);
+  hebbian_table_deinit(&network->hebbian);
+  rate_limit_table_deinit(&network->rate_limits);
+  connection_manager_deinit(&network->conn_mgr);
+  free(network);
 }
 
 // === Query tests ===
