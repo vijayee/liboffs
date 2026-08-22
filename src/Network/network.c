@@ -1851,6 +1851,10 @@ bool network_verify_and_penalize_bad_block(network_t* network,
   if (network == NULL || data == NULL || claimed_hash == NULL || supplier == NULL) {
     return false;
   }
+  // Hoist now_ms once: both the good-block last_seen update and the bad-block
+  // rate-limit charge + last_seen update need it. Minimal-network tests have
+  // rings == NULL, so the ring-set lookup is guarded below.
+  uint64_t now_ms = (uint64_t)time(NULL) * 1000;
   // A zeroed supplier id is not a real peer (e.g. an empty response path at
   // the call sites). Count a bad block on mismatch so the metric still moves,
   // but do NOT touch the Hebbian or rate-limit tables — there is no peer to
@@ -1862,6 +1866,12 @@ bool network_verify_and_penalize_bad_block(network_t* network,
     if (supplier_is_meaningful) {
       float reward = network->conn_mgr.hebbian.base_reward;
       hebbian_frequency(&network->hebbian, supplier, reward);
+      if (network->rings != NULL) {
+        net_node_t* node = ring_set_find_by_id(network->rings, supplier);
+        if (node != NULL) {
+          node->last_seen_ms = now_ms;
+        }
+      }
     }
     return true;
   }
@@ -1869,10 +1879,20 @@ bool network_verify_and_penalize_bad_block(network_t* network,
   if (supplier_is_meaningful) {
     float penalty = network->conn_mgr.hebbian.failure_penalty *
                     network->conn_mgr.hebbian.bad_block_multiplier;
-    hebbian_frequency(&network->hebbian, supplier, -penalty);
-    uint64_t now_ms = (uint64_t)time(NULL) * 1000;
+    // hebbian_apply_penalty (not hebbian_frequency) so an unknown supplier is
+    // NOT added to the table at HEBBIAN_INITIAL_WEIGHT (a positive value — the
+    // opposite of a penalty). The supplier is typically already known from a
+    // prior good block, so this decrements the existing entry.
+    hebbian_apply_penalty(&network->hebbian, supplier, -penalty);
     rate_limit_charge(&network->rate_limits, supplier, RPC_TYPE_FIND_BLOCK,
                       network->conn_mgr.hebbian.bad_block_rate_cost, now_ms);
+    if (network->rings != NULL) {
+      net_node_t* node = ring_set_find_by_id(network->rings, supplier);
+      if (node != NULL) {
+        node->last_seen_ms = now_ms;
+        node->bad_blocks_received++;
+      }
+    }
   }
   // Record the bad_block outcome in the message log (release builds have
   // network->log == NULL, so this is a no-op there). A zero-supplier bad
@@ -4515,9 +4535,12 @@ static bool network_rate_limit_check(network_t* network,
   // Apply the configured Hebbian rate-limit penalty on rejection. This is the
   // single chokepoint for both the direct-QUIC path (sender_id is the
   // authenticated remote_node_id) and the relay path (sender_id is the wire
-  // sender_id). See audit #12 + rate_limit_penalty wiring.
-  hebbian_frequency(&network->hebbian, sender_id,
-                    -network->conn_mgr.hebbian.rate_limit_penalty);
+  // sender_id). See audit #12 + rate_limit_penalty wiring. Use
+  // hebbian_apply_penalty (not hebbian_frequency) so an unknown sender is NOT
+  // inserted at HEBBIAN_INITIAL_WEIGHT — a rate-limited unknown peer should
+  // not gain a positive entry from being penalized.
+  hebbian_apply_penalty(&network->hebbian, sender_id,
+                        -network->conn_mgr.hebbian.rate_limit_penalty);
   network_send_rate_limited(network, peer, sender_id, relay_endpoint_id,
                             wire_type, rpc, now_ms);
   return false;

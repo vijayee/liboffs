@@ -56,6 +56,13 @@ void hebbian_table_set(hebbian_table_t* table, const node_id_t* peer_id, float w
 // Apply frequency rule: w_{requester→holder} += delta_w
 void hebbian_frequency(hebbian_table_t* table, const node_id_t* holder, float delta_w);
 
+// Apply a negative delta (penalty) to an existing peer's weight. If the peer
+// is not in the table, this is a no-op — unlike hebbian_frequency, it does NOT
+// create a new entry (which would land at HEBBIAN_INITIAL_WEIGHT, a positive
+// value — the opposite of a penalty). Used for bad-block and rate-limit
+// penalties where penalizing an unknown peer should not add it to the table.
+void hebbian_apply_penalty(hebbian_table_t* table, const node_id_t* peer_id, float penalty);
+
 // Apply feedback rule along path:
 // For i = 1 to path_len-2: w_{path[i]→path[i+1]} += eta_f × delta_w
 void hebbian_feedback(hebbian_table_t* table, const node_id_t* path, uint8_t path_len,

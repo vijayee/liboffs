@@ -1560,6 +1560,33 @@ TEST_F(HebbianTest, Remove) {
   EXPECT_FLOAT_EQ(hebbian_table_get(&table, &id), HEBBIAN_MIN_WEIGHT);
 }
 
+TEST(HebbianApplyPenalty, DoesNotCreateEntryForUnknownPeer) {
+  hebbian_table_t table;
+  hebbian_table_init(&table, 16, 0.999f);
+  node_id_t peer;
+  memset(&peer.hash, 0x22, NODE_ID_HASH_SIZE);
+  // Peer not in table — penalty is a no-op, must NOT create a +0.1 entry.
+  float before = hebbian_table_get(&table, &peer);  // HEBBIAN_MIN_WEIGHT (absent)
+  hebbian_apply_penalty(&table, &peer, -0.5f);
+  EXPECT_EQ(table.count, 0u);  // no entry created
+  EXPECT_NEAR(hebbian_table_get(&table, &peer), before, 0.0001f);  // still absent/min
+  hebbian_table_deinit(&table);
+}
+
+TEST(HebbianApplyPenalty, DecrementsExistingPeer) {
+  hebbian_table_t table;
+  hebbian_table_init(&table, 16, 0.999f);
+  node_id_t peer;
+  memset(&peer.hash, 0x33, NODE_ID_HASH_SIZE);
+  hebbian_table_set(&table, &peer, 0.8f);
+  hebbian_apply_penalty(&table, &peer, -0.3f);
+  EXPECT_NEAR(hebbian_table_get(&table, &peer), 0.5f, 0.001f);
+  // Clamp at min weight.
+  hebbian_apply_penalty(&table, &peer, -100.0f);
+  EXPECT_NEAR(hebbian_table_get(&table, &peer), HEBBIAN_MIN_WEIGHT, 0.0001f);
+  hebbian_table_deinit(&table);
+}
+
 // === Respiration tests ===
 
 TEST(RespirationTest, SeekIntervalAtZeroCapacity) {

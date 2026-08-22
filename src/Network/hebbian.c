@@ -139,6 +139,19 @@ void hebbian_frequency(hebbian_table_t* table, const node_id_t* holder, float de
   }
 }
 
+// Apply a penalty (negative delta) to an existing peer's weight only. Unlike
+// hebbian_frequency, this does NOT create a new entry for an unknown peer —
+// a fresh entry would land at HEBBIAN_INITIAL_WEIGHT (positive 0.1), which is
+// the opposite of a penalty. Penalty is expected to be negative; the helper
+// adds it directly to the existing weight and clamps at HEBBIAN_MIN_WEIGHT.
+void hebbian_apply_penalty(hebbian_table_t* table, const node_id_t* peer_id, float penalty) {
+  if (table == NULL || peer_id == NULL) return;
+  hebbian_weight_t* entry = hebbian_find(table, peer_id);
+  if (entry == NULL) return;  // unknown peer — do not create a positive entry
+  entry->weight += penalty;  // penalty is negative
+  if (entry->weight < HEBBIAN_MIN_WEIGHT) entry->weight = HEBBIAN_MIN_WEIGHT;
+}
+
 // Feedback rule: for i = 1 to path_len-2: w_{path[i]→path[i+1]} += eta_f × delta_w
 void hebbian_feedback(hebbian_table_t* table, const node_id_t* path, uint8_t path_len,
                       float delta_w) {

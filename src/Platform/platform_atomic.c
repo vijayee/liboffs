@@ -15,6 +15,7 @@
 
 int platform_file_atomic_write(const char* target_path, const uint8_t* data, size_t len) {
   if (target_path == NULL) return -1;
+  if (len > 0xFFFFFFFFu) return -1;  // Windows WriteFile is 32-bit; peer-state files are tiny but guard anyway
   size_t path_len = strlen(target_path);
   // Temp path: target + ".tmp.<pid>" — same directory, unique per process.
   char tmp_path[4096];
