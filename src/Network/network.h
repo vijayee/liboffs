@@ -261,6 +261,8 @@ int network_relay_challenge_get_for_test(network_t* network, size_t index,
 bool network_verify_and_penalize_bad_block(network_t* network,
                                            const buffer_t* data,
                                            const buffer_t* claimed_hash,
-                                           const node_id_t* supplier);
+                                           const node_id_t* supplier,
+                                           uint8_t wire_type,
+                                           uint64_t message_id);
 
 #endif // OFFS_NETWORK_H

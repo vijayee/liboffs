@@ -23,7 +23,7 @@ typedef struct {
   node_id_t peer_id;         // who we sent to / received from
   uint64_t message_id;       // correlation ID from wire message
   uint8_t block_hash[32];    // zeroed if not applicable
-  uint8_t result;            // 0=success, 1=forwarded, 2=not_found, 3=declined
+  uint8_t result;            // 0=success, 1=forwarded, 2=not_found, 3=declined, 4=bad_block
   float hebbian_weight;      // peer's Hebbian weight AFTER this event
 } message_event_t;
 

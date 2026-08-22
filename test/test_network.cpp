@@ -165,14 +165,16 @@ TEST(NetworkBadBlock, VerifyRejectsBadBlockAndPenalizes) {
 
   // Good block: verify true, weight increases by base_reward.
   float before_good = hebbian_table_get(&network->hebbian, &supplier);
-  bool ok_good = network_verify_and_penalize_bad_block(network, data, hash, &supplier);
+  bool ok_good = network_verify_and_penalize_bad_block(network, data, hash, &supplier,
+                                                       WIRE_FIND_BLOCK_RESPONSE, 1);
   EXPECT_TRUE(ok_good);
   float after_good = hebbian_table_get(&network->hebbian, &supplier);
   EXPECT_GT(after_good, before_good);
 
   // Bad block: verify false, weight decreases by failure_penalty*multiplier.
   float before_bad = after_good;
-  bool ok_bad = network_verify_and_penalize_bad_block(network, wrong_data, hash, &supplier);
+  bool ok_bad = network_verify_and_penalize_bad_block(network, wrong_data, hash, &supplier,
+                                                      WIRE_FIND_BLOCK_RESPONSE, 2);
   EXPECT_FALSE(ok_bad);
   float after_bad = hebbian_table_get(&network->hebbian, &supplier);
   EXPECT_LT(after_bad, before_bad);
@@ -186,7 +188,8 @@ TEST(NetworkBadBlock, VerifyRejectsBadBlockAndPenalizes) {
   node_id_t zero_supplier;
   memset(&zero_supplier, 0, sizeof(zero_supplier));
   float zero_before = hebbian_table_get(&network->hebbian, &zero_supplier);
-  bool ok_zero = network_verify_and_penalize_bad_block(network, wrong_data, hash, &zero_supplier);
+  bool ok_zero = network_verify_and_penalize_bad_block(network, wrong_data, hash, &zero_supplier,
+                                                       WIRE_FIND_BLOCK_RESPONSE, 3);
   EXPECT_FALSE(ok_zero);
   EXPECT_NEAR(hebbian_table_get(&network->hebbian, &zero_supplier), zero_before, 0.0001f);
 

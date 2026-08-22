@@ -1845,7 +1845,9 @@ static void network_handle_request_timeout_tick(network_t* network,
 bool network_verify_and_penalize_bad_block(network_t* network,
                                            const buffer_t* data,
                                            const buffer_t* claimed_hash,
-                                           const node_id_t* supplier) {
+                                           const node_id_t* supplier,
+                                           uint8_t wire_type,
+                                           uint64_t message_id) {
   if (network == NULL || data == NULL || claimed_hash == NULL || supplier == NULL) {
     return false;
   }
@@ -1871,6 +1873,15 @@ bool network_verify_and_penalize_bad_block(network_t* network,
     uint64_t now_ms = (uint64_t)time(NULL) * 1000;
     rate_limit_charge(&network->rate_limits, supplier, RPC_TYPE_FIND_BLOCK,
                       network->conn_mgr.hebbian.bad_block_rate_cost, now_ms);
+  }
+  // Record the bad_block outcome in the message log (release builds have
+  // network->log == NULL, so this is a no-op there). A zero-supplier bad
+  // block is still a bad block observed, so the log entry is recorded
+  // outside the supplier_is_meaningful guard.
+  if (network->log != NULL) {
+    message_log_record(network->log, wire_type, MSG_DIRECTION_RECEIVED,
+                       supplier, message_id, claimed_hash->data, 4,
+                       &network->hebbian);
   }
   return false;
 }
@@ -2963,7 +2974,8 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
         if (response->path_len > 0) {
           memcpy(&supplier, &response->path[response->path_len - 1], sizeof(node_id_t));
         }
-        if (network_verify_and_penalize_bad_block(network, data_buf, hash_buf, &supplier)) {
+        if (network_verify_and_penalize_bad_block(network, data_buf, hash_buf, &supplier,
+                                                   WIRE_FIND_BLOCK_RESPONSE, response->message_id)) {
           block_size_e block_type = network->block_cache->type;
           if (response->block_data_len == mega) block_type = mega;
           else if (response->block_data_len == standard) block_type = standard;
@@ -3201,7 +3213,8 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
           if (store->path_len > 0) {
             memcpy(&supplier, &store->path[store->path_len - 1], sizeof(node_id_t));
           }
-          if (network_verify_and_penalize_bad_block(network, data_buf, hash_buf, &supplier)) {
+          if (network_verify_and_penalize_bad_block(network, data_buf, hash_buf, &supplier,
+                                                     WIRE_STORE_BLOCK, store->message_id)) {
             block = block_create_existing_data_hash_by_type(
                 data_buf, hash_buf, network->block_cache->type);
           }
@@ -3907,7 +3920,8 @@ static void network_handle_recall_accept(network_t* network, message_t* msg) {
       // Supplier for RecallAccept is the named sender_id (the peer answering
       // our recall with the block data). Verify before caching so a bad block
       // penalizes the responder and is dropped.
-      if (network_verify_and_penalize_bad_block(network, data_buf, block_hash_buf, &accept->sender_id)) {
+      if (network_verify_and_penalize_bad_block(network, data_buf, block_hash_buf, &accept->sender_id,
+                                                 WIRE_RECALL_ACCEPT, accept->message_id)) {
         block_size_e block_type = network->block_cache->type;
         if (accept->block_data_len == mega) block_type = mega;
         else if (accept->block_data_len == standard) block_type = standard;
@@ -4498,6 +4512,12 @@ static bool network_rate_limit_check(network_t* network,
   if (rate_limit_check(&network->rate_limits, sender_id, rpc, now_ms)) {
     return true;
   }
+  // Apply the configured Hebbian rate-limit penalty on rejection. This is the
+  // single chokepoint for both the direct-QUIC path (sender_id is the
+  // authenticated remote_node_id) and the relay path (sender_id is the wire
+  // sender_id). See audit #12 + rate_limit_penalty wiring.
+  hebbian_frequency(&network->hebbian, sender_id,
+                    -network->conn_mgr.hebbian.rate_limit_penalty);
   network_send_rate_limited(network, peer, sender_id, relay_endpoint_id,
                             wire_type, rpc, now_ms);
   return false;
