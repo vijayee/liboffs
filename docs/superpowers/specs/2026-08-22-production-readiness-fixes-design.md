@@ -32,7 +32,6 @@ Every CRITICAL, HIGH, MEDIUM, and LOW finding from the 2026-08-21 production-rea
 
 ## 3. Non-Goals
 
-- Persisting the Hebbian weight table across restart. The table rebuilds from zero on restart; bad peers must re-offend to be re-penalized, which is acceptable because content verification catches them regardless. (Persistence is a future enhancement.)
 - Forcing `allow_secure=true` as the default. The default stays encryption-only for backward compatibility; secure mode is opt-in and documented.
 - A separate key server for update signing keys. The release public key is compiled into the binary (fail-closed if unset).
 - ABI/soname versioning. The version bump to `v0.2.0` is a tag/changelog concern; symbol versioning is a future task.
@@ -91,11 +90,50 @@ Add to `hebbian_config_t` (`src/Network/hebbian_config.h`) and the `Configuratio
 
 Wire the two existing-but-dead fields (`failure_penalty`, `rate_limit_penalty`) into actual call sites — `failure_penalty` per 4.2, `rate_limit_penalty` applied on any rate-limit rejection event.
 
-### 4.5 Tests
+### 4.5 Peer state persistence
+
+Reputation and peer knowledge are only useful if they survive restart. Persist the Hebbian weight table and connected-peer information to disk and reload on startup.
+
+**What is persisted** (per peer, in `peer_state_t`):
+
+| Field | Source | Purpose on reload |
+|-------|--------|-------------------|
+| `node_id` | `peer_connection_t.remote_node_id` | Primary key |
+| `addr`, `port` | `peer_connection_t.peer_addr` | Reconnect target |
+| `hebbian_weight` | `hebbian_table_t` entry | Reputation survives restart |
+| `relay_verified` | `peer_connection_t.relay_verified` | Secure-mode routing gate survives restart |
+| `nat_type` | `peer_connection_t.nat_type` | Reconnect strategy (direct vs relay-only) |
+| `last_seen_ms` | monotonic clock at last interaction | Drop stale peers on reload |
+| `bad_blocks_received` | new metric (Section 4.2) | Bad-block history survives restart |
+
+Runtime-only fields (`quic_connection`, `quic_stream`, mailbox state, token-bucket levels) are **not** persisted — they are re-established on reconnect.
+
+**Format and location.** CBOR array of `peer_state_t`, written to `{data_dir}/peer_state.cbor`. CBOR is already a dependency and used by the BlockCache index/WAL.
+
+**When to save.**
+- Debounced: reuse the existing `hebbian_decay` timer tick (default 60s) — after each decay pass, write the file if the table has changed since the last save. Cheap, bounded.
+- On graceful shutdown: `src/Node/node.c` phased drain writes a final copy before the network tears down.
+- Not on every weight change (would be too frequent).
+
+**Atomic write.** Write to `peer_state.cbor.tmp`, `platform_file_sync`, then `rename` over `peer_state.cbor`. A crash mid-write leaves the previous file intact. Check the write return (propagate ENOSPC/I/O errors to the log; do not silently drop).
+
+**Load on startup.** Before the network accepts connections, read `peer_state.cbor`. Treat the file as hostile input: validate CBOR shape per entry (same discipline as Section 5.3), skip malformed entries. Populate the Hebbian table and a "known peers" reconnection list. Drop entries whose `last_seen_ms` is older than a configurable `peer_state_ttl` (default 7 days). Re-establish connections to the surviving peers via the existing peer-discovery/reconnect path; do not block startup on unreachable peers.
+
+**Decay continuity.** Because weights are persisted with their current value and decay runs on the timer, decay continues naturally across restart — no catch-up computation needed.
+
+**New config tunables** (added to `Configuration`):
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `peer_state_ttl_ms` | 604800000 (7 days) | Drop peers not seen for this long on reload |
+| `peer_state_save_interval_ms` | 60000 | Debounced save cadence |
+
+### 4.6 Tests
 
 - `test_block.cpp`: round-trip `block_verify_hash` (good data → true); tampered data (single bit flipped → false); wrong-size hash → false; constant-time compare sanity.
 - `test_network.cpp`: mock peer serves a wrong block → assert block rejected, supplier weight decreased by `failure_penalty * bad_block_multiplier`, rate-limit bucket charged `bad_block_rate_cost`, and after N bad blocks the peer drops below `drop_threshold` and is not routed to.
 - `test_health_handler.cpp` / `test_health_http.cpp`: assert the new `bad_blocks_received` metric is exposed in `/health`.
+- `test_peer_state.cpp` (new): write weights + peer info, reload, assert restored; a bad peer remains below `drop_threshold` after reload and is not routed; atomic write (kill mid-write → previous file intact, no corruption); malformed entry skipped, rest loaded; `peer_state_ttl` drops stale entries; graceful-shutdown save survives a simulated restart.
 
 ## 5. Stage 2 — Storage Durability
 
@@ -297,8 +335,9 @@ None. All design decisions are resolved:
 
 - **Scope:** everything, all severities.
 - **Update signing:** ed25519 signed manifest, embedded pubkey via CMake, fail-closed.
-- **TLS default:** stays `false` — encryption, not identity (closed by threat model).
+- **TLS default:** stays `false` — encryption, not identity in default mode; secure mode opt-in via authority (closed by threat model).
 - **Peer rating:** wired into the existing Hebbian + rate-limit infrastructure; no new reputation subsystem.
+- **Peer state persistence:** Hebbian weights + connected-peer info persisted to `peer_state.cbor`, debounced save + graceful-shutdown save, atomic write, hostile-input-validated load with `peer_state_ttl`.
 - **systemd unit:** `--foreground` + `Type=simple`.
 - **Version bump:** `v0.2.0`.
 - **fsync in tests:** disabled via flag for speed (approved).
@@ -308,11 +347,12 @@ None. All design decisions are resolved:
 
 Stages 1-5 are ordered by dependency and risk:
 
-1. **Stage 1** (content integrity + reputation) — unblocks nothing else; highest value; small blast radius.
-2. **Stage 2** (storage durability) — independent of Stage 1; can land in parallel.
-3. **Stage 4.2** (memory-safety fixes) — small, independent; land early to de-risk the rest.
-4. **Stage 3** (self-update) — independent; larger; needs the release-signing tooling.
-5. **Stage 4.1, 4.3** (HTTP + relay/gossip) — depends on Stage 1's reputation wiring for the gossip-referral penalty.
-6. **Stage 5** (CI/packaging/daemon) — land last so CI gates the final tree; the `v0.2.0` tag is the closing act.
+1. **Stage 1** (content integrity + reputation, Sections 4.1-4.4) — unblocks nothing else; highest value; small blast radius.
+2. **Stage 1 persistence** (Section 4.5) — follows Stage 1 so the persisted weights are meaningful; independent of other stages.
+3. **Stage 2** (storage durability) — independent of Stage 1; can land in parallel.
+4. **Stage 4.2** (memory-safety fixes) — small, independent; land early to de-risk the rest.
+5. **Stage 3** (self-update) — independent; larger; needs the release-signing tooling.
+6. **Stage 4.1, 4.3** (HTTP + relay/gossip) — depends on Stage 1's reputation wiring for the gossip-referral penalty and the mode-aware relay gate.
+7. **Stage 5** (CI/packaging/daemon) — land last so CI gates the final tree; the `v0.2.0` tag is the closing act.
 
 The writing-plans skill will break each stage into concrete, testable tasks.
