@@ -449,6 +449,9 @@ void section_dispatch(void* state, message_t* msg) {
         p->full = free_map_is_full(&section->free_map);
         break;
       }
+      if (section->fsync_data) {
+        platform_file_sync(section->file);
+      }
       atomic_store(&section->dirty, 1);
       if (section->on_dirty != NULL) {
         section->on_dirty(section->on_dirty_context, section);
@@ -864,6 +867,9 @@ void section_save_meta(section_t* section) {
   ssize_t written = platform_file_write(meta_file, data, size);
   if (written < (ssize_t)size) {
     log_error("Failed to write section meta data");
+  }
+  if (section->fsync_data) {
+    platform_file_sync(meta_file);
   }
   platform_file_close(meta_file);
   free(data);
