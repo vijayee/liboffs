@@ -14,6 +14,7 @@ extern "C" {
 #include <cbor.h>
 #include "../src/BlockCache/frand.h"
 #include "../src/BlockCache/wal.h"
+#include "../src/Platform/platform_file.h"
 #include "../src/Util/get_dir.h"
 }
 
@@ -325,5 +326,48 @@ namespace indexTest {
     wal_destroy(wal);
     rm_rf(location);
     free(location);
+  }
+
+  /* Regression test for wal_read's type switch: an unknown type byte must
+     return WAL_ERR_UNKNOWN_TYPE rather than leaving `size` uninitialized
+     and calling get_memory(garbage). Writes a valid 'addition' record,
+     then corrupts the type byte in-place before reopening. */
+  TEST(WalRead, UnknownTypeByteReturnsErrorNotCrash) {
+    char* dir = path_join("/tmp", "wal_unknown_type_test");
+    rm_rf(dir);
+    mkdir_p(dir);
+    uint64_t id = 1;
+    wal_t* wal = wal_create(dir, id);
+    ASSERT_NE(wal, nullptr);
+
+    buffer_t* payload = buffer_create(78);
+    for (size_t index = 0; index < 78; index++) {
+      payload->data[index] = (uint8_t)index;
+    }
+    wal_write(wal, addition, payload);
+    buffer_destroy(payload);
+
+    /* Corrupt the type byte of that record in-place: seek to offset 0,
+       write 'x'. wal_write lazily opened wal->log above. */
+    ASSERT_NE(wal->log, nullptr);
+    platform_file_seek(wal->log, 0, PLATFORM_SEEK_SET);
+    uint8_t bad_type = 'x';
+    platform_file_write(wal->log, &bad_type, 1);
+    platform_file_sync(wal->log);
+    wal_destroy(wal);
+
+    /* Re-load and read — must return WAL_ERR_UNKNOWN_TYPE, not crash. */
+    wal_t* wal2 = wal_load(dir, id);
+    ASSERT_NE(wal2, nullptr);
+    wal_type_e type;
+    buffer_t* data = nullptr;
+    uint64_t cursor = 0;
+    int32_t wal_size = 0;
+    int rc = wal_read(wal2, &type, &data, &cursor, &wal_size);
+    EXPECT_EQ(rc, WAL_ERR_UNKNOWN_TYPE);
+    wal_destroy(wal2);
+
+    rm_rf(dir);
+    free(dir);
   }
 }

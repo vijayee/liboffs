@@ -17,6 +17,15 @@ typedef enum wal_type_e {
   ejection = 'e'
 } wal_type_e;
 
+// wal_read return codes. -3 is clean EOF; 0 is a complete valid record.
+// Positive codes are recoverable errors — the caller should stop replay at
+// the last complete record and keep the prefix, NOT bail to an empty index.
+#define WAL_ERR_SHORT_TYPE      1
+#define WAL_ERR_SHORT_CRC       2
+#define WAL_ERR_SHORT_PAYLOAD   3
+#define WAL_ERR_CRC             4
+#define WAL_ERR_UNKNOWN_TYPE    5
+
 typedef struct {
   platform_file_t* log;
   char* location;

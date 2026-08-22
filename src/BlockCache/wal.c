@@ -100,15 +100,15 @@ int wal_read(wal_t* wal, wal_type_e* type, buffer_t** data, uint64_t* cursor, in
   platform_file_seek(wal->log, (int64_t)*cursor, PLATFORM_SEEK_SET);
   size_t bytes = platform_file_read(wal->log, type, 1);
   if (bytes != 1) {
-    return 1;
+    return WAL_ERR_SHORT_TYPE;
   }
   uint32_t crc;
   bytes = platform_file_read(wal->log, &crc, 4);
   if (bytes != 4) {
-    return 2;
+    return WAL_ERR_SHORT_CRC;
   }
 
-  uint64_t size;
+  uint64_t size = 0;  // init — unknown type must not allocate garbage
   switch (*type) {
     case 'a':
     case 'i':
@@ -120,12 +120,14 @@ int wal_read(wal_t* wal, wal_type_e* type, buffer_t** data, uint64_t* cursor, in
     case 'r':
       size = 34;
       break;
+    default:
+      return WAL_ERR_UNKNOWN_TYPE;
   }
   uint8_t* buf = get_memory(size);
   bytes = platform_file_read(wal->log, buf, size);
   if (bytes != size) {
     free(buf);
-    return 3;
+    return WAL_ERR_SHORT_PAYLOAD;
   }
   buffer_t* buffer = buffer_create_from_existing_memory(buf, size);
   *data = buffer;
@@ -136,7 +138,7 @@ int wal_read(wal_t* wal, wal_type_e* type, buffer_t** data, uint64_t* cursor, in
   if (crc == crc2) {
     return 0;
   } else {
-    return 4;
+    return WAL_ERR_CRC;
   }
 }
 void wal_destroy(wal_t* wal) {
