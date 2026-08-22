@@ -2009,6 +2009,23 @@ TEST_F(HebbianConfigTest, ProductionDefaults) {
   EXPECT_FLOAT_EQ(config.initial_weight, 0.1f);
 }
 
+TEST(HebbianConfig, BadBlockDefaultsAreSane) {
+  hebbian_config_t config;
+  hebbian_config_init(&config);
+  EXPECT_NEAR(config.bad_block_multiplier, 5.0f, 0.001f);
+  EXPECT_NEAR(config.bad_block_rate_cost, 10.0f, 0.001f);
+  EXPECT_NEAR(config.failure_penalty, 0.2f, 0.001f);
+  EXPECT_NEAR(config.rate_limit_penalty, 0.1f, 0.001f);
+  EXPECT_NEAR(config.base_reward, 0.1f, 0.001f);
+}
+
+TEST(HebbianConfig, ProductionOverridesKeepBadBlockFields) {
+  hebbian_config_t config;
+  hebbian_config_init_production(&config);
+  EXPECT_NEAR(config.bad_block_multiplier, 5.0f, 0.001f);
+  EXPECT_NEAR(config.bad_block_rate_cost, 10.0f, 0.001f);
+}
+
 // === PeerConnection tests ===
 
 class PeerConnectionTest : public ::testing::Test {

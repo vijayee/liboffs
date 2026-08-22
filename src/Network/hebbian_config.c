@@ -13,6 +13,8 @@ void hebbian_config_init(hebbian_config_t* config) {
   config->failure_penalty = 0.2f;
   config->rate_limit_penalty = 0.1f;
   config->recall_reward = 2.0f;
+  config->bad_block_multiplier = 5.0f;
+  config->bad_block_rate_cost = 10.0f;
 
   for (size_t index = 0; index < HEBBIAN_RPC_MULTIPLIER_COUNT; index++) {
     config->rpc_multipliers[index] = 0.3f;
@@ -33,4 +35,6 @@ void hebbian_config_init_production(hebbian_config_t* config) {
   hebbian_config_init(config);
   config->decay_rate = 0.002f;
   config->drop_threshold = 0.05f;
+  // bad_block_multiplier and bad_block_rate_cost keep their defaults (5.0 / 10.0);
+  // override here only if production wants different bad-block penalties.
 }

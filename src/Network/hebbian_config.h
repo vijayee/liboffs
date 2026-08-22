@@ -19,6 +19,8 @@ typedef struct hebbian_config_t {
   float failure_penalty;
   float rate_limit_penalty;
   float recall_reward;
+  float bad_block_multiplier;   // multiplier on failure_penalty for a bad block (default 5.0)
+  float bad_block_rate_cost;    // extra tokens charged to the supplier's FIND_BLOCK bucket (default 10.0)
   float rpc_multipliers[HEBBIAN_RPC_MULTIPLIER_COUNT];
 } hebbian_config_t;
 
