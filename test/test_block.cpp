@@ -59,3 +59,48 @@ TEST(TestBlock, TestBlockOperations) {
   block_destroy(block1);
   buffer_destroy(buf);
 }
+
+TEST(TestBlock, VerifyHashMatchesGoodData) {
+  uint8_t raw[128];
+  for (size_t index = 0; index < sizeof(raw); index++) raw[index] = (uint8_t)(index * 7);
+  buffer_t* data = buffer_create_from_pointer_copy(raw, sizeof(raw));
+  ASSERT_NE(data, nullptr);
+  buffer_t* hash = hash_data(data);
+  ASSERT_NE(hash, nullptr);
+  EXPECT_TRUE(block_verify_hash(data, hash));
+  DESTROY(data, buffer);
+  DESTROY(hash, buffer);
+}
+
+TEST(TestBlock, VerifyHashRejectsTamperedData) {
+  uint8_t raw[128];
+  for (size_t index = 0; index < sizeof(raw); index++) raw[index] = (uint8_t)(index * 7);
+  buffer_t* data = buffer_create_from_pointer_copy(raw, sizeof(raw));
+  buffer_t* hash = hash_data(data);
+  data->data[64] ^= 0x01;
+  EXPECT_FALSE(block_verify_hash(data, hash));
+  DESTROY(data, buffer);
+  DESTROY(hash, buffer);
+}
+
+TEST(TestBlock, VerifyHashRejectsWrongSizeHash) {
+  uint8_t raw[128];
+  for (size_t index = 0; index < sizeof(raw); index++) raw[index] = (uint8_t)(index * 7);
+  buffer_t* data = buffer_create_from_pointer_copy(raw, sizeof(raw));
+  buffer_t* short_hash = buffer_create(16);
+  EXPECT_FALSE(block_verify_hash(data, short_hash));
+  DESTROY(data, buffer);
+  DESTROY(short_hash, buffer);
+}
+
+TEST(TestBlock, VerifyHashRejectsNullArgs) {
+  EXPECT_FALSE(block_verify_hash(NULL, NULL));
+  uint8_t raw[128];
+  for (size_t index = 0; index < sizeof(raw); index++) raw[index] = (uint8_t)(index * 7);
+  buffer_t* data = buffer_create_from_pointer_copy(raw, sizeof(raw));
+  buffer_t* hash = hash_data(data);
+  EXPECT_FALSE(block_verify_hash(NULL, hash));
+  EXPECT_FALSE(block_verify_hash(data, NULL));
+  DESTROY(data, buffer);
+  DESTROY(hash, buffer);
+}

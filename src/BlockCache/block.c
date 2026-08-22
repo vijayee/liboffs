@@ -16,6 +16,23 @@ buffer_t* hash_data(buffer_t* data) {
   return buffer_create_from_existing_memory(digest, BLAKE3_OUT_LEN);
 }
 
+bool block_verify_hash(const buffer_t* data, const buffer_t* expected_hash) {
+  if (data == NULL || expected_hash == NULL) return false;
+  if (expected_hash->size != BLAKE3_OUT_LEN) return false;
+  buffer_t* computed = hash_data((buffer_t*)data);
+  if (computed == NULL) return false;
+  bool match = (computed->size == expected_hash->size);
+  if (match) {
+    uint8_t diff = 0;
+    for (size_t index = 0; index < computed->size; index++) {
+      diff |= (uint8_t)(computed->data[index] ^ expected_hash->data[index]);
+    }
+    match = (diff == 0);
+  }
+  buffer_destroy(computed);
+  return match;
+}
+
 block_t* block_create(buffer_t* data) {
   return block_create_by_type(data, standard);
 }

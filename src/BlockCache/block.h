@@ -22,6 +22,11 @@ typedef struct {
 } block_t;
 
 buffer_t* hash_data(buffer_t* data);
+// Recompute BLAKE3 over data and constant-time compare against the expected
+// hash. Returns true on match, false on mismatch/wrong-size/null. Used to
+// verify peer-supplied block data against its requested address and to
+// detect on-disk corruption on cache read.
+bool block_verify_hash(const buffer_t* data, const buffer_t* expected_hash);
 block_t* block_create(buffer_t* data);
 block_t* block_create_by_type(buffer_t* data, block_size_e type);
 block_t* block_create_random_block();
