@@ -421,6 +421,12 @@ index_t* index_create(size_t bucket_size, char* location, uint64_t wait, uint64_
              loaded snapshot's WAL is followed by a next_id with a one-id
              gap. */
           index->next_id = most_recent_id + 2;
+          /* index_create_from (via cbor_to_index) already set current_file/
+             last_file for the loaded snapshot's WAL ids; the rebuilding
+             branch re-points them at the new snapshot's ids, so free the
+             intermediate strings before overwriting to avoid leaking them. */
+          free(index->current_file);
+          free(index->last_file);
           index->current_file = path_join(index->location, id);
           index->next_id = current_id + 1;
           sprintf(id,"%lu", current_id - 1 );
