@@ -239,9 +239,11 @@ static int _index_replay_wal(index_t* index, char* parent_location,
           index_entry_t* entry = cbor_to_index_entry(cbor);
           if (entry != NULL) {
             index_entry_t* from_index = REFERENCE(index_find(index, entry->hash), index_entry_t);
-            if (from_index != NULL) index_increment(index, from_index);
+            if (from_index != NULL) {
+              index_increment(index, from_index);
+              DESTROY(from_index, index_entry);
+            }
             DESTROY(entry, index_entry);
-            DESTROY(from_index, index_entry);
           }
           cbor_decref(&cbor);
         } else {
@@ -256,7 +258,9 @@ static int _index_replay_wal(index_t* index, char* parent_location,
           if (cbor_isa_bytestring(cbor_hash) && cbor_isa_uint(cbor_date)) {
             buffer_t* hash = cbor_to_buffer(cbor_hash);
             index_entry_t* entry = index_find(index, hash);
-            index_entry_set_ejection_date(entry, cbor_get_int(cbor_date));
+            if (entry != NULL) {
+              index_entry_set_ejection_date(entry, cbor_get_int(cbor_date));
+            }
             DESTROY(hash, buffer);
           }
           cbor_decref(&cbor_hash);

@@ -349,10 +349,10 @@ namespace indexTest {
      clean snapshot, then add more entries and drop the handle WITHOUT
      index_destroy (no flush, no snapshot of the new entries), then reopen
      and assert the post-snapshot entries survived via WAL replay.
-     DISABLED: this test currently FAILS — entries added after the last
-     snapshot are not restored on reopen, which means the WAL replay path
-     is not covering post-snapshot WAL entries. Tracked in OFFS-184. Remove
-     the DISABLED_ prefix once OFFS-184 lands. */
+     OFFS-184 resolved: the happy-path live-WAL replay (index_create else-branch)
+     now recovers entries added after the last snapshot. Simulates a crash by
+     skipping index_destroy in Phase 2; Phase 3 reopens and asserts all entries
+     (snapshotted + post-snapshot) are present. */
   TEST_F(TestIndex, TestWalCrashRecovery) {
     int error_code = 0;
     const size_t snapshot_count = 4;
