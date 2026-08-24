@@ -385,4 +385,87 @@ TEST_F(TestOffRoutes, DirectoryOfdRawRoundTrip) {
     platform_socket_destroy(sock);
 }
 
+/* Test: streaming PUT with stream-length exceeding OFFS_MAX_STREAM_LENGTH is
+ * rejected at headers-complete with 400. */
+TEST_F(TestOffRoutes, PutStreamLengthTooLarge) {
+    off_routes_register(server, pool, bc, ofd_cache, tc, NULL, NULL, NULL, NULL);
+    http_server_listen(server);
+
+    platform_socket_t* sock = NULL;
+    for (int attempts = 0; attempts < 50; attempts++) {
+        platform_usleep(10000);
+        sock = _connect_to_server(port);
+        if (sock != NULL) break;
+    }
+    ASSERT_NE(sock, nullptr);
+
+    /* stream-length header declares a value over the 64MB cap. The body itself
+     * is small (Content-Length: 4) — the headers-complete handler must reject
+     * before any body is buffered. */
+    char put_request[4096];
+    int put_len = snprintf(put_request, sizeof(put_request),
+        "PUT /offsystem HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "type: application/octet-stream\r\n"
+        "file-name: too_large.txt\r\n"
+        "stream-length: %zu\r\n"
+        "Content-Length: 4\r\n"
+        "\r\n"
+        "test",
+        (size_t)(64 * 1024 * 1024 + 1));
+
+    char put_response[8192];
+    memset(put_response, 0, sizeof(put_response));
+    int result = _send_and_recv(sock, put_request, (size_t)put_len,
+                                put_response, sizeof(put_response), 5000);
+    EXPECT_EQ(result, 0);
+    /* Status line must be 400 — "Invalid stream length" */
+    EXPECT_NE(strstr(put_response, "400"), nullptr);
+
+    platform_socket_destroy(sock);
+}
+
+/* Test: PUT with tuple-size exceeding the configured max_tuple_size is
+ * rejected with 400. */
+TEST_F(TestOffRoutes, PutTupleSizeTooLarge) {
+    config_t config = config_default();
+    config.max_tuple_size = 30;
+    off_routes_register(server, pool, bc, ofd_cache, tc, NULL, &config, NULL, NULL);
+    http_server_listen(server);
+
+    platform_socket_t* sock = NULL;
+    for (int attempts = 0; attempts < 50; attempts++) {
+        platform_usleep(10000);
+        sock = _connect_to_server(port);
+        if (sock != NULL) break;
+    }
+    ASSERT_NE(sock, nullptr);
+
+    const char* body = "Hello OFF System!";
+    size_t body_len = strlen(body);
+    char put_request[4096];
+    int put_len = snprintf(put_request, sizeof(put_request),
+        "PUT /offsystem HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "type: application/octet-stream\r\n"
+        "file-name: tuple_too_large.txt\r\n"
+        "stream-length: %zu\r\n"
+        "tuple-size: 100\r\n"
+        "Content-Length: %zu\r\n"
+        "\r\n"
+        "%s",
+        body_len, body_len, body);
+
+    char put_response[8192];
+    memset(put_response, 0, sizeof(put_response));
+    int result = _send_and_recv(sock, put_request, (size_t)put_len,
+                                put_response, sizeof(put_response), 5000);
+    EXPECT_EQ(result, 0);
+    /* Status line must be 400 — "tuple-size exceeds configured max_tuple_size" */
+    EXPECT_NE(strstr(put_response, "400"), nullptr);
+    EXPECT_NE(strstr(put_response, "tuple-size"), nullptr);
+
+    platform_socket_destroy(sock);
+}
+
 } // namespace off_routes_test

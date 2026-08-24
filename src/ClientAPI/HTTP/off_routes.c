@@ -28,6 +28,11 @@
 #include "../../Util/log.h"
 #include "../../Util/validation.h"
 
+/* Upper bound on the client-declared `stream-length` header for streaming PUT.
+ * Matches the non-streaming OFFS_MAX_CBOR_MESSAGE_SIZE bound so a client cannot
+ * declare a tiny stream-length and then stream gigabytes through the pipeline. */
+#define OFFS_MAX_STREAM_LENGTH  OFFS_MAX_CBOR_MESSAGE_SIZE
+
 static int _draining_middleware(http_request_t* request, http_response_t* response,
                                 void* user_data) {
   (void)request;
@@ -137,13 +142,15 @@ off_routes_context_t* off_routes_context_create(scheduler_pool_t* pool,
                                                   block_cache_t* bc,
                                                   ofd_cache_t* ofd_cache,
                                                   tuple_cache_t* tc,
-                                                  network_t* network) {
+                                                  network_t* network,
+                                                  size_t max_tuple_size) {
     off_routes_context_t* ctx = get_clear_memory(sizeof(off_routes_context_t));
     ctx->pool = pool;
     ctx->bc = bc;
     ctx->ofd_cache = ofd_cache;
     ctx->tc = tc;
     ctx->network = network;
+    ctx->max_tuple_size = max_tuple_size;
     return ctx;
 }
 
@@ -529,6 +536,8 @@ typedef struct {
     block_cache_t* bc;
     buffer_t* upload_data;
     uint8_t temporary;
+    uint64_t bytes_received;  /* actual bytes received in the streaming body, bounded by stream_length */
+    uint8_t stream_exceeded;  /* set when bytes_received crosses stream_length; further chunks are dropped */
 } put_context_t;
 
 static void _put_on_descriptor_close(void* ctx, void* unused) {
@@ -770,10 +779,8 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
     const char* temporary_header = http_request_header(request, "temporary");
     uint8_t is_temporary = (temporary_header != NULL && strcmp(temporary_header, "true") == 0);
 
-    /* Resolve tuple_size from the optional `tuple-size` header, default 3.
-     * The HTTP off_routes context does not carry a config pointer, so the
-     * max_tuple_size bound check is not enforced here — the space check
-     * below still catches oversized uploads. */
+    /* Resolve tuple_size from the optional `tuple-size` header, default 3,
+     * and enforce the configured max_tuple_size bound. */
     const char* tuple_size_header = http_request_header(request, "tuple-size");
     size_t tuple_size = 3;
     if (tuple_size_header != NULL) {
@@ -781,6 +788,15 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
         if (parsed > 0) {
             tuple_size = (size_t)parsed;
         }
+    }
+    if (ctx->max_tuple_size != 0 && tuple_size > ctx->max_tuple_size) {
+        http_response_set_status(response, 400);
+        http_response_write(response, "tuple-size exceeds configured max_tuple_size", 44);
+        http_response_end(response);
+        if (upload_data != NULL) {
+            buffer_destroy(upload_data);
+        }
+        return;
     }
 
     /* Pre-flight space check: reject if the cache cannot fit the estimated bytes */
@@ -856,6 +872,24 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
 static void _put_on_request_data(void* ctx, void* data) {
     put_context_t* put_ctx = (put_context_t*)ctx;
     buffer_t* chunk = (buffer_t*)data;
+
+    /* Bound the actual streamed bytes against the client-declared stream-length.
+     * The pre-flight headers-complete handler already rejects stream-length
+     * values above OFFS_MAX_STREAM_LENGTH, so a malicious client cannot declare
+     * a tiny stream-length and then stream gigabytes through the pipeline —
+     * once bytes_received crosses stream_length, subsequent chunks are dropped
+     * and the stream is marked exceeded so the finalizer treats it as an error. */
+    if (put_ctx->stream_exceeded) {
+        return;
+    }
+    put_ctx->bytes_received += chunk->size;
+    if (put_ctx->bytes_received > put_ctx->stream_length) {
+        put_ctx->stream_exceeded = 1;
+        log_warn("_put_on_request_data: streamed body exceeded declared stream-length (%zu > %zu); dropping excess",
+                 (size_t)put_ctx->bytes_received, put_ctx->stream_length);
+        return;
+    }
+
     writeable_off_stream_write(put_ctx->ws, chunk);
 
     /* Accumulate raw data for OFD cache population on directory uploads */
@@ -927,7 +961,7 @@ static int _off_put_headers_complete(http_connection_t* connection,
     }
 
     size_t stream_length = (size_t)atol(stream_length_str);
-    if (stream_length == 0) {
+    if (stream_length == 0 || stream_length > OFFS_MAX_STREAM_LENGTH) {
         return _off_put_headers_complete_error(response, 400, "Invalid stream length");
     }
 
@@ -938,9 +972,8 @@ static int _off_put_headers_complete(http_connection_t* connection,
     const char* temporary_header = http_request_header(request, "temporary");
     uint8_t is_temporary = (temporary_header != NULL && strcmp(temporary_header, "true") == 0);
 
-    /* Resolve tuple_size from the optional `tuple-size` header, default 3.
-     * The HTTP off_routes context does not carry a config pointer, so the
-     * max_tuple_size bound check is not enforced here. */
+    /* Resolve tuple_size from the optional `tuple-size` header, default 3,
+     * and enforce the configured max_tuple_size bound. */
     const char* tuple_size_header = http_request_header(request, "tuple-size");
     size_t tuple_size = 3;
     if (tuple_size_header != NULL) {
@@ -948,6 +981,10 @@ static int _off_put_headers_complete(http_connection_t* connection,
         if (parsed > 0) {
             tuple_size = (size_t)parsed;
         }
+    }
+    if (routes_ctx->max_tuple_size != 0 && tuple_size > routes_ctx->max_tuple_size) {
+        return _off_put_headers_complete_error(response, 400,
+            "tuple-size exceeds configured max_tuple_size");
     }
 
     /* Pre-flight space check: reject immediately if the cache cannot fit the
@@ -1056,7 +1093,8 @@ void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
                   (void*)server, (void*)pool, (void*)bc);
         return;
     }
-    off_routes_context_t* ctx = off_routes_context_create(pool, bc, ofd_cache, tc, network);
+    off_routes_context_t* ctx = off_routes_context_create(pool, bc, ofd_cache, tc, network,
+                                                            config != NULL ? config->max_tuple_size : 0);
 
     http_server_use(server, _draining_middleware, server, NULL);
 

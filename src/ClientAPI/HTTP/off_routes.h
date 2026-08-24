@@ -20,6 +20,7 @@ typedef struct {
     ofd_cache_t* ofd_cache;
     tuple_cache_t* tc;
     network_t* network;
+    size_t max_tuple_size;  /* configured upper bound for tuple-size header; 0 = disabled */
 } off_routes_context_t;
 
 void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
@@ -32,7 +33,8 @@ off_routes_context_t* off_routes_context_create(scheduler_pool_t* pool,
                                                   block_cache_t* bc,
                                                   ofd_cache_t* ofd_cache,
                                                   tuple_cache_t* tc,
-                                                  network_t* network);
+                                                  network_t* network,
+                                                  size_t max_tuple_size);
 void off_routes_context_destroy(off_routes_context_t* ctx);
 
 #endif //OFFS_OFF_ROUTES_H
