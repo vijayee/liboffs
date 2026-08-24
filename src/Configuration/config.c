@@ -255,6 +255,10 @@ int config_validate(const config_t* config) {
       log_error("ws_enabled cannot be used with api_key_hash (plaintext remote transport)");
       valid = false;
     }
+    if (config->http_enabled && !config->https_enabled) {
+      log_error("http_enabled (plaintext) cannot be used with api_key_hash (bearer over plaintext HTTP)");
+      valid = false;
+    }
   }
 
   if (config->http_idle_timeout_ms == 0) {

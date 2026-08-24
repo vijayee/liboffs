@@ -162,3 +162,27 @@ TEST(ConfigValidate, LocalBindingNoAuthTrueAccepted) {
   config.config_local_binding_no_auth = true;
   EXPECT_EQ(config_validate(&config), 0);
 }
+
+TEST(ConfigValidate, BearerOverPlaintextHttpRejected) {
+  config_t config = config_default();
+  // 60-char bcrypt $2b$ hash (placeholder; validator only checks length + prefix)
+  config.api_key_hash = strdup("$2b$12$xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+  config.http_enabled = true;
+  config.https_enabled = false;
+  EXPECT_NE(config_validate(&config), 0);
+  free(config.api_key_hash);
+}
+
+TEST(ConfigValidate, BearerOverHttpsAccepted) {
+  config_t config = config_default();
+  config.api_key_hash = strdup("$2b$12$xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+  config.http_enabled = false;
+  config.https_enabled = true;
+  // https_enabled requires cert/key paths — set them or the validator rejects for that reason.
+  config.https_cert_path = strdup("/tmp/fake-cert.pem");
+  config.https_key_path = strdup("/tmp/fake-key.pem");
+  EXPECT_EQ(config_validate(&config), 0);
+  free(config.api_key_hash);
+  free(config.https_cert_path);
+  free(config.https_key_path);
+}
