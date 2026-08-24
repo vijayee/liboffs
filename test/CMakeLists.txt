@@ -96,6 +96,7 @@ if (BUILD_TESTING)
             # is self-contained and no longer depends on a stale gitignored
             # certs/ca_cert.pem left on disk from a manual run.
             ${CMAKE_CURRENT_SOURCE_DIR}/../tools/offs-ca/ca_ops.c
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tools/offs-release-sign/sign_ops.c
             )
     # Match the OFFS_ENABLE_ASAN gate from the parent CMakeLists.txt: when on,
     # instrument the test exe and link the AddressSanitizer runtime so the
@@ -163,6 +164,8 @@ if (BUILD_TESTING)
     target_include_directories(testliboffs PRIVATE ${GMOCK_INCLUDE_DIR})
     # ca_ops.h for test_peer_verify's in-suite CA certificate generation.
     target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../tools/offs-ca)
+    # sign_ops.h for test_update_verify's ReleaseSignTool round-trip test.
+    target_include_directories(testliboffs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../tools/offs-release-sign)
 
     include(GoogleTest)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)

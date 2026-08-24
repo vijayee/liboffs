@@ -2,11 +2,13 @@
 
 extern "C" {
 #include "Update/update_verify.h"
+#include "sign_ops.h"
 #include <openssl/ssl.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/bio.h>
 #include <string.h>
+#include <stdlib.h>
 }
 
 TEST(UpdateTls, ContextEnablesPeerVerification) {
@@ -108,4 +110,54 @@ TEST(UpdateVerify, NullPubkeyFailsClosed) {
   uint8_t dummy_sig[64] = {0};
   bool ok = update_verify_manifest(dummy_sig, sizeof(dummy_sig), manifest, sizeof(manifest)-1, NULL, 0);
   EXPECT_FALSE(ok);
+}
+
+TEST(ReleaseSignTool, KeygenSignVerifyRoundTrip) {
+  // Generate a keypair to /tmp.
+  const char* tmpdir = getenv("TMPDIR");
+  if (tmpdir == NULL) tmpdir = "/tmp";
+  char priv_path[256], pub_path[256], manifest_path[256];
+  snprintf(priv_path, sizeof(priv_path), "%s/offs_release_test_priv.pem", tmpdir);
+  snprintf(pub_path, sizeof(pub_path), "%s/offs_release_test_pub.pem", tmpdir);
+  snprintf(manifest_path, sizeof(manifest_path), "%s/offs_release_test_manifest.cbor", tmpdir);
+  ASSERT_EQ(release_sign_keygen(priv_path, pub_path), 0);
+
+  // Write a manifest.
+  uint8_t manifest[] = "{\"version\":1,\"release_tag\":\"v1.2.3\",\"files\":[]}";
+  FILE* f = fopen(manifest_path, "wb");
+  ASSERT_NE(f, nullptr);
+  ASSERT_EQ(fwrite(manifest, 1, sizeof(manifest) - 1, f), sizeof(manifest) - 1);
+  fclose(f);
+
+  // Sign it.
+  ASSERT_EQ(release_sign_sign(priv_path, manifest_path), 0);
+
+  // Read the signature.
+  char sig_path[256];
+  snprintf(sig_path, sizeof(sig_path), "%s.sig", manifest_path);
+  FILE* sf = fopen(sig_path, "rb");
+  ASSERT_NE(sf, nullptr);
+  uint8_t sig[64];
+  size_t got = fread(sig, 1, 64, sf);
+  fclose(sf);
+  ASSERT_EQ(got, 64u);
+
+  // Read the pubkey PEM.
+  FILE* pf = fopen(pub_path, "rb");
+  ASSERT_NE(pf, nullptr);
+  char pub_pem[1024];
+  size_t pub_len = fread(pub_pem, 1, sizeof(pub_pem) - 1, pf);
+  fclose(pf);
+
+  // Verify with Task 2's update_verify_manifest.
+  bool ok = update_verify_manifest(sig, 64, manifest, sizeof(manifest) - 1, pub_pem, pub_len);
+  EXPECT_TRUE(ok);
+
+  // Tamper manifest → verify false.
+  uint8_t bad_manifest[] = "{\"version\":2,\"release_tag\":\"v1.2.3\",\"files\":[]}";
+  bool bad = update_verify_manifest(sig, 64, bad_manifest, sizeof(bad_manifest) - 1, pub_pem, pub_len);
+  EXPECT_FALSE(bad);
+
+  // Cleanup.
+  remove(priv_path); remove(pub_path); remove(manifest_path); remove(sig_path);
 }
