@@ -156,6 +156,9 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  /* Wire the HTTP idle/hard timeouts from the config (slowloris defense). */
+  http_server_set_timeouts(server, config.http_idle_timeout_ms, config.http_hard_timeout_ms);
+
   uint64_t server_start_ms = platform_monotonic_ns() / 1000000ULL;
   uint8_t running_val = 1;
   uint8_t draining_val = 0;
