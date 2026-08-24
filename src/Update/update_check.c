@@ -4,6 +4,7 @@
 
 #include "update_check.h"
 
+#include "update_verify.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include <cJSON.h>
@@ -163,7 +164,7 @@ static char* _https_get(const char* host, const char* path,
   address_info = NULL;
 
   /* TLS handshake */
-  ssl_context = SSL_CTX_new(TLS_client_method());
+  ssl_context = update_ssl_context_create();
   if (ssl_context == NULL) {
     _https_free_context(ssl_context, ssl_connection, socket_fd);
     return NULL;
@@ -177,7 +178,17 @@ static char* _https_get(const char* host, const char* path,
 
   SSL_set_fd(ssl_connection, socket_fd);
 
+  /* SNI: send the host name so the server presents the right cert. */
+  SSL_set_tlsext_host_name(ssl_connection, host);
+
   if (SSL_connect(ssl_connection) != 1) {
+    log_error("update_check: TLS handshake failed for %s", host);
+    _https_free_context(ssl_context, ssl_connection, socket_fd);
+    return NULL;
+  }
+
+  if (SSL_get_verify_result(ssl_connection) != X509_V_OK) {
+    log_error("update_check: TLS certificate verification failed for %s", host);
     _https_free_context(ssl_context, ssl_connection, socket_fd);
     return NULL;
   }
