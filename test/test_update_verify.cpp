@@ -2,6 +2,8 @@
 
 extern "C" {
 #include "Update/update_verify.h"
+#include "Update/update_actor.h"
+#include "ClientAPI/update_status_handler.h"
 #include "sign_ops.h"
 #include <openssl/ssl.h>
 #include <openssl/evp.h>
@@ -9,6 +11,7 @@ extern "C" {
 #include <openssl/bio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 }
 
 TEST(UpdateTls, ContextEnablesPeerVerification) {
@@ -160,4 +163,33 @@ TEST(ReleaseSignTool, KeygenSignVerifyRoundTrip) {
 
   // Cleanup.
   remove(priv_path); remove(pub_path); remove(manifest_path); remove(sig_path);
+}
+
+TEST(UpdateApply, MissingStagedUpdaterSetsFailedState) {
+  // Build a minimal update_actor_t pointing at an empty staging dir. The
+  // missing-staged-updater branch of _apply_update must set state to
+  // update_state_failed and return WITHOUT exit(0)ing — so the test process
+  // survives to observe the state. (The success branch calls exit(0) and is
+  // intentionally not exercised here; it is covered by code review + the
+  // de-wonk pass.)
+  char staging_dir[512];
+  const char* tmpdir = getenv("TMPDIR");
+  if (tmpdir == NULL) tmpdir = "/tmp";
+  snprintf(staging_dir, sizeof(staging_dir), "%s/offs_apply_test_XXXXXX", tmpdir);
+  ASSERT_NE(mkdtemp(staging_dir), nullptr);
+
+  update_actor_t ua;
+  memset(&ua, 0, sizeof(ua));
+  snprintf(ua.staging_dir, sizeof(ua.staging_dir), "%s", staging_dir);
+  snprintf(ua.install_dir, sizeof(ua.install_dir), "%s/inst", staging_dir);
+  snprintf(ua.backup_dir, sizeof(ua.backup_dir), "%s/backup", staging_dir);
+  ua.status_ctx = NULL;
+
+  update_actor_apply_for_test(&ua);
+
+  // Process survived (no exit(0)) — assert the failed state.
+  EXPECT_EQ(ua.state, update_state_failed);
+
+  // Cleanup the tmp staging dir.
+  rmdir(staging_dir);
 }

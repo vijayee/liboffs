@@ -19,7 +19,8 @@ typedef enum {
   update_state_downloading,
   update_state_staged,
   update_state_draining,
-  update_state_applying
+  update_state_applying,
+  update_state_failed
 } update_state_e;
 
 typedef struct update_actor_t {
@@ -54,5 +55,11 @@ void update_actor_destroy(update_actor_t* actor);
 void update_actor_check_now(update_actor_t* actor);
 update_state_e update_actor_get_state(update_actor_t* actor);
 const version_t* update_actor_get_pending_version(update_actor_t* actor);
+
+// Test-only accessor: invokes the internal _apply_update path. The missing-
+// staged-updater and fork-failure branches return without exiting the process
+// (setting state to update_state_failed); the success branch calls exit(0) and
+// must NOT be invoked from tests.
+void update_actor_apply_for_test(update_actor_t* actor);
 
 #endif // OFFS_UPDATE_ACTOR_H

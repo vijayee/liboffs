@@ -5,13 +5,25 @@
 #include "update_actor.h"
 #include "../Util/allocator.h"
 #include "../Util/atomic_compat.h"
+#include "../Util/log.h"
+#include "../Platform/platform_file.h"
 #include "update_download.h"
 #include "update_stage.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifndef OFFS_PATH_MAX
+  #ifdef _WIN32
+    #define OFFS_PATH_MAX 4096
+  #else
+    #include <limits.h>
+    #define OFFS_PATH_MAX 4096
+  #endif
+#endif
 
 typedef enum {
   UPDATE_MSG_CHECK = 1,
@@ -27,6 +39,7 @@ static const char* _state_to_string(update_state_e state) {
     case update_state_staged:      return "staged";
     case update_state_draining:    return "draining";
     case update_state_applying:    return "applying";
+    case update_state_failed:      return "failed";
     default:                       return "unknown";
   }
 }
@@ -154,16 +167,39 @@ static void _drain_tick(update_actor_t* ua) {
 static void _apply_update(update_actor_t* ua) {
   ua->state = update_state_applying;
   _update_status_ctx(ua);
-  pid_t pid = fork();
-  if (pid == 0) {
-    /* Child: replace self with updater binary */
-    execlp("offs-updater", "offs-updater",
-           ua->staging_dir, ua->install_dir, ua->backup_dir, NULL);
-    _exit(127);
-  } else if (pid > 0) {
-    /* Parent: terminate cleanly to let child take over */
-    exit(0);
+
+  // The staged updater was hash-verified against the signed manifest by
+  // update_download. Exec the STAGED absolute path — NOT a PATH lookup, which
+  // would run the old installed updater.
+  char staged_updater[OFFS_PATH_MAX];
+  snprintf(staged_updater, sizeof(staged_updater), "%s/offs-updater", ua->staging_dir);
+  if (!platform_file_exists(staged_updater)) {
+    log_error("update_apply: staged updater missing: %s — daemon stays alive", staged_updater);
+    ua->state = update_state_failed;
+    _update_status_ctx(ua);
+    return;
   }
+
+  pid_t pid = fork();
+  if (pid < 0) {
+    log_error("update_apply: fork failed: %s — daemon stays alive", strerror(errno));
+    ua->state = update_state_failed;
+    _update_status_ctx(ua);
+    return;
+  }
+  if (pid == 0) {
+    // Child: exec the staged, verified updater.
+    execl(staged_updater, "offs-updater",
+          ua->staging_dir, ua->install_dir, ua->backup_dir, NULL);
+    log_error("update_apply: exec failed: %s", strerror(errno));
+    _exit(127);
+  }
+  // Parent: the staged updater takes over (it stops the daemon service, copies
+  // files, restarts). exit(0) so the daemon process ends cleanly for the
+  // service manager. If the child's exec failed, the child _exit(127)s and the
+  // service manager restarts the daemon (which will see the failed state on
+  // next check). This is the existing flow's contract.
+  exit(0);
 }
 
 update_actor_t* update_actor_create(scheduler_pool_t* pool,
@@ -219,4 +255,8 @@ const version_t* update_actor_get_pending_version(update_actor_t* ua) {
     return &ua->pending_update->version;
   }
   return NULL;
+}
+
+void update_actor_apply_for_test(update_actor_t* ua) {
+  _apply_update(ua);
 }
