@@ -15,7 +15,6 @@ typedef struct {
   version_t version;
   char tag_name[64];
   char download_url[512];
-  char sha256[65];
   update_manifest_t* manifest;
   bool available;
   bool prerelease;
