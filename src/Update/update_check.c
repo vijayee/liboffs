@@ -4,6 +4,7 @@
 
 #include "update_check.h"
 
+#include "update_manifest.h"
 #include "update_verify.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
@@ -425,28 +426,16 @@ update_info_t* update_check_fetch(const update_check_config_t* config,
     }
   }
 
-  /* Extract SHA256 from release body */
-  cJSON* body_item = cJSON_GetObjectItem(release_entry, "body");
-  if (body_item != NULL && cJSON_IsString(body_item)) {
-    const char* body_text = body_item->valuestring;
-    const char* sha_line = strstr(body_text, "sha256:");
-
-    if (sha_line != NULL) {
-      sha_line += 7; /* skip "sha256:" */
-
-      /* Skip whitespace */
-      while (*sha_line == ' ' || *sha_line == '\t') {
-        sha_line++;
-      }
-
-      /* Copy up to 64 hex characters */
-      size_t sha_index = 0;
-      while (sha_index < sizeof(info->sha256) - 1 &&
-             *sha_line != '\0' && *sha_line != '\n' && *sha_line != '\r') {
-        info->sha256[sha_index++] = *sha_line++;
-      }
-      info->sha256[sha_index] = '\0';
-    }
+  /* Fetch + verify the signed manifest (replaces sha256 markdown scraping).
+   * The manifest carries the per-file SHA256 list; without a verified
+   * manifest the update path cannot verify file hashes, so fail closed. */
+  info->manifest = update_manifest_fetch(info->tag_name, config);
+  if (info->manifest == NULL) {
+    log_warn("update_check: signed manifest fetch/verify failed for %s — update unavailable",
+             info->tag_name);
+    cJSON_Delete(root);
+    update_info_free(info);
+    return NULL;
   }
 
   if (is_newer && info->download_url[0] == '\0') {
@@ -461,6 +450,9 @@ update_info_t* update_check_fetch(const update_check_config_t* config,
 
 void update_info_free(update_info_t* info) {
   if (info != NULL) {
+    if (info->manifest != NULL) {
+      update_manifest_free(info->manifest);
+    }
     free(info);
   }
 }
