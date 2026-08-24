@@ -20,15 +20,35 @@ typedef struct {
   char* data_dir;
   config_trigger_restart_fn trigger_restart; /* NULL → offs_node_restart fallback */
   void* restart_user_data;
+  bool local_no_auth;  /* mirrors config->config_local_binding_no_auth */
 } config_routes_ctx_t;
 
-/* Auth: check Bearer token OR local binding */
+/* Auth + transport check for config endpoints. For mutation endpoints
+   (PUT /config, POST /config/restart) non-loopback bindings are refused
+   outright (403) regardless of bearer; loopback bindings skip auth only when
+   ctx->local_no_auth is set. For read-only GET /config the bearer middleware
+   already enforced auth on non-loopback, so this just authorizes loopback. */
 static int _config_check_auth(http_request_t* request, http_response_t* response,
-                               http_server_t* server) {
-  /* Local binding — skip auth */
-  if (http_server_is_local_binding(server)) return 0;
+                               http_server_t* server, config_routes_ctx_t* ctx,
+                               bool is_mutation) {
+  /* Mutations are refused on non-loopback bindings — defense in depth, even
+     if a valid bearer reached this point. */
+  if (is_mutation && !http_server_is_local_binding(server)) {
+    http_response_set_status(response, HTTP_STATUS_FORBIDDEN);
+    http_response_set_header(response, "Content-Type", "application/json");
+    const char* msg = "{\"error\":\"config mutation requires local transport\"}";
+    http_response_write(response, msg, strlen(msg));
+    http_response_end(response);
+    return -1;
+  }
 
-  /* Remote — require Bearer token */
+  /* Loopback + opt-out flag → skip bearer. Default (flag false) still
+     requires the bearer middleware to have set is_authenticated. */
+  if (http_server_is_local_binding(server) && ctx->local_no_auth) {
+    request->is_authenticated = 1;
+    return 0;
+  }
+
   if (!request->is_authenticated) {
     http_response_set_status(response, HTTP_STATUS_UNAUTHORIZED);
     http_response_end(response);
@@ -45,7 +65,7 @@ static void _config_get_handler(http_request_t* request, http_response_t* respon
                                  void* user_data) {
   config_routes_ctx_t* ctx = (config_routes_ctx_t*)user_data;
 
-  if (_config_check_auth(request, response, ctx->node->http_server) != 0) return;
+  if (_config_check_auth(request, response, ctx->node->http_server, ctx, false) != 0) return;
 
   cJSON* json = config_to_json(ctx->node->config);
   char* json_str = cJSON_Print(json);
@@ -68,7 +88,7 @@ static void _config_put_handler(http_request_t* request, http_response_t* respon
                                  void* user_data) {
   config_routes_ctx_t* ctx = (config_routes_ctx_t*)user_data;
 
-  if (_config_check_auth(request, response, ctx->node->http_server) != 0) return;
+  if (_config_check_auth(request, response, ctx->node->http_server, ctx, true) != 0) return;
 
   /* Need a body */
   if (request->body == NULL || request->body->size == 0) {
@@ -187,15 +207,10 @@ static void _config_restart_handler(http_request_t* request, http_response_t* re
                                      void* user_data) {
   config_routes_ctx_t* ctx = (config_routes_ctx_t*)user_data;
 
-  /* Restart is only allowed on local transports */
-  if (!http_server_is_local_binding(ctx->node->http_server)) {
-    http_response_set_status(response, HTTP_STATUS_FORBIDDEN);
-    http_response_set_header(response, "Content-Type", "application/json");
-    const char* msg = "{\"error\":\"restart requires local transport\"}";
-    http_response_write(response, msg, strlen(msg));
-    http_response_end(response);
-    return;
-  }
+  /* Restart is a mutation — refused on non-loopback bindings, and on loopback
+     requires either the opt-out flag or a valid bearer (checked via
+     _config_check_auth). */
+  if (_config_check_auth(request, response, ctx->node->http_server, ctx, true) != 0) return;
 
   /* Verify pending config exists */
   if (config_pending_exists(ctx->data_dir) != 1) {
@@ -239,6 +254,7 @@ void config_routes_register(http_server_t* server, offs_node_t* node,
   ctx->data_dir = strdup(data_dir);
   ctx->trigger_restart = trigger_restart;
   ctx->restart_user_data = restart_user_data;
+  ctx->local_no_auth = (config != NULL) ? config->config_local_binding_no_auth : false;
 
   http_server_get_with_data(server, "/config", _config_get_handler, ctx,
                             _config_routes_ctx_destroy);

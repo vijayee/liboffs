@@ -150,3 +150,15 @@ TEST(ConfigValidate, PeerStateSaveIntervalBounded) {
   config.peer_state_save_interval_ms = 5000;  // below 10s floor
   EXPECT_NE(config_validate(&config), 0);
 }
+
+TEST(ConfigValidate, LocalBindingNoAuthDefaultsFalse) {
+  config_t config = config_default();
+  EXPECT_FALSE(config.config_local_binding_no_auth);
+  EXPECT_EQ(config_validate(&config), 0);
+}
+
+TEST(ConfigValidate, LocalBindingNoAuthTrueAccepted) {
+  config_t config = config_default();
+  config.config_local_binding_no_auth = true;
+  EXPECT_EQ(config_validate(&config), 0);
+}

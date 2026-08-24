@@ -1064,9 +1064,14 @@ void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
     http_server_use(server, cors_middleware, cors_config,
                     (void (*)(void*))cors_config_destroy);
 
-    /* Register auth middleware if an API key hash is configured */
-    if (config != NULL && config->api_key_hash != NULL && api_key != NULL) {
-        auth_middleware_t* auth = auth_middleware_create(api_key, config->api_key_hash);
+    /* Register auth middleware if an API key hash is configured. The plaintext
+       api_key is no longer passed to the middleware (it was unused); the
+       middleware validates the bearer token against the bcrypt hash and, when
+       config_local_binding_no_auth is set, skips bearer on loopback. */
+    if (config != NULL && config->api_key_hash != NULL) {
+        auth_middleware_t* auth = auth_middleware_create(config->api_key_hash,
+                                                          config->config_local_binding_no_auth,
+                                                          server);
         if (auth != NULL) {
             http_server_use(server, auth_middleware_handler(), auth,
                             (void (*)(void*))auth_middleware_destroy);

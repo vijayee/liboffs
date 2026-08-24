@@ -62,6 +62,7 @@ config_t config_default() {
   config.tcp_tls_key_path = NULL;
   config.allow_secure = false;
   config.api_key_hash = NULL;
+  config.config_local_binding_no_auth = false;
   config.log_level = LOG_INFO;
   config.log_structured = false;
   for (int mod_index = 0; mod_index < 9; mod_index++) {

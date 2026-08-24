@@ -10,11 +10,16 @@ extern "C" {
 #include "../src/ClientAPI/HTTP/http_route.h"
 #include "../src/ClientAPI/HTTP/http_headers.h"
 #include "../src/ClientAPI/HTTP/cors.h"
+#include "../src/ClientAPI/HTTP/auth_middleware.h"
+#include "../src/ClientAPI/HTTP/config_routes.h"
+#include "../src/Configuration/config.h"
+#include "../src/Node/node.h"
 #include "../src/Scheduler/scheduler.h"
 #include "../src/Platform/platform.h"
 #include "../src/Platform/platform_socket.h"
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 /* usleep is POSIX-only; platform_sleep_ms is the cross-platform equivalent.
  * Call sites pass microsecond values (e.g. 10000 == 10ms), so divide by 1000.
@@ -575,6 +580,160 @@ TEST(TestCorsConfig, TestOffsystemConfig) {
   EXPECT_NE(strstr(config->allow_headers, "stream-length"), nullptr);
   EXPECT_NE(strstr(config->allow_headers, "server-address"), nullptr);
   cors_config_destroy(config);
+}
+
+// --- Local-Binding Auth Tests ---
+//
+// config_local_binding_no_auth (default false) controls whether the auth
+// middleware skips bearer on loopback. Default: bearer required even on
+// 127.0.0.1. Opt-out (true): no-bearer allowed on loopback. Config mutations
+// (PUT /config, POST /config/restart) are refused on non-loopback bindings
+// regardless of bearer.
+
+static const char* k_local_auth_test_hash =
+    "$2b$04$MTIzNDU2Nzg5MDEyMzQ1NePheb5yq4/5.giE2KzFrDwx2yMnwVtpW"; /* "test-key" */
+static const char* k_local_auth_test_key = "test-key";
+
+class LocalBindingAuth : public testing::Test {
+public:
+  scheduler_pool_t* pool;
+  http_server_t* server;
+  uint16_t port;
+  config_t config;
+  offs_node_t node;
+  char* data_dir;
+
+  void SetUp() override {
+    port = _next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
+    pool = scheduler_pool_create(4);
+    scheduler_pool_start(pool);
+    server = NULL;
+    memset(&node, 0, sizeof(node));
+    config = config_default();
+    config.api_key_hash = strdup(k_local_auth_test_hash);
+    node.config = &config;
+    char dir_template[] = "/tmp/test_local_auth_XXXXXX";
+    data_dir = mkdtemp(dir_template);
+    ASSERT_NE(data_dir, nullptr);
+    data_dir = strdup(data_dir);
+  }
+
+  void TearDown() override {
+    if (server != NULL) {
+      http_server_stop(server);
+    }
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    if (server != NULL) {
+      http_server_destroy(server);
+    }
+    scheduler_pool_destroy(pool);
+    rmdir(data_dir);
+    free(data_dir);
+    free(config.api_key_hash);
+    config.api_key_hash = NULL;
+  }
+
+  /* Create the server bound to host, register auth middleware + config routes,
+     and start listening. */
+  void setup_server(const char* host, bool local_no_auth) {
+    server = http_server_create(pool, host, port);
+    ASSERT_TRUE(server != NULL);
+    node.http_server = server;
+    config.config_local_binding_no_auth = local_no_auth;
+
+    auth_middleware_t* auth = auth_middleware_create(config.api_key_hash,
+                                                      local_no_auth, server);
+    ASSERT_TRUE(auth != NULL);
+    http_server_use(server, auth_middleware_handler(), auth,
+                    (void (*)(void*))auth_middleware_destroy);
+
+    config_routes_register(server, &node, &config, data_dir, NULL, NULL);
+    http_server_listen(server);
+  }
+
+  platform_socket_t* connect() {
+    platform_socket_t* sock = NULL;
+    for (int attempts = 0; attempts < 50; attempts++) {
+      platform_usleep(10000);
+      sock = _connect_to_server(port);
+      if (sock != NULL) break;
+    }
+    return sock;
+  }
+};
+
+/* Default (flag=false): no bearer on loopback → 401 from auth middleware. */
+TEST_F(LocalBindingAuth, BearerRequiredOnLoopbackByDefault) {
+  setup_server("127.0.0.1", false);
+  platform_socket_t* sock = connect();
+  ASSERT_NE(sock, nullptr);
+
+  char response[4096];
+  const char* request =
+      "PUT /config HTTP/1.1\r\n"
+      "Host: localhost\r\n"
+      "Content-Length: 2\r\n\r\n"
+      "{}";
+  int result = _send_and_recv(sock, request, response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "401"), nullptr);
+
+  platform_socket_destroy(sock);
+}
+
+/* Opt-out (flag=true): no bearer on loopback → 200 from config PUT handler. */
+TEST_F(LocalBindingAuth, NoAuthOnLoopbackWhenOptOut) {
+  setup_server("127.0.0.1", true);
+  platform_socket_t* sock = connect();
+  ASSERT_NE(sock, nullptr);
+
+  char response[4096];
+  const char* request =
+      "PUT /config HTTP/1.1\r\n"
+      "Host: localhost\r\n"
+      "Content-Length: 2\r\n\r\n"
+      "{}";
+  int result = _send_and_recv(sock, request, response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "200"), nullptr);
+
+  platform_socket_destroy(sock);
+}
+
+/* Non-loopback binding: even with a valid bearer, config mutation → 403. */
+TEST_F(LocalBindingAuth, ConfigMutationRefusedNonLoopback) {
+  setup_server("0.0.0.0", false);
+  platform_socket_t* sock = connect();
+  ASSERT_NE(sock, nullptr);
+
+  char response[4096];
+  std::string request =
+      std::string("PUT /config HTTP/1.1\r\n") +
+      "Host: localhost\r\n" +
+      "Authorization: Bearer " + k_local_auth_test_key + "\r\n" +
+      "Content-Length: 2\r\n\r\n" +
+      "{}";
+  int result = _send_and_recv(sock, request.c_str(), response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "403"), nullptr);
+
+  platform_socket_destroy(sock);
+}
+
+/* Opt-out (flag=true): GET /config on loopback with no bearer → 200. */
+TEST_F(LocalBindingAuth, ConfigGetAllowedOnLoopback) {
+  setup_server("127.0.0.1", true);
+  platform_socket_t* sock = connect();
+  ASSERT_NE(sock, nullptr);
+
+  char response[8192];
+  const char* request = "GET /config HTTP/1.1\r\nHost: localhost\r\n\r\n";
+  int result = _send_and_recv(sock, request, response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "200"), nullptr);
+
+  platform_socket_destroy(sock);
 }
 
 } // namespace http_test

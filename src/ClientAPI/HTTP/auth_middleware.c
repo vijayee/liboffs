@@ -15,39 +15,45 @@
 #include <string.h>
 
 struct auth_middleware_t {
-  char* api_key;
   char* bcrypt_hash;
+  bool allow_local_no_auth;
+  http_server_t* server;
 };
 
-auth_middleware_t* auth_middleware_create(const char* api_key, const char* bcrypt_hash) {
-  if (api_key == NULL || bcrypt_hash == NULL) {
+auth_middleware_t* auth_middleware_create(const char* bcrypt_hash,
+                                          bool allow_local_no_auth,
+                                          http_server_t* server) {
+  if (bcrypt_hash == NULL) {
     return NULL;
   }
   auth_middleware_t* auth = get_clear_memory(sizeof(auth_middleware_t));
-  auth->api_key = strdup(api_key);
   auth->bcrypt_hash = strdup(bcrypt_hash);
-  if (auth->api_key == NULL || auth->bcrypt_hash == NULL) {
-    free(auth->api_key);
-    free(auth->bcrypt_hash);
+  if (auth->bcrypt_hash == NULL) {
     free(auth);
     return NULL;
   }
+  auth->allow_local_no_auth = allow_local_no_auth;
+  auth->server = server;
   return auth;
 }
 
 void auth_middleware_destroy(auth_middleware_t* auth) {
   if (auth == NULL) return;
-  /* Zero the API key before freeing */
-  if (auth->api_key != NULL) {
-    memset(auth->api_key, 0, strlen(auth->api_key));
-    free(auth->api_key);
-  }
   free(auth->bcrypt_hash);
   free(auth);
 }
 
 static int _auth_handler(http_request_t* request, http_response_t* response, void* user_data) {
   auth_middleware_t* auth = (auth_middleware_t*)user_data;
+
+  /* Opt-out: on a loopback binding with the flag set, skip bearer auth.
+     This is the only path that lets a no-bearer request through; the
+     default (allow_local_no_auth=false) still requires bearer on loopback. */
+  if (auth->allow_local_no_auth && auth->server != NULL &&
+      http_server_is_local_binding(auth->server)) {
+    request->is_authenticated = 1;
+    return 0;
+  }
 
   const char* auth_header = http_headers_get(&request->headers, "Authorization");
   if (auth_header == NULL) {

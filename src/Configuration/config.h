@@ -72,6 +72,7 @@ typedef struct {
 
   /* Auth */
   char*    api_key_hash;        // bcrypt hash ($2b$ prefix), NULL if auth disabled
+  bool     config_local_binding_no_auth;  // when true, skip bearer auth for config-mutation endpoints on loopback (default false — bearer required even on loopback)
 
   /* Logging */
   int      log_level;            // LOG_TRACE..LOG_FATAL from Util/log.h
