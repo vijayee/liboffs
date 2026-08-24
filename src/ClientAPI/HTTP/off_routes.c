@@ -878,7 +878,8 @@ static void _put_on_request_data(void* ctx, void* data) {
      * values above OFFS_MAX_STREAM_LENGTH, so a malicious client cannot declare
      * a tiny stream-length and then stream gigabytes through the pipeline —
      * once bytes_received crosses stream_length, subsequent chunks are dropped
-     * and the stream is marked exceeded so the finalizer treats it as an error. */
+     * (stream_exceeded gates further writes) so the writeable_off_stream only
+     * ever stores up to the declared stream_length bytes. */
     if (put_ctx->stream_exceeded) {
         return;
     }
