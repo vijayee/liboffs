@@ -3953,3 +3953,148 @@ TEST(NetworkBadBlockMetric, CounterIncrementsOnBadBlock) {
   network_bad_block_received();
   EXPECT_EQ(network_bad_blocks_received_value(), before + 2);
 }
+
+// === Gossip per-source insertion cap tests ===
+//
+// A single gossip/pull packet can advertise up to RING_MAX_RINGS targets.
+// Without a per-source cap, a malicious peer can flood the ring table with
+// chaff. GOSSIP_PER_SOURCE_CAP (defined in network.c) bounds the number of
+// NEW insertions per packet. The test mirrors the value as
+// kGossipPerSourceCap = (RING_MAX_RINGS / 2) — keep in sync with network.c.
+// These tests drive network_dispatch directly with a minimal network_t
+// (no actor pool, no I/O) and verify the cap holds for both WIRE_GOSSIP
+// and WIRE_GOSSIP_PULL handlers.
+
+static const size_t kGossipPerSourceCap = (RING_MAX_RINGS / 2);
+
+class GossipCapTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    config = config_default();
+    authority = authority_create(&config);
+    ASSERT_NE(authority, nullptr);
+
+    network = (network_t*)calloc(1, sizeof(network_t));
+    ASSERT_NE(network, nullptr);
+    network->authority = authority;
+    network->rings = ring_set_create(0, 0, 0);
+    ASSERT_NE(network->rings, nullptr);
+    hebbian_table_init(&network->hebbian, 4, 0.999f);
+    rate_limit_table_init(&network->rate_limits, 4);
+
+    // Distinct local id so the sender id never collides with targets.
+    memset(authority->local_id.hash, 0xAB, NODE_ID_HASH_SIZE);
+  }
+
+  void TearDown() override {
+    if (network != nullptr) {
+      ring_set_clear_nodes(network->rings);
+      ring_set_destroy(network->rings);
+      hebbian_table_deinit(&network->hebbian);
+      rate_limit_table_deinit(&network->rate_limits);
+      free(network);
+    }
+    authority_destroy(authority);
+  }
+
+  // Build RING_MAX_RINGS distinct target ids, none equal to sender_id.
+  void MakeDistinctTargets(node_id_t targets[RING_MAX_RINGS],
+                           const node_id_t& sender_id) {
+    for (uint8_t index = 0; index < RING_MAX_RINGS; index++) {
+      memset(targets[index].hash, 0x10 + index, NODE_ID_HASH_SIZE);
+      ASSERT_NE(memcmp(targets[index].hash, sender_id.hash, NODE_ID_HASH_SIZE), 0);
+    }
+  }
+
+  config_t config;
+  authority_t* authority;
+  network_t* network;
+};
+
+TEST_F(GossipCapTest, PerSourceInsertionCapped) {
+  node_id_t sender_id = {};
+  memset(sender_id.hash, 0xEE, NODE_ID_HASH_SIZE);
+
+  wire_gossip_t gossip = {};
+  gossip.message_id = 1;
+  gossip.sender_id = sender_id;
+  gossip.rendezvous_addr = 0;
+  gossip.rendezvous_port = 0;
+  gossip.target_count = RING_MAX_RINGS;
+  MakeDistinctTargets(gossip.targets, sender_id);
+
+  message_t msg = {};
+  msg.type = NETWORK_GOSSIP_RECEIVED;
+  msg.payload = &gossip;
+  msg.payload_destroy = NULL;
+
+  size_t before = ring_set_total_nodes(network->rings);
+  ASSERT_EQ(before, 0u);
+
+  network_dispatch(network, &msg);
+
+  // Sender + at most kGossipPerSourceCap new targets.
+  size_t after = ring_set_total_nodes(network->rings);
+  EXPECT_EQ(after, (size_t)(1 + kGossipPerSourceCap));
+}
+
+TEST_F(GossipCapTest, PullPerSourceInsertionCapped) {
+  node_id_t sender_id = {};
+  memset(sender_id.hash, 0xDD, NODE_ID_HASH_SIZE);
+
+  wire_gossip_pull_t pull = {};
+  pull.message_id = 2;
+  pull.sender_id = sender_id;
+  pull.rendezvous_addr = 0;
+  pull.rendezvous_port = 0;
+  pull.target_count = RING_MAX_RINGS;
+  MakeDistinctTargets(pull.targets, sender_id);
+
+  message_t msg = {};
+  msg.type = NETWORK_GOSSIP_PULL_RECEIVED;
+  msg.payload = &pull;
+  msg.payload_destroy = NULL;
+
+  network_dispatch(network, &msg);
+
+  size_t after = ring_set_total_nodes(network->rings);
+  EXPECT_EQ(after, (size_t)(1 + kGossipPerSourceCap));
+}
+
+TEST_F(GossipCapTest, AlreadyPresentTargetsDoNotConsumeBudget) {
+  node_id_t sender_id = {};
+  memset(sender_id.hash, 0xCC, NODE_ID_HASH_SIZE);
+
+  // Pre-insert the first 3 targets so they are already in the ring.
+  node_id_t targets[RING_MAX_RINGS];
+  MakeDistinctTargets(targets, sender_id);
+  for (uint8_t index = 0; index < 3; index++) {
+    net_node_t* node = net_node_create(&targets[index], 0, 0);
+    ASSERT_NE(node, nullptr);
+    node->weight = FIND_BLOCK_MIN_WEIGHT;
+    ASSERT_EQ(ring_set_insert(network->rings, node, 0), 0);
+  }
+
+  wire_gossip_t gossip = {};
+  gossip.message_id = 3;
+  gossip.sender_id = sender_id;
+  gossip.rendezvous_addr = 0;
+  gossip.rendezvous_port = 0;
+  gossip.target_count = RING_MAX_RINGS;
+  memcpy(gossip.targets, targets, sizeof(targets));
+
+  message_t msg = {};
+  msg.type = NETWORK_GOSSIP_RECEIVED;
+  msg.payload = &gossip;
+  msg.payload_destroy = NULL;
+
+  network_dispatch(network, &msg);
+
+  // 3 pre-inserted + sender + up to kGossipPerSourceCap NEW targets.
+  // The 3 pre-inserted targets are skipped without consuming cap budget,
+  // so the handler can still insert kGossipPerSourceCap new targets
+  // from the remaining (RING_MAX_RINGS - 3) candidates.
+  size_t after = ring_set_total_nodes(network->rings);
+  size_t expected = 3u + 1u + (size_t)kGossipPerSourceCap;
+  EXPECT_EQ(after, expected);
+}

@@ -49,6 +49,21 @@
 #define PING_CAPACITY_INTERVAL_MS 900000  // 15 minutes
 #define FRIEND_RECONNECT_INTERVAL_MS 5000
 
+/* Per-source cap on new ring insertions from a single gossip/pull packet.
+   Bounds ring chaff: a malicious peer can advertise at most this many
+   previously-unknown targets per gossip message. Set to half of
+   RING_MAX_RINGS so the cap is effective (RING_MAX_RINGS is 10; a cap of
+   32 would be a no-op against the wire-format bound of RING_MAX_RINGS
+   targets per packet). Only NEW insertions count toward the cap —
+   targets already in the ring are skipped without consuming budget.
+
+   The referral penalty for unreachable (addr=0) targets is deferred: it
+   requires a failure-signal from a failed ping/find_block to the
+   advertised target, which is out of scope for the cap-only fix.
+   test/test_network.cpp mirrors this value as (RING_MAX_RINGS / 2) —
+   keep them in sync. */
+#define GOSSIP_PER_SOURCE_CAP (RING_MAX_RINGS / 2)
+
 /* Process-global counter for peer-supplied blocks whose hash did not match
    the requested hash. Registered once in network_create. File-scope static;
    external callers read the value via network_bad_blocks_received_value. */
@@ -1995,9 +2010,24 @@ static void network_handle_gossip_received(network_t* network, message_t* msg) {
   network_add_node_to_ring(network, &gossip->sender_id,
                             gossip->rendezvous_addr, gossip->rendezvous_port);
 
-  // Add all targets from the gossip packet
-  for (uint8_t index = 0; index < gossip->target_count && index < RING_MAX_RINGS; index++) {
-    network_add_node_to_ring(network, &gossip->targets[index], 0, 0);
+  // Add targets from the gossip packet, capped at GOSSIP_PER_SOURCE_CAP new
+  // insertions. Targets already in the ring are skipped without consuming
+  // budget — only NEW insertions count toward the cap. Guarded on
+  // network->rings since ring_set_find_by_id needs a live set to test for
+  // prior presence; when rings is NULL there is nothing to insert into.
+  size_t inserted = 0;
+  if (network->rings != NULL) {
+    for (uint8_t index = 0;
+         index < gossip->target_count && index < RING_MAX_RINGS &&
+         inserted < GOSSIP_PER_SOURCE_CAP;
+         index++) {
+      net_node_t* existing = ring_set_find_by_id(network->rings,
+                                                 &gossip->targets[index]);
+      if (existing == NULL) {
+        network_add_node_to_ring(network, &gossip->targets[index], 0, 0);
+        inserted++;
+      }
+    }
   }
 
   // PUSHPULL: send our ring membership back to the sender
@@ -2048,9 +2078,22 @@ static void network_handle_gossip_pull_received(network_t* network, message_t* m
   network_add_node_to_ring(network, &pull->sender_id,
                             pull->rendezvous_addr, pull->rendezvous_port);
 
-  // Add all targets from the gossip pull packet
-  for (uint8_t index = 0; index < pull->target_count && index < RING_MAX_RINGS; index++) {
-    network_add_node_to_ring(network, &pull->targets[index], 0, 0);
+  // Add targets from the pull packet, capped at GOSSIP_PER_SOURCE_CAP new
+  // insertions. Targets already in the ring are skipped without consuming
+  // budget — only NEW insertions count toward the cap.
+  size_t inserted = 0;
+  if (network->rings != NULL) {
+    for (uint8_t index = 0;
+         index < pull->target_count && index < RING_MAX_RINGS &&
+         inserted < GOSSIP_PER_SOURCE_CAP;
+         index++) {
+      net_node_t* existing = ring_set_find_by_id(network->rings,
+                                                 &pull->targets[index]);
+      if (existing == NULL) {
+        network_add_node_to_ring(network, &pull->targets[index], 0, 0);
+        inserted++;
+      }
+    }
   }
 
   // No response — this is the pull half of PUSHPULL
