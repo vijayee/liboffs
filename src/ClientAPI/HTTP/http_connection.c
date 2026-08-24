@@ -210,6 +210,19 @@ static int _on_headers_complete(http_parser* parser) {
 static int _on_body(http_parser* parser, const char* at, size_t length) {
   http_connection_t* connection = (http_connection_t*)parser->data;
 
+  /* Defensive sentinel: historically a heap-corruption bug left buffer->data
+     NULL in the body handlers (see docs/OPERATIONS.md "Known issues"). The
+     root cause is under investigation; guard the entry so a corrupted pointer
+     logs and aborts the parse instead of dereferencing NULL. http-parser
+     never legitimately invokes on_body with at==NULL or length==0, so these
+     checks are free in the uncorrupted path. */
+  if (at == NULL || length == 0 || connection == NULL || connection->request == NULL) {
+    log_error("_on_body: NULL body pointer or length (at=%p length=%zu connection=%p request=%p) — heap corruption suspected",
+              (const void*)at, length, (void*)connection,
+              connection ? (void*)connection->request : NULL);
+    return 1;
+  }
+
   // Streaming mode: pipe body chunks directly into the request stream
   if (connection->streaming_route != NULL) {
     buffer_t* chunk = buffer_create_from_pointer_copy((uint8_t*)at, length);
@@ -228,11 +241,19 @@ static int _on_body(http_parser* parser, const char* at, size_t length) {
       : (length < 8192 ? 8192 : length * 2);
     connection->request->body = buffer_create_with_capacity(0, initial_capacity);
     buffer_ensure_capacity(connection->request->body, length);
+    if (connection->request->body->data == NULL) {
+      log_error("_on_body: buffer->data NULL after ensure_capacity — heap corruption suspected");
+      return 1;
+    }
     memcpy(connection->request->body->data, at, length);
     connection->request->body->size = length;
   } else {
     size_t needed = connection->request->body->size + length;
     buffer_ensure_capacity(connection->request->body, needed);
+    if (connection->request->body->data == NULL) {
+      log_error("_on_body: buffer->data NULL after ensure_capacity (append path) — heap corruption suspected");
+      return 1;
+    }
     memcpy(connection->request->body->data + connection->request->body->size, at, length);
     connection->request->body->size = needed;
   }

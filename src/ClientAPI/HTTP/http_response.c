@@ -5,6 +5,7 @@
 #include "http_connection.h"
 #include "http_request.h"
 #include "../../Util/allocator.h"
+#include "../../Util/log.h"
 #include "../../Buffer/buffer.h"
 #include <poll-dancer/poll-dancer.h>
 #include <stdio.h>
@@ -124,6 +125,16 @@ void http_response_end(http_response_t* response) {
 static void _pipe_on_data(void* ctx, void* chunk) {
     http_response_t* response = (http_response_t*)ctx;
     buffer_t* buf = (buffer_t*)chunk;
+    /* Defensive sentinel: historically a heap-corruption bug left buffer->data
+       NULL in the response piping path (see docs/OPERATIONS.md "Known issues").
+       The root cause is under investigation; guard the entry so a corrupted
+       chunk logs and drops instead of dereferencing NULL in http_response_write. */
+    if (buf == NULL || buf->data == NULL) {
+        log_error("_pipe_on_data: NULL buf or buf->data (buf=%p data=%p size=%zu) — heap corruption suspected",
+                 (void*)buf, buf ? (void*)buf->data : NULL,
+                 buf ? (size_t)buf->size : (size_t)0);
+        return;
+    }
     http_response_write(response, (const char*)buf->data, buf->size);
 }
 

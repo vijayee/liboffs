@@ -873,6 +873,18 @@ static void _put_on_request_data(void* ctx, void* data) {
     put_context_t* put_ctx = (put_context_t*)ctx;
     buffer_t* chunk = (buffer_t*)data;
 
+    /* Defensive sentinel: historically a heap-corruption bug left buffer->data
+       NULL in the streamed-PUT body handler (see docs/OPERATIONS.md "Known
+       issues"). The root cause is under investigation; guard the entry so a
+       corrupted chunk logs and drops instead of dereferencing NULL inside
+       writeable_off_stream_write / buffer_concat. */
+    if (chunk == NULL || chunk->data == NULL) {
+        log_error("_put_on_request_data: NULL chunk or chunk->data (chunk=%p data=%p size=%zu) — heap corruption suspected",
+                 (void*)chunk, chunk ? (void*)chunk->data : NULL,
+                 chunk ? (size_t)chunk->size : (size_t)0);
+        return;
+    }
+
     /* Bound the actual streamed bytes against the client-declared stream-length.
      * The pre-flight headers-complete handler already rejects stream-length
      * values above OFFS_MAX_STREAM_LENGTH, so a malicious client cannot declare
