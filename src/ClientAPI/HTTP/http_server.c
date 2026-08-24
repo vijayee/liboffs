@@ -293,14 +293,23 @@ void http_server_destroy(http_server_t* server) {
      * pending_messages (pending_counter is left intact). */
     actor_detach_pool(&conn->actor);
     message_queue_destroy(&conn->actor.queue);
-    /* Clean up the watcher — the I/O thread is already stopped so we
-     * can stop and destroy it directly on the main thread. */
+    /* Clean up the watcher and idle timer — the I/O thread is already
+     * stopped (joined in http_server_stop above) so we can stop and destroy
+     * them directly on the main thread. The idle timer was armed on the I/O
+     * loop in http_connection_create; if we don't tear it down here each
+     * connection still in the vector at shutdown leaks its pd_timer_t. */
     if (ATOMIC_LOAD(&conn->watcher) != NULL) {
       pd_watcher_t* watcher = ATOMIC_EXCHANGE(&conn->watcher, NULL);
       if (watcher != NULL) {
         pd_watcher_stop(watcher);
         pd_watcher_destroy(watcher);
       }
+    }
+    if (conn->idle_timer != NULL) {
+      pd_timer_t* timer = conn->idle_timer;
+      conn->idle_timer = NULL;
+      pd_timer_stop(timer);
+      pd_timer_destroy(timer);
     }
     if (conn->request != NULL) {
       DESTROY(conn->request, http_request);
