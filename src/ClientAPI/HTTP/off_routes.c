@@ -1065,24 +1065,6 @@ static int _off_put_headers_complete(http_connection_t* connection,
     return 1;
 }
 
-static void _off_post_handler(http_request_t* request, http_response_t* response, void* user_data) {
-    off_routes_context_t* ctx = (off_routes_context_t*)user_data;
-    (void)ctx;
-
-    off_url_t* url = off_url_parse(request->path);
-    if (!url) {
-        http_response_set_status(response, 400);
-        http_response_end(response);
-        return;
-    }
-
-    // POST is for temporary block management
-    // For now, just acknowledge
-    http_response_set_status(response, 200);
-    http_response_end(response);
-    off_url_destroy(url);
-}
-
 void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
                          block_cache_t* bc, ofd_cache_t* ofd_cache, tuple_cache_t* tc,
                          network_t* network,
@@ -1124,6 +1106,4 @@ void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
                                _off_put_handler, ctx, NULL);
     http_route_t* put_route = &server->routes.data[server->routes.length - 1];
     put_route->headers_complete_handler = _off_put_headers_complete;
-    http_server_post_with_data(server, OFF_GET_PATTERN,
-                                _off_post_handler, ctx, NULL);
 }
