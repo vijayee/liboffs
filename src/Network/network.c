@@ -5396,22 +5396,26 @@ void network_dispatch(void* state, message_t* msg) {
         }
 
         uint8_t type = wire_get_type(wire_msg);
-        // Inbound rate limiting for relayed messages — enforce after the
-        // sender_id is extracted (so we have a key) but before dispatch. The
-        // key is the wire sender_id (relay trust is a separate concern; the
-        // signed-nonce challenge gates admission). See audit #12.
+        // Inbound rate limiting for relayed messages — enforce before dispatch.
+        // Key the bucket on the relay endpoint id (the stable connection
+        // identity), NOT the wire sender_id (which is spoofable on the relay
+        // path). An attacker on a single relay connection can't dodge the
+        // bucket by varying the wire sender_id; a different relay connection
+        // gets a different bucket (correct — it's a different peer). The
+        // synthetic node_id_t is the 4-byte endpoint id copied into the first
+        // 4 bytes of a zeroed hash. See audit #12.
         if (type != WIRE_RATE_LIMITED && type != WIRE_RELAY_CHALLENGE &&
             type != WIRE_RELAY_CHALLENGE_RESPONSE) {
-          node_id_t rl_sender;
-          memset(&rl_sender, 0, sizeof(rl_sender));
-          if (wire_extract_sender_id(wire_msg, &rl_sender) == 0) {
-            uint64_t now_ms = (uint64_t)time(NULL) * 1000;
-            if (!network_rate_limit_check(network, &rl_sender, NULL,
-                                          relay_payload->src_endpoint_id,
-                                          type, now_ms)) {
-              cbor_decref(&wire_msg);
-              break;
-            }
+          node_id_t rl_key;
+          memset(&rl_key, 0, sizeof(rl_key));
+          uint32_t endpoint = relay_payload->src_endpoint_id;
+          memcpy(&rl_key.hash[0], &endpoint, sizeof(endpoint));
+          uint64_t now_ms = (uint64_t)time(NULL) * 1000;
+          if (!network_rate_limit_check(network, &rl_key, NULL,
+                                        relay_payload->src_endpoint_id,
+                                        type, now_ms)) {
+            cbor_decref(&wire_msg);
+            break;
           }
         }
         message_t dispatch_msg;

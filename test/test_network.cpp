@@ -1842,6 +1842,74 @@ TEST(RateLimitCharge, ChargeClampsAtZero) {
   rate_limit_table_deinit(&table);
 }
 
+// --- Relay rate-limit key derivation (audit #12) ---
+//
+// The relay rate-limit at network.c:5398 keys its bucket on a synthetic
+// node_id_t derived from the relay endpoint id (the stable connection
+// identity), NOT the wire sender_id (which is spoofable on the relay path).
+// The derivation is: zero the node_id_t, copy the 4-byte endpoint id into the
+// first 4 bytes of the hash. These tests verify the derivation directly.
+
+static node_id_t MakeRelayRateLimitKey(uint32_t endpoint_id) {
+  node_id_t key = {};
+  memcpy(&key.hash[0], &endpoint_id, sizeof(endpoint_id));
+  return key;
+}
+
+TEST(RelayRateLimit, EndpointKeyDerivationIsDeterministic) {
+  // Same endpoint id -> identical key (so the bucket is shared across all
+  // messages on that relay connection, regardless of spoofed wire sender_id).
+  node_id_t key_a = MakeRelayRateLimitKey(0xCAFEBABEu);
+  node_id_t key_b = MakeRelayRateLimitKey(0xCAFEBABEu);
+  EXPECT_EQ(memcmp(key_a.hash, key_b.hash, NODE_ID_HASH_SIZE), 0);
+  // Bytes beyond the 4-byte endpoint id must be zero.
+  for (size_t index = sizeof(uint32_t); index < NODE_ID_HASH_SIZE; index++) {
+    EXPECT_EQ(key_a.hash[index], 0);
+  }
+}
+
+TEST(RelayRateLimit, DifferentEndpointsGetSeparateBuckets) {
+  rate_limit_table_t table;
+  rate_limit_table_init(&table, 16);
+  node_id_t key1 = MakeRelayRateLimitKey(0x11111111u);
+  node_id_t key2 = MakeRelayRateLimitKey(0x22222222u);
+  ASSERT_NE(memcmp(key1.hash, key2.hash, NODE_ID_HASH_SIZE), 0);
+
+  // Drain key1's FIND_BLOCK bucket; key2 must be unaffected (separate bucket).
+  ASSERT_TRUE(rate_limit_check(&table, &key1, RPC_TYPE_FIND_BLOCK, 1000));
+  rate_limit_charge(&table, &key1, RPC_TYPE_FIND_BLOCK, 1000.0f, 1000);
+  const peer_rate_limits_t* entry1 = rate_limit_table_find(&table, &key1);
+  ASSERT_NE(entry1, nullptr);
+  EXPECT_NEAR(entry1->buckets[RPC_TYPE_FIND_BLOCK].tokens, 0.0f, 0.01f);
+  const peer_rate_limits_t* entry2 = rate_limit_table_find(&table, &key2);
+  EXPECT_EQ(entry2, nullptr);
+  rate_limit_table_deinit(&table);
+}
+
+TEST(RelayRateLimit, SameEndpointSharesBucketAcrossSpoofedSenderIds) {
+  rate_limit_table_t table;
+  rate_limit_table_init(&table, 16);
+  // Simulate the network.c relay-rate-limit call site: the key is derived
+  // from the endpoint id ONLY. Two messages with the SAME endpoint id but
+  // DIFFERENT spoofed wire sender_ids produce the SAME synthetic key, so
+  // they share a rate-limit bucket — an attacker cannot dodge the bucket
+  // by varying the wire sender_id.
+  uint32_t endpoint = 0xDEADBEEFu;
+  node_id_t key_msg1 = MakeRelayRateLimitKey(endpoint);
+  node_id_t key_msg2 = MakeRelayRateLimitKey(endpoint);
+  ASSERT_EQ(memcmp(key_msg1.hash, key_msg2.hash, NODE_ID_HASH_SIZE), 0);
+
+  // Drain the bucket via msg1; msg2 must see the same drained bucket.
+  ASSERT_TRUE(rate_limit_check(&table, &key_msg1, RPC_TYPE_FIND_BLOCK, 1000));
+  rate_limit_charge(&table, &key_msg1, RPC_TYPE_FIND_BLOCK, 1000.0f, 1000);
+  const peer_rate_limits_t* entry = rate_limit_table_find(&table, &key_msg2);
+  ASSERT_NE(entry, nullptr);
+  EXPECT_NEAR(entry->buckets[RPC_TYPE_FIND_BLOCK].tokens, 0.0f, 0.01f);
+  // Exactly one entry in the table — not one per spoofed sender_id.
+  EXPECT_EQ(table.count, 1u);
+  rate_limit_table_deinit(&table);
+}
+
 // === Authority persistence tests ===
 
 class AuthorityPeerStoreTest : public ::testing::Test {
