@@ -385,9 +385,9 @@ static bool _scheduler_pool_reinject_stranded(scheduler_pool_t* pool) {
   return reinjected;
 }
 
-void scheduler_pool_wait_for_idle(scheduler_pool_t* pool) {
-  if (pool == NULL) return;
-  if (atomic_load(&pool->terminate)) return;
+int scheduler_pool_wait_for_idle(scheduler_pool_t* pool) {
+  if (pool == NULL) return 0;
+  if (atomic_load(&pool->terminate)) return 0;
 
   /* Bound on consecutive "all idle yet messages remain" recovery attempts. A
      correct run needs at most a handful (one per stranded actor batch); this
@@ -424,7 +424,10 @@ void scheduler_pool_wait_for_idle(scheduler_pool_t* pool) {
                   "(counter/registry desync or unrecoverable strand)",
                   atomic_load(&pool->pending_messages), pool->worker_count,
                   recovery_attempts);
-        abort();
+        /* Drain deferred derefs before returning so the caller's subsequent
+           pool_stop / destroy does not inherit a pending-deref backlog. */
+        scheduler_pool_drain_pending_derefs(pool);
+        return -1;
       }
       /* A worker woken by the re-inject may have already drained its mailbox,
          gone idle, and signalled this condvar while we ran the scan WITHOUT
@@ -446,6 +449,7 @@ void scheduler_pool_wait_for_idle(scheduler_pool_t* pool) {
 
   /* Drain pending deferred derefs — no actors running, safe to destroy */
   scheduler_pool_drain_pending_derefs(pool);
+  return 0;
 }
 
 scheduler_t* scheduler_get_current(void) {

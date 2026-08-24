@@ -112,6 +112,58 @@ static void _timer_completion_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   (void)watcher;
   (void)events;
   timer_completion_payload_t* completion = (timer_completion_payload_t*)user_data;
+  timer_actor_t* timer_actor = completion->timer_actor;
+
+  /* Lifetime guard: this callback runs on the pd-loop thread with no
+     synchronization against a concurrent timer_actor_cancel /
+     timer_actor_cancel_target / _timer_actor_destroy_all_tracked on another
+     thread. Those paths untrack the timer (remove it from active_timers /
+     debounce_map) and free its user_data (this `completion`) under
+     loop_lock BEFORE pd_timer_destroy is called, so by the time the timer
+     is destroyed (and this callback can no longer fire) the completion is
+     already freed. But poll-dancer may have already dispatched this callback
+     on the loop thread before the untrack+destroy acquired loop_lock — in
+     that window `completion` is still valid (not yet freed), yet the timer
+     is about to be torn down.
+
+     Re-verify under loop_lock that the timer backing this `completion` is
+     still tracked. The lookup compares pointer VALUES (no dereference of
+     freed memory): we compare `completion` against each tracked timer's
+     user_data and each debounce entry's completion_payload. If not found,
+     the timer has been cancelled/destroyed (or is mid-teardown holding
+     loop_lock on the other thread) and we must NOT touch
+     `completion->timer_actor->actor` — drop the firing. This mirrors the
+     F8 re-check in the TIMER_COMPLETION dispatch (see timer_actor.c:242-288)
+     and the timer_actor_cancel_target contract. */
+  platform_mutex_lock(timer_actor->loop_lock);
+  bool tracked = false;
+  for (size_t index = 0; index < timer_actor->active_timer_count; index++) {
+    pd_timer_t* tracked_timer = timer_actor->active_timers[index];
+    if (tracked_timer == NULL) {
+      continue;
+    }
+    if (tracked_timer->user_data == completion) {
+      tracked = true;
+      break;
+    }
+  }
+  if (!tracked) {
+    for (size_t index = 0; index < MAX_DEBOUNCE_KEYS; index++) {
+      if (timer_actor->debounce_map[index].completion_payload == completion) {
+        tracked = true;
+        break;
+      }
+    }
+  }
+  platform_mutex_unlock(timer_actor->loop_lock);
+  if (!tracked) {
+    /* The timer was cancelled/destroyed out from under this in-flight
+       firing. Dropping is safe: the target's completion is still delivered
+       by the cancel_target / debounce_flush path, or — if the target itself
+       is being torn down — was deliberately suppressed. */
+    return;
+  }
+
   /* Allocate a fresh copy for each firing — actor_send takes ownership and
      frees via payload_destroy. The original completion stays alive for
      repeating timers until pd_timer_destroy is called. */
@@ -121,7 +173,7 @@ static void _timer_completion_callback(pd_loop_t* loop, pd_watcher_t* watcher,
   msg.type = TIMER_COMPLETION;
   msg.payload = copy;
   msg.payload_destroy = free;
-  actor_send(&completion->timer_actor->actor, &msg);
+  actor_send(&timer_actor->actor, &msg);
 }
 
 static void _timer_actor_dispatch(void* state, message_t* msg) {
@@ -323,12 +375,30 @@ timer_actor_t* timer_actor_create(scheduler_pool_t* pool) {
   actor_init(&timer_actor->actor, timer_actor, _timer_actor_dispatch, pool);
   timer_actor->loop = pd_loop_create(NULL);
   if (timer_actor->loop == NULL) {
+    /* actor_init registered this actor in the pool's registry; leaving it
+       registered would let a later registry traversal dereference freed
+       memory. Detach before freeing. */
+    actor_detach_pool(&timer_actor->actor);
     free(timer_actor);
     return NULL;
   }
   timer_actor->loop_lock = platform_mutex_create();
+  if (timer_actor->loop_lock == NULL) {
+    actor_detach_pool(&timer_actor->actor);
+    pd_loop_destroy(timer_actor->loop);
+    free(timer_actor);
+    return NULL;
+  }
   atomic_store(&timer_actor->running, 1);
   timer_actor->thread = platform_thread_create(_timer_actor_thread, timer_actor);
+  if (timer_actor->thread == NULL) {
+    atomic_store(&timer_actor->running, 0);
+    actor_detach_pool(&timer_actor->actor);
+    platform_mutex_destroy(timer_actor->loop_lock);
+    pd_loop_destroy(timer_actor->loop);
+    free(timer_actor);
+    return NULL;
+  }
   return timer_actor;
 }
 

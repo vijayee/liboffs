@@ -42,9 +42,12 @@ static void _pool_global_init_once(void) {
   platform_mutex_t* m = platform_mutex_create();
   platform_mutex_t* expected = NULL;
   if (!atomic_compare_exchange_strong(&_pool_init_mutex, &expected, m)) {
-    /* Lost the race: another thread installed a mutex. Use it. If our
-     * local allocation is non-NULL, the loser's mutex is leaked — that
-     * is acceptable on this path (one mutex per process on first init). */
+    /* Lost the race: another thread installed its mutex as the guard. The
+     * winner's mutex is used for serialization; our local `m` is never
+     * installed and never owned by anyone else, so destroying it here is
+     * safe (no concurrent locker can hold it). Leaving it allocated would
+     * leak one mutex per losing thread per first-init race. */
+    platform_mutex_destroy(m);
   }
   platform_mutex_t* guard = atomic_load(&_pool_init_mutex);
   if (guard != NULL) {

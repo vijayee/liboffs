@@ -36,7 +36,16 @@ void buffer_ensure_capacity(buffer_t* buf, size_t needed) {
   while (new_capacity < needed) {
     new_capacity *= 2;
   }
-  buf->data = realloc(buf->data, new_capacity);
+  void* new_data = realloc(buf->data, new_capacity);
+  if (new_data == NULL) {
+    /* OOM: consistent with get_memory/get_clear_memory (src/Util/allocator.c),
+       which abort on allocation failure. Assigning NULL to buf->data would
+       leak the old buffer and leave buf->capacity inconsistent with the
+       still-referenced old allocation, inviting a later double-free or
+       NULL deref. Abort is the project's established OOM contract. */
+    abort();
+  }
+  buf->data = new_data;
   buf->capacity = new_capacity;
 }
 
