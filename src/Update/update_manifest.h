@@ -46,4 +46,11 @@ update_manifest_t* update_manifest_fetch(const char* release_tag,
 
 void update_manifest_free(update_manifest_t* manifest);
 
+/* Look up a file by its asset name (the manifest's `path` field — e.g.
+ * "offs-daemon", "offs-cli", "offs-updater"). Returns the manifest_file_t*
+ * if found, NULL if `manifest` is NULL, `path` is NULL, or no entry matches.
+ * The returned pointer is owned by the manifest; do not free. */
+const manifest_file_t* update_manifest_find_file(const update_manifest_t* manifest,
+                                                  const char* path);
+
 #endif /* OFFS_UPDATE_MANIFEST_H */

@@ -5,6 +5,7 @@
 #include "update_download.h"
 
 #include "update_verify.h"
+#include "update_manifest.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 
@@ -364,23 +365,40 @@ bool update_download(const update_info_t* info,
     return false;
   }
 
-  /* Verify SHA256 if present */
-  if (info->sha256[0] != '\0') {
-    char computed_sha256[65];
-    memset(computed_sha256, 0, sizeof(computed_sha256));
+  /* SHA256 verification against the signed manifest — mandatory, no opt-out.
+     The asset name is the last path segment of the download URL (URL-decoded
+     by _download_file's writer; GitHub asset URLs do not require additional
+     percent-decoding for the basename). */
+  if (info->manifest == NULL) {
+    log_error("update_download: no signed manifest — refusing to install unverified file");
+    remove(output_path);
+    return false;
+  }
 
-    if (!_compute_sha256(output_path, computed_sha256)) {
-      log_error("update_download: SHA256 computation failed for %s", output_path);
-      remove(output_path);
-      return false;
-    }
+  const char* slash_pos = strrchr(info->download_url, '/');
+  const char* asset_name = (slash_pos != NULL) ? slash_pos + 1 : info->download_url;
 
-    if (strcmp(computed_sha256, info->sha256) != 0) {
-      log_error("update_download: SHA256 verification failed for %s — expected %s, got %s",
-                output_path, info->sha256, computed_sha256);
-      remove(output_path);
-      return false;
-    }
+  const manifest_file_t* entry =
+      update_manifest_find_file(info->manifest, asset_name);
+  if (entry == NULL) {
+    log_error("update_download: %s not listed in signed manifest — refusing", asset_name);
+    remove(output_path);
+    return false;
+  }
+
+  char computed_sha256[65];
+  memset(computed_sha256, 0, sizeof(computed_sha256));
+  if (!_compute_sha256(output_path, computed_sha256)) {
+    log_error("update_download: SHA256 computation failed for %s", output_path);
+    remove(output_path);
+    return false;
+  }
+
+  if (strcmp(computed_sha256, entry->sha256) != 0) {
+    log_error("update_download: SHA256 mismatch for %s — manifest %s, got %s",
+              asset_name, entry->sha256, computed_sha256);
+    remove(output_path);
+    return false;
   }
 
   /* Extract archive */

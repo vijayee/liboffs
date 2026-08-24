@@ -605,6 +605,21 @@ void update_manifest_free(update_manifest_t* manifest) {
   }
 }
 
+const manifest_file_t* update_manifest_find_file(const update_manifest_t* manifest,
+                                                  const char* path) {
+  if (manifest == NULL || path == NULL || manifest->files == NULL) {
+    return NULL;
+  }
+
+  for (size_t index = 0; index < manifest->file_count; index++) {
+    if (strcmp(manifest->files[index].path, path) == 0) {
+      return &manifest->files[index];
+    }
+  }
+
+  return NULL;
+}
+
 /* ---------------------------------------------------------------------------
  * Public API — fetch
  * --------------------------------------------------------------------------- */
