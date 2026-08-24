@@ -296,6 +296,60 @@ TEST_F(TestHttpServer, TestGetRequest) {
   platform_socket_destroy(sock);
 }
 
+/* When active_connections reaches max_connections, the accept path destroys
+   the next accepted socket without serving it. The client sees a quick close
+   (recv returns 0/RST) and no HTTP response. This exercises the
+   max_connections gate (http_server.c _accept_handler). */
+TEST_F(TestHttpServer, MaxConnectionsRefusesExcess) {
+  server = http_server_create(pool, "127.0.0.1", port);
+  ASSERT_TRUE(server != NULL);
+
+  http_server_get(server, "^/hello$", _test_get_handler, NULL);
+  http_server_set_max_connections(server, 2);
+  http_server_listen(server);
+
+  /* Open 2 connections (the limit). Hold them open without sending a request
+     so they remain counted as active. */
+  platform_socket_t* sock1 = NULL;
+  platform_socket_t* sock2 = NULL;
+  for (int attempts = 0; attempts < 50 && sock1 == NULL; attempts++) {
+    platform_usleep(10000);
+    sock1 = _connect_to_server(port);
+  }
+  for (int attempts = 0; attempts < 50 && sock2 == NULL; attempts++) {
+    platform_usleep(10000);
+    sock2 = _connect_to_server(port);
+  }
+  ASSERT_NE(sock1, nullptr);
+  ASSERT_NE(sock2, nullptr);
+
+  /* Give the server's I/O loop a moment to accept both so
+     active_connections reaches the limit (2). */
+  platform_sleep_ms(100);
+
+  /* The 3rd connection exceeds the limit. The accept path destroys the
+     server-side socket; the client sees a quick close with no HTTP response.
+     The TCP connect may succeed before the server's accept runs, so we send a
+     request and inspect the response: a refused connection yields no "200".
+     Retry briefly to tolerate the accept loop's async timing. */
+  bool refused = false;
+  for (int attempts = 0; attempts < 50; attempts++) {
+    platform_usleep(10000);
+    platform_socket_t* sock3 = _connect_to_server(port);
+    if (sock3 == NULL) { refused = true; break; }
+    char response[256];
+    response[0] = '\0';
+    _send_and_recv(sock3, "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                   response, sizeof(response));
+    platform_socket_destroy(sock3);
+    if (strstr(response, "200") == NULL) { refused = true; break; }
+  }
+  EXPECT_TRUE(refused);
+
+  platform_socket_destroy(sock1);
+  platform_socket_destroy(sock2);
+}
+
 TEST_F(TestHttpServer, TestPostRequest) {
   server = http_server_create(pool, "127.0.0.1", port);
   ASSERT_TRUE(server != NULL);

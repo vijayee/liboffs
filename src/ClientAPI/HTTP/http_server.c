@@ -108,7 +108,7 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
   server->running = 0;
   server->listen_sock = NULL;
   server->listen_watcher = NULL;
-  server->max_connections = 0;
+  server->max_connections = 1024;
   atomic_store(&server->active_connections, 0);
   atomic_store(&server->draining, 0);
   server->is_local_binding = 0;
