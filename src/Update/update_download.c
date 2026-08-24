@@ -6,6 +6,7 @@
 
 #include "update_verify.h"
 #include "update_manifest.h"
+#include "update_extract.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 
@@ -308,19 +309,20 @@ static bool _download_file(const char* url, const char* token,
  * Static helpers – archive extraction
  * --------------------------------------------------------------------------- */
 
+/* Maximum total extracted bytes. A legitimate release tarball is well under
+   this; the cap rejects a malicious archive that declares an enormous file
+   size to exhaust disk or memory. */
+#define OFFS_MAX_EXTRACT_BYTES (1ULL * 1024 * 1024 * 1024)
+
+/* Extract the downloaded archive in-process via update_extract, which
+   enforces path containment (no absolute paths, no ".." components, no
+   symlinks/hardlinks/devices, total-size cap). This replaces the previous
+   fork/execlp("tar",...) and system("tar ...") implementations, which
+   delegated to an external tar binary with no path containment — a
+   malicious tarball could write outside dest_dir via ".." entries or
+   symlinks. */
 static bool _extract_archive(const char* archive_path, const char* dest_dir) {
-  char command[1024];
-
-#ifdef _WIN32
-  snprintf(command, sizeof(command), "tar -xf \"%s\" -C \"%s\"",
-           archive_path, dest_dir);
-#else
-  snprintf(command, sizeof(command), "tar -xzf \"%s\" -C \"%s\"",
-           archive_path, dest_dir);
-#endif
-
-  int result = system(command);
-  return result == 0;
+  return update_extract(archive_path, dest_dir, OFFS_MAX_EXTRACT_BYTES) == 0;
 }
 
 /* ---------------------------------------------------------------------------
