@@ -925,7 +925,7 @@ TEST_F(FindBlockTest, TtlExpiredReturnsTtlExpired) {
 
   find_block_result_e result = find_block_execute(
       &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
-      next_hops, &next_hop_count);
+      next_hops, &next_hop_count, false);
 
   EXPECT_EQ(result, FIND_BLOCK_TTL_EXPIRED);
   EXPECT_EQ(next_hop_count, 0u);
@@ -937,7 +937,7 @@ TEST_F(FindBlockTest, NullStateReturnsNotFound) {
 
   find_block_result_e result = find_block_execute(
       &eabf_table, &eabf_ttl, NULL, rings, &local_id, NULL,
-      next_hops, &next_hop_count);
+      next_hops, &next_hop_count, false);
 
   EXPECT_EQ(result, FIND_BLOCK_NOT_FOUND);
 }
@@ -952,7 +952,7 @@ TEST_F(FindBlockTest, NoPeersReturnsNotFound) {
 
   find_block_result_e result = find_block_execute(
       &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
-      next_hops, &next_hop_count);
+      next_hops, &next_hop_count, false);
 
   // No ring members, no EABF entries — should return NOT_FOUND
   EXPECT_EQ(result, FIND_BLOCK_NOT_FOUND);
@@ -989,7 +989,7 @@ TEST_F(FindBlockTest, WithRingMembersForwards) {
 
   find_block_result_e result = find_block_execute(
       &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
-      next_hops, &next_hop_count);
+      next_hops, &next_hop_count, false);
 
   EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
   EXPECT_GT(next_hop_count, 0u);
@@ -1032,7 +1032,7 @@ TEST_F(FindBlockTest, EabfGravityWellOverrides) {
 
   find_block_result_e result = find_block_execute(
       &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
-      next_hops, &next_hop_count);
+      next_hops, &next_hop_count, false);
 
   EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
   // Should route to node_b (gravity well) despite its lower weight
@@ -1071,7 +1071,7 @@ TEST_F(FindBlockTest, PathCycleDetection) {
 
   find_block_result_e result = find_block_execute(
       &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
-      next_hops, &next_hop_count);
+      next_hops, &next_hop_count, false);
 
   // node_a is in the path so gravity well and ring candidate should be skipped
   EXPECT_EQ(result, FIND_BLOCK_NOT_FOUND);
@@ -1103,7 +1103,7 @@ TEST_F(FindBlockTest, VisitedBloomFiltersEabfGravityWell) {
   size_t next_hop_count = 0;
   find_block_result_e result = find_block_execute(
       &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
-      next_hops, &next_hop_count);
+      next_hops, &next_hop_count, false);
 
   // node_a is in visited bloom so gravity well should be skipped
   EXPECT_EQ(result, FIND_BLOCK_NOT_FOUND);
@@ -1136,7 +1136,7 @@ TEST_F(FindBlockTest, VisitedBloomFiltersRingCandidates) {
   size_t next_hop_count = 0;
   find_block_result_e result = find_block_execute(
       &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
-      next_hops, &next_hop_count);
+      next_hops, &next_hop_count, false);
 
   // Should forward but only to node_b (node_a is filtered by visited bloom)
   EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
@@ -1175,13 +1175,156 @@ TEST_F(FindBlockTest, VisitedBloomAndPathBothFilter) {
   size_t next_hop_count = 0;
   find_block_result_e result = find_block_execute(
       &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
-      next_hops, &next_hop_count);
+      next_hops, &next_hop_count, false);
 
   // Both candidates filtered (one by path, one by visited bloom)
   EXPECT_EQ(result, FIND_BLOCK_NOT_FOUND);
 
   net_node_destroy(node_a);
   net_node_destroy(node_b);
+}
+
+// === Mode-aware relay routing gate (Stage 4 Task 11) ===
+//
+// A relay-admitted peer (relay_verified=false) is inserted below the routing
+// min-weight gate. In default mode it becomes routable once its Hebbian
+// weight crosses the gate; in secure mode it additionally requires
+// relay_verified=true. See network_secure_mode() + spec Section 7.3.
+
+TEST_F(FindBlockTest, RelayAdmittedBelowGateNotRoutableInDefaultMode) {
+  // Relay-admitted peer inserted at weight 0.0 (below FIND_BLOCK_MIN_WEIGHT).
+  // Default mode (secure_mode=false): the weight gate excludes it.
+  node_id_t id_relay = {};
+  memset(id_relay.hash, 0x30, NODE_ID_HASH_SIZE);
+  net_node_t* relay_node = net_node_create(&id_relay, 0x0A000003, 8082);
+  relay_node->weight = 0.0f;
+  relay_node->relay_verified = false;
+  ring_set_insert(rings, relay_node, 8000);
+
+  uint8_t block_hash[32] = {};
+  memset(block_hash, 0xCC, 32);
+  find_block_state_t state = {};
+  memcpy(state.block_hash, block_hash, 32);
+  state.ttl = 6;
+
+  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  find_block_result_e result = find_block_execute(
+      &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
+      next_hops, &next_hop_count, /*secure_mode=*/false);
+
+  // No routable candidates — relay-admitted peer is below the weight gate
+  EXPECT_EQ(result, FIND_BLOCK_NOT_FOUND);
+  EXPECT_EQ(next_hop_count, 0u);
+}
+
+TEST_F(FindBlockTest, RelayAdmittedRoutableAfterEarningWeightInDefaultMode) {
+  // Same peer, but its Hebbian weight has crossed the routing min-weight gate
+  // (synced by network_sync_hebbian_to_rings after serving verified blocks).
+  node_id_t id_relay = {};
+  memset(id_relay.hash, 0x31, NODE_ID_HASH_SIZE);
+  net_node_t* relay_node = net_node_create(&id_relay, 0x0A000004, 8083);
+  relay_node->weight = FIND_BLOCK_MIN_WEIGHT * 2.0f;  // above the gate
+  relay_node->relay_verified = false;  // still unverified — OK in default mode
+  ring_set_insert(rings, relay_node, 8000);
+
+  uint8_t block_hash[32] = {};
+  memset(block_hash, 0xDD, 32);
+  find_block_state_t state = {};
+  memcpy(state.block_hash, block_hash, 32);
+  state.ttl = 6;
+
+  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  find_block_result_e result = find_block_execute(
+      &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
+      next_hops, &next_hop_count, /*secure_mode=*/false);
+
+  // Above the weight gate — routable in default mode despite relay_verified=false
+  EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
+  ASSERT_EQ(next_hop_count, 1u);
+  EXPECT_TRUE(node_id_equals(&next_hops[0]->id, &id_relay));
+}
+
+TEST_F(FindBlockTest, RelayAdmittedNotRoutableInSecureModeEvenWithHighWeight) {
+  // Secure mode: relay_verified=false is NOT routable even with high weight.
+  node_id_t id_relay = {};
+  memset(id_relay.hash, 0x32, NODE_ID_HASH_SIZE);
+  net_node_t* relay_node = net_node_create(&id_relay, 0x0A000005, 8084);
+  relay_node->weight = 0.9f;  // high weight — but identity not verified
+  relay_node->relay_verified = false;
+  ring_set_insert(rings, relay_node, 8000);
+
+  uint8_t block_hash[32] = {};
+  memset(block_hash, 0xEE, 32);
+  find_block_state_t state = {};
+  memcpy(state.block_hash, block_hash, 32);
+  state.ttl = 6;
+
+  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  find_block_result_e result = find_block_execute(
+      &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
+      next_hops, &next_hop_count, /*secure_mode=*/true);
+
+  // Secure mode: identity gate excludes the unverified peer
+  EXPECT_EQ(result, FIND_BLOCK_NOT_FOUND);
+  EXPECT_EQ(next_hop_count, 0u);
+}
+
+TEST_F(FindBlockTest, RelayAdmittedRoutableInSecureModeAfterVerified) {
+  // Secure mode: once relay_verified=true (signed-nonce challenge succeeded),
+  // the peer is routable again.
+  node_id_t id_relay = {};
+  memset(id_relay.hash, 0x33, NODE_ID_HASH_SIZE);
+  net_node_t* relay_node = net_node_create(&id_relay, 0x0A000006, 8085);
+  relay_node->weight = 0.5f;  // above the weight gate
+  relay_node->relay_verified = true;  // identity verified
+  ring_set_insert(rings, relay_node, 8000);
+
+  uint8_t block_hash[32] = {};
+  memset(block_hash, 0xFF, 32);
+  find_block_state_t state = {};
+  memcpy(state.block_hash, block_hash, 32);
+  state.ttl = 6;
+
+  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  find_block_result_e result = find_block_execute(
+      &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
+      next_hops, &next_hop_count, /*secure_mode=*/true);
+
+  EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
+  ASSERT_EQ(next_hop_count, 1u);
+  EXPECT_TRUE(node_id_equals(&next_hops[0]->id, &id_relay));
+}
+
+TEST(RelayGossipGatingTest, NetworkSecureModePredicate) {
+  // network_secure_mode requires authority + allow_secure + ca_cert_data.
+  // We construct a minimal network_t (only the fields the predicate reads) and
+  // exercise each branch of the predicate.
+  network_t network = {};
+  EXPECT_FALSE(network_secure_mode(NULL));
+  EXPECT_FALSE(network_secure_mode(&network));  // authority == NULL
+
+  authority_t authority = {};
+  network.authority = &authority;
+  EXPECT_FALSE(network_secure_mode(&network));  // allow_secure == false
+
+  authority.allow_secure = true;
+  EXPECT_FALSE(network_secure_mode(&network));  // ca_cert_data == NULL
+
+  uint8_t fake_ca[8] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+  authority.ca_cert_data = fake_ca;
+  authority.ca_cert_len = 0;
+  EXPECT_FALSE(network_secure_mode(&network));  // ca_cert_len == 0
+
+  authority.ca_cert_len = sizeof(fake_ca);
+  EXPECT_TRUE(network_secure_mode(&network));  // all conditions met
 }
 
 // === StoreBlock tests ===
@@ -3740,7 +3883,7 @@ TEST_F(ClosestNodesExecuteTest, SelfIsTarget) {
 
   closest_nodes_result_e result = closest_nodes_execute(
       &eabf_table, &eabf_ttl, NULL, rings, latency_cache, &local_id,
-      &query, next_hops, &next_hop_count);
+      &query, next_hops, &next_hop_count, false);
 
   EXPECT_EQ(result, CLOSEST_NODES_FOUND);
   EXPECT_EQ(next_hop_count, 0u);
@@ -3757,7 +3900,7 @@ TEST_F(ClosestNodesExecuteTest, TTLExpired) {
 
   closest_nodes_result_e result = closest_nodes_execute(
       &eabf_table, &eabf_ttl, NULL, rings, latency_cache, &local_id,
-      &query, next_hops, &next_hop_count);
+      &query, next_hops, &next_hop_count, false);
 
   EXPECT_EQ(result, CLOSEST_NODES_TTL_EXPIRED);
 }
@@ -3775,7 +3918,7 @@ TEST_F(ClosestNodesExecuteTest, NoCandidatesReturnsNotFound) {
 
   closest_nodes_result_e result = closest_nodes_execute(
       &eabf_table, &eabf_ttl, NULL, rings, latency_cache, &local_id,
-      &query, next_hops, &next_hop_count);
+      &query, next_hops, &next_hop_count, false);
 
   EXPECT_EQ(result, CLOSEST_NODES_NOT_FOUND);
 }
@@ -3803,7 +3946,7 @@ TEST_F(ClosestNodesExecuteTest, BetaConvergenceWhenLatencyCached) {
 
   closest_nodes_result_e result = closest_nodes_execute(
       &eabf_table, &eabf_ttl, NULL, rings, latency_cache, &local_id,
-      &query, next_hops, &next_hop_count);
+      &query, next_hops, &next_hop_count, false);
 
   // Not converged, and no ring candidates, so NOT_FOUND
   EXPECT_EQ(result, CLOSEST_NODES_NOT_FOUND);
@@ -3831,7 +3974,7 @@ TEST_F(ClosestNodesExecuteTest, BetaConvergenceWithTightRatio) {
 
   closest_nodes_result_e result = closest_nodes_execute(
       &eabf_table, &eabf_ttl, NULL, rings, latency_cache, &local_id,
-      &query, next_hops, &next_hop_count);
+      &query, next_hops, &next_hop_count, false);
 
   EXPECT_EQ(result, CLOSEST_NODES_FOUND);
 }

@@ -190,6 +190,17 @@ void network_dispatch(void* state, message_t* msg);
    debounce is armed. The authoritative final save remains
    authority_save_peers in offs_node_stop Phase 8. */
 void network_mark_peer_state_dirty(network_t* network);
+
+/* Secure-mode predicate (Stage 4 mode-aware relay gating). Returns true iff
+   the network has an authority configured for secure mode (allow_secure) AND
+   a CA certificate is actually loaded (ca_cert_data != NULL, ca_cert_len > 0).
+   allow_secure alone is insufficient — the runtime check for "CA loaded" is
+   ca_cert_data != NULL. In secure mode, relay-admitted peers
+   (relay_verified=false) are NOT routable until the signed-nonce challenge
+   sets relay_verified=true. In default mode (this returns false), relay-
+   admitted peers are gated by Hebbian weight (reputation), not identity. */
+bool network_secure_mode(const network_t* network);
+
 int network_connect_relay(network_t* network, const char* host, uint16_t port);
 int network_connect_peer(network_t* network, const char* host, uint16_t port);
 

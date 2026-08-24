@@ -93,6 +93,14 @@ void network_mark_peer_state_dirty(network_t* network) {
   }
 }
 
+bool network_secure_mode(const network_t* network) {
+  return network != NULL
+      && network->authority != NULL
+      && network->authority->allow_secure
+      && network->authority->ca_cert_data != NULL
+      && network->authority->ca_cert_len > 0;
+}
+
 /* Format an IPv4 address (host byte order) as a dotted-quad string. Writes
    into the caller-provided buffer of at least 16 bytes. Returns 0 on success,
    -1 on error. Uses snprintf for portability (no inet_ntop dependency). */
@@ -948,6 +956,10 @@ static void network_handle_salutation(network_t* network, message_t* msg,
     net_node_t* node = net_node_create(&salut->sender_id, ring_addr, ring_port);
     if (node != NULL) {
       node->weight = FIND_BLOCK_MIN_WEIGHT;
+      // Direct-QUIC salutation verified the peer's identity (BLAKE3(public_key)
+      // == sender_id), so mark the ring node relay_verified=true — secure-mode
+      // routing gating in find_block/closest_nodes requires this flag.
+      node->relay_verified = true;
       node->last_gossip_time = (uint64_t)time(NULL) * 1000;
       net_node_record_success(node);
       ring_set_insert(network->rings, node, 0);
@@ -1678,6 +1690,14 @@ static void network_handle_relay_challenge_response(network_t* network,
       log_warn("network: relay challenge verified but peer %s not in conn_mgr",
                 response.responder_id.str);
     }
+    // Mirror relay_verified onto the ring node so the routing selection in
+    // find_block_execute / closest_nodes_execute (which operate on net_node_t)
+    // can gate relay-admitted peers in secure mode. Spec Section 7.3.
+    net_node_t* ring_node = ring_set_find_by_id(network->rings,
+                                                &response.responder_id);
+    if (ring_node != NULL) {
+      ring_node->relay_verified = true;
+    }
     network_relay_challenge_remove_at(network, (size_t)found_index);
   } else {
     log_warn("network: relay challenge response verify failed (id_ok=%d "
@@ -2118,7 +2138,7 @@ static void network_handle_closest_nodes(network_t* network, message_t* msg) {
   closest_nodes_result_e result = closest_nodes_execute(
       &network->eabf_table, &network->eabf_ttl, &network->conn_mgr,
       network->rings, network->latency_cache, &network->authority->local_id,
-      query, next_hops, &next_hop_count);
+      query, next_hops, &next_hop_count, network_secure_mode(network));
 
   switch (result) {
     case CLOSEST_NODES_FOUND: {
@@ -2486,7 +2506,7 @@ static void network_handle_local_closest_nodes(network_t* network, message_t* ms
   closest_nodes_result_e result = closest_nodes_execute(
       &network->eabf_table, &network->eabf_ttl, &network->conn_mgr,
       network->rings, network->latency_cache, &network->authority->local_id,
-      &wire_query, next_hops, &next_hop_count);
+      &wire_query, next_hops, &next_hop_count, network_secure_mode(network));
 
   if (result == CLOSEST_NODES_FOUND) {
     // We are the closest — deliver result immediately
@@ -2790,7 +2810,8 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
       &network->authority->local_id,
       &state,
       next_hops,
-      &next_hop_count);
+      &next_hop_count,
+      network_secure_mode(network));
 
   switch (result) {
     case FIND_BLOCK_FOUND:
@@ -4242,7 +4263,8 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
       &network->authority->local_id,
       &state,
       next_hops,
-      &next_hop_count);
+      &next_hop_count,
+      network_secure_mode(network));
 
   switch (result) {
     case FIND_BLOCK_FOUND: {
@@ -5413,12 +5435,21 @@ void network_dispatch(void* state, message_t* msg) {
               conn_state_upgrade_to_direct(existing);
             }
           }
-          // Also ensure the sender is in the ring set for routing
+          // Also ensure the sender is in the ring set for routing. Relay-
+          // admitted peers are inserted BELOW the routing min-weight gate
+          // (weight 0.0, below FIND_BLOCK_MIN_WEIGHT) so they are NOT
+          // routable on admission. In default mode they become routable
+          // once their Hebbian weight crosses the gate (after serving
+          // verified blocks, which is synced by network_sync_hebbian_to_rings).
+          // In secure mode they additionally require relay_verified=true
+          // (the signed-nonce challenge), gated in find_block_execute /
+          // closest_nodes_execute via network_secure_mode(). Spec Section 7.3.
           net_node_t* ring_node = ring_set_find_by_id(network->rings, &sender_id);
           if (ring_node == NULL) {
             net_node_t* node = net_node_create(&sender_id, 0, 0);
             if (node != NULL) {
-              node->weight = FIND_BLOCK_MIN_WEIGHT;
+              node->weight = 0.0f;
+              node->relay_verified = false;
               ring_set_insert(network->rings, node, 0);
             }
           }

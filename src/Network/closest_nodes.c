@@ -132,7 +132,8 @@ closest_nodes_result_e closest_nodes_execute(
     const node_id_t* local_id,
     const wire_closest_nodes_t* query,
     net_node_t** next_hops,
-    size_t* next_hop_count) {
+    size_t* next_hop_count,
+    bool secure_mode) {
   if (query == NULL || local_id == NULL || next_hops == NULL || next_hop_count == NULL) {
     return CLOSEST_NODES_NOT_FOUND;
   }
@@ -240,8 +241,13 @@ closest_nodes_result_e closest_nodes_execute(
         continue;
       }
 
+      // Skip peers below the routing min-weight gate (relay-admitted peers
+      // are inserted below the gate and become routable only after their
+      // Hebbian weight crosses it). In secure mode, additionally skip
+      // relay-admitted peers whose identity has not been verified.
       float weight = peer_node->weight;
-      if (weight < CLOSEST_NODES_MIN_WEIGHT) weight = CLOSEST_NODES_MIN_WEIGHT;
+      if (weight < CLOSEST_NODES_MIN_WEIGHT) continue;
+      if (secure_mode && !peer_node->relay_verified) continue;
 
       // Prefer lower hops (stronger gravity well); break ties by weight
       if (hops < gravity_best_level ||
@@ -287,6 +293,8 @@ closest_nodes_result_e closest_nodes_execute(
       }
 
       if (node->weight < CLOSEST_NODES_MIN_WEIGHT) continue;
+      // Secure mode: skip relay-admitted peers (identity not verified)
+      if (secure_mode && !node->relay_verified) continue;
 
       if (candidate_count < RING_K * RING_MAX_RINGS) {
         candidates[candidate_count] = node;
@@ -320,6 +328,8 @@ closest_nodes_result_e closest_nodes_execute(
       }
 
       if (node->weight < CLOSEST_NODES_MIN_WEIGHT) continue;
+      // Secure mode: skip relay-admitted peers (identity not verified)
+      if (secure_mode && !node->relay_verified) continue;
 
       if (candidate_count < RING_K * RING_MAX_RINGS) {
         candidates[candidate_count] = node;

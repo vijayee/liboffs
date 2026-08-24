@@ -28,6 +28,11 @@ typedef enum closest_nodes_result_e {
 
 // Execute Closest-N handler logic
 // Returns result code and populates next_hops with selected forward targets
+// secure_mode: when true, relay-admitted peers (net_node_t.relay_verified=false)
+// are skipped in candidate selection — they are not routable until the
+// signed-nonce challenge verifies their identity. When false (default mode),
+// relay-admitted peers are gated only by Hebbian weight (reputation). See
+// network_secure_mode() in network.h.
 closest_nodes_result_e closest_nodes_execute(
     eabf_table_t* eabf_table,
     eabf_ttl_table_t* eabf_ttl,
@@ -37,7 +42,8 @@ closest_nodes_result_e closest_nodes_execute(
     const node_id_t* local_id,
     const wire_closest_nodes_t* query,
     net_node_t** next_hops,
-    size_t* next_hop_count);
+    size_t* next_hop_count,
+    bool secure_mode);
 
 // Select ring samples for a Closest-N response
 // Walks rings from lowest latency to highest, picking one primary member per ring

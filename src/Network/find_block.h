@@ -41,6 +41,11 @@ typedef struct find_block_state_t {
 
 // Execute FindBlock handler logic
 // Returns result code and populates response fields
+// secure_mode: when true, relay-admitted peers (net_node_t.relay_verified=false)
+// are skipped in candidate selection — they are not routable until the
+// signed-nonce challenge verifies their identity. When false (default mode),
+// relay-admitted peers are gated only by Hebbian weight (reputation). See
+// network_secure_mode() in network.h.
 find_block_result_e find_block_execute(
     eabf_table_t* eabf_table,
     eabf_ttl_table_t* eabf_ttl,
@@ -50,7 +55,8 @@ find_block_result_e find_block_execute(
     const find_block_state_t* state,
     /* Output: selected next-hop nodes (up to FORWARD_FANOUT) */
     net_node_t** next_hops,
-    size_t* next_hop_count);
+    size_t* next_hop_count,
+    bool secure_mode);
 
 // Add a block_hash to the visited bloom filter
 void find_block_add_visited(uint8_t* visited_bloom, uint16_t* visited_count,

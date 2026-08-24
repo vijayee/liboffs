@@ -137,7 +137,8 @@ find_block_result_e find_block_execute(
     const node_id_t* local_id,
     const find_block_state_t* state,
     net_node_t** next_hops,
-    size_t* next_hop_count) {
+    size_t* next_hop_count,
+    bool secure_mode) {
   if (state == NULL || local_id == NULL || next_hops == NULL || next_hop_count == NULL) {
     return FIND_BLOCK_NOT_FOUND;
   }
@@ -240,9 +241,15 @@ find_block_result_e find_block_execute(
       continue;
     }
 
-    // Use the peer's Hebbian weight, with a floor of FIND_BLOCK_MIN_WEIGHT
+    // Use the peer's Hebbian weight. Peers below FIND_BLOCK_MIN_WEIGHT are
+    // skipped (gate, not floor) — this excludes relay-admitted peers (inserted
+    // at weight 0.0, below the gate) until their Hebbian weight crosses the
+    // routing min-weight gate (i.e. after they've served verified blocks).
+    // In secure mode, additionally skip relay-admitted peers whose identity
+    // has not been verified via the signed-nonce challenge.
     float weight = peer_node->weight;
-    if (weight < FIND_BLOCK_MIN_WEIGHT) weight = FIND_BLOCK_MIN_WEIGHT;
+    if (weight < FIND_BLOCK_MIN_WEIGHT) continue;
+    if (secure_mode && !peer_node->relay_verified) continue;
 
     // Prefer lower hops (stronger gravity well); break ties by weight
     if (hops < gravity_best_level ||
@@ -298,6 +305,8 @@ find_block_result_e find_block_execute(
 
       // Skip nodes below minimum weight
       if (node->weight < FIND_BLOCK_MIN_WEIGHT) continue;
+      // Secure mode: skip relay-admitted peers (identity not verified)
+      if (secure_mode && !node->relay_verified) continue;
 
       if (candidate_count < RING_K * RING_MAX_RINGS) {
         candidates[candidate_count] = node;
@@ -332,6 +341,8 @@ find_block_result_e find_block_execute(
       }
 
       if (node->weight < FIND_BLOCK_MIN_WEIGHT) continue;
+      // Secure mode: skip relay-admitted peers (identity not verified)
+      if (secure_mode && !node->relay_verified) continue;
 
       if (candidate_count < RING_K * RING_MAX_RINGS) {
         candidates[candidate_count] = node;
