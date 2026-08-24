@@ -23,7 +23,7 @@ jobs:
           sudo apt-get install -y cmake build-essential libssl-dev clang
 
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DCMAKE_C_COMPILER=${{ matrix.compiler }}
+        run: cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
         env:
           CC: ${{ matrix.compiler }}
 
@@ -31,4 +31,4 @@ jobs:
         run: cmake --build build --target testliboffs -j$(nproc)
 
       - name: Test
-        run: cd build && ./test/testliboffs --gtest_filter='-*Stream*'
+        run: cd build && ./test/testliboffs
