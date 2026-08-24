@@ -73,20 +73,68 @@ Requires:
 ## Tools
 
 - **`offs-ca`** — Offline certificate authority for generating CA certs, node keys, and signing CSRs. Supports ed25519, RSA (2048/4096), and ECDSA (P-256/P-384/P-521).
+- **`offs-release-sign`** — Signs release manifests with an ed25519 private key so `offsd`'s self-update path can cryptographically verify release artifacts. See [docs/RELEASE.md](./docs/RELEASE.md) for the release-signing process.
+
+## Self-update
+
+`offsd` can self-update from releases published at `github.com/Prometheus-SCN/OFFS/releases`. The update path is cryptographically verified end-to-end:
+
+- **TLS verification** — the updater verifies GitHub's TLS certificate against the system CA store (no unauthenticated connections).
+- **Signed manifest** — each release carries a `manifest.cbor` + `manifest.cbor.sig`. The manifest lists every release file with its SHA256 and size; the signature is ed25519, verified against a release public key compiled into `offsd` at build time (`-DOFFS_RELEASE_PUBKEY=<path>`). **Fail-closed:** if the binary was built without `OFFS_RELEASE_PUBKEY`, self-update refuses to install anything.
+- **Per-file SHA256** — every downloaded file is re-hashed and compared against the verified manifest. No opt-out: a file not in the manifest or a hash mismatch aborts the update.
+- **Path-contained extraction** — archives are extracted by an in-process USTAR reader that rejects absolute paths, `..` components, symlinks, and hardlinks (no external `tar`, no path traversal).
+- **Verified updater binary** — the staged `offs-updater` is itself a manifest-listed, hash-verified file; `offsd` execs the staged absolute path (not a `PATH` lookup).
+
+The Prometheus-SCN release operator holds the signing private key offline; see [docs/RELEASE.md](./docs/RELEASE.md) for the key custody + per-release signing process.
+
+## Operating a node
+
+The `offsd` daemon and `offs` CLI are built from the `OFFS/` subtree. Start a
+node with `offs start` (it double-forks and writes a PID file), stop with
+`offs stop`, and query with `offs status` / `offs health`.
+
+**TLS peer verification is off by default** (`allow_secure=false`): the
+QUIC/WebTransport/relay paths then set
+`QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION`, so connections are
+encrypted but **not authenticated** — acceptable for a trusted LAN, not for
+public-internet exposure. For production, set `allow_secure=true` in the
+config and provision a CA with `offs-ca`; with a CA loaded, peer
+certificates are validated against it on the direct-QUIC path.
+
+Observability: logging is leveled per module (`log_level`, `log_structured`,
+`log_module_levels`); `GET /health` returns node status, uptime, peer count,
+topology, and the metrics registry as JSON. There is no Prometheus
+exposition endpoint — scrape `/health` or the `offs-metrics` cJSON/CBOR
+endpoints.
 
 ## Example
 
 ```c
 #include <offs_client.h>
+#include <stdio.h>
+
+static void on_health(void* ctx, const char* json) {
+    (void)ctx;
+    printf("health: %s\n", json);
+}
 
 int main(void) {
-    offs_client_t *client = offs_client_create("localhost", 8080, false);
-    offs_http_get(client, "/health", callback, NULL);
-    offs_client_destroy(client);
+    /* transport_url selects the transport: tcp://, ws://, wt://, http://... */
+    offs_client_t* client = offs_client_connect("tcp://127.0.0.1:8080", NULL);
+    if (client == NULL) {
+        fprintf(stderr, "connect failed\n");
+        return 1;
+    }
+    offs_client_health(client, on_health, NULL);
+    offs_client_disconnect(client);
+    return 0;
 }
 ```
 
-See `examples/` for a Flutter client app and server example.
+`offs_http_get(const char* url)` is a separate one-shot helper that opens a
+raw TCP connection and returns the response body as a `buffer_t*` (caller
+DESTROYs it); it does not take a client handle. See `examples/off_server/`
+for a full server and `examples/off_client/` for a Flutter client app.
 
 ## Testing
 
