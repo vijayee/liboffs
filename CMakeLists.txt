@@ -186,6 +186,20 @@ option(OFFS_ENABLE_ASAN "Instrument the offs library with AddressSanitizer (MSVC
 if(OFFS_ENABLE_ASAN)
   target_compile_options(offs PRIVATE /fsanitize=address /Z7)
 endif()
+# Release manifest signature verification: the ed25519 public key (PEM) used by
+# update_verify_manifest to verify signed release manifests. Pass a path to a
+# PEM file at configure time; the contents are embedded as a C string literal
+# (newlines escaped) on the offs target. When unset, the verifier is fail-
+# closed (update_verify_load_pubkey returns NULL and every verification fails)
+# and a WARNING is emitted so the operator notices.
+set(OFFS_RELEASE_PUBKEY "" CACHE STRING "Path to a PEM ed25519 public key for verifying release manifests (Prometheus-SCN release key)")
+if(OFFS_RELEASE_PUBKEY)
+  file(READ ${OFFS_RELEASE_PUBKEY} _offs_release_pubkey_pem)
+  string(REPLACE "\n" "\\n" _offs_release_pubkey_escaped "${_offs_release_pubkey_pem}")
+  target_compile_definitions(offs PRIVATE OFFS_RELEASE_PUBKEY="${_offs_release_pubkey_escaped}")
+else()
+  message(WARNING "OFFS_RELEASE_PUBKEY not set — self-update verification will be fail-closed (no release key compiled in)")
+endif()
 
 # Opt-in debug info (PDB + /Z7) for the offs library WITHOUT AddressSanitizer.
 # Used by the test crash-catcher (test_crash_catch.h) to symbolicate a native
