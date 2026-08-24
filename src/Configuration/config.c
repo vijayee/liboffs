@@ -63,6 +63,8 @@ config_t config_default() {
   config.allow_secure = false;
   config.api_key_hash = NULL;
   config.config_local_binding_no_auth = false;
+  config.http_idle_timeout_ms = 30000;
+  config.http_hard_timeout_ms = 60000;
   config.log_level = LOG_INFO;
   config.log_structured = false;
   for (int mod_index = 0; mod_index < 9; mod_index++) {
@@ -253,6 +255,15 @@ int config_validate(const config_t* config) {
       log_error("ws_enabled cannot be used with api_key_hash (plaintext remote transport)");
       valid = false;
     }
+  }
+
+  if (config->http_idle_timeout_ms == 0) {
+    log_error("config_validate: http_idle_timeout_ms must be > 0");
+    valid = false;
+  }
+  if (config->http_hard_timeout_ms == 0) {
+    log_error("config_validate: http_hard_timeout_ms must be > 0");
+    valid = false;
   }
 
   return valid ? 0 : -1;

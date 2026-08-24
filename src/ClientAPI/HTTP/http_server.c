@@ -25,9 +25,21 @@ static void _destroy_stack_init(http_server_t* server) {
   server->destroy_head = NULL;
 }
 
-static void _destroy_stack_push(http_server_t* server, pd_watcher_t* watcher) {
+static void _destroy_stack_push_watcher(http_server_t* server, pd_watcher_t* watcher) {
   server_destroy_node_t* node = get_clear_memory(sizeof(server_destroy_node_t));
   node->watcher = watcher;
+  node->is_timer = 0;
+  platform_mutex_lock(server->destroy_lock);
+  node->next = server->destroy_head;
+  server->destroy_head = node;
+  platform_mutex_unlock(server->destroy_lock);
+  pd_loop_async_send(server->loop, NULL);
+}
+
+static void _destroy_stack_push_timer(http_server_t* server, pd_timer_t* timer) {
+  server_destroy_node_t* node = get_clear_memory(sizeof(server_destroy_node_t));
+  node->timer = timer;
+  node->is_timer = 1;
   platform_mutex_lock(server->destroy_lock);
   node->next = server->destroy_head;
   server->destroy_head = node;
@@ -43,7 +55,12 @@ static void _destroy_stack_drain(http_server_t* server) {
   platform_mutex_unlock(server->destroy_lock);
   while (node != NULL) {
     server_destroy_node_t* next = node->next;
-    pd_watcher_destroy(node->watcher);
+    if (node->is_timer) {
+      pd_timer_stop(node->timer);
+      pd_timer_destroy(node->timer);
+    } else {
+      pd_watcher_destroy(node->watcher);
+    }
     free(node);
     node = next;
   }
@@ -87,7 +104,13 @@ void _server_dispatch(void* state, message_t* msg) {
            has been joined — so by the time pd_watcher_destroy runs the real
            stop+free there is no concurrent reader, and any still-queued abort
            completion is discarded when the IOCP handle closes. */
-        _destroy_stack_push(server, payload->watcher);
+        _destroy_stack_push_watcher(server, payload->watcher);
+      } else if (payload->timer != NULL) {
+        /* Per-connection idle timer teardown, deferred to the I/O thread for
+           the same reason as the watcher: pd_timer_destroy touches loop-internal
+           state that the I/O thread may be walking. Stop+destroy on the I/O
+           thread via the destroy stack. */
+        _destroy_stack_push_timer(server, payload->timer);
       }
       break;
     }
@@ -112,6 +135,8 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
   atomic_store(&server->active_connections, 0);
   atomic_store(&server->draining, 0);
   server->is_local_binding = 0;
+  server->idle_timeout_ms = 30000;
+  server->hard_timeout_ms = 60000;
   _destroy_stack_init(server);
 
   server->listen_sock = platform_socket_create(PLATFORM_AF_INET, 1);
@@ -563,6 +588,14 @@ void http_server_drain(http_server_t* server) {
 
 void http_server_set_max_connections(http_server_t* server, size_t max_connections) {
   server->max_connections = max_connections;
+}
+
+void http_server_set_timeouts(http_server_t* server, uint32_t idle_ms, uint32_t hard_ms) {
+  if (server == NULL) {
+    return;
+  }
+  server->idle_timeout_ms = idle_ms;
+  server->hard_timeout_ms = hard_ms;
 }
 
 uint8_t http_server_is_local_binding(const http_server_t* server) {

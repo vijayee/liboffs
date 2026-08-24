@@ -13,6 +13,7 @@
 #include "../../Actor/actor.h"
 #include "../../Actor/message.h"
 #include "../../Scheduler/scheduler.h"
+#include "../../Util/log.h"
 #include <string.h>
 #ifdef _WIN32
   #include "../../Platform/platform_posix_compat.h"
@@ -36,6 +37,8 @@ static int _on_message_complete(http_parser* parser);
 
 static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                        pd_event_t events, void* user_data);
+static void _connection_idle_timer_callback(pd_loop_t* loop, pd_watcher_t* watcher,
+                                            pd_event_t events, void* user_data);
 #ifndef _WIN32
 /* POSIX-only: SSL_read runs against the kernel socket, which still holds the
  * bytes on epoll/kqueue. On Windows the worker instead decrypts ciphertext fed
@@ -774,6 +777,27 @@ void http_connection_dispatch(void* state, message_t* msg) {
   }
 }
 
+/* Idle/hard timeout callback — runs on the I/O thread. The connection's
+   request, write_buffer, and sock state are owned by the worker (the actor),
+   so this callback must NOT touch them directly. It sends an
+   HTTP_CONNECTION_CLOSE message to the connection actor, which runs the
+   existing close path (stop watcher, close fd) on the worker. The timer is
+   one-shot, so no stop is needed here. Matches the I/O->worker deferral
+   pattern used by _connection_read_callback for HANGUP/ERROR. */
+static void _connection_idle_timer_callback(pd_loop_t* loop, pd_watcher_t* watcher,
+                                            pd_event_t events, void* user_data) {
+  (void)loop;
+  (void)watcher;
+  (void)events;
+  http_connection_t* connection = (http_connection_t*)user_data;
+  log_warn("http_connection: idle/hard timeout — closing connection");
+  message_t msg;
+  msg.type = HTTP_CONNECTION_CLOSE;
+  msg.payload = NULL;
+  msg.payload_destroy = NULL;
+  actor_send(&connection->actor, &msg);
+}
+
 /* I/O event callback — runs on the I/O thread. For plain HTTP it drains the
    bytes that completed the read directly here and ships them to the
    connection actor as a DATA message for parsing. For SSL it can't — the
@@ -790,6 +814,26 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
                                        pd_event_t events, void* user_data) {
   (void)loop;
   http_connection_t* connection = (http_connection_t*)user_data;
+
+  /* Re-arm the idle timer on any I/O activity (READ or WRITE) so a connection
+     that dribbles bytes never trips the idle timeout, and check the hard
+     deadline so a slow-but-steady request is bounded. Both run on the I/O
+     thread, which owns the timer. The timer is one-shot; stop+start restarts
+     its countdown from server->idle_timeout_ms. */
+  if (connection->idle_timer != NULL && (events & (PD_EVENT_READ | PD_EVENT_WRITE))) {
+    pd_timer_stop(connection->idle_timer);
+    pd_timer_start(connection->idle_timer);
+  }
+  if (connection->hard_deadline_ms != 0 &&
+      (platform_monotonic_ns() / 1000000ULL) > connection->hard_deadline_ms) {
+    message_t msg;
+    msg.type = HTTP_CONNECTION_CLOSE;
+    msg.payload = NULL;
+    msg.payload_destroy = NULL;
+    actor_send(&connection->actor, &msg);
+    _connection_stop_watcher(connection);
+    return;
+  }
 
   if (events & PD_EVENT_WRITE) {
     /* Socket is writable — notify actor to flush buffered write data */
@@ -965,6 +1009,8 @@ http_connection_t* http_connection_create(http_server_t* server, platform_socket
   connection->header_value_len = 0;
   connection->header_value_cap = 0;
   connection->streaming_route = NULL;
+  connection->idle_timer = NULL;
+  connection->hard_deadline_ms = 0;
 
   actor_init(&connection->actor, connection, http_connection_dispatch, server->pool);
 
@@ -977,6 +1023,18 @@ http_connection_t* http_connection_create(http_server_t* server, platform_socket
     PD_EVENT_READ, _connection_read_callback, connection));
   if (ATOMIC_LOAD(&connection->watcher) != NULL) {
     pd_watcher_start(ATOMIC_LOAD(&connection->watcher));
+  }
+
+  /* Arm the slowloris idle timer + set the hard request deadline. The timer
+     fires on the I/O loop after idle_timeout_ms with no I/O activity; the hard
+     deadline is checked on each read callback. Both send HTTP_CONNECTION_CLOSE
+     to the connection actor, which runs the existing close path on the worker. */
+  connection->hard_deadline_ms =
+      (platform_monotonic_ns() / 1000000ULL) + server->hard_timeout_ms;
+  connection->idle_timer = pd_timer_create(server->loop, server->idle_timeout_ms,
+                                           0, _connection_idle_timer_callback, connection);
+  if (connection->idle_timer != NULL) {
+    pd_timer_start(connection->idle_timer);
   }
 
   return connection;
@@ -1012,6 +1070,29 @@ void http_connection_destroy(http_connection_t* connection) {
           pd_watcher_stop(watcher);
           pd_watcher_destroy(watcher);
         }
+      }
+    }
+    if (connection->idle_timer != NULL) {
+      pd_timer_t* timer = connection->idle_timer;
+      connection->idle_timer = NULL;
+      /* Same deferred-stop+destroy pattern as the watcher: the timer lives on
+         the I/O loop and the I/O thread may be in its callback or walking loop
+         timer state, so push stop+destroy onto the I/O-thread destroy stack.
+         During server shutdown (server == NULL) the I/O thread is already
+         joined, so stop+destroy directly. */
+      if (connection->server != NULL) {
+        watcher_update_payload_t* payload = get_clear_memory(sizeof(watcher_update_payload_t));
+        payload->watcher = NULL;
+        payload->events = 0;
+        payload->timer = timer;
+        message_t msg;
+        msg.type = HTTP_SERVER_STOP_WATCHER;
+        msg.payload = payload;
+        msg.payload_destroy = free;
+        actor_send(&connection->server->actor, &msg);
+      } else {
+        pd_timer_stop(timer);
+        pd_timer_destroy(timer);
       }
     }
     if (connection->sock != NULL) {

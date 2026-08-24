@@ -31,7 +31,9 @@ typedef vec_t(http_middleware_entry_t) vec_middleware_t;
 typedef vec_t(http_connection_t*) vec_connection_t;
 
 typedef struct server_destroy_node_t {
-  pd_watcher_t* watcher;
+  pd_watcher_t* watcher;     /* valid when is_timer == 0 */
+  pd_timer_t* timer;         /* valid when is_timer == 1 */
+  uint8_t is_timer;
   struct server_destroy_node_t* next;
 } server_destroy_node_t;
 
@@ -51,6 +53,10 @@ typedef struct http_server_t {
   ATOMIC(size_t) active_connections;
   ATOMIC(uint8_t) draining;
   uint8_t is_local_binding;
+  /* Per-connection slowloris timeouts (set from config via
+     http_server_set_timeouts, or left at the 30s/60s defaults). */
+  uint32_t idle_timeout_ms;
+  uint32_t hard_timeout_ms;
   platform_mutex_t* destroy_lock;
   server_destroy_node_t* destroy_head;
 } http_server_t;
@@ -75,6 +81,7 @@ void http_server_listen(http_server_t* server);
 void http_server_stop(http_server_t* server);
 void http_server_drain(http_server_t* server);
 void http_server_set_max_connections(http_server_t* server, size_t max_connections);
+void http_server_set_timeouts(http_server_t* server, uint32_t idle_ms, uint32_t hard_ms);
 
 void http_server_dispatch(http_server_t* server, http_request_t* request, http_response_t* response);
 

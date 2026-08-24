@@ -74,6 +74,12 @@ typedef struct {
   char*    api_key_hash;        // bcrypt hash ($2b$ prefix), NULL if auth disabled
   bool     config_local_binding_no_auth;  // when true, skip bearer auth for config-mutation endpoints on loopback (default false — bearer required even on loopback)
 
+  /* HTTP slowloris defense. Per-connection idle timeout (no bytes received for
+     this many ms closes the connection) and hard request timeout (total time
+     a single request may take, regardless of byte cadence). 0 is invalid. */
+  uint32_t http_idle_timeout_ms;   // default 30000
+  uint32_t http_hard_timeout_ms;   // default 60000
+
   /* Logging */
   int      log_level;            // LOG_TRACE..LOG_FATAL from Util/log.h
   bool     log_structured;       // enable key=value structured output

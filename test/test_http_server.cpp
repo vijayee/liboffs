@@ -350,6 +350,69 @@ TEST_F(TestHttpServer, MaxConnectionsRefusesExcess) {
   platform_socket_destroy(sock2);
 }
 
+/* Slowloris defense: a connection that sends a partial request (no
+   \r\n\r\n) and then goes silent must be closed by the idle timer. With
+   idle_timeout_ms = 100 the server should close the socket within a few
+   hundred ms. recv returns 0 (peer closed) or -1 (RST) — never a response. */
+TEST_F(TestHttpServer, SlowlorisConnectionClosedOnIdleTimeout) {
+  server = http_server_create(pool, "127.0.0.1", port);
+  ASSERT_TRUE(server != NULL);
+
+  http_server_get(server, "^/hello$", _test_get_handler, NULL);
+  http_server_set_timeouts(server, 100, 1000);
+  http_server_listen(server);
+
+  platform_socket_t* sock = NULL;
+  for (int attempts = 0; attempts < 50 && sock == NULL; attempts++) {
+    platform_usleep(10000);
+    sock = _connect_to_server(port);
+  }
+  ASSERT_NE(sock, nullptr);
+
+  /* Send a partial request — no terminating \r\n\r\n, so the request never
+     completes and the connection sits idle waiting for more bytes. */
+  const char* partial = "GET /hello HTTP/1.1\r\nHost: localhost\r\n";
+  EXPECT_EQ(_send_all(sock, partial, strlen(partial)), 0);
+
+  /* Poll recv until the server closes the connection (returns 0 or -1). */
+  char buf[64];
+  int got = 1;
+  for (int attempts = 0; attempts < 50 && got > 0; attempts++) {
+    platform_usleep(20000);
+    got = (int)platform_socket_recv(sock, buf, sizeof(buf));
+  }
+  EXPECT_LE(got, 0);
+
+  platform_socket_destroy(sock);
+}
+
+/* A normal request (full \r\n\r\n) that completes within the idle timeout
+   must not be closed by the timer. The route returns 200 + "Hello, World!". */
+TEST_F(TestHttpServer, NormalRequestNotTimedOut) {
+  server = http_server_create(pool, "127.0.0.1", port);
+  ASSERT_TRUE(server != NULL);
+
+  http_server_get(server, "^/hello$", _test_get_handler, NULL);
+  http_server_set_timeouts(server, 100, 1000);
+  http_server_listen(server);
+
+  platform_socket_t* sock = NULL;
+  for (int attempts = 0; attempts < 50 && sock == NULL; attempts++) {
+    platform_usleep(10000);
+    sock = _connect_to_server(port);
+  }
+  ASSERT_NE(sock, nullptr);
+
+  char response[4096];
+  const char* request = "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
+  int result = _send_and_recv(sock, request, response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "200"), nullptr);
+  EXPECT_NE(strstr(response, "Hello, World!"), nullptr);
+
+  platform_socket_destroy(sock);
+}
+
 TEST_F(TestHttpServer, TestPostRequest) {
   server = http_server_create(pool, "127.0.0.1", port);
   ASSERT_TRUE(server != NULL);
