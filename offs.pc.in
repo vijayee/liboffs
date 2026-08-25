@@ -1,0 +1,10 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${exec_prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: offs
+Description: Owner Free File System — content-addressed decentralized storage library
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -loffs
+Cflags: -I${includedir}/offs
