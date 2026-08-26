@@ -40,5 +40,9 @@ are resolved.
 **Verification:** `TestPushFileStream.*`, `TestPullFileStream.*`,
 `TestStreamActor.*`, `TestHttpServer.*`, `TestOffRoutes.*`, and
 `TestHttpServerSsl.*` all pass under TSAN with zero data-race reports, and
-the full 849-test suite passes. A pre-existing, unrelated 48-byte leak
-remains in the GET path (`_setup_stream_pipeline`, `off_routes.c:220`).
+the full 849-test suite passes. The GET-path pipeline refcount leak in
+`_setup_stream_pipeline` (off_routes.c) that previously leaked 48 bytes
+direct + 209 bytes indirect per GET request has also been fixed — the
+`get_pipeline_t` refcount now reaches zero in all paths via a `desc_done`
+flag that ensures desc contributes exactly one deref whether close or
+error fires first.
