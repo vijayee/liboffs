@@ -165,6 +165,11 @@ typedef struct {
     tuple_cache_t* tc;
     http_response_t* response;
     ori_t* ori;
+    /* desc_done ensures desc contributes exactly one pipeline deref,
+       whether close or error fires first. stream_deactivate emits both
+       close_event and error_event, so without this flag the pipeline
+       would be dereffed twice for desc. */
+    uint8_t desc_done;
 } get_pipeline_t;
 
 static void _pipeline_on_tuple(void* ctx, void* data) {
@@ -177,7 +182,11 @@ static void _pipeline_on_desc_close(void* ctx, void* unused) {
     (void)unused;
     get_pipeline_t* pipeline = (get_pipeline_t*)ctx;
     readable_descriptor_t* desc = pipeline->desc;
-    int is_zero = refcounter_dereference_is_zero((refcounter_t*)pipeline);
+    int is_zero = 0;
+    if (!pipeline->desc_done) {
+        pipeline->desc_done = 1;
+        is_zero = refcounter_dereference_is_zero((refcounter_t*)pipeline);
+    }
     stream_deferred_deref((stream_t*)desc);
     if (is_zero) {
         DESTROY(pipeline->ori, ori);
@@ -193,7 +202,12 @@ static void _pipeline_on_desc_error(void* ctx, void* error) {
        end/destroy the response here; _pipe_on_error and _pipe_on_close
        both fire on stream deactivation and would double-free. */
     stream_deactivate((stream_t*)pipeline->rs, NULL);
-    if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
+    int is_zero = 0;
+    if (!pipeline->desc_done) {
+        pipeline->desc_done = 1;
+        is_zero = refcounter_dereference_is_zero((refcounter_t*)pipeline);
+    }
+    if (is_zero) {
         DESTROY(pipeline->ori, ori);
         free(pipeline);
     }
@@ -223,10 +237,9 @@ static void _setup_stream_pipeline(http_response_t* response, scheduler_pool_t* 
     pipeline->tc = tc;
     pipeline->response = response;
     pipeline->ori = stream_ori;
+    /* Two derefs total: one for desc-done (close or error, whichever
+       fires first — guarded by desc_done), one for rs-done. */
     refcounter_init((refcounter_t*)pipeline);
-    refcounter_reference((refcounter_t*)pipeline);
-    refcounter_reference((refcounter_t*)pipeline);
-    refcounter_reference((refcounter_t*)pipeline);
     refcounter_reference((refcounter_t*)pipeline);
 
     stream_subscribe((stream_t*)desc, data_event, pipeline,
