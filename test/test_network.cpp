@@ -1416,20 +1416,40 @@ TEST_F(StoreBlockTest, MaxHopsZeroReturnsMaxHopsReached) {
 }
 
 TEST_F(StoreBlockTest, LowCapacityAccepts) {
-  srand(2);  // Deterministic seed: rand() produces 0.70 < 0.75 accept probability
-  store_block_state_t state = {};
-  memset(state.block_hash, 0xAA, 32);
-  state.max_hops = 6;
+  /* At local_capacity=0.2, INHALE phase, accept_probability = 1 - 0.2/0.80
+     = 0.75. store_block_should_accept draws from platform_random_uniform_float
+     (CSPRNG via getentropy on Linux), which srand() cannot seed, so a single
+     trial is non-deterministic. Run N trials and assert the acceptance rate
+     matches the 0.75 probability within a tight confidence band.
+     N=2000 → expected 1500 accepts, std dev sqrt(2000*0.75*0.25) ≈ 19.4.
+     [1400, 1600] is ±5.16σ → ~1-in-5M false-fail rate, effectively
+     non-flaky. */
+  constexpr int N = 2000;
+  constexpr int expected = 1500;
+  constexpr int tolerance = 100;
+  int accepts = 0;
+  for (int i = 0; i < N; i++) {
+    store_block_state_t state = {};
+    memset(state.block_hash, 0xAA, 32);
+    state.max_hops = 6;
 
-  net_node_t* next_hops[STORE_BLOCK_FORWARD_FANOUT];
-  size_t next_hop_count = 0;
+    net_node_t* next_hops[STORE_BLOCK_FORWARD_FANOUT];
+    size_t next_hop_count = 0;
 
-  // Low capacity (0.2) → should accept
-  store_block_result_e result = store_block_execute(
-      &eabf_table, NULL, rings, &local_id, 0.2f, NODE_PHASE_INHALE,
-      &state, next_hops, &next_hop_count);
+    store_block_result_e result = store_block_execute(
+        &eabf_table, NULL, rings, &local_id, 0.2f, NODE_PHASE_INHALE,
+        &state, next_hops, &next_hop_count);
+    if (result == STORE_BLOCK_ACCEPTED) {
+      accepts++;
+    }
+  }
 
-  EXPECT_EQ(result, STORE_BLOCK_ACCEPTED);
+  EXPECT_GE(accepts, expected - tolerance)
+      << "Acceptance rate too low: " << accepts << "/" << N
+      << " (expected ~" << expected << " ± " << tolerance << ")";
+  EXPECT_LE(accepts, expected + tolerance)
+      << "Acceptance rate too high: " << accepts << "/" << N
+      << " (expected ~" << expected << " ± " << tolerance << ")";
 }
 
 TEST_F(StoreBlockTest, HighCapacityForwards) {
