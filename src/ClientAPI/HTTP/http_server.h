@@ -31,9 +31,10 @@ typedef vec_t(http_middleware_entry_t) vec_middleware_t;
 typedef vec_t(http_connection_t*) vec_connection_t;
 
 typedef struct server_destroy_node_t {
-  pd_watcher_t* watcher;     /* valid when is_timer == 0 */
-  pd_timer_t* timer;         /* valid when is_timer == 1 */
-  uint8_t is_timer;
+  pd_watcher_t* watcher;     /* valid when type == 0 */
+  pd_timer_t* timer;         /* valid when type == 1 */
+  platform_socket_t* sock;   /* valid when type == 2 */
+  uint8_t type;              /* 0 = watcher, 1 = timer, 2 = socket */
   struct server_destroy_node_t* next;
 } server_destroy_node_t;
 
@@ -84,6 +85,10 @@ void http_server_set_max_connections(http_server_t* server, size_t max_connectio
 void http_server_set_timeouts(http_server_t* server, uint32_t idle_ms, uint32_t hard_ms);
 
 void http_server_dispatch(http_server_t* server, http_request_t* request, http_response_t* response);
+
+/* Defer a connection socket's close+free to the I/O thread's destroy stack so
+   it is never freed while the I/O-thread read callback may still be using it. */
+void http_server_defer_socket_destroy(http_server_t* server, platform_socket_t* sock);
 
 http_route_t* http_server_match_route(http_server_t* server, int method, const char* path);
 

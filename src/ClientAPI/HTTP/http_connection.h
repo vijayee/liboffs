@@ -32,7 +32,7 @@ typedef struct http_connection_t {
   refcounter_t refcounter;
   actor_t actor;
   http_server_t* server;
-  platform_socket_t* sock;
+  ATOMIC(platform_socket_t*) sock;
   ATOMIC(pd_watcher_t*) watcher;
   SSL* ssl;
   /* Windows IOCP only: memory BIO pair decoupling OpenSSL from the socket so

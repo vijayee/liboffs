@@ -339,9 +339,13 @@ static void _connection_stop_watcher(http_connection_t* connection) {
 
 /* Close the fd and mark connection as closing. Used from dispatch (worker thread). */
 static void _connection_close_fd(http_connection_t* connection) {
-  if (connection->sock != NULL) {
-    platform_socket_destroy(connection->sock);
-    connection->sock = NULL;
+  platform_socket_t* sock = ATOMIC_EXCHANGE(&connection->sock, NULL);
+  if (sock != NULL) {
+    if (connection->server != NULL) {
+      http_server_defer_socket_destroy(connection->server, sock);
+    } else {
+      platform_socket_destroy(sock);
+    }
   }
   connection->is_closing = 1;
 }
@@ -359,8 +363,9 @@ static int _connection_send_raw_blocking(http_connection_t* connection,
                                           const uint8_t* data, size_t len,
                                           size_t* out_sent) {
   size_t sent_total = 0;
+  platform_socket_t* sock = ATOMIC_LOAD(&connection->sock);
   for (int attempts = 0; attempts < 2000 && sent_total < len; attempts++) {
-    ssize_t sent = platform_socket_send(connection->sock, data + sent_total,
+    ssize_t sent = platform_socket_send(sock, data + sent_total,
                                          len - sent_total);
     if (sent > 0) {
       sent_total += (size_t)sent;
@@ -461,13 +466,13 @@ static int _connection_send_all_blocking(http_connection_t* connection,
  * cross-thread race on the BIO. */
 static void _connection_ssl_data_handle(http_connection_t* connection,
                                         buffer_t* data) {
-  if (connection->sock == NULL || connection->ssl == NULL) {
+  if (ATOMIC_LOAD(&connection->sock) == NULL || connection->ssl == NULL) {
     return;
   }
   BIO_write(connection->rbio, data->data, (int)data->size);
 
   for (int batch = 0; batch < 16; batch++) {
-    if (connection->sock == NULL) {
+    if (ATOMIC_LOAD(&connection->sock) == NULL) {
       return;
     }
     char buffer[READ_BUFFER_SIZE];
@@ -566,7 +571,7 @@ void http_connection_dispatch(void* state, message_t* msg) {
       /* ASIO-style: the I/O thread notified us that data is available.
          Perform the actual recv() and parsing here on the scheduler worker. */
       atomic_store(&connection->read_pending, 0);
-      if (connection->sock == NULL) {
+      if (ATOMIC_LOAD(&connection->sock) == NULL) {
         break;
       }
 #ifndef _WIN32
@@ -582,7 +587,7 @@ void http_connection_dispatch(void* state, message_t* msg) {
          goes through READABLE -> _connection_do_reads. */
       buffer_t* data = (buffer_t*)msg->payload;
       msg->payload = NULL; /* Take ownership — actor_run won't destroy it */
-      if (connection->sock == NULL) {
+      if (ATOMIC_LOAD(&connection->sock) == NULL) {
         DESTROY(data, buffer);
         break;
       }
@@ -629,7 +634,7 @@ void http_connection_dispatch(void* state, message_t* msg) {
     case HTTP_CONNECTION_WRITE: {
       buffer_t* buf = (buffer_t*)msg->payload;
       msg->payload = NULL; /* Take ownership — actor_run won't destroy it */
-      if (connection->sock == NULL) {
+      if (ATOMIC_LOAD(&connection->sock) == NULL) {
         DESTROY(buf, buffer);
         break;
       }
@@ -696,7 +701,7 @@ void http_connection_dispatch(void* state, message_t* msg) {
         break;
       }
       /* Try direct send */
-      ssize_t sent = platform_socket_send(connection->sock, buf->data, buf->size);
+      ssize_t sent = platform_socket_send(ATOMIC_LOAD(&connection->sock), buf->data, buf->size);
       if (sent < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
           connection->write_buffer = buf;
@@ -728,7 +733,7 @@ void http_connection_dispatch(void* state, message_t* msg) {
     }
 
     case HTTP_CONNECTION_WRITABLE: {
-      if (connection->sock == NULL) {
+      if (ATOMIC_LOAD(&connection->sock) == NULL) {
         break;
       }
       if (connection->write_buffer == NULL || connection->write_buffer->size == 0) {
@@ -736,7 +741,7 @@ void http_connection_dispatch(void* state, message_t* msg) {
         _connection_update_watcher(connection, PD_EVENT_READ);
         break;
       }
-      ssize_t sent = platform_socket_send(connection->sock, connection->write_buffer->data,
+      ssize_t sent = platform_socket_send(ATOMIC_LOAD(&connection->sock), connection->write_buffer->data,
                            connection->write_buffer->size);
       if (sent > 0) {
         if ((size_t)sent >= connection->write_buffer->size) {
@@ -745,8 +750,8 @@ void http_connection_dispatch(void* state, message_t* msg) {
           connection->write_pending = 0;
           if (connection->is_closing) {
             /* All data flushed — finish the deferred close */
-            if (connection->sock != NULL) {
-              platform_socket_shutdown(connection->sock, PLATFORM_SHUT_WR);
+            if (ATOMIC_LOAD(&connection->sock) != NULL) {
+              platform_socket_shutdown(ATOMIC_LOAD(&connection->sock), PLATFORM_SHUT_WR);
             }
             _connection_stop_watcher(connection);
             _connection_close_fd(connection);
@@ -785,8 +790,8 @@ void http_connection_dispatch(void* state, message_t* msg) {
         _connection_update_watcher(connection, PD_EVENT_READ | PD_EVENT_WRITE);
         break;
       }
-      if (connection->sock != NULL) {
-        platform_socket_shutdown(connection->sock, PLATFORM_SHUT_WR);
+      if (ATOMIC_LOAD(&connection->sock) != NULL) {
+        platform_socket_shutdown(ATOMIC_LOAD(&connection->sock), PLATFORM_SHUT_WR);
       }
       _connection_stop_watcher(connection);
       _connection_close_fd(connection);
@@ -915,10 +920,11 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
     if (total_read == 0) {
       /* POSIX path: synchronous recv. The socket may already be closed if the
          connection was torn down concurrently with a pending READ event. */
-      if (connection->sock == NULL) {
+      platform_socket_t* sock = ATOMIC_LOAD(&connection->sock);
+      if (sock == NULL) {
         return;
       }
-      ssize_t bytes_read = platform_socket_recv(connection->sock, buffer, sizeof(buffer));
+      ssize_t bytes_read = platform_socket_recv(sock, buffer, sizeof(buffer));
       if (bytes_read <= 0) {
         if (bytes_read == 0) {
           message_t msg;
@@ -965,7 +971,7 @@ static void _connection_do_reads(http_connection_t* connection) {
   }
   for (int batch = 0; batch < 16; batch++) {
     char buffer[READ_BUFFER_SIZE];
-    if (connection->sock == NULL) {
+    if (ATOMIC_LOAD(&connection->sock) == NULL) {
       return;
     }
 
@@ -1012,7 +1018,7 @@ http_connection_t* http_connection_create(http_server_t* server, platform_socket
   http_connection_t* connection = get_clear_memory(sizeof(http_connection_t));
   refcounter_init((refcounter_t*)connection);
   connection->server = server;
-  connection->sock = sock;
+  ATOMIC_STORE(&connection->sock, sock);
   connection->ssl = NULL;
   connection->rbio = NULL;
   connection->wbio = NULL;
@@ -1116,9 +1122,9 @@ void http_connection_destroy(http_connection_t* connection) {
         pd_timer_destroy(timer);
       }
     }
-    if (connection->sock != NULL) {
-      platform_socket_destroy(connection->sock);
-      connection->sock = NULL;
+    platform_socket_t* sock = ATOMIC_EXCHANGE(&connection->sock, NULL);
+    if (sock != NULL) {
+      platform_socket_destroy(sock);
     }
     if (connection->request != NULL) {
       DESTROY(connection->request, http_request);
@@ -1140,7 +1146,7 @@ void http_connection_destroy(http_connection_t* connection) {
 }
 
 void http_connection_write(http_connection_t* connection, const char* data, size_t length) {
-  if (connection == NULL || connection->sock == NULL) {
+  if (connection == NULL || ATOMIC_LOAD(&connection->sock) == NULL) {
     return;
   }
   buffer_t* buf = buffer_create_from_pointer_copy((uint8_t*)data, length);

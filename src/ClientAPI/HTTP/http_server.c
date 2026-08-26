@@ -28,7 +28,7 @@ static void _destroy_stack_init(http_server_t* server) {
 static void _destroy_stack_push_watcher(http_server_t* server, pd_watcher_t* watcher) {
   server_destroy_node_t* node = get_clear_memory(sizeof(server_destroy_node_t));
   node->watcher = watcher;
-  node->is_timer = 0;
+  node->type = 0;
   platform_mutex_lock(server->destroy_lock);
   node->next = server->destroy_head;
   server->destroy_head = node;
@@ -39,7 +39,18 @@ static void _destroy_stack_push_watcher(http_server_t* server, pd_watcher_t* wat
 static void _destroy_stack_push_timer(http_server_t* server, pd_timer_t* timer) {
   server_destroy_node_t* node = get_clear_memory(sizeof(server_destroy_node_t));
   node->timer = timer;
-  node->is_timer = 1;
+  node->type = 1;
+  platform_mutex_lock(server->destroy_lock);
+  node->next = server->destroy_head;
+  server->destroy_head = node;
+  platform_mutex_unlock(server->destroy_lock);
+  pd_loop_async_send(server->loop, NULL);
+}
+
+void http_server_defer_socket_destroy(http_server_t* server, platform_socket_t* sock) {
+  server_destroy_node_t* node = get_clear_memory(sizeof(server_destroy_node_t));
+  node->sock = sock;
+  node->type = 2;
   platform_mutex_lock(server->destroy_lock);
   node->next = server->destroy_head;
   server->destroy_head = node;
@@ -55,9 +66,11 @@ static void _destroy_stack_drain(http_server_t* server) {
   platform_mutex_unlock(server->destroy_lock);
   while (node != NULL) {
     server_destroy_node_t* next = node->next;
-    if (node->is_timer) {
+    if (node->type == 1) {
       pd_timer_stop(node->timer);
       pd_timer_destroy(node->timer);
+    } else if (node->type == 2) {
+      platform_socket_destroy(node->sock);
     } else {
       pd_watcher_destroy(node->watcher);
     }
@@ -254,9 +267,9 @@ void http_server_destroy(http_server_t* server) {
   for (int i = 0; i < server->connections.length; i++) {
     http_connection_t* conn = server->connections.data[i];
     conn->is_closing = 1;
-    if (conn->sock != NULL) {
-      platform_socket_destroy(conn->sock);
-      conn->sock = NULL;
+    platform_socket_t* sock = ATOMIC_EXCHANGE(&conn->sock, NULL);
+    if (sock != NULL) {
+      platform_socket_destroy(sock);
     }
     conn->server = NULL;
   }

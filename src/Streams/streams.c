@@ -252,6 +252,38 @@ static void _stream_notify_owned_error(stream_t* stream, async_error_t* error) {
   }
 }
 
+/* Pipe/piped are routed through the stream actor so pipe_notifiers is only
+   ever touched on the actor thread. The public pipe entry points send a
+   STREAM_PIPE message; the on_pipe handler then sends STREAM_PIPED to the
+   peer's actor, so each stream's pipe_notifiers is written and freed on its
+   own actor thread (no cross-thread use-after-free). */
+void stream_pipe_internal(stream_t* source, stream_t* dest) {
+  source->on_pipe(source, dest);
+}
+
+void stream_piped_internal(stream_t* stream, stream_t* source) {
+  stream->on_piped(stream, source);
+}
+
+static void _stream_pipe_payload_destroy(void* ptr) {
+  stream_pipe_payload_t* p = (stream_pipe_payload_t*) ptr;
+  if (p->source != NULL) {
+    DEREFERENCE(p->source);
+  }
+  if (p->dest != NULL) {
+    DEREFERENCE(p->dest);
+  }
+  free(p);
+}
+
+static void _stream_piped_payload_destroy(void* ptr) {
+  stream_piped_payload_t* p = (stream_piped_payload_t*) ptr;
+  if (p->source != NULL) {
+    DEREFERENCE(p->source);
+  }
+  free(p);
+}
+
 void stream_dispatch(void* state, message_t* msg) {
   stream_t* stream = (stream_t*) state;
   switch (msg->type) {
@@ -336,6 +368,16 @@ void stream_dispatch(void* state, message_t* msg) {
         notify_payload->payload = NULL;
         notify_payload->payload_destroy = NULL;
       }
+      break;
+    }
+    case STREAM_PIPE: {
+      stream_pipe_payload_t* p = (stream_pipe_payload_t*) msg->payload;
+      stream_pipe_internal(p->source, p->dest);
+      break;
+    }
+    case STREAM_PIPED: {
+      stream_piped_payload_t* p = (stream_piped_payload_t*) msg->payload;
+      stream_piped_internal(stream, p->source);
       break;
     }
     case STREAM_SET_PULLING: {
@@ -730,7 +772,14 @@ void readable_push_stream_pipe(stream_t* rs, stream_t* ws) {
   } else if (ws->type == readable_stream || ws->force == pull) {
     stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Invalid write stream being piped to"), (void (*)(void*))error_destroy);
   } else {
-    rs->on_pipe(rs, ws);
+    stream_pipe_payload_t* payload = get_clear_memory(sizeof(stream_pipe_payload_t));
+    payload->source = REFERENCE(rs, stream_t);
+    payload->dest = REFERENCE(ws, stream_t);
+    message_t msg;
+    msg.type = STREAM_PIPE;
+    msg.payload = payload;
+    msg.payload_destroy = _stream_pipe_payload_destroy;
+    actor_send(&rs->actor, &msg);
   }
 }
 
@@ -763,7 +812,13 @@ void _readable_push_stream_on_pipe(stream_t* rs, stream_t* ws) {
     rs->pipe_notifiers[2].event = close_event;
     rs->pipe_notifiers[2].id = stream_subscribe(ws, close_event, REFERENCE(rs, stream_t), (void(*)(void*, void*)) _readable_push_stream_close_notify, (void (*)(void*))rs->destructor);
     rs->pipe_notifiers[2].stream = REFERENCE(ws, stream_t);
-    ws->on_piped(ws, rs);
+    stream_piped_payload_t* piped_payload = get_clear_memory(sizeof(stream_piped_payload_t));
+    piped_payload->source = REFERENCE(rs, stream_t);
+    message_t piped_msg;
+    piped_msg.type = STREAM_PIPED;
+    piped_msg.payload = piped_payload;
+    piped_msg.payload_destroy = _stream_piped_payload_destroy;
+    actor_send(&ws->actor, &piped_msg);
   }
 }
 
@@ -875,7 +930,14 @@ void writeable_pull_stream_pipe(stream_t* ws, stream_t* rs) {
   } else if (ws->type == readable_stream || ws->force == push) {
     stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Invalid read stream being piped to"), (void (*)(void*))error_destroy);
   } else {
-    ws->on_pipe(ws, rs);
+    stream_pipe_payload_t* payload = get_clear_memory(sizeof(stream_pipe_payload_t));
+    payload->source = REFERENCE(ws, stream_t);
+    payload->dest = REFERENCE(rs, stream_t);
+    message_t msg;
+    msg.type = STREAM_PIPE;
+    msg.payload = payload;
+    msg.payload_destroy = _stream_pipe_payload_destroy;
+    actor_send(&ws->actor, &msg);
   }
 }
 
@@ -920,7 +982,13 @@ void _writeable_pull_stream_on_pipe(stream_t* ws, stream_t* rs) {
     ws->pipe_notifiers[4].id = stream_subscribe(rs, data_event, REFERENCE(ws, stream_t), (void(*)(void*, void*)) _writeable_pull_stream_data_notify, (void (*)(void*))ws->destructor);
     ws->pipe_notifiers[4].stream = REFERENCE(rs, stream_t);
     ws->is_piped = 1;
-    rs->on_piped(rs, ws);
+    stream_piped_payload_t* piped_payload = get_clear_memory(sizeof(stream_piped_payload_t));
+    piped_payload->source = REFERENCE(ws, stream_t);
+    message_t piped_msg;
+    piped_msg.type = STREAM_PIPED;
+    piped_msg.payload = piped_payload;
+    piped_msg.payload_destroy = _stream_piped_payload_destroy;
+    actor_send(&rs->actor, &piped_msg);
   }
 }
 
