@@ -59,6 +59,8 @@ typedef void (*offs_block_get_cb_t)(void* ctx, uint8_t status,
     const uint8_t* data, size_t data_len);
 typedef void (*offs_block_delete_cb_t)(void* ctx, uint8_t status);
 typedef void (*offs_health_cb_t)(void* ctx, const char* json_response);
+typedef void (*offs_peer_info_cb_t)(void* ctx, uint8_t format, const uint8_t* data, size_t data_len);
+typedef void (*offs_peer_connect_cb_t)(void* ctx, uint8_t status);
 
 /* Connection lifecycle */
 offs_client_t* offs_client_connect(const char* transport_url, const char* api_key);
@@ -123,6 +125,22 @@ int offs_client_block_delete(offs_client_t* client,
 /* Health check */
 int offs_client_health(offs_client_t* client,
     offs_health_cb_t callback, void* ctx);
+
+/* Peer operations. format: 0 = raw CBOR peer_info, 1 = base58 text,
+   2 = PPM QR image. The _qr forms are sugar for format 2. */
+int offs_client_peer_info(offs_client_t* client, offs_peer_info_cb_t callback, void* ctx);
+int offs_client_peer_info_ex(offs_client_t* client, uint8_t format,
+                             offs_peer_info_cb_t callback, void* ctx);
+int offs_client_peer_connect(offs_client_t* client, uint8_t format,
+                             const uint8_t* data, size_t data_len,
+                             offs_peer_connect_cb_t callback, void* ctx);
+int offs_client_peer_connect_qr(offs_client_t* client, const uint8_t* ppm, size_t ppm_len,
+                                offs_peer_connect_cb_t callback, void* ctx);
+int offs_client_friend_add(offs_client_t* client, uint8_t format,
+                           const uint8_t* data, size_t data_len,
+                           offs_peer_connect_cb_t callback, void* ctx);
+int offs_client_friend_add_qr(offs_client_t* client, const uint8_t* ppm, size_t ppm_len,
+                              offs_peer_connect_cb_t callback, void* ctx);
 
 /* Raw HTTP GET — opens a temporary TCP connection to fetch data from a URL.
    Returns a buffer_t* with the response body, or NULL on error.
