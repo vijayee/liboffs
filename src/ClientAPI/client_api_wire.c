@@ -1079,13 +1079,17 @@ cbor_item_t* client_api_peer_info_request_encode(void) {
 }
 
 cbor_item_t* client_api_peer_info_request_encode_format(uint8_t format) {
-  cbor_item_t* array = cbor_new_definite_array(2);
+  /* Format 0 keeps the original 1-element frame shape so old daemons and
+     old capture tooling see byte-identical requests. */
+  cbor_item_t* array = cbor_new_definite_array(format == 0 ? 1 : 2);
   cbor_item_t* item = cbor_build_uint8(CLIENT_API_PEER_INFO_REQUEST);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
-  item = cbor_build_uint8(format);
-  (void)cbor_array_push(array, item);
-  cbor_decref(&item);
+  if (format != 0) {
+    item = cbor_build_uint8(format);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+  }
   return array;
 }
 

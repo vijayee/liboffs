@@ -10,9 +10,23 @@ namespace qr_wire_test {
 
 TEST(PeerInfoRequestWire, BareFrameDecodesToFormatCbor) {
   cbor_item_t* frame = client_api_peer_info_request_encode();
+  ASSERT_EQ(1u, cbor_array_size(frame));  /* original 1-element wire shape */
   uint8_t format = 99;
   ASSERT_EQ(0, client_api_peer_info_request_decode(frame, &format));
   EXPECT_EQ(0, format);  /* backward compatible default: raw CBOR */
+  cbor_decref(&frame);
+}
+
+TEST(PeerInfoRequestWire, BareFrameAcceptedByDecode) {
+  /* A hand-built 1-element frame decodes to format 0 — the shape old
+     clients send and old daemons must keep accepting. */
+  cbor_item_t* frame = cbor_new_definite_array(1);
+  cbor_item_t* type = cbor_build_uint8(CLIENT_API_PEER_INFO_REQUEST);
+  (void)cbor_array_push(frame, type);
+  cbor_decref(&type);
+  uint8_t format = 99;
+  ASSERT_EQ(0, client_api_peer_info_request_decode(frame, &format));
+  EXPECT_EQ(0, format);
   cbor_decref(&frame);
 }
 
