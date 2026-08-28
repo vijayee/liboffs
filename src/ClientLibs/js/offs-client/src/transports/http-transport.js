@@ -1,9 +1,5 @@
 
-/**
- * Content-Type for peer/friend request bodies, by wire format.
- * 0=raw CBOR, 1=base58 text, 2=PPM QR image.
- */
-const PEER_BODY_CONTENT_TYPES = { 0: 'application/cbor', 1: 'text/plain', 2: 'image/x-portable-pixmap' };
+import { PEER_CONTENT_TYPES, PEER_FORMATS } from '../wire.js';
 
 /**
  * HTTP REST transport for the OFFS client.
@@ -279,7 +275,7 @@ export class HttpTransport {
    * @returns {Promise<{format: number, data: Uint8Array}>}
    */
   async peerInfo(format = 'cbor') {
-    const fmt = { cbor: 0, base58: 1, qrcode: 2 }[format] ?? 0;
+    const fmt = PEER_FORMATS[format] ?? 0;
     const response = await fetch(this.url(`/peer/info?format=${format}`), {
       method: 'GET',
       headers: this.authHeaders(),
@@ -298,8 +294,8 @@ export class HttpTransport {
   async peerConnect(peerInfo, format = 0) {
     const response = await fetch(this.url('/peer/connect'), {
       method: 'POST',
-      headers: { ...this.authHeaders(), 'Content-Type': PEER_BODY_CONTENT_TYPES[format] ?? 'application/cbor' },
-      body: format === 1 ? new TextDecoder().decode(peerInfo) : peerInfo,
+      headers: { ...this.authHeaders(), 'Content-Type': PEER_CONTENT_TYPES[format] ?? 'application/cbor' },
+      body: format === PEER_FORMATS.base58 ? new TextDecoder().decode(peerInfo) : peerInfo,
       signal: this.abortController?.signal,
     });
     if (!response.ok) throw new Error(`Peer connect failed: ${response.status}`);
@@ -327,8 +323,8 @@ export class HttpTransport {
   async friendAdd(peerInfo, format = 0) {
     const response = await fetch(this.url('/friends'), {
       method: 'POST',
-      headers: { ...this.authHeaders(), 'Content-Type': PEER_BODY_CONTENT_TYPES[format] ?? 'application/cbor' },
-      body: format === 1 ? new TextDecoder().decode(peerInfo) : peerInfo,
+      headers: { ...this.authHeaders(), 'Content-Type': PEER_CONTENT_TYPES[format] ?? 'application/cbor' },
+      body: format === PEER_FORMATS.base58 ? new TextDecoder().decode(peerInfo) : peerInfo,
       signal: this.abortController?.signal,
     });
     if (!response.ok) throw new Error(`Friend add failed: ${response.status}`);

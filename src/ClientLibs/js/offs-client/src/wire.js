@@ -42,6 +42,20 @@ export const MSG = {
   CONFIG_RELOAD_RESPONSE: 38
 };
 
+/**
+ * Peer-info wire format bytes shared by PEER_INFO_REQUEST/RESPONSE,
+ * PEER_CONNECT and FRIEND_ADD: 0 = raw CBOR, 1 = base58 text,
+ * 2 = PPM QR image.
+ */
+export const PEER_FORMATS = { cbor: 0, base58: 1, qrcode: 2 };
+
+/** HTTP Content-Type for each peer-info wire format (request bodies). */
+export const PEER_CONTENT_TYPES = {
+  [PEER_FORMATS.cbor]: 'application/cbor',
+  [PEER_FORMATS.base58]: 'text/plain',
+  [PEER_FORMATS.qrcode]: 'image/x-portable-pixmap',
+};
+
 export const STATUS = {
   OK: 0,
   BAD_REQUEST: 1,
@@ -285,7 +299,7 @@ export function decodePeerInfoResponse(bytes) {
 }
 
 /**
- * @param {number} format 0=cbor, 1=base58
+ * @param {number} format 0=cbor, 1=base58, 2=qrcode (PPM image)
  * @param {Uint8Array} data
  * @returns {Uint8Array}
  */
@@ -323,7 +337,7 @@ export function decodePeerListResponse(bytes) {
 // --- Friend ---
 
 /**
- * @param {number} format
+ * @param {number} format 0=cbor, 1=base58, 2=qrcode (PPM image)
  * @param {Uint8Array} data
  * @returns {Uint8Array}
  */
