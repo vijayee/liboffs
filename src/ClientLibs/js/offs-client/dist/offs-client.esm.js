@@ -1,7 +1,7 @@
 var rr = Object.defineProperty;
 var nr = (t, e, r) => e in t ? rr(t, e, { enumerable: !0, configurable: !0, writable: !0, value: r }) : t[e] = r;
 var B = (t, e, r) => nr(t, typeof e != "symbol" ? e + "" : e, r);
-const st = { 0: "application/cbor", 1: "text/plain", 2: "image/x-portable-pixmap" };
+const nt = { 0: "application/cbor", 1: "text/plain", 2: "image/x-portable-pixmap" };
 class D {
   /**
    * @param {string} url
@@ -248,7 +248,7 @@ class D {
     var s;
     const n = await fetch(this.url("/peer/connect"), {
       method: "POST",
-      headers: { ...this.authHeaders(), "Content-Type": st[r] ?? "application/cbor" },
+      headers: { ...this.authHeaders(), "Content-Type": nt[r] ?? "application/cbor" },
       body: r === 1 ? new TextDecoder().decode(e) : e,
       signal: (s = this.abortController) == null ? void 0 : s.signal
     });
@@ -277,7 +277,7 @@ class D {
     var s;
     const n = await fetch(this.url("/friends"), {
       method: "POST",
-      headers: { ...this.authHeaders(), "Content-Type": st[r] ?? "application/cbor" },
+      headers: { ...this.authHeaders(), "Content-Type": nt[r] ?? "application/cbor" },
       body: r === 1 ? new TextDecoder().decode(e) : e,
       signal: (s = this.abortController) == null ? void 0 : s.signal
     });
@@ -357,17 +357,17 @@ try {
 } catch {
 }
 let E, le, c = 0;
-const sr = 105, ir = 57342, or = 57343, it = 57337, ot = 6, de = {};
-let Ee = 11281e4, ie = 1681e4, T = {}, k, Pe, Ne = 0, ge = 0, H, Z, F = [], He = [], z, W, we, at = {
+const sr = 105, ir = 57342, or = 57343, st = 57337, it = 6, de = {};
+let ye = 11281e4, ie = 1681e4, T = {}, k, Pe, Ne = 0, xe = 0, H, Z, F = [], He = [], z, W, Ee, ot = {
   useRecords: !1,
   mapsAsObjects: !0
-}, me = !1, xt = 2;
+}, ge = !1, wt = 2;
 try {
   new Function("");
 } catch {
-  xt = 1 / 0;
+  wt = 1 / 0;
 }
-class ye {
+class me {
   constructor(e) {
     if (e && ((e.keyMap || e._keyMap) && !e.useRecords && (e.useRecords = !1, e.mapsAsObjects = !0), e.useRecords === !1 && e.mapsAsObjects === void 0 && (e.mapsAsObjects = !0), e.getStructures && (e.getShared = e.getStructures), e.getShared && !e.structures && ((e.structures = []).uninitialized = !0), e.keyMap)) {
       this.mapKey = /* @__PURE__ */ new Map();
@@ -414,26 +414,26 @@ class ye {
   }
   decode(e, r) {
     if (E)
-      return bt(() => (Ge(), this ? this.decode(e, r) : ye.prototype.decode.call(at, e, r)));
-    le = r > -1 ? r : e.length, c = 0, ge = 0, Pe = null, H = null, E = e;
+      return St(() => (Ge(), this ? this.decode(e, r) : me.prototype.decode.call(ot, e, r)));
+    le = r > -1 ? r : e.length, c = 0, xe = 0, Pe = null, H = null, E = e;
     try {
       W = e.dataView || (e.dataView = new DataView(e.buffer, e.byteOffset, e.byteLength));
     } catch (n) {
       throw E = null, e instanceof Uint8Array ? n : new Error("Source must be a Uint8Array or Buffer but was a " + (e && typeof e == "object" ? e.constructor.name : typeof e));
     }
-    if (this instanceof ye) {
+    if (this instanceof me) {
       if (T = this, z = this.sharedValues && (this.pack ? new Array(this.maxPrivatePackedValues || 16).concat(this.sharedValues) : this.sharedValues), this.structures)
         return k = this.structures, Re();
       (!k || k.length > 0) && (k = []);
     } else
-      T = at, (!k || k.length > 0) && (k = []), z = null;
+      T = ot, (!k || k.length > 0) && (k = []), z = null;
     return Re();
   }
   decodeMultiple(e, r) {
     let n, s = 0;
     try {
       let o = e.length;
-      me = !0;
+      ge = !0;
       let l = this ? this.decode(e, o) : Ze.decode(e, o);
       if (r) {
         if (r(l) === !1)
@@ -449,7 +449,7 @@ class ye {
     } catch (o) {
       throw o.lastPosition = s, o.values = n, o;
     } finally {
-      me = !1, Ge();
+      ge = !1, Ge();
     }
   }
 }
@@ -468,7 +468,7 @@ function Re() {
     else if (c > le) {
       let e = new Error("Unexpected end of CBOR data");
       throw e.incomplete = !0, e;
-    } else if (!me)
+    } else if (!ge)
       throw new Error("Data read, but end of buffer not reached");
     return t;
   } catch (t) {
@@ -518,7 +518,7 @@ function A() {
           case 4:
             let r = [], n, s = 0;
             for (; (n = A()) != de; ) {
-              if (s >= Ee) throw new Error(`Array length exceeds ${Ee}`);
+              if (s >= ye) throw new Error(`Array length exceeds ${ye}`);
               r[s++] = n;
             }
             return e == 4 ? r : e == 3 ? r.join("") : Buffer.concat(r);
@@ -538,7 +538,7 @@ function A() {
                 }
               return l;
             } else {
-              we && (T.mapsAsObjects = !0, we = !1);
+              Ee && (T.mapsAsObjects = !0, Ee = !1);
               let l = /* @__PURE__ */ new Map();
               if (T.keyMap) {
                 let p = 0;
@@ -573,35 +573,35 @@ function A() {
     case 2:
       return lr(t);
     case 3:
-      if (ge >= c)
+      if (xe >= c)
         return Pe.slice(c - Ne, (c += t) - Ne);
-      if (ge == 0 && le < 140 && t < 32) {
-        let s = t < 16 ? gt(t) : fr(t);
+      if (xe == 0 && le < 140 && t < 32) {
+        let s = t < 16 ? xt(t) : fr(t);
         if (s != null)
           return s;
       }
       return ar(t);
     case 4:
-      if (t >= Ee) throw new Error(`Array length exceeds ${Ee}`);
+      if (t >= ye) throw new Error(`Array length exceeds ${ye}`);
       let r = new Array(t);
       for (let s = 0; s < t; s++) r[s] = A();
       return r;
     case 5:
-      if (t >= ie) throw new Error(`Map size exceeds ${Ee}`);
+      if (t >= ie) throw new Error(`Map size exceeds ${ye}`);
       if (T.mapsAsObjects) {
         let s = {};
         if (T.keyMap) for (let o = 0; o < t; o++) s[Y(T.decodeKey(A()))] = A();
         else for (let o = 0; o < t; o++) s[Y(A())] = A();
         return s;
       } else {
-        we && (T.mapsAsObjects = !0, we = !1);
+        Ee && (T.mapsAsObjects = !0, Ee = !1);
         let s = /* @__PURE__ */ new Map();
         if (T.keyMap) for (let o = 0; o < t; o++) s.set(T.decodeKey(A()), A());
         else for (let o = 0; o < t; o++) s.set(A(), A());
         return s;
       }
     case 6:
-      if (t >= it) {
+      if (t >= st) {
         let s = k[t & 8191];
         if (s)
           return s.read || (s.read = je(s)), s.read();
@@ -624,7 +624,7 @@ function A() {
             for (let p = 2; p < o; p++)
               qe(l++, A());
             return A();
-          } else if (t == it)
+          } else if (t == st)
             return Er();
           if (T.getShared && (Qe(), s = k[t & 8191], s))
             return s.read || (s.read = je(s)), s.read();
@@ -667,7 +667,7 @@ function A() {
       throw new Error("Unknown CBOR token " + t);
   }
 }
-const ft = /^[a-zA-Z_$][a-zA-Z\d_$]*$/;
+const at = /^[a-zA-Z_$][a-zA-Z\d_$]*$/;
 function je(t) {
   if (!t) throw new Error("Structure is required in record definition");
   function e() {
@@ -692,9 +692,9 @@ function je(t) {
         return n(A);
       n = n.next;
     }
-    if (this.slowReads++ >= xt) {
+    if (this.slowReads++ >= wt) {
       let o = this.length == r ? this : this.slice(0, r);
-      return n = T.keyMap ? new Function("r", "return {" + o.map((l) => T.decodeKey(l)).map((l) => ft.test(l) ? Y(l) + ":r()" : "[" + JSON.stringify(l) + "]:r()").join(",") + "}") : new Function("r", "return {" + o.map((l) => ft.test(l) ? Y(l) + ":r()" : "[" + JSON.stringify(l) + "]:r()").join(",") + "}"), this.compiledReader && (n.next = this.compiledReader), n.propertyCount = r, this.compiledReader = n, n(A);
+      return n = T.keyMap ? new Function("r", "return {" + o.map((l) => T.decodeKey(l)).map((l) => at.test(l) ? Y(l) + ":r()" : "[" + JSON.stringify(l) + "]:r()").join(",") + "}") : new Function("r", "return {" + o.map((l) => at.test(l) ? Y(l) + ":r()" : "[" + JSON.stringify(l) + "]:r()").join(",") + "}"), this.compiledReader && (n.next = this.compiledReader), n.propertyCount = r, this.compiledReader = n, n(A);
     }
     let s = {};
     if (T.keyMap) for (let o = 0; o < r; o++) s[Y(T.decodeKey(this[o]))] = A();
@@ -713,7 +713,7 @@ function Y(t) {
 let ar = Ke;
 function Ke(t) {
   let e;
-  if (t < 16 && (e = gt(t)))
+  if (t < 16 && (e = xt(t)))
     return e;
   if (t > 64 && Me)
     return Me.decode(E.subarray(c, c += t));
@@ -774,7 +774,7 @@ function fr(t) {
   }
   return K.apply(String, r);
 }
-function gt(t) {
+function xt(t) {
   if (t < 4)
     if (t < 2) {
       if (t === 0)
@@ -906,7 +906,7 @@ function lr(t) {
     Uint8Array.prototype.slice.call(E, c, c += t)
   ) : E.subarray(c, c += t);
 }
-let mt = new Float32Array(1), Oe = new Uint8Array(mt.buffer, 0, 4);
+let gt = new Float32Array(1), Oe = new Uint8Array(gt.buffer, 0, 4);
 function cr() {
   let t = E[c++], e = E[c++], r = (t & 127) >> 2;
   if (r === 31)
@@ -917,7 +917,7 @@ function cr() {
   }
   return Oe[3] = t & 128 | // sign bit
   (r >> 1) + 56, Oe[2] = (t & 7) << 5 | // last exponent bit and first two mantissa bits
-  e >> 3, Oe[1] = e << 5, Oe[0] = 0, mt[0];
+  e >> 3, Oe[1] = e << 5, Oe[0] = 0, gt[0];
 }
 new Array(4096);
 class ce {
@@ -955,7 +955,7 @@ F[14] = (t) => H ? H[0].slice(H.position0, H.position0 += t) : new ce(t, 14);
 F[15] = (t) => H ? H[1].slice(H.position1, H.position1 += t) : new ce(t, 15);
 let ur = { Error, RegExp };
 F[27] = (t) => (ur[t[0]] || Error)(t[1], t[2]);
-const St = (t) => {
+const mt = (t) => {
   if (E[c++] != 132) {
     let r = new Error("Packed values structure must be followed by a 4 element array");
     throw E.length < c && (r.incomplete = !0), r;
@@ -967,14 +967,14 @@ const St = (t) => {
   }
   return z = z ? e.concat(z.slice(e.length)) : e, z.prefixes = t(), z.suffixes = t(), t();
 };
-St.handlesRead = !0;
-F[51] = St;
-F[ot] = (t) => {
+mt.handlesRead = !0;
+F[51] = mt;
+F[it] = (t) => {
   if (!z)
     if (T.getShared)
       Qe();
     else
-      return new ce(t, ot);
+      return new ce(t, it);
   if (typeof t == "number")
     return z[16 + (t >= 0 ? 2 * t : -2 * t - 1)];
   let e = new Error("No support for non-integer packed references yet");
@@ -995,7 +995,7 @@ F[29] = (t) => {
   return e.used = !0, e.target;
 };
 F[258] = (t) => new Set(t);
-(F[259] = (t) => (T.mapsAsObjects && (T.mapsAsObjects = !1, we = !0), t())).handlesRead = !0;
+(F[259] = (t) => (T.mapsAsObjects && (T.mapsAsObjects = !1, Ee = !0), t())).handlesRead = !0;
 function he(t, e) {
   return typeof t == "string" ? t + e : t instanceof Array ? t.concat(e) : Object.assign({}, t, e);
 }
@@ -1030,7 +1030,7 @@ He.push((t, e) => {
   if (t == 55799)
     return e;
 });
-const hr = new Uint8Array(new Uint16Array([1]).buffer)[0] == 1, lt = [
+const hr = new Uint8Array(new Uint16Array([1]).buffer)[0] == 1, ft = [
   Uint8Array,
   Uint8ClampedArray,
   Uint16Array,
@@ -1043,8 +1043,8 @@ const hr = new Uint8Array(new Uint16Array([1]).buffer)[0] == 1, lt = [
   Float32Array,
   Float64Array
 ], pr = [64, 68, 69, 70, 71, 72, 77, 78, 79, 85, 86];
-for (let t = 0; t < lt.length; t++)
-  yr(lt[t], pr[t]);
+for (let t = 0; t < ft.length; t++)
+  yr(ft[t], pr[t]);
 function yr(t, e) {
   let r = "get" + t.name.slice(0, -5), n;
   typeof t == "function" ? n = t.BYTES_PER_ELEMENT : t = null;
@@ -1093,13 +1093,13 @@ function pe() {
 }
 function Qe() {
   if (T.getShared) {
-    let t = bt(() => (E = null, T.getShared())) || {}, e = t.structures || [];
+    let t = St(() => (E = null, T.getShared())) || {}, e = t.structures || [];
     T.sharedVersion = t.version, z = T.sharedValues = t.packedValues, k === !0 ? T.structures = k = e : k.splice.apply(k, [0, e.length].concat(e));
   }
 }
-function bt(t) {
-  let e = le, r = c, n = Ne, s = ge, o = Pe, l = Z, p = H, y = new Uint8Array(E.slice(0, le)), _ = k, g = T, P = me, L = t();
-  return le = e, c = r, Ne = n, ge = s, Pe = o, Z = l, H = p, E = y, me = P, k = _, T = g, W = new DataView(E.buffer, E.byteOffset, E.byteLength), L;
+function St(t) {
+  let e = le, r = c, n = Ne, s = xe, o = Pe, l = Z, p = H, y = new Uint8Array(E.slice(0, le)), _ = k, g = T, P = ge, L = t();
+  return le = e, c = r, Ne = n, xe = s, Pe = o, Z = l, H = p, E = y, ge = P, k = _, T = g, W = new DataView(E.buffer, E.byteOffset, E.byteLength), L;
 }
 function Ge() {
   E = null, Z = null, k = null;
@@ -1107,7 +1107,7 @@ function Ge() {
 const Je = new Array(147);
 for (let t = 0; t < 256; t++)
   Je[t] = +("1e" + Math.floor(45.15 - t * 0.30103));
-let Ze = new ye({ useRecords: !1 });
+let Ze = new me({ useRecords: !1 });
 const $ = Ze.decode;
 Ze.decodeMultiple;
 let Ae;
@@ -1115,16 +1115,16 @@ try {
   Ae = new TextEncoder();
 } catch {
 }
-let $e, _t;
-const Be = typeof globalThis == "object" && globalThis.Buffer, Se = typeof Be < "u", Ce = Se ? Be.allocUnsafeSlow : Uint8Array, ct = Se ? Be : Uint8Array, ut = 256, dt = Se ? 4294967296 : 2144337920;
+let $e, bt;
+const Be = typeof globalThis == "object" && globalThis.Buffer, Se = typeof Be < "u", Ce = Se ? Be.allocUnsafeSlow : Uint8Array, lt = Se ? Be : Uint8Array, ct = 256, ut = Se ? 4294967296 : 2144337920;
 let Ie, f, N, i = 0, oe, M = null;
 const wr = 61440, xr = /[\u0080-\uFFFF]/, Q = Symbol("record-id");
-class Ye extends ye {
+class _t extends me {
   constructor(e) {
     super(e), this.offset = 0;
     let r, n, s, o, l;
     e = e || {};
-    let p = ct.prototype.utf8Write ? function(a, w) {
+    let p = lt.prototype.utf8Write ? function(a, w) {
       return f.utf8Write(a, w, f.byteLength - w);
     } : Ae && Ae.encodeInto ? function(a, w) {
       return Ae.encodeInto(a, f.subarray(w)).written;
@@ -1149,7 +1149,7 @@ class Ye extends ye {
         }
       return this.encode(a, w);
     }, this.encode = function(a, w) {
-      if (f || (f = new Ce(8192), N = new DataView(f.buffer, 0, 8192), i = 0), oe = f.length - 10, oe - i < 2048 ? (f = new Ce(f.length), N = new DataView(f.buffer, 0, f.length), oe = f.length - 10, i = 0) : w === yt && (i = i + 7 & 2147483640), r = i, y.useSelfDescribedHeader && (N.setUint32(i, 3654940416), i += 3), l = y.structuredClone ? /* @__PURE__ */ new Map() : null, y.bundleStrings && typeof a != "string" ? (M = [], M.size = 1 / 0) : M = null, n = y.structures, n) {
+      if (f || (f = new Ce(8192), N = new DataView(f.buffer, 0, 8192), i = 0), oe = f.length - 10, oe - i < 2048 ? (f = new Ce(f.length), N = new DataView(f.buffer, 0, f.length), oe = f.length - 10, i = 0) : w === pt && (i = i + 7 & 2147483640), r = i, y.useSelfDescribedHeader && (N.setUint32(i, 3654940416), i += 3), l = y.structuredClone ? /* @__PURE__ */ new Map() : null, y.bundleStrings && typeof a != "string" ? (M = [], M.size = 1 / 0) : M = null, n = y.structures, n) {
         if (n.uninitialized) {
           let h = y.getShared() || {};
           y.structures = n = h.structures || [], y.sharedVersion = h.version;
@@ -1192,12 +1192,12 @@ class Ye extends ye {
       try {
         if (Ie)
           return;
-        if (S(a), M && pt(r, S), y.offset = i, l && l.idsToInsert) {
+        if (S(a), M && ht(r, S), y.offset = i, l && l.idsToInsert) {
           i += l.idsToInsert.length * 2, i > oe && J(i), y.offset = i;
           let d = Sr(f.subarray(r, i), l.idsToInsert);
           return l = null, d;
         }
-        return w & yt ? (f.start = r, f.end = i, f) : f.subarray(r, i);
+        return w & pt ? (f.start = r, f.end = i, f) : f.subarray(r, i);
       } finally {
         if (n) {
           if (I < 10 && I++, n.length > g && (n.length = g), re > 1e4)
@@ -1213,7 +1213,7 @@ class Ye extends ye {
           let d = f.subarray(r, i);
           return y.updateSharedData() === !1 ? y.encode(a) : d;
         }
-        w & br && (i = r);
+        w & _r && (i = r);
       }
     }, this.findCommonStringsToPack = () => (L = /* @__PURE__ */ new Map(), C || (C = /* @__PURE__ */ Object.create(null)), (a) => {
       let w = a && a.threshold || 4, d = this.pack ? a.maxPrivatePackedValues || 16 : 0;
@@ -1244,7 +1244,7 @@ class Ye extends ye {
         if (M && h >= 4 && h < 1024) {
           if ((M.size += h) > wr) {
             let R, O = (M[0] ? M[0].length * 3 + M[1].length : 0) + 10;
-            i + O > oe && (f = J(i + O)), f[i++] = 217, f[i++] = 223, f[i++] = 249, f[i++] = M.position ? 132 : 130, f[i++] = 26, R = i - r, i += 4, M.position && pt(r, S), M = ["", ""], M.size = 0, M.position = R;
+            i + O > oe && (f = J(i + O)), f[i++] = 217, f[i++] = 223, f[i++] = 249, f[i++] = M.position ? 132 : 130, f[i++] = 26, R = i - r, i += 4, M.position && ht(r, S), M = ["", ""], M.size = 0, M.position = R;
           }
           let b = xr.test(a);
           M[b ? 0 : 1] += a, f[i++] = b ? 206 : 207, S(h);
@@ -1314,7 +1314,7 @@ class Ye extends ye {
                 S(u), S(m);
           else {
             for (let u = 0, m = $e.length; u < m; u++) {
-              let b = _t[u];
+              let b = bt[u];
               if (a instanceof b) {
                 let R = $e[u], O = R.tag;
                 O == null && (O = R.getTag && R.getTag.call(this, a)), O < 24 ? f[i++] = 192 | O : O < 256 ? (f[i++] = 216, f[i++] = O) : O < 65536 ? (f[i++] = 217, f[i++] = O >> 8, f[i++] = O & 255) : O > -1 && (f[i++] = 218, N.setUint32(i, O), i += 4), R.encode.call(this, a, S, J);
@@ -1389,21 +1389,21 @@ class Ye extends ye {
       if (this.keyMap) {
         R = Object.keys(a).map((U) => this.encodeKey(U)), m = R.length;
         for (let U = 0; U < m; U++) {
-          let nt = R[U];
-          d = h[nt], d || (d = h[nt] = /* @__PURE__ */ Object.create(null), u++), h = d;
+          let rt = R[U];
+          d = h[rt], d || (d = h[rt] = /* @__PURE__ */ Object.create(null), u++), h = d;
         }
       } else
         for (let U in a) (typeof a.hasOwnProperty != "function" || a.hasOwnProperty(U)) && (d = h[U], d || (h[Q] & 1048576 && (b = h[Q] & 65535), d = h[U] = /* @__PURE__ */ Object.create(null), u++), h = d, m++);
       let O = h[Q];
       if (O !== void 0)
         O &= 65535, f[i++] = 217, f[i++] = O >> 8 | 224, f[i++] = O & 255;
-      else if (R || (R = h.__keys__ || (h.__keys__ = Object.keys(a))), b === void 0 ? (O = o.nextId++, O || (O = 0, o.nextId = 1), O >= ut && (o.nextId = (O = g) + 1)) : O = b, o[O] = R, O < g) {
+      else if (R || (R = h.__keys__ || (h.__keys__ = Object.keys(a))), b === void 0 ? (O = o.nextId++, O || (O = 0, o.nextId = 1), O >= ct && (o.nextId = (O = g) + 1)) : O = b, o[O] = R, O < g) {
         f[i++] = 217, f[i++] = O >> 8 | 224, f[i++] = O & 255, h = o.transitions;
         for (let U = 0; U < m; U++)
           (h[Q] === void 0 || h[Q] & 1048576) && (h[Q] = O), h = h[R[U]];
         h[Q] = O | 1048576, s = !0;
       } else {
-        if (h[Q] = O, N.setUint32(i, 3655335680), i += 3, u && (re += I * u), G.length >= ut - g && (G.shift()[Q] = void 0), G.push(h), te(m + 2), S(57344 + O), S(R), w) return;
+        if (h[Q] = O, N.setUint32(i, 3655335680), i += 3, u && (re += I * u), G.length >= ct - g && (G.shift()[Q] = void 0), G.push(h), te(m + 2), S(57344 + O), S(R), w) return;
         for (let U in a)
           (typeof a.hasOwnProperty != "function" || a.hasOwnProperty(U)) && S(a[U]);
         return;
@@ -1414,10 +1414,10 @@ class Ye extends ye {
     }, J = (a) => {
       let w;
       if (a > 16777216) {
-        if (a - r > dt)
+        if (a - r > ut)
           throw new Error("Encoded buffer would be larger than maximum buffer size");
         w = Math.min(
-          dt,
+          ut,
           Math.round(Math.max((a - r) * (a > 67108864 ? 1.25 : 2), 4194304) / 4096) * 4096
         );
       } else
@@ -1435,7 +1435,7 @@ class Ye extends ye {
       let h = a.constructor;
       if (h === Object) {
         let u = y.useRecords !== !1;
-        u ? X(a, !0) : ht(Object.keys(a).length, 160);
+        u ? X(a, !0) : dt(Object.keys(a).length, 160);
         for (let m in a) {
           let b = a[m];
           u || S(m), b && typeof b == "object" ? w[m] ? yield* ne(b, w[m]) : yield* ue(b, w, m) : S(b);
@@ -1452,7 +1452,7 @@ class Ye extends ye {
         for (let u of a)
           u && (typeof u == "object" || i - r > v) ? w.element ? yield* ne(u, w.element) : yield* ue(u, w, "element") : S(u);
         f[i++] = 255;
-      } else ke(a) ? (ht(a.size, 64), yield f.subarray(r, i), yield a, se()) : a[Symbol.asyncIterator] ? (f[i++] = 159, yield f.subarray(r, i), yield a, se(), f[i++] = 255) : S(a);
+      } else ke(a) ? (dt(a.size, 64), yield f.subarray(r, i), yield a, se()) : a[Symbol.asyncIterator] ? (f[i++] = 159, yield f.subarray(r, i), yield a, se(), f[i++] = 255) : S(a);
       d && i > r ? yield f.subarray(r, i) : i - r > v && (yield f.subarray(r, i), se());
     }
     function* ue(a, w, d) {
@@ -1474,7 +1474,7 @@ class Ye extends ye {
     async function* _e(a, w) {
       for (let d of ne(a, w, !0)) {
         let h = d.constructor;
-        if (h === ct || h === Uint8Array)
+        if (h === lt || h === Uint8Array)
           yield d;
         else if (ke(d)) {
           let u = d.stream().getReader(), m;
@@ -1504,7 +1504,7 @@ class Ye extends ye {
     return s === !1 ? (n = this.getShared() || {}, this.structures = n.structures || [], this.sharedValues = n.packedValues, this.sharedVersion = n.version, this.structures.nextId = this.structures.length) : r.forEach((o, l) => this.structures[l] = o), s;
   }
 }
-function ht(t, e) {
+function dt(t, e) {
   t < 24 ? f[i++] = e | t : t < 256 ? (f[i++] = e | 24, f[i++] = t) : t < 65536 ? (f[i++] = e | 25, f[i++] = t >> 8, f[i++] = t & 255) : (f[i++] = e | 26, N.setUint32(i, t), i += 4);
 }
 class Rt {
@@ -1558,7 +1558,7 @@ function Ue(t, e) {
   }
 }
 const mr = new Uint8Array(new Uint16Array([1]).buffer)[0] == 1;
-_t = [
+bt = [
   Date,
   Set,
   Error,
@@ -1698,16 +1698,16 @@ function Sr(t, e) {
   }
   return t;
 }
-function pt(t, e) {
+function ht(t, e) {
   N.setUint32(M.position + t, i - M.position - t + 1);
   let r = M;
   M = null, e(r[0]), e(r[1]);
 }
-let Xe = new Ye({ useRecords: !1 });
-Xe.encode;
-Xe.encodeAsIterable;
-Xe.encodeAsAsyncIterable;
-const yt = 512, br = 1024, De = 2048, j = new Ye({ tagUint8Array: !1 }), x = {
+let Ye = new _t({ useRecords: !1 });
+const br = Ye.encode;
+Ye.encodeAsIterable;
+Ye.encodeAsAsyncIterable;
+const pt = 512, _r = 1024, De = 2048, j = new _t({ tagUint8Array: !1 }), x = {
   PUT_REQUEST: 1,
   PUT_DATA: 2,
   PUT_END: 3,
@@ -1744,7 +1744,7 @@ const yt = 512, br = 1024, De = 2048, j = new Ye({ tagUint8Array: !1 }), x = {
   CONFIG_SET_RESPONSE: 36,
   CONFIG_RELOAD_REQUEST: 37,
   CONFIG_RELOAD_RESPONSE: 38
-}, _r = {
+}, Rr = {
   OK: 0,
   BAD_REQUEST: 1,
   NOT_FOUND: 2,
@@ -1752,11 +1752,11 @@ const yt = 512, br = 1024, De = 2048, j = new Ye({ tagUint8Array: !1 }), x = {
   RANGE_NOT_SATISFIABLE: 4,
   UNAUTHORIZED: 5
 };
-function et(t) {
+function Xe(t) {
   const e = $(t);
   return Array.isArray(e) ? e[0] : null;
 }
-function tt(t) {
+function et(t) {
   const e = new TextEncoder().encode(t);
   return j.encode([x.AUTH_REQUEST, e]);
 }
@@ -1909,7 +1909,7 @@ function tr(t) {
 const $r = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
   MSG: x,
-  STATUS: _r,
+  STATUS: Rr,
   decodeBlockDeleteResponse: Lt,
   decodeBlockGetResponse: Dt,
   decodeBlockPutResponse: It,
@@ -1925,7 +1925,7 @@ const $r = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   decodePeerInfoResponse: Kt,
   decodePeerListResponse: vt,
   decodePutResponse: We,
-  encodeAuthRequest: tt,
+  encodeAuthRequest: et,
   encodeBlockDeleteRequest: Ft,
   encodeBlockGetRequest: kt,
   encodeBlockPutRequest: Ct,
@@ -1943,10 +1943,10 @@ const $r = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   encodePutData: Ot,
   encodePutEnd: Tt,
   encodePutRequest: Ve,
-  getMessageType: et,
+  getMessageType: Xe,
   isGetEnd: Nt
 }, Symbol.toStringTag, { value: "Module" }));
-class Rr {
+class Or {
   /**
    * @param {string} url
    * @param {string} [apiKey]
@@ -1971,7 +1971,7 @@ class Rr {
       const n = this.socket;
       if (!n) return r(new Error("Socket not created"));
       n.onopen = () => {
-        this.apiKey && this.send(tt(this.apiKey)), e();
+        this.apiKey && this.send(et(this.apiKey)), e();
       }, n.onerror = (s) => {
         var l;
         const o = s.message || ((l = s.error) == null ? void 0 : l.message) || "unknown";
@@ -1980,7 +1980,7 @@ class Rr {
         this.socket = null, this.openPromise = null;
       }, n.onmessage = (s) => {
         var p;
-        const o = new Uint8Array(s.data), l = et(o);
+        const o = new Uint8Array(s.data), l = Xe(o);
         l !== null && ((p = this.messageHandler) == null || p.call(this, l, o));
       };
     }), this.openPromise);
@@ -2006,7 +2006,7 @@ class Rr {
     this.messageHandler = e;
   }
 }
-class Or {
+class Tr {
   /**
    * @param {string} url
    * @param {string} [apiKey]
@@ -2035,7 +2035,7 @@ class Or {
   async connect() {
     return this.transport ? this.openPromise || Promise.resolve() : (this.transport = new WebTransport(this.url), this.openPromise = this.transport.ready.then(async () => {
       const e = await this.transport.createBidirectionalStream();
-      this.writer = e.writable.getWriter(), this.reader = e.readable.getReader(), this.running = !0, this._readLoop(), this.apiKey && await this.send(tt(this.apiKey));
+      this.writer = e.writable.getWriter(), this.reader = e.readable.getReader(), this.running = !0, this._readLoop(), this.apiKey && await this.send(et(this.apiKey));
     }), this.openPromise);
   }
   disconnect() {
@@ -2067,10 +2067,10 @@ class Or {
         const { done: n, value: s } = await this.reader.read();
         if (n) break;
         const o = s instanceof Uint8Array ? s : new Uint8Array(s.buffer, s.byteOffset, s.byteLength);
-        for (e = e ? Tr(e, o) : o; e.length >= 4; ) {
+        for (e = e ? Ar(e, o) : o; e.length >= 4; ) {
           const p = new DataView(e.buffer, e.byteOffset, e.length).getUint32(0, !1);
           if (e.length < 4 + p) break;
-          const y = e.subarray(4, 4 + p), _ = et(y);
+          const y = e.subarray(4, 4 + p), _ = Xe(y);
           _ !== null && ((r = this.messageHandler) == null || r.call(this, _, y)), e = e.subarray(4 + p);
         }
       }
@@ -2078,15 +2078,15 @@ class Or {
     }
   }
 }
-function Tr(t, e) {
+function Ar(t, e) {
   const r = new Uint8Array(t.length + e.length);
   return r.set(t, 0), r.set(e, t.length), r;
 }
-const ze = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz", rt = new Int8Array(128);
-rt.fill(-1);
+const ze = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz", tt = new Int8Array(128);
+tt.fill(-1);
 for (let t = 0; t < ze.length; t++)
-  rt[ze.charCodeAt(t)] = t;
-function xe(t) {
+  tt[ze.charCodeAt(t)] = t;
+function we(t) {
   if (t.length === 0) return null;
   let e = 0;
   for (; e < t.length && t[e] === "1"; )
@@ -2095,7 +2095,7 @@ function xe(t) {
   for (let n = e; n < t.length; n++) {
     const s = t.charCodeAt(n);
     if (s >= 128) return null;
-    const o = rt[s];
+    const o = tt[s];
     if (o < 0) return null;
     let l = o;
     for (let p = 0; p < r.length; p++)
@@ -2123,20 +2123,20 @@ function Fe(t) {
   }
   return "1".repeat(r) + n.reverse().map((o) => ze[o]).join("");
 }
-function Et(t) {
+function yt(t) {
   const e = t.indexOf("/offsystem/v3/");
   if (e < 0) return null;
   const n = t.slice(e + 14).split("/");
   if (n.length < 4) return null;
   const s = n[n.length - 4], o = n[n.length - 3], l = n[n.length - 2], p = n.slice(n.length - 1).join("/"), y = parseInt(s, 10);
-  return !Number.isFinite(y) || xe(o) === null || xe(l) === null ? null : {
+  return !Number.isFinite(y) || we(o) === null || we(l) === null ? null : {
     fileHashB58: o,
     descriptorHashB58: l,
     streamLength: y,
     fileName: decodeURIComponent(p)
   };
 }
-function Ar(t) {
+function Ur(t) {
   const e = {
     html: "text/html",
     htm: "text/html",
@@ -2192,7 +2192,7 @@ function Ar(t) {
   const n = t.slice(r + 1).toLowerCase();
   return e[n] || "application/octet-stream";
 }
-function Ur(t) {
+function Pr(t) {
   return typeof t.arrayBuffer == "function" ? t.arrayBuffer().then((e) => new Uint8Array(e)) : new Promise((e, r) => {
     const n = new FileReader();
     n.onload = () => e(new Uint8Array(n.result)), n.onerror = () => r(n.error), n.readAsArrayBuffer(t);
@@ -2202,7 +2202,7 @@ function Te(t) {
   const r = t.replace(/\\\\/g, "/").split("/").filter(Boolean);
   return r.length > 0 ? r[r.length - 1] : "file";
 }
-function wt(t, e = 65536) {
+function Et(t, e = 65536) {
   let r = 0;
   return new ReadableStream({
     pull(n) {
@@ -2211,13 +2211,13 @@ function wt(t, e = 65536) {
         return;
       }
       const s = Math.min(r + e, t.size), o = t.slice(r, s);
-      return Ur(o).then((l) => {
+      return Pr(o).then((l) => {
         n.enqueue(l), r = s;
       });
     }
   });
 }
-function Pr(t) {
+function Nr(t) {
   if (typeof FileList < "u" && t instanceof FileList) {
     const e = [];
     for (let r = 0; r < t.length; r++) {
@@ -2229,15 +2229,13 @@ function Pr(t) {
   }
   return Array.isArray(t) ? t.map((e) => e instanceof File || e instanceof Blob ? { path: e.webkitRelativePath || e.name, file: e } : { path: e.path, file: e.file }) : Object.entries(t).map(([e, r]) => ({ path: e, file: r }));
 }
-function Nr(t, e = "http://localhost:23402") {
+function Br(t, e = "http://localhost:23402") {
   if (!t || /^https?:\/\//i.test(t)) return t;
   let r = t;
   r.startsWith("offs://") && (r = r.slice(7));
   const n = "/offsystem/v3/", s = r.indexOf(n);
   return s >= 0 && (r = r.slice(s)), r.startsWith(n) ? `${e.replace(/\/$/, "")}${r}` : t;
 }
-const Br = new Ye({ tagUint8Array: !1, useRecords: !1 });
-new ye({ useRecords: !1 });
 const Cr = 128e3, Ir = 3;
 function kr({
   name: t,
@@ -2270,7 +2268,7 @@ function Fr(t) {
     };
     return r.isDirectory ? n.d = r.dirHash : (n.f = r.fileHash, n.D = r.descriptorHash, n.s = r.finalByte, n.B = r.blockType, n.T = r.tupleSize, n.o = r.fileOffset), n;
   });
-  return Br.encode({ v: 1, entries: e });
+  return br({ v: 1, entries: e });
 }
 const Lr = { cbor: 0, base58: 1, qrcode: 2 };
 function Mr() {
@@ -2280,7 +2278,7 @@ function Mr() {
   };
 }
 function Hr(t, e, r) {
-  return t.startsWith("ws://") || t.startsWith("wss://") ? new Rr(t, e, r) : t.startsWith("wt://") || t.startsWith("wts://") ? new Or(t, e, r) : new D(t, e, r);
+  return t.startsWith("ws://") || t.startsWith("wss://") ? new Or(t, e, r) : t.startsWith("wt://") || t.startsWith("wts://") ? new Tr(t, e, r) : new D(t, e, r);
 }
 class vr {
   /**
@@ -2567,7 +2565,7 @@ class vr {
    * @returns {string}
    */
   static offUrlToHttpUrl(e, r) {
-    return Nr(e, r);
+    return Br(e, r);
   }
   /**
    * @returns {Promise<any[]>}
@@ -2651,7 +2649,7 @@ class vr {
    * @returns {Promise<{oriString: string}>}
    */
   async putFolder(e, r = {}) {
-    const n = Pr(e);
+    const n = Nr(e);
     if (n.length === 0)
       throw new Error("No files to upload");
     const s = r.recyclerUrls || [], o = n.length;
@@ -2662,10 +2660,10 @@ class vr {
     }, y = jr(n.map((g) => g.path)), _ = async (g) => {
       const P = Te(g || y || "root"), q = Kr(n, g), V = qr(n, g), C = [];
       for (const I of V) {
-        const X = (await _(I)).oriString, J = Et(X);
+        const X = (await _(I)).oriString, J = yt(X);
         if (!J)
           throw new Error(`Failed to parse subdirectory URL: ${X}`);
-        const v = xe(J.fileHashB58);
+        const v = we(J.fileHashB58);
         if (!v)
           throw new Error(`Invalid directory hash in URL: ${X}`);
         C.push(Dr({
@@ -2674,10 +2672,10 @@ class vr {
         }));
       }
       for (const I of q) {
-        const S = Te(I.path), X = Ar(S), J = I.file.size;
+        const S = Te(I.path), X = Ur(S), J = I.file.size;
         let v;
         if (this.transport instanceof D) {
-          const se = wt(I.file);
+          const se = Et(I.file);
           v = (await this.put({
             contentType: X,
             fileName: S,
@@ -2695,7 +2693,7 @@ class vr {
             recyclerUrls: s,
             temporary: r.temporary
           });
-          const se = wt(I.file).getReader();
+          const se = Et(I.file).getReader();
           for (; ; ) {
             const { done: _e, value: a } = await se.read();
             if (_e) break;
@@ -2703,10 +2701,10 @@ class vr {
           }
           v = (await this.putStreamEnd()).oriString;
         }
-        const ae = Et(v);
+        const ae = yt(v);
         if (!ae)
           throw new Error(`Failed to parse file URL: ${v}`);
-        const ne = xe(ae.fileHashB58), ue = xe(ae.descriptorHashB58);
+        const ne = we(ae.fileHashB58), ue = we(ae.descriptorHashB58);
         if (!ne || !ue)
           throw new Error(`Invalid hash in file URL: ${v}`);
         C.push(kr({
@@ -2775,11 +2773,11 @@ var Le = globalThis.OffsClient;
 Le && Le.OffsClient && (globalThis.OffsClient = Le.OffsClient);
 export {
   vr as OffsClient,
-  xe as base58Decode,
+  we as base58Decode,
   Fe as base58Encode,
-  Ar as mimeFromExtension,
-  Nr as offUrlToHttpUrl,
-  Et as parseOffUrl,
+  Ur as mimeFromExtension,
+  Br as offUrlToHttpUrl,
+  yt as parseOffUrl,
   $r as wire
 };
 //# sourceMappingURL=offs-client.esm.js.map
