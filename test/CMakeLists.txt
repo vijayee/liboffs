@@ -35,6 +35,7 @@ if (BUILD_TESTING)
             test_buffer.cpp
             test_refcounter.cpp
             test_block.cpp
+            test_qr.cpp
             test_index.cpp
             test_section.cpp
             test_block_cache.cpp
