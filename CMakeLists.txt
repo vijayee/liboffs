@@ -431,7 +431,7 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/quirc/lib/quirc.c)
   # codes (one region per isolated module): the region budget is exhausted
   # before the bottom-left finder pattern is labeled, making large payloads
   # undecodable. 65000 is near quirc's documented ceiling (65534); pixel type
-  # widens to 32-bit automatically when the limit exceeds 254.
+  # widens beyond 8-bit automatically (16-bit for limits below UINT16_MAX).
   target_compile_definitions(quirc PRIVATE QUIRC_MAX_REGIONS=65000)
   if(NOT MSVC)
     # identify.c uses rint/sqrt; MSVC's CRT provides both intrinsically.

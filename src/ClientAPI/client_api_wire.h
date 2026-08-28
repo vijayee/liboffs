@@ -239,11 +239,12 @@ typedef struct {
 } client_api_config_reload_response_t;
 
 // --- Peer Info Request ---
-// [type] — no payload
+// [type] or [type, format: uint]
+// format: 0 = raw CBOR (default), 1 = Base58 text, 2 = PPM QR image
 
 // --- Peer Info Response ---
 // [type, format_byte, data: bstr]
-// format_byte: 0 = raw CBOR, 1 = Base58 text
+// format_byte: 0 = raw CBOR, 1 = Base58 text, 2 = PPM QR image
 typedef struct {
   uint8_t format;
   uint8_t* data;
@@ -376,6 +377,12 @@ int client_api_config_reload_response_decode(cbor_item_t* item, client_api_confi
 void client_api_config_reload_response_destroy(client_api_config_reload_response_t* msg);
 
 cbor_item_t* client_api_peer_info_request_encode(void);
+/* Same frame with an explicit response format byte:
+   0 = raw CBOR, 1 = base58 text, 2 = PPM QR image. */
+cbor_item_t* client_api_peer_info_request_encode_format(uint8_t format);
+/* Decode [type] or [type, format]; *format is 0 for the 1-element form.
+   Rejects unknown formats (anything > 2) and frames with extra elements. */
+int client_api_peer_info_request_decode(cbor_item_t* item, uint8_t* format);
 
 cbor_item_t* client_api_peer_info_response_encode(const client_api_peer_info_response_t* msg);
 int client_api_peer_info_response_decode(cbor_item_t* item, client_api_peer_info_response_t* msg);

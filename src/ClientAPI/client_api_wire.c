@@ -1072,14 +1072,47 @@ void client_api_update_status_response_destroy(client_api_update_status_response
 }
 
 // --- Peer Info Request ---
-// [type] — no payload
+// [type] or [type, format: uint]
 
 cbor_item_t* client_api_peer_info_request_encode(void) {
-  cbor_item_t* array = cbor_new_definite_array(1);
+  return client_api_peer_info_request_encode_format(0);
+}
+
+cbor_item_t* client_api_peer_info_request_encode_format(uint8_t format) {
+  cbor_item_t* array = cbor_new_definite_array(2);
   cbor_item_t* item = cbor_build_uint8(CLIENT_API_PEER_INFO_REQUEST);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
+  item = cbor_build_uint8(format);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
   return array;
+}
+
+int client_api_peer_info_request_decode(cbor_item_t* item, uint8_t* format) {
+  if (item == NULL || format == NULL || !cbor_isa_array(item)) return -1;
+  size_t size = cbor_array_size(item);
+  if (size < 1 || size > 2) return -1;
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) ||
+      cbor_get_uint8(type_item) != CLIENT_API_PEER_INFO_REQUEST) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  *format = 0;  /* bare [type] frame means raw CBOR */
+  if (size == 2) {
+    cbor_item_t* format_item = cbor_array_get(item, 1);
+    if (!cbor_isa_uint(format_item) || cbor_get_uint8(format_item) > 2) {
+      cbor_decref(&format_item);
+      return -1;
+    }
+    *format = cbor_get_uint8(format_item);
+    cbor_decref(&format_item);
+  }
+  return 0;
 }
 
 // --- Peer Info Response ---
