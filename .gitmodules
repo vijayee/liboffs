@@ -28,3 +28,9 @@
 [submodule "deps/bcrypt"]
 	path = deps/bcrypt
 	url = https://github.com/rg3/bcrypt
+[submodule "deps/libqrencode"]
+	path = deps/libqrencode
+	url = https://github.com/fukuchi/libqrencode.git
+[submodule "deps/quirc"]
+	path = deps/quirc
+	url = https://github.com/dlbeer/quirc.git

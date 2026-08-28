@@ -390,18 +390,36 @@ else()
     message(FATAL_ERROR "OpenSSL not found.")
 endif()
 
-# libqrencode for QR code generation (optional)
-find_package(PkgConfig QUIET)
-if(PkgConfig_FOUND)
-  pkg_check_modules(QRENCODE QUIET libqrencode)
-endif()
-if(QRENCODE_FOUND)
-  target_compile_definitions(offs PRIVATE HAS_QRENCODE)
-  target_include_directories(offs PRIVATE ${QRENCODE_INCLUDE_DIRS})
-  target_link_libraries(offs PRIVATE ${QRENCODE_LIBRARIES})
-  message(STATUS "libqrencode found — QR code generation enabled")
+# libqrencode — QR encoder, vendored submodule (deps/libqrencode). Required:
+# QR peer-info generation is a first-class client-API feature, not an optional
+# extra, so a missing submodule is a loud error like deps/bcrypt. Built
+# without PNG support and without CLI tools — only the core encoder is used,
+# via src/QR/qr.c (added by the next task).
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/libqrencode/CMakeLists.txt)
+  set(WITH_TOOLS   OFF CACHE BOOL "" FORCE)
+  set(WITH_TESTS   OFF CACHE BOOL "" FORCE)
+  set(WITHOUT_PNG  ON  CACHE BOOL "" FORCE)
+  add_subdirectory(deps/libqrencode)
+  target_include_directories(offs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps/libqrencode)
+  target_link_libraries(offs PRIVATE qrencode)
 else()
-  message(STATUS "libqrencode not found — QR code generation disabled")
+  message(FATAL_ERROR "deps/libqrencode submodule missing. Run: git submodule update --init --recursive")
+endif()
+
+# quirc — QR decoder, vendored submodule (deps/quirc). Upstream ships no
+# CMakeLists.txt (Makefile-only, see deps/quirc/Makefile LIB_OBJ), so compile
+# the four decoder sources directly into a static library. Only decode is
+# used (via src/QR/qr.c); quirc_encode.c is intentionally not built.
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/quirc/lib/quirc.c)
+  add_library(quirc STATIC
+    deps/quirc/lib/quirc.c
+    deps/quirc/lib/decode.c
+    deps/quirc/lib/identify.c
+    deps/quirc/lib/version_db.c)
+  target_include_directories(quirc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/deps/quirc/lib)
+  target_link_libraries(offs PRIVATE quirc)
+else()
+  message(FATAL_ERROR "deps/quirc submodule missing. Run: git submodule update --init --recursive")
 endif()
 
 add_subdirectory(src/Platform)
