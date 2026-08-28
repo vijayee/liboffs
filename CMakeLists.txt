@@ -399,7 +399,17 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/libqrencode/CMakeLists.txt)
   set(WITH_TOOLS   OFF CACHE BOOL "" FORCE)
   set(WITH_TESTS   OFF CACHE BOOL "" FORCE)
   set(WITHOUT_PNG  ON  CACHE BOOL "" FORCE)
+  # libqrencode turns its own tests back on whenever BUILD_TESTING is set
+  # (its CMakeLists does `if(BUILD_TESTING) set(WITH_TESTS ON)`), which would
+  # defeat the WITH_TESTS=OFF above and register ctest entries for binaries
+  # that are never built. Shadow BUILD_TESTING with a plain directory-scoped
+  # variable just for this add_subdirectory — the cache value the project's
+  # own test suite (test/CMakeLists.txt) depends on stays untouched.
+  set(_OFFS_QRENCODE_BUILD_TESTING ${BUILD_TESTING})
+  set(BUILD_TESTING OFF)
   add_subdirectory(deps/libqrencode EXCLUDE_FROM_ALL)
+  set(BUILD_TESTING ${_OFFS_QRENCODE_BUILD_TESTING})
+  unset(_OFFS_QRENCODE_BUILD_TESTING)
   target_include_directories(offs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps/libqrencode)
   target_link_libraries(offs PRIVATE qrencode)
 else()
