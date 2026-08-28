@@ -427,6 +427,12 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/quirc/lib/quirc.c)
     deps/quirc/lib/identify.c
     deps/quirc/lib/version_db.c)
   target_include_directories(quirc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/deps/quirc/lib)
+  # The default QUIRC_MAX_REGIONS=254 is too small for dense version-40 QR
+  # codes (one region per isolated module): the region budget is exhausted
+  # before the bottom-left finder pattern is labeled, making large payloads
+  # undecodable. 65000 is near quirc's documented ceiling (65534); pixel type
+  # widens to 32-bit automatically when the limit exceeds 254.
+  target_compile_definitions(quirc PRIVATE QUIRC_MAX_REGIONS=65000)
   if(NOT MSVC)
     # identify.c uses rint/sqrt; MSVC's CRT provides both intrinsically.
     target_link_libraries(quirc PUBLIC m)

@@ -92,4 +92,51 @@ TEST(QrDecode, RejectsNullAndEmpty) {
   EXPECT_TRUE(qr_decode_from_ppm((const uint8_t*)"P6\n1 1\n255\n", 0, &len) == NULL);
 }
 
+TEST(QrDecode, OutLenUntouchedOnFailure) {
+  size_t len = 42;
+  const char* garbage = "not a ppm";
+  EXPECT_TRUE(qr_decode_from_ppm((const uint8_t*)garbage, strlen(garbage), &len) == NULL);
+  EXPECT_EQ(42u, len);
+}
+
+TEST(QrRoundTrip, SingleBytePayload) {
+  const uint8_t payload = 0xAB;
+  size_t ppm_len = 0;
+  uint8_t* ppm = qr_encode_to_ppm(&payload, 1, &ppm_len);
+  ASSERT_NE(ppm, nullptr);
+  size_t decoded_len = 0;
+  uint8_t* decoded = qr_decode_from_ppm(ppm, ppm_len, &decoded_len);
+  free(ppm);
+  ASSERT_NE(decoded, nullptr);
+  EXPECT_EQ(1u, decoded_len);
+  EXPECT_EQ(payload, decoded[0]);
+  free(decoded);
+}
+
+TEST(QrRoundTrip, MaxCapacityPayload) {
+  /* Byte-mode EC-M capacity for the highest QR version libqrencode emits
+     (version 40): 2331 bytes. This is the exact regime where quirc's
+     region budget used to be exhausted, so it guards the QUIRC_MAX_REGIONS
+     wiring in CMakeLists.txt. */
+  static const size_t kPayloadLen = 2331;
+  uint8_t payload[kPayloadLen];
+  uint32_t state = 987654321;
+  for (size_t i = 0; i < kPayloadLen; i++) {
+    state = state * 1103515245 + 12345;
+    payload[i] = (uint8_t)(state >> 16);
+  }
+
+  size_t ppm_len = 0;
+  uint8_t* ppm = qr_encode_to_ppm(payload, kPayloadLen, &ppm_len);
+  ASSERT_NE(ppm, nullptr);
+
+  size_t decoded_len = 0;
+  uint8_t* decoded = qr_decode_from_ppm(ppm, ppm_len, &decoded_len);
+  free(ppm);
+  ASSERT_NE(decoded, nullptr);
+  EXPECT_EQ(kPayloadLen, decoded_len);
+  EXPECT_EQ(0, memcmp(decoded, payload, kPayloadLen));
+  free(decoded);
+}
+
 }  // namespace qr_test

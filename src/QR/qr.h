@@ -7,8 +7,8 @@
 // knows nothing about peer info, CBOR, or transports.
 //
 
-#ifndef LIBOFFS_QR_H
-#define LIBOFFS_QR_H
+#ifndef OFFS_QR_H
+#define OFFS_QR_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -27,4 +27,4 @@ uint8_t* qr_encode_to_ppm(const uint8_t* payload, size_t payload_len,
 uint8_t* qr_decode_from_ppm(const uint8_t* ppm_data, size_t ppm_len,
                             size_t* out_len);
 
-#endif /* LIBOFFS_QR_H */
+#endif /* OFFS_QR_H */

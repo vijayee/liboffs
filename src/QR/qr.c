@@ -1,3 +1,4 @@
+// Created by victor on 8/27/26.
 #include "qr.h"
 #include <qrencode.h>
 #include <quirc.h>
@@ -17,8 +18,10 @@
 
 /* Strict P6: magic, whitespace, width, whitespace, height, whitespace,
    maxval (must be exactly 255), exactly one whitespace byte, then
-   width*height*3 binary RGB bytes. Anything else is rejected — the encoder
-   in this file is the only producer we support. */
+   width*height*3 binary RGB bytes. The pixel-length check below is the real
+   gate: it only requires that many bytes to be present, so trailing bytes
+   after the pixel data are tolerated — the encoder in this file is the only
+   producer we support. */
 static const uint8_t* _ppm_skip_ws(const uint8_t* cursor, const uint8_t* end) {
   while (cursor < end && (*cursor == ' ' || *cursor == '\t' ||
                           *cursor == '\n' || *cursor == '\r')) {
