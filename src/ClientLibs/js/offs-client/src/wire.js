@@ -264,10 +264,14 @@ export function decodeHealthResponse(bytes) {
 // --- Peer ---
 
 /**
+ * @param {number} [format=0] 0=cbor, 1=base58, 2=qrcode (PPM image)
  * @returns {Uint8Array}
  */
-export function encodePeerInfoRequest() {
-  return encoder.encode([MSG.PEER_INFO_REQUEST]);
+export function encodePeerInfoRequest(format = 0) {
+  if (format === 0) {
+    return encoder.encode([MSG.PEER_INFO_REQUEST]); // 1-element shape, unchanged
+  }
+  return encoder.encode([MSG.PEER_INFO_REQUEST, format]);
 }
 
 /**

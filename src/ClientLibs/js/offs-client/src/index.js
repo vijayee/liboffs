@@ -15,6 +15,12 @@ import {
 import { buildOfdCbor, ofdFile, ofdDirectory } from './ofd.js';
 
 /**
+ * Wire format byte for peer info requests / peer connect payloads.
+ * 0=raw CBOR, 1=base58 text, 2=PPM QR image.
+ */
+const FORMAT_WIRE = { cbor: 0, base58: 1, qrcode: 2 };
+
+/**
  * @typedef {import('./types.js').OffsClientConfig} OffsClientConfig
  * @typedef {import('./types.js').OffsPutOptions} OffsPutOptions
  * @typedef {import('./types.js').OffsGetCallbacks} OffsGetCallbacks
@@ -398,7 +404,7 @@ export class OffsClient {
       return this.transport.peerInfo(format);
     }
 
-    const requestBytes = wire.encodePeerInfoRequest();
+    const requestBytes = wire.encodePeerInfoRequest(FORMAT_WIRE[format] ?? 0);
     const responseBytes = await this._sendAndWait(requestBytes, wire.MSG.PEER_INFO_RESPONSE);
     return wire.decodePeerInfoResponse(responseBytes);
   }
@@ -416,6 +422,24 @@ export class OffsClient {
     const requestBytes = wire.encodePeerConnect(format, peerInfo);
     const responseBytes = await this._sendAndWait(requestBytes, wire.MSG.PEER_CONNECT_RESULT);
     return wire.decodePeerConnectResult(responseBytes);
+  }
+
+  /**
+   * Connect to a peer from a QR image (binary P6 PPM bytes).
+   * @param {Uint8Array} ppmBytes
+   * @returns {Promise<{status: number}>}
+   */
+  async peerConnectQr(ppmBytes) {
+    return this.peerConnect(ppmBytes, 2);
+  }
+
+  /**
+   * Add a friend from a QR image (binary P6 PPM bytes).
+   * @param {Uint8Array} ppmBytes
+   * @returns {Promise<void>}
+   */
+  async friendAddQr(ppmBytes) {
+    return this.friendAdd(ppmBytes, 2);
   }
 
   /**

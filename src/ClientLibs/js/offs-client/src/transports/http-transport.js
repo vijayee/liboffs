@@ -1,5 +1,11 @@
 
 /**
+ * Content-Type for peer/friend request bodies, by wire format.
+ * 0=raw CBOR, 1=base58 text, 2=PPM QR image.
+ */
+const PEER_BODY_CONTENT_TYPES = { 0: 'application/cbor', 1: 'text/plain', 2: 'image/x-portable-pixmap' };
+
+/**
  * HTTP REST transport for the OFFS client.
  * Maps wire messages to the HTTP routes in src/ClientAPI/HTTP/.
  */
@@ -273,7 +279,7 @@ export class HttpTransport {
    * @returns {Promise<{format: number, data: Uint8Array}>}
    */
   async peerInfo(format = 'cbor') {
-    const fmt = format === 'base58' ? 1 : 0;
+    const fmt = { cbor: 0, base58: 1, qrcode: 2 }[format] ?? 0;
     const response = await fetch(this.url(`/peer/info?format=${format}`), {
       method: 'GET',
       headers: this.authHeaders(),
@@ -292,7 +298,7 @@ export class HttpTransport {
   async peerConnect(peerInfo, format = 0) {
     const response = await fetch(this.url('/peer/connect'), {
       method: 'POST',
-      headers: { ...this.authHeaders(), 'Content-Type': format === 1 ? 'text/plain' : 'application/cbor' },
+      headers: { ...this.authHeaders(), 'Content-Type': PEER_BODY_CONTENT_TYPES[format] ?? 'application/cbor' },
       body: format === 1 ? new TextDecoder().decode(peerInfo) : peerInfo,
       signal: this.abortController?.signal,
     });
@@ -321,7 +327,7 @@ export class HttpTransport {
   async friendAdd(peerInfo, format = 0) {
     const response = await fetch(this.url('/friends'), {
       method: 'POST',
-      headers: { ...this.authHeaders(), 'Content-Type': format === 1 ? 'text/plain' : 'application/cbor' },
+      headers: { ...this.authHeaders(), 'Content-Type': PEER_BODY_CONTENT_TYPES[format] ?? 'application/cbor' },
       body: format === 1 ? new TextDecoder().decode(peerInfo) : peerInfo,
       signal: this.abortController?.signal,
     });
