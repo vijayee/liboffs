@@ -14,14 +14,12 @@
 #include "../../Node/node.h"
 #include "../../Util/allocator.h"
 #include "../../Util/base58.h"
+#include "../../QR/qr.h"
+#include "../peer_handlers.h"   /* peer_info_from_payload — shared decode helper */
 #include <cJSON.h>
 #include <string.h>
 #include <stdlib.h>
 #include <cbor.h>
-
-#ifdef HAS_QRENCODE
-#include <qrencode.h>
-#endif
 
 typedef struct {
   offs_node_t* node;
@@ -95,33 +93,20 @@ static size_t _serialize_cbor(cbor_item_t* item, uint8_t** out_bytes) {
 static int _decode_peer_info_body(http_request_t* request, peer_info_t* info) {
   const char* content_type = http_request_header(request, "Content-Type");
 
-  if (content_type != NULL && strstr(content_type, "application/cbor") != NULL) {
-    /* CBOR body */
+  if (content_type != NULL && strstr(content_type, "image/x-portable-pixmap") != NULL) {
+    /* QR image body — decode via the shared payload helper (format 2) */
     if (request->body == NULL || request->body->size == 0) return -1;
-
-    struct cbor_load_result load_result;
-    cbor_item_t* item = cbor_load(request->body->data, request->body->size, &load_result);
-    if (item == NULL || load_result.error.code != CBOR_ERR_NONE) {
-      if (item != NULL) cbor_decref(&item);
-      return -1;
-    }
-
-    int rc = peer_info_decode(item, info);
-    cbor_decref(&item);
-    return rc;
+    return peer_info_from_payload(2, request->body->data, request->body->size, info);
   }
 
-  /* Default: try Base58 (text/plain or no Content-Type) */
+  if (content_type != NULL && strstr(content_type, "application/cbor") != NULL) {
+    if (request->body == NULL || request->body->size == 0) return -1;
+    return peer_info_from_payload(0, request->body->data, request->body->size, info);
+  }
+
+  /* Default: base58 text (text/plain or no Content-Type) */
   if (request->body == NULL || request->body->size == 0) return -1;
-
-  /* Null-terminate body for base58_decode */
-  char* body_str = get_clear_memory(request->body->size + 1);
-  memcpy(body_str, request->body->data, request->body->size);
-  body_str[request->body->size] = '\0';
-
-  int rc = peer_info_from_base58(body_str, info);
-  free(body_str);
-  return rc;
+  return peer_info_from_payload(1, request->body->data, request->body->size, info);
 }
 
 /* --- Connect to peer and return status code --- */
@@ -176,28 +161,35 @@ static void _peer_info_handler(http_request_t* request, http_response_t* respons
     return;
   }
 
-#ifdef HAS_QRENCODE
   if (strcmp(format, "qrcode") == 0) {
-    cbor_item_t* qr_cbor = peer_info_encode(info);
-    if (qr_cbor == NULL) {
+    cbor_item_t* cbor_map = peer_info_encode(info);
+    if (cbor_map == NULL) {
       http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
       http_response_set_header(response, "Content-Type", "text/plain");
-      http_response_write(response, "Failed to encode peer info", 25);
+      http_response_write(response, "Failed to encode peer info", 26);
       http_response_end(response);
       peer_info_destroy(info);
       free(info);
       return;
     }
 
-    size_t buf_size = cbor_serialized_size(qr_cbor);
-    uint8_t* buf = get_clear_memory(buf_size);
-    cbor_serialize(qr_cbor, buf, buf_size);
-    cbor_decref(&qr_cbor);
+    uint8_t* serialized = NULL;
+    size_t serialized_len = _serialize_cbor(cbor_map, &serialized);
+    cbor_decref(&cbor_map);
+    if (serialized_len == 0) {
+      http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+      http_response_set_header(response, "Content-Type", "text/plain");
+      http_response_write(response, "CBOR serialization failed", 25);
+      http_response_end(response);
+      peer_info_destroy(info);
+      free(info);
+      return;
+    }
 
-    QRcode* qr = QRcode_encodeData((int)buf_size, buf, 0, QR_ECLEVEL_M);
-    free(buf);
-
-    if (qr == NULL) {
+    size_t ppm_len = 0;
+    uint8_t* ppm = qr_encode_to_ppm(serialized, serialized_len, &ppm_len);
+    free(serialized);
+    if (ppm == NULL) {
       http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
       http_response_set_header(response, "Content-Type", "text/plain");
       http_response_write(response, "QR encoding failed", 18);
@@ -207,53 +199,15 @@ static void _peer_info_handler(http_request_t* request, http_response_t* respons
       return;
     }
 
-    // Generate a simple PPM (portable pixmap) image from QR bitmap
-    // PPM is trivial to generate without libpng, widely supported
-    int qr_size = qr->width;
-    int scale = 4;
-    int img_size = qr_size * scale;
-    size_t ppm_header_len = snprintf(NULL, 0, "P6\n%d %d\n255\n", img_size, img_size);
-    size_t ppm_size = ppm_header_len + (size_t)(img_size * img_size * 3);
-    char* ppm = get_clear_memory(ppm_size);
-    snprintf(ppm, ppm_size, "P6\n%d %d\n255\n", img_size, img_size);
-    size_t offset = ppm_header_len;
-    for (int y = 0; y < qr_size; y++) {
-      for (int sy = 0; sy < scale; sy++) {
-        for (int x = 0; x < qr_size; x++) {
-          uint8_t pixel = (qr->data[y * qr_size + x] & 1) ? 0 : 255;
-          for (int sx = 0; sx < scale; sx++) {
-            ppm[offset++] = (char)pixel;
-            ppm[offset++] = (char)pixel;
-            ppm[offset++] = (char)pixel;
-          }
-        }
-      }
-    }
-
-    QRcode_free(qr);
-
     http_response_set_status(response, HTTP_STATUS_OK);
     http_response_set_header(response, "Content-Type", "image/x-portable-pixmap");
-    http_response_write(response, ppm, ppm_size);
+    http_response_write(response, (const char*)ppm, ppm_len);
     free(ppm);
     http_response_end(response);
     peer_info_destroy(info);
     free(info);
     return;
   }
-#endif
-
-#ifndef HAS_QRENCODE
-  if (strcmp(format, "qrcode") == 0) {
-    http_response_set_status(response, 501);
-    http_response_set_header(response, "Content-Type", "text/plain");
-    http_response_write(response, "QR code generation not available", 30);
-    http_response_end(response);
-    peer_info_destroy(info);
-    free(info);
-    return;
-  }
-#endif
 
   if (strcmp(format, "base58") == 0) {
     char* b58 = peer_info_to_base58(info);
