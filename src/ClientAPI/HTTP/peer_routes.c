@@ -156,7 +156,7 @@ static void _peer_info_handler(http_request_t* request, http_response_t* respons
   if (info == NULL) {
     http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
     http_response_set_header(response, "Content-Type", "text/plain");
-    http_response_write(response, "Failed to populate local addresses", 32);
+    http_response_write(response, "Failed to populate local addresses", 34);
     http_response_end(response);
     return;
   }
