@@ -399,7 +399,7 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/libqrencode/CMakeLists.txt)
   set(WITH_TOOLS   OFF CACHE BOOL "" FORCE)
   set(WITH_TESTS   OFF CACHE BOOL "" FORCE)
   set(WITHOUT_PNG  ON  CACHE BOOL "" FORCE)
-  add_subdirectory(deps/libqrencode)
+  add_subdirectory(deps/libqrencode EXCLUDE_FROM_ALL)
   target_include_directories(offs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps/libqrencode)
   target_link_libraries(offs PRIVATE qrencode)
 else()
@@ -408,8 +408,8 @@ endif()
 
 # quirc — QR decoder, vendored submodule (deps/quirc). Upstream ships no
 # CMakeLists.txt (Makefile-only, see deps/quirc/Makefile LIB_OBJ), so compile
-# the four decoder sources directly into a static library. Only decode is
-# used (via src/QR/qr.c); quirc_encode.c is intentionally not built.
+# its four decoder sources (quirc.c, decode.c, identify.c, version_db.c)
+# directly into a static library. Only decode is used (via src/QR/qr.c).
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/quirc/lib/quirc.c)
   add_library(quirc STATIC
     deps/quirc/lib/quirc.c
@@ -417,6 +417,14 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/quirc/lib/quirc.c)
     deps/quirc/lib/identify.c
     deps/quirc/lib/version_db.c)
   target_include_directories(quirc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/deps/quirc/lib)
+  if(NOT MSVC)
+    # identify.c uses rint/sqrt; MSVC's CRT provides both intrinsically.
+    target_link_libraries(quirc PUBLIC m)
+  endif()
+  if(MSVC)
+    # Silence size-conversion warnings in vendored code, matching the bcrypt target's policy.
+    target_compile_options(quirc PRIVATE /W0)
+  endif()
   target_link_libraries(offs PRIVATE quirc)
 else()
   message(FATAL_ERROR "deps/quirc submodule missing. Run: git submodule update --init --recursive")
