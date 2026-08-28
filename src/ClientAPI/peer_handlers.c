@@ -153,8 +153,22 @@ void peer_handle_info_request(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     response.format = 2;
     response.data = ppm;
     response.data_size = ppm_len;
+  } else if (format == 1) {
+    /* Base58 text — encode the CBOR payload so the format label matches. */
+    size_t b58_len = base58_encoded_length(bytes_serialized) + 1;
+    char* b58 = get_clear_memory(b58_len);
+    int encoded_len = base58_encode(serialized, bytes_serialized, b58, b58_len);
+    free(serialized);
+    if (encoded_len <= 0) {
+      ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                      "Base58 encoding failed");
+      return;
+    }
+    response.format = 1;
+    response.data = (uint8_t*)b58;
+    response.data_size = (size_t)encoded_len;
   } else {
-    response.format = format;  /* 0 = raw CBOR */
+    response.format = 0;  /* raw CBOR */
     response.data = serialized;
     response.data_size = bytes_serialized;
   }
