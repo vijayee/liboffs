@@ -9,6 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* PPM QR images are large: a version-40 QR at 4x scale is a ~740x740 P6
+   PPM (~1.6 MB) for a 2331-byte payload. 2 MB covers the worst case while
+   still bounding allocation. */
+#define CLIENT_API_PEER_INFO_MAX_PAYLOAD (2 * 1024 * 1024)
+
 // --- Helper: encode a string as CBOR text string (empty string for NULL) ---
 static cbor_item_t* _encode_string(const char* str) {
   if (str == NULL) {
@@ -1167,7 +1172,7 @@ int client_api_peer_info_response_decode(cbor_item_t* item, client_api_peer_info
     return -1;
   }
   msg->data_size = cbor_bytestring_length(data_item);
-  if (msg->data_size > 65536) {
+  if (msg->data_size > CLIENT_API_PEER_INFO_MAX_PAYLOAD) {
     cbor_decref(&data_item);
     return -1;
   }
@@ -1232,7 +1237,9 @@ int client_api_peer_connect_decode(cbor_item_t* item, client_api_peer_connect_t*
     return -1;
   }
   msg->data_size = cbor_bytestring_length(data_item);
-  if (msg->data_size > 65536) {
+  /* format 2 carries a PPM QR image, which is larger than raw peer info —
+     see peer_info_response cap */
+  if (msg->data_size > CLIENT_API_PEER_INFO_MAX_PAYLOAD) {
     cbor_decref(&data_item);
     return -1;
   }
@@ -1394,7 +1401,9 @@ int client_api_friend_add_decode(cbor_item_t* item, client_api_friend_add_t* msg
     return -1;
   }
   msg->data_size = cbor_bytestring_length(data_item);
-  if (msg->data_size > 65536) {
+  /* format 2 carries a PPM QR image, which is larger than raw peer info —
+     see peer_info_response cap */
+  if (msg->data_size > CLIENT_API_PEER_INFO_MAX_PAYLOAD) {
     cbor_decref(&data_item);
     return -1;
   }
