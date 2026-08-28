@@ -1888,13 +1888,14 @@ int offs_client_peer_info_ex(offs_client_t* client, uint8_t format,
                              offs_peer_info_cb_t callback, void* ctx) {
   if (client == NULL || !client->connected) return -1;
 
+  cbor_item_t* frame = client_api_peer_info_request_encode_format(format);
+  if (frame == NULL) return -1;  /* invalid format (> 2) rejected by encoder */
+
   platform_mutex_lock(client->lock);
   client->peer_info_cb = callback;
   client->peer_info_cb_ctx = ctx;
   platform_mutex_unlock(client->lock);
 
-  cbor_item_t* frame = client_api_peer_info_request_encode_format(format);
-  if (frame == NULL) return -1;  /* invalid format (> 2) rejected by encoder */
   _send_frame(client, frame);
   return 0;
 }
@@ -1904,15 +1905,16 @@ int offs_client_peer_info(offs_client_t* client,
   return offs_client_peer_info_ex(client, 0, callback, ctx);
 }
 
+int offs_client_peer_info_qr(offs_client_t* client,
+                             offs_peer_info_cb_t callback, void* ctx) {
+  return offs_client_peer_info_ex(client, 2, callback, ctx);
+}
+
 int offs_client_peer_connect(offs_client_t* client, uint8_t format,
                              const uint8_t* data, size_t data_len,
                              offs_peer_connect_cb_t callback, void* ctx) {
   if (client == NULL || !client->connected || data == NULL || data_len == 0) return -1;
-
-  platform_mutex_lock(client->lock);
-  client->peer_connect_cb = callback;
-  client->peer_connect_cb_ctx = ctx;
-  platform_mutex_unlock(client->lock);
+  if (format > 2) return -1;  /* only 0/1/2 are defined */
 
   client_api_peer_connect_t msg;
   memset(&msg, 0, sizeof(msg));
@@ -1921,6 +1923,13 @@ int offs_client_peer_connect(offs_client_t* client, uint8_t format,
   msg.data_size = data_len;
 
   cbor_item_t* frame = client_api_peer_connect_encode(&msg);
+  if (frame == NULL) return -1;  /* cbor allocation failure */
+
+  platform_mutex_lock(client->lock);
+  client->peer_connect_cb = callback;
+  client->peer_connect_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
   _send_frame(client, frame);
   return 0;
 }
@@ -1934,11 +1943,7 @@ int offs_client_friend_add(offs_client_t* client, uint8_t format,
                            const uint8_t* data, size_t data_len,
                            offs_peer_connect_cb_t callback, void* ctx) {
   if (client == NULL || !client->connected || data == NULL || data_len == 0) return -1;
-
-  platform_mutex_lock(client->lock);
-  client->peer_connect_cb = callback;
-  client->peer_connect_cb_ctx = ctx;
-  platform_mutex_unlock(client->lock);
+  if (format > 2) return -1;  /* only 0/1/2 are defined */
 
   client_api_friend_add_t msg;
   memset(&msg, 0, sizeof(msg));
@@ -1947,6 +1952,13 @@ int offs_client_friend_add(offs_client_t* client, uint8_t format,
   msg.data_size = data_len;
 
   cbor_item_t* frame = client_api_friend_add_encode(&msg);
+  if (frame == NULL) return -1;  /* cbor allocation failure */
+
+  platform_mutex_lock(client->lock);
+  client->peer_connect_cb = callback;
+  client->peer_connect_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
   _send_frame(client, frame);
   return 0;
 }

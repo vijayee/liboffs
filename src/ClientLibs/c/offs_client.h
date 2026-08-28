@@ -127,10 +127,19 @@ int offs_client_health(offs_client_t* client,
     offs_health_cb_t callback, void* ctx);
 
 /* Peer operations. format: 0 = raw CBOR peer_info, 1 = base58 text,
-   2 = PPM QR image. The _qr forms are sugar for format 2. */
+   2 = PPM QR image. The _qr forms are sugar for format 2.
+   Error delivery: daemon-side rejections (unauthorized, undecodable peer
+   info, etc.) arrive as ERROR frames dispatched to the error callback
+   registered via offs_client_get()'s callbacks — if no error callback is
+   registered, failures are silent. Success results arrive on the
+   per-operation callback.
+   Concurrency: one outstanding operation per callback slot — issuing
+   peer_connect and then friend_add before the first result arrives
+   delivers the first result to the second callback. */
 int offs_client_peer_info(offs_client_t* client, offs_peer_info_cb_t callback, void* ctx);
 int offs_client_peer_info_ex(offs_client_t* client, uint8_t format,
                              offs_peer_info_cb_t callback, void* ctx);
+int offs_client_peer_info_qr(offs_client_t* client, offs_peer_info_cb_t callback, void* ctx);
 int offs_client_peer_connect(offs_client_t* client, uint8_t format,
                              const uint8_t* data, size_t data_len,
                              offs_peer_connect_cb_t callback, void* ctx);
