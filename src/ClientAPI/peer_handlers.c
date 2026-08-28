@@ -7,6 +7,7 @@
 #include "../Network/node_id.h"
 #include "../Util/base58.h"
 #include "../Util/allocator.h"
+#include "../QR/qr.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -16,11 +17,64 @@
 #define PEER_LIST_KEY_IS_FRIEND  3
 #define PEER_LIST_KEY_RTT_MS     4
 
-void peer_handle_info_request(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
-  (void)frame; /* no payload */
+int peer_info_from_payload(uint8_t format, const uint8_t* data,
+                           size_t data_size, peer_info_t* info) {
+  if (info == NULL) return -1;
 
+  if (format == 0) {
+    /* CBOR bytes */
+    struct cbor_load_result load_result;
+    cbor_item_t* decoded = cbor_load(data, data_size, &load_result);
+    if (decoded == NULL || load_result.error.code != CBOR_ERR_NONE) {
+      if (decoded != NULL) cbor_decref(&decoded);
+      return -1;
+    }
+    int rc = peer_info_decode(decoded, info);
+    cbor_decref(&decoded);
+    return rc;
+  }
+
+  if (format == 1) {
+    /* Base58 text */
+    char* b58_str = get_clear_memory(data_size + 1);
+    if (b58_str == NULL) return -1;
+    memcpy(b58_str, data, data_size);
+    b58_str[data_size] = '\0';
+    int rc = peer_info_from_base58(b58_str, info);
+    free(b58_str);
+    return rc;
+  }
+
+  if (format == 2) {
+    /* PPM QR image → payload bytes → CBOR peer_info */
+    size_t payload_len = 0;
+    uint8_t* payload = qr_decode_from_ppm(data, data_size, &payload_len);
+    if (payload == NULL) return -1;
+    struct cbor_load_result load_result;
+    cbor_item_t* decoded = cbor_load(payload, payload_len, &load_result);
+    free(payload);
+    if (decoded == NULL || load_result.error.code != CBOR_ERR_NONE) {
+      if (decoded != NULL) cbor_decref(&decoded);
+      return -1;
+    }
+    int rc = peer_info_decode(decoded, info);
+    cbor_decref(&decoded);
+    return rc;
+  }
+
+  return -1;
+}
+
+void peer_handle_info_request(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
   if (!ctx->is_authenticated) {
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
+
+  uint8_t format = 0;
+  if (client_api_peer_info_request_decode(frame, &format) != 0) {
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_BAD_REQUEST,
+                    "Invalid peer info request");
     return;
   }
 
@@ -84,12 +138,29 @@ void peer_handle_info_request(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
   /* Build and send response */
   client_api_peer_info_response_t response;
   memset(&response, 0, sizeof(response));
-  response.format = 0; /* raw CBOR */
-  response.data = serialized;
-  response.data_size = bytes_serialized;
+
+  if (format == 2) {
+    /* PPM QR image — ownership of the encoded image transfers to the
+       response struct; client_api_peer_info_response_destroy frees it. */
+    size_t ppm_len = 0;
+    uint8_t* ppm = qr_encode_to_ppm(serialized, bytes_serialized, &ppm_len);
+    free(serialized);
+    if (ppm == NULL) {
+      ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                      "QR encoding failed");
+      return;
+    }
+    response.format = 2;
+    response.data = ppm;
+    response.data_size = ppm_len;
+  } else {
+    response.format = format;  /* 0 = raw CBOR */
+    response.data = serialized;
+    response.data_size = bytes_serialized;
+  }
 
   cbor_item_t* out_frame = client_api_peer_info_response_encode(&response);
-  free(serialized);
+  client_api_peer_info_response_destroy(&response);
   ctx->send_frame(ctx->conn, out_frame);
 }
 
@@ -107,26 +178,8 @@ void peer_handle_connect(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
 
   peer_info_t remote_info;
   memset(&remote_info, 0, sizeof(remote_info));
-  int decode_ok = -1;
-
-  if (msg.format == 0) {
-    /* CBOR bytes — load and decode */
-    struct cbor_load_result load_result;
-    cbor_item_t* decoded = cbor_load(msg.data, msg.data_size, &load_result);
-    if (decoded != NULL && load_result.error.code == CBOR_ERR_NONE) {
-      decode_ok = peer_info_decode(decoded, &remote_info);
-      cbor_decref(&decoded);
-    }
-  } else if (msg.format == 1) {
-    /* Base58 text — interpret as null-terminated string */
-    char* b58_str = get_clear_memory(msg.data_size + 1);
-    if (b58_str != NULL) {
-      memcpy(b58_str, msg.data, msg.data_size);
-      b58_str[msg.data_size] = '\0';
-      decode_ok = peer_info_from_base58(b58_str, &remote_info);
-      free(b58_str);
-    }
-  }
+  int decode_ok = peer_info_from_payload(msg.format, msg.data, msg.data_size,
+                                         &remote_info);
 
   client_api_peer_connect_destroy(&msg);
 
@@ -240,26 +293,8 @@ void peer_handle_friend_add(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     return;
   }
 
-  int decode_ok = -1;
-
-  if (msg.format == 0) {
-    /* CBOR bytes */
-    struct cbor_load_result load_result;
-    cbor_item_t* decoded = cbor_load(msg.data, msg.data_size, &load_result);
-    if (decoded != NULL && load_result.error.code == CBOR_ERR_NONE) {
-      decode_ok = peer_info_decode(decoded, new_friend);
-      cbor_decref(&decoded);
-    }
-  } else if (msg.format == 1) {
-    /* Base58 text */
-    char* b58_str = get_clear_memory(msg.data_size + 1);
-    if (b58_str != NULL) {
-      memcpy(b58_str, msg.data, msg.data_size);
-      b58_str[msg.data_size] = '\0';
-      decode_ok = peer_info_from_base58(b58_str, new_friend);
-      free(b58_str);
-    }
-  }
+  int decode_ok = peer_info_from_payload(msg.format, msg.data, msg.data_size,
+                                         new_friend);
 
   client_api_friend_add_destroy(&msg);
 

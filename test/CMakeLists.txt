@@ -37,6 +37,7 @@ if (BUILD_TESTING)
             test_block.cpp
             test_qr.cpp
             test_qr_wire.cpp
+            test_peer_payload.cpp
             test_index.cpp
             test_section.cpp
             test_block_cache.cpp

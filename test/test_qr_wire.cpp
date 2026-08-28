@@ -59,6 +59,10 @@ TEST(PeerInfoRequestWire, UnknownFormatRejected) {
   cbor_decref(&array);
 }
 
+TEST(PeerInfoRequestWire, EncodeRejectsUnknownFormat) {
+  EXPECT_TRUE(client_api_peer_info_request_encode_format(3) == NULL);
+}
+
 TEST(PeerInfoRequestWire, ExtraElementRejected) {
   cbor_item_t* array = cbor_new_definite_array(3);
   cbor_item_t* type = cbor_build_uint8(CLIENT_API_PEER_INFO_REQUEST);

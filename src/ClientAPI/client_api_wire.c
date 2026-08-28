@@ -1079,6 +1079,7 @@ cbor_item_t* client_api_peer_info_request_encode(void) {
 }
 
 cbor_item_t* client_api_peer_info_request_encode_format(uint8_t format) {
+  if (format > 2) return NULL;  /* only 0/1/2 are defined; decode rejects the rest */
   /* Format 0 keeps the original 1-element frame shape so old daemons and
      old capture tooling see byte-identical requests. */
   cbor_item_t* array = cbor_new_definite_array(format == 0 ? 1 : 2);
