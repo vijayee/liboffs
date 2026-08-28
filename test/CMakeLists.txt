@@ -19,7 +19,11 @@ if (BUILD_TESTING)
     if(OFFS_ENABLE_ASAN)
       foreach(_gtest_t gtest gtest_main gmock gmock_main)
         if(TARGET ${_gtest_t})
-          target_compile_options(${_gtest_t} PRIVATE /fsanitize=address /Z7)
+          if(MSVC)
+            target_compile_options(${_gtest_t} PRIVATE /fsanitize=address /Z7)
+          else()
+            target_compile_options(${_gtest_t} PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
+          endif()
         endif()
       endforeach()
     endif()
@@ -105,12 +109,30 @@ if (BUILD_TESTING)
     # ASan-instrumented offs objects it links resolve against it. Externals stay
     # uninstrumented. /Z7 embeds debug info for symbolicated ASan stack traces.
     if(OFFS_ENABLE_ASAN)
-      target_compile_options(testliboffs PRIVATE /fsanitize=address /Z7)
-      # The ASan runtime auto-links via the /fsanitize=address compiler-emitted
-      # /DEFAULTLIB directive (link.exe needs no /fsanitize=address flag, which
-      # older toolsets reject as LNK4044). /DEBUG emits a full PDB so ASan's
-      # faulting stack traces symbolicate (LNK4302 asks for it explicitly).
-      target_link_options(testliboffs PRIVATE /DEBUG)
+      if(MSVC)
+        target_compile_options(testliboffs PRIVATE /fsanitize=address /Z7)
+        # The ASan runtime auto-links via the /fsanitize=address compiler-emitted
+        # /DEFAULTLIB directive (link.exe needs no /fsanitize=address flag, which
+        # older toolsets reject as LNK4044). /DEBUG emits a full PDB so ASan's
+        # faulting stack traces symbolicate (LNK4302 asks for it explicitly).
+        target_link_options(testliboffs PRIVATE /DEBUG)
+      else()
+        # GCC/Clang: match the offs-library ASan scope so the instrumented
+        # objects resolve against the ASan runtime pulled in here.
+        target_compile_options(testliboffs PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
+        target_link_options(testliboffs PRIVATE -fsanitize=address)
+      endif()
+    endif()
+    if(OFFS_ENABLE_UBSAN AND NOT MSVC)
+      target_compile_options(testliboffs PRIVATE -fsanitize=undefined -fno-omit-frame-pointer -g)
+      target_link_options(testliboffs PRIVATE -fsanitize=undefined)
+    endif()
+    if(OFFS_ENABLE_TSAN AND NOT MSVC)
+      if(OFFS_ENABLE_ASAN)
+        message(FATAL_ERROR "OFFS_ENABLE_TSAN and OFFS_ENABLE_ASAN are mutually exclusive; enable only one.")
+      endif()
+      target_compile_options(testliboffs PRIVATE -fsanitize=thread -fno-omit-frame-pointer -g)
+      target_link_options(testliboffs PRIVATE -fsanitize=thread)
     endif()
     # Native crash-diagnosis build (no ASan): embed debug info + emit a PDB so
     # the test_crash_catch vectored handler can symbolicate the faulting stack
