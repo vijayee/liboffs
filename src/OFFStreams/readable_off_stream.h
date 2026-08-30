@@ -44,6 +44,10 @@ typedef struct {
 load_tuple_payload_t* load_tuple_payload_create(size_t tuples_loaded, size_t tuples_skipped);
 void load_tuple_payload_destroy(void* payload);
 
+/* Block size in bytes for a given block type. Shared by the descriptor, the
+ * off_stream and LOAD consumers that compute tuple totals from a file size. */
+size_t off_block_size_for_type(block_size_e type);
+
 typedef struct {
   stream_t stream;
   block_cache_t* bc;

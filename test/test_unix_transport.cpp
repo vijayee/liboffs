@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <cstring>
 #include <string>
+#include <vector>
 #include <fstream>
 extern "C" {
 #include "../src/ClientAPI/Unix/unix_transport.h"
@@ -383,6 +384,105 @@ TEST_F(TestUnixTransport, PutAndGetRoundTrip) {
 
     stream_framer_destroy(framer);
     platform_socket_destroy(sock);
+}
+
+TEST_F(TestUnixTransport, LoadRoundTrip) {
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
+
+    /* 150000 bytes spans two 128000-byte standard blocks -> 2 tuples. */
+    const size_t data_size = 150000;
+    std::vector<uint8_t> data(data_size);
+    for (size_t index = 0; index < data_size; index++) {
+        data[index] = (uint8_t)(index & 0xFF);
+    }
+
+    client_api_put_request_t put_req;
+    memset(&put_req, 0, sizeof(put_req));
+    put_req.content_type = (char*)"application/octet-stream";
+    put_req.file_name = (char*)"load_roundtrip.bin";
+    put_req.stream_length = data_size;
+    put_req.server_address = NULL;
+    put_req.data = data.data();
+    put_req.data_size = data_size;
+
+    cbor_item_t* frame = client_api_put_request_encode(&put_req);
+    ASSERT_NE(frame, nullptr);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
+
+    stream_framer_t* framer = stream_framer_create();
+    cbor_item_t* response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+
+    uint8_t type = client_api_wire_get_type(response);
+    ASSERT_EQ(type, CLIENT_API_PUT_RESPONSE);
+
+    client_api_put_response_t put_resp;
+    memset(&put_resp, 0, sizeof(put_resp));
+    ASSERT_EQ(client_api_put_response_decode(response, &put_resp), 0);
+    ASSERT_NE(put_resp.ori_string, nullptr);
+    char* ori_string = strdup(put_resp.ori_string);
+    client_api_put_response_destroy(&put_resp);
+    cbor_decref(&response);
+
+    /* Flip the socket nonblocking so _recv_frame's attempt loop (not a
+     * blocking recv) bounds each LOAD frame wait — keeps the test from
+     * stalling indefinitely when the server sends fewer frames than
+     * expected. The large PUT send above already completed while blocking. */
+    platform_socket_set_nonblocking(sock);
+
+    client_api_load_request_t load_req;
+    memset(&load_req, 0, sizeof(load_req));
+    load_req.ori_string = ori_string;
+    load_req.has_range = 0;
+
+    frame = client_api_load_request_encode(&load_req);
+    ASSERT_NE(frame, nullptr);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
+    free(ori_string);
+
+    /* Read frames until LOAD_END, counting progress frames. */
+    size_t progress_frames = 0;
+    size_t last_loaded = 0;
+    uint8_t end_status = 0xFF;
+    size_t end_loaded = 0;
+    size_t end_total = 0;
+
+    for (int index = 0; index < 16; index++) {
+        response = _recv_frame(sock, framer, 2000);
+        if (response == nullptr) {
+            break;
+        }
+        type = client_api_wire_get_type(response);
+        if (type == CLIENT_API_LOAD_PROGRESS) {
+            size_t loaded = 0;
+            size_t total = 0;
+            EXPECT_EQ(client_api_load_progress_decode(response, &loaded, &total), 0);
+            EXPECT_EQ(total, (size_t)2);
+            EXPECT_GT(loaded, last_loaded);
+            last_loaded = loaded;
+            progress_frames++;
+        } else if (type == CLIENT_API_LOAD_END) {
+            EXPECT_EQ(client_api_load_end_decode(response, &end_status, &end_loaded, &end_total), 0);
+            EXPECT_EQ(end_status, CLIENT_API_LOAD_STATUS_LOADED);
+            EXPECT_EQ(end_loaded, (size_t)2);
+            EXPECT_EQ(end_total, (size_t)2);
+            cbor_decref(&response);
+            break;
+        }
+        cbor_decref(&response);
+    }
+
+    /* Close the client connection before asserting so a failure path cannot
+     * stall transport teardown with a live socket. */
+    stream_framer_destroy(framer);
+    platform_socket_destroy(sock);
+
+    EXPECT_EQ(progress_frames, (size_t)2);
+    EXPECT_EQ(last_loaded, (size_t)2);
+    EXPECT_EQ(end_status, CLIENT_API_LOAD_STATUS_LOADED);
+    EXPECT_EQ(end_loaded, (size_t)2);
+    EXPECT_EQ(end_total, (size_t)2);
 }
 
 TEST_F(TestUnixTransport, MaxConnections) {

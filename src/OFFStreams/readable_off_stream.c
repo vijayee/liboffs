@@ -11,7 +11,9 @@
 #include "../Scheduler/scheduler.h"
 #include "../Network/network.h"
 
-static size_t _block_size_for_type(block_size_e type) {
+static size_t _block_size_for_type(block_size_e type);
+
+size_t off_block_size_for_type(block_size_e type) {
   switch (type) {
     case mega:     return 1000000;
     case standard: return 128000;
@@ -19,6 +21,10 @@ static size_t _block_size_for_type(block_size_e type) {
     case nano:     return 136;
   }
   return 128000;
+}
+
+static size_t _block_size_for_type(block_size_e type) {
+  return off_block_size_for_type(type);
 }
 
 static void _render_origin_data(readable_off_stream_t* stream, buffer_t* data) {

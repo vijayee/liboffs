@@ -222,6 +222,192 @@ static unix_get_pipeline_t* _unix_get_pipeline_create(unix_connection_t* conn, o
   return pipeline;
 }
 
+/* --- LOAD pipeline callbacks --- */
+
+/* Pipeline context for LOAD requests: pulls a file's blocks into the block
+ * cache without serving file data, forwarding tuple-level progress as
+ * LOAD_PROGRESS frames and terminating with exactly one LOAD_END frame.
+ * Subscription/refcount discipline mirrors unix_get_pipeline_t. */
+typedef struct {
+  refcounter_t refcounter;
+  unix_connection_t* conn;
+  readable_off_stream_t* rs;
+  readable_descriptor_t* desc;
+  ori_t* ori;
+  size_t tuples_total;   /* ceil(final_byte / block_size) - offset tuples */
+  size_t tuples_loaded;  /* maintained from load_tuple_event payloads */
+  size_t tuples_skipped; /* maintained from load_tuple_event payloads */
+  uint8_t failed;        /* an error_event fired on desc or rs */
+  uint8_t terminal_sent; /* guards the single LOAD_END frame */
+} unix_load_pipeline_t;
+
+static void _unix_load_send_terminal(unix_load_pipeline_t* pipeline) {
+  if (pipeline->terminal_sent) {
+    return;
+  }
+  pipeline->terminal_sent = 1;
+  uint8_t status = CLIENT_API_LOAD_STATUS_LOADED;
+  if (pipeline->failed) {
+    status = CLIENT_API_LOAD_STATUS_FAILED;
+  } else if (pipeline->tuples_total > 0 && pipeline->tuples_loaded == 0) {
+    status = CLIENT_API_LOAD_STATUS_FAILED;
+  } else if (pipeline->tuples_skipped > 0) {
+    status = CLIENT_API_LOAD_STATUS_PARTIAL;
+  }
+  cbor_item_t* frame = client_api_load_end_encode(
+      status, pipeline->tuples_loaded, pipeline->tuples_total);
+  _unix_connection_send_frame(pipeline->conn, frame);
+}
+
+static void _unix_load_on_tuple(void* ctx, void* data) {
+  unix_load_pipeline_t* pipeline = (unix_load_pipeline_t*)ctx;
+  tuple_t* tuple = (tuple_t*)data;
+  readable_off_stream_write(pipeline->rs, tuple);
+}
+
+/* The load_tuple_event payload is CONSUME-transferred: the notify machinery
+ * holds the reference and destroys it after dispatch. Copy the counters,
+ * never destroy or dereference the payload here. */
+static void _unix_load_on_tuple_loaded(void* ctx, void* data) {
+  unix_load_pipeline_t* pipeline = (unix_load_pipeline_t*)ctx;
+  load_tuple_payload_t* progress = (load_tuple_payload_t*)data;
+  if (progress != NULL) {
+    pipeline->tuples_loaded = progress->tuples_loaded;
+    pipeline->tuples_skipped = progress->tuples_skipped;
+  }
+  cbor_item_t* frame = client_api_load_progress_encode(
+      pipeline->tuples_loaded, pipeline->tuples_total);
+  _unix_connection_send_frame(pipeline->conn, frame);
+}
+
+static void _unix_load_on_rs_close(void* ctx, void* unused) {
+  (void)unused;
+  unix_load_pipeline_t* pipeline = (unix_load_pipeline_t*)ctx;
+  /* Tally-before-close ordering (Task 2) guarantees the tuple counters were
+   * updated before this terminal frame is sent. If a close arrived first
+   * anyway, the last known counters are reported. */
+  _unix_load_send_terminal(pipeline);
+  stream_deferred_deref((stream_t*)pipeline->rs);
+  ori_destroy(pipeline->ori);
+  if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
+    DESTROY(pipeline->ori, ori);
+    free(pipeline);
+  }
+}
+
+static void _unix_load_on_desc_close(void* ctx, void* unused) {
+  (void)unused;
+  unix_load_pipeline_t* pipeline = (unix_load_pipeline_t*)ctx;
+  stream_deferred_deref((stream_t*)pipeline->desc);
+  ori_destroy(pipeline->ori);
+  if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
+    DESTROY(pipeline->ori, ori);
+    free(pipeline);
+  }
+}
+
+static void _unix_load_on_rs_error(void* ctx, void* error) {
+  (void)error;
+  unix_load_pipeline_t* pipeline = (unix_load_pipeline_t*)ctx;
+  pipeline->failed = 1;
+  /* stream_deactivate queues a close right after the error, which emits the
+   * terminal LOAD_END FAILED; terminal_sent keeps exactly one terminal. */
+  stream_deactivate((stream_t*)pipeline->rs, NULL);
+}
+
+static void _unix_load_on_desc_error(void* ctx, void* error) {
+  (void)error;
+  unix_load_pipeline_t* pipeline = (unix_load_pipeline_t*)ctx;
+  pipeline->failed = 1;
+  stream_deactivate((stream_t*)pipeline->rs, NULL);
+  stream_deactivate((stream_t*)pipeline->desc, NULL);
+}
+
+static void _unix_handle_load(unix_connection_t* conn, cbor_item_t* frame) {
+  if (!conn->is_authenticated) {
+    _unix_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
+  client_api_load_request_t msg;
+  memset(&msg, 0, sizeof(msg));
+  if (client_api_load_request_decode(frame, &msg) != 0) {
+    _unix_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Invalid load request");
+    return;
+  }
+
+  off_url_t* url = off_url_parse(msg.ori_string);
+  client_api_load_request_destroy(&msg);
+
+  if (url == NULL) {
+    _unix_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Invalid OFF URL");
+    return;
+  }
+
+  /* v1: directory ORIs are not loadable — directories are resolved in HTTP
+   * land; reject explicitly so the client gets a clear error. */
+  if (url->content_type != NULL && strstr(url->content_type, "offsystem/directory") != NULL) {
+    off_url_destroy(url);
+    _unix_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST,
+                                "Load requires a file ORI, not a directory");
+    return;
+  }
+
+  /* Synchronous load path (same ORI construction as the GET path) */
+  ori_t* ori = ori_create(url->stream_length);
+  ori->block_type = standard;
+  ori->tuple_size = 3;
+  if (url->descriptor_hash != NULL) {
+    ori->descriptor_hash = REFERENCE(url->descriptor_hash, buffer_t);
+  }
+  if (url->file_hash != NULL) {
+    ori->file_hash = REFERENCE(url->file_hash, buffer_t);
+  }
+  if (url->file_name != NULL) {
+    ori->file_name = get_memory(strlen(url->file_name) + 1);
+    memcpy(ori->file_name, url->file_name, strlen(url->file_name) + 1);
+  }
+  off_url_destroy(url);
+
+  /* No GET_RESPONSE_START: load reports progress via LOAD_PROGRESS/LOAD_END */
+
+  network_t* network = conn->peer_ctx.network;
+
+  unix_load_pipeline_t* pipeline = get_clear_memory(sizeof(unix_load_pipeline_t));
+  refcounter_init((refcounter_t*)pipeline);
+  pipeline->conn = conn;
+  pipeline->ori = ori;
+  size_t block_size = off_block_size_for_type(ori->block_type);
+  pipeline->tuples_total = (ori->final_byte / block_size) +
+                           ((ori->final_byte % block_size) > 0 ? 1 : 0) -
+                           (ori->file_offset / block_size);
+
+  /* Reference count: 1 base + 1 for error callbacks that may both fire */
+  REFERENCE(pipeline, unix_load_pipeline_t);
+
+  size_t descriptor_pad = 32;
+
+  readable_off_stream_t* rs = readable_off_stream_create_ex(
+    conn->pool, conn->bc, conn->tc, REFERENCE(ori, ori_t), descriptor_pad, network, 1);
+  readable_descriptor_t* desc = readable_descriptor_create(
+    conn->pool, conn->bc, REFERENCE(ori, ori_t), descriptor_pad, network);
+
+  pipeline->rs = rs;
+  pipeline->desc = desc;
+
+  /* NO data_event consumer on rs: load mode never serves file data */
+  stream_subscribe((stream_t*)rs, load_tuple_event, pipeline, _unix_load_on_tuple_loaded, NULL);
+  stream_subscribe((stream_t*)rs, close_event, pipeline, _unix_load_on_rs_close, NULL);
+  stream_subscribe((stream_t*)rs, error_event, pipeline, _unix_load_on_rs_error, NULL);
+  stream_subscribe((stream_t*)desc, close_event, pipeline, _unix_load_on_desc_close, NULL);
+  stream_subscribe((stream_t*)desc, error_event, pipeline, _unix_load_on_desc_error, NULL);
+
+  /* Pipe: descriptor provides tuples to the off_stream */
+  stream_subscribe((stream_t*)desc, data_event, pipeline, _unix_load_on_tuple, NULL);
+
+  /* Start the descriptor pull */
+  readable_descriptor_push(desc);
+}
+
 /* --- PUT pipeline callbacks --- */
 
 static void _unix_put_on_descriptor_close(void* ctx, void* unused) {
@@ -629,6 +815,9 @@ static void _unix_dispatch_frame(unix_connection_t* conn, uint8_t type, cbor_ite
   switch (type) {
     case CLIENT_API_GET_REQUEST:
       _unix_handle_get(conn, frame);
+      break;
+    case CLIENT_API_LOAD_REQUEST:
+      _unix_handle_load(conn, frame);
       break;
     case CLIENT_API_PUT_REQUEST:
       _unix_handle_put(conn, frame);
