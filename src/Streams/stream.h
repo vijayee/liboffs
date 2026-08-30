@@ -37,7 +37,8 @@ typedef enum {
   unpiped_event = 11,
   piped_event = 12,
   drain_event = 13,
-  error_event = 14
+  error_event = 14,
+  load_tuple_event = 15
 } stream_event_e;
 
 typedef struct {
@@ -142,7 +143,7 @@ typedef struct {
   uint8_t is_pulling;
 } stream_set_pulling_payload_t;
 
-#define STREAM_HANDLER_COUNT 15
+#define STREAM_HANDLER_COUNT 16
 struct stream_t {
   refcounter_t refcounter;
   stream_type_e type;

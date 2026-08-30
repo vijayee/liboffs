@@ -32,6 +32,18 @@ typedef struct pending_tuple_t {
   struct pending_tuple_t* next;
 } pending_tuple_t;
 
+/* Progress payload for load_tuple_event (load mode only). Refcounted: the
+ * notify machinery holds references while dispatching, so handlers should
+ * copy the two counters out or take their own reference. */
+typedef struct {
+  refcounter_t refcounter;
+  size_t tuples_loaded;
+  size_t tuples_skipped;
+} load_tuple_payload_t;
+
+load_tuple_payload_t* load_tuple_payload_create(size_t tuples_loaded, size_t tuples_skipped);
+void load_tuple_payload_destroy(void* payload);
+
 typedef struct {
   stream_t stream;
   block_cache_t* bc;
@@ -42,6 +54,9 @@ typedef struct {
   size_t sent_bytes;
   size_t offset_remainder;
   uint8_t offset_applied;
+  uint8_t load_mode;                /* 1 = missing data tuples are skipped and tallied */
+  size_t tuples_loaded;             /* tuples whose data was served / rendered */
+  size_t tuples_skipped;            /* tuples abandoned because blocks were missing */
   off_stream_state_e state;         /* stream state */
   /* Async decode state */
   tuple_t* pending_tuple;
@@ -49,9 +64,20 @@ typedef struct {
   size_t blocks_expected;
   size_t blocks_received;
   pending_block_fetch_t* pending_fetches;
+  /* Hashes of an already-skipped tuple: late results matching these are
+   * dropped so they cannot XOR-accumulate into the next tuple. */
+  pending_block_fetch_t* stale_fetches;
   /* Queue of tuples waiting to be processed */
   pending_tuple_t* tuple_queue;
 } readable_off_stream_t;
+
+/* Load mode: missing data tuples are skipped and tallied (tuples_skipped)
+ * instead of deactivating the stream; each resolved tuple (loaded or skipped)
+ * emits load_tuple_event with a load_tuple_payload_t. Descriptor misses
+ * remain fatal. */
+readable_off_stream_t* readable_off_stream_create_ex(
+    scheduler_pool_t* pool, block_cache_t* bc, tuple_cache_t* tc,
+    ori_t* ori, size_t descriptor_pad, network_t* network, uint8_t load_mode);
 
 readable_off_stream_t* readable_off_stream_create(
     scheduler_pool_t* pool, block_cache_t* bc, tuple_cache_t* tc,

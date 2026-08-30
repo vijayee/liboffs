@@ -53,6 +53,7 @@ if (BUILD_TESTING)
             test_tuple_ori.cpp
             test_tuple_cache.cpp
             test_readable_off_stream.cpp
+            test_readable_load.cpp
             test_writeable_off_stream.cpp
             test_readable_descriptor.cpp
             test_writeable_descriptor.cpp
