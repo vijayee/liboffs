@@ -758,6 +758,91 @@ TEST_F(TestUnixTransport, LoadDirectoryOriRejected) {
     platform_socket_destroy(sock);
 }
 
+/* A LOAD whose descriptor hash decodes (valid base58, 32 bytes) but is not
+   in the block cache (and no network is configured) must fail cleanly: the
+   descriptor's error_event fires, the pipeline deactivates rs and desc, and
+   the client receives exactly one terminal LOAD_END with STATUS_FAILED (2)
+   and zero progress frames. Without the deactivate-loop guard in
+   _unix_load_on_desc_error/_unix_load_on_rs_error this path re-notifies
+   error_event forever (stream_deactivate notifies unconditionally), so the
+   terminal frame — and the finite drain below — is the regression pin. */
+TEST_F(TestUnixTransport, LoadFailedWhenDescriptorUnreachable) {
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
+    platform_socket_set_nonblocking(sock);
+
+    /* base58 of bytes 0x01..0x20 — exactly how the positive tests derive
+       hashes; decodes to a valid 32-byte hash that is absent from the cache. */
+    uint8_t hash_bytes[32];
+    for (size_t index = 0; index < sizeof(hash_bytes); index++) {
+        hash_bytes[index] = (uint8_t)(index + 1);
+    }
+    char hash_b58[64];
+    ASSERT_GT(base58_encode(hash_bytes, sizeof(hash_bytes),
+                            hash_b58, sizeof(hash_b58)), 0);
+
+    char ghost_ori[512];
+    snprintf(ghost_ori, sizeof(ghost_ori),
+             "http://localhost:23402/offsystem/v3/standard/%zu/%s/%s/load_ghost.bin",
+             (size_t)100, hash_b58, hash_b58);
+
+    client_api_load_request_t load_req;
+    memset(&load_req, 0, sizeof(load_req));
+    load_req.ori_string = ghost_ori;
+    load_req.has_range = 0;
+
+    cbor_item_t* frame = client_api_load_request_encode(&load_req);
+    ASSERT_NE(frame, nullptr);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
+
+    stream_framer_t* framer = stream_framer_create();
+    size_t progress_frames = 0;
+    uint8_t end_status = 0xFF;
+    size_t end_loaded = 0;
+    size_t end_total = 0;
+    bool saw_load_end = false;
+
+    for (int index = 0; index < 16; index++) {
+        cbor_item_t* response = _recv_frame(sock, framer, 10000);
+        if (response == nullptr) {
+            break;
+        }
+        uint8_t type = client_api_wire_get_type(response);
+        if (type == CLIENT_API_LOAD_PROGRESS) {
+            progress_frames++;
+        } else if (type == CLIENT_API_LOAD_END) {
+            EXPECT_EQ(client_api_load_end_decode(response, &end_status,
+                                                &end_loaded, &end_total), 0);
+            saw_load_end = true;
+            cbor_decref(&response);
+            break;
+        }
+        cbor_decref(&response);
+    }
+
+    /* Exactly-once terminal: drain a few more frames with a short timeout;
+     * none may be a second LOAD_END (or any further load traffic — the loop
+     * guard keeps the failure path finite). */
+    for (int index = 0; index < 4; index++) {
+        cbor_item_t* extra = _recv_frame(sock, framer, 300);
+        if (extra != nullptr) {
+            EXPECT_NE(client_api_wire_get_type(extra), CLIENT_API_LOAD_END);
+            cbor_decref(&extra);
+        }
+    }
+
+    /* Close the client connection before asserting so a failure path cannot
+     * stall transport teardown with a live socket. */
+    stream_framer_destroy(framer);
+    platform_socket_destroy(sock);
+
+    EXPECT_TRUE(saw_load_end)
+        << "unreachable-descriptor load never terminated: LOAD_END missing";
+    EXPECT_EQ(end_status, CLIENT_API_LOAD_STATUS_FAILED);
+    EXPECT_EQ(end_loaded, (size_t)0);
+    EXPECT_EQ(progress_frames, (size_t)0);
+}
+
 TEST_F(TestUnixTransport, MaxConnections) {
     char limited_path[128];
     _make_socket_path(limited_path, sizeof(limited_path), "limited");

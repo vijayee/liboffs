@@ -322,16 +322,30 @@ static void _unix_load_on_rs_error(void* ctx, void* error) {
   unix_load_pipeline_t* pipeline = (unix_load_pipeline_t*)ctx;
   pipeline->failed = 1;
   /* stream_deactivate queues a close right after the error, which emits the
-   * terminal LOAD_END FAILED; terminal_sent keeps exactly one terminal. */
-  stream_deactivate((stream_t*)pipeline->rs, NULL);
+   * terminal LOAD_END FAILED; terminal_sent keeps exactly one terminal. Only
+   * deactivate when this error did not already come from one —
+   * stream_deactivate re-notifies error_event UNCONDITIONALLY, so an
+   * unguarded re-deactivate here would loop forever on the stream's actor. */
+  if (!pipeline->rs->stream.is_deactivated) {
+    stream_deactivate((stream_t*)pipeline->rs, NULL);
+  }
 }
 
 static void _unix_load_on_desc_error(void* ctx, void* error) {
   (void)error;
   unix_load_pipeline_t* pipeline = (unix_load_pipeline_t*)ctx;
   pipeline->failed = 1;
-  stream_deactivate((stream_t*)pipeline->rs, NULL);
-  stream_deactivate((stream_t*)pipeline->desc, NULL);
+  /* Deactivating rs routes the failure into the rs close path (exactly one
+   * terminal LOAD_END). Both deactivates are guarded: the error may have
+   * fired FROM a deactivated stream, and stream_deactivate re-notifies
+   * error_event unconditionally on its target, so re-deactivating either
+   * stream from this handler would re-enter these handlers forever. */
+  if (!pipeline->rs->stream.is_deactivated) {
+    stream_deactivate((stream_t*)pipeline->rs, NULL);
+  }
+  if (!((stream_t*)pipeline->desc)->is_deactivated) {
+    stream_deactivate((stream_t*)pipeline->desc, NULL);
+  }
 }
 
 static void _unix_handle_load(unix_connection_t* conn, cbor_item_t* frame) {

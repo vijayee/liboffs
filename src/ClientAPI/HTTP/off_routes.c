@@ -258,10 +258,11 @@ static void _setup_stream_pipeline(http_response_t* response, scheduler_pool_t* 
 
 /* ---- ?load=1 cache-load pipeline ---- */
 
-/* True when the request's query string carries the given parameter, either
-   bare ("?load") or with a value ("?load=1"). Parameters are '&'-separated,
-   so a file NAME that happens to contain "load" can never match (names live
-   in the path, not the query string). */
+/* True when the request's query string enables the given parameter: either a
+   bare token ("?load") or "load=1". Any other value ("?load=0") is treated as
+   NOT enabled. Parameters are '&'-separated, so a file NAME that happens to
+   contain "load" can never match (names live in the path, not the query
+   string). */
 static int _query_has_param(const char* query_string, const char* name) {
     if (query_string == NULL) return 0;
     size_t name_len = strlen(name);
@@ -269,10 +270,14 @@ static int _query_has_param(const char* query_string, const char* name) {
     while (*cursor != '\0') {
         const char* separator = strchr(cursor, '&');
         size_t token_len = separator != NULL ? (size_t)(separator - cursor) : strlen(cursor);
-        if ((token_len == name_len ||
-             (token_len > name_len && cursor[name_len] == '=')) &&
-            strncmp(cursor, name, name_len) == 0) {
+        if (token_len == name_len && strncmp(cursor, name, name_len) == 0) {
             return 1;
+        }
+        if (token_len > name_len && strncmp(cursor, name, name_len) == 0 &&
+            cursor[name_len] == '=') {
+            /* Bare token matched above; here only "?load=1" enables —
+               "?load=0" and any other value do not. */
+            return token_len == name_len + 2 && cursor[name_len + 1] == '1';
         }
         if (separator == NULL) break;
         cursor = separator + 1;
@@ -288,6 +293,10 @@ static int _query_has_param(const char* query_string, const char* name) {
 typedef struct {
     refcounter_t refcounter;
     http_response_t* response;
+    /* Snapshot of response->connection at setup time. Held so the terminal
+       can release the setup's connection reference even if another teardown
+       has since detached the response (response->connection == NULL). */
+    http_connection_t* connection;
     readable_off_stream_t* rs;
     readable_descriptor_t* desc;
     ori_t* ori;
@@ -331,12 +340,17 @@ static void _load_pipeline_terminal(off_load_pipeline_t* pipeline) {
                             status == CLIENT_API_LOAD_STATUS_PARTIAL ? "partial" : "loaded",
                             pipeline->tuples_loaded, pipeline->tuples_total);
     http_response_t* response = pipeline->response;
-    http_connection_t* connection = response->connection;
-    if (connection == NULL) {
-        return;  /* Client vanished mid-stream; response already torn down. */
+    http_connection_t* connection = pipeline->connection;
+    pipeline->response = NULL;
+    pipeline->connection = NULL;
+    /* Client-vanished guard: whenever another teardown detached the response
+       (response->connection == NULL), its write path is dead — skip the
+       final line and just drop this pipeline's setup references, exactly
+       like the live path releases them below. */
+    if (response->connection != NULL) {
+        http_response_write(response, line, (size_t)line_len);
+        http_response_end(response);
     }
-    http_response_write(response, line, (size_t)line_len);
-    http_response_end(response);
     response->connection = NULL;
     http_response_destroy(response);
     http_connection_destroy(connection);
@@ -456,6 +470,7 @@ static void _setup_load_pipeline(http_response_t* response, scheduler_pool_t* po
     pipeline->desc = desc;
     pipeline->rs = rs;
     pipeline->response = response;
+    pipeline->connection = response->connection;
     pipeline->ori = stream_ori;
     size_t block_size = off_block_size_for_type(stream_ori->block_type);
     pipeline->tuples_total = (stream_ori->final_byte / block_size) +

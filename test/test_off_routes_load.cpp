@@ -338,6 +338,21 @@ TEST_F(TestOffRoutesLoad, LoadStreamsNdjsonTerminalLoaded) {
     EXPECT_NE(strstr(bare_response, "application/x-ndjson"), nullptr);
     EXPECT_NE(strstr(bare_response, "{\"status\":\"loaded\""), nullptr);
 
+    /* `?load=0` explicitly disables the load flow: the request must be
+       served as a plain file response, not the ndjson load stream. */
+    char url_disabled[4096];
+    snprintf(url_disabled, sizeof(url_disabled), "%s?load=0", url);
+    char disabled_response[8192];
+    memset(disabled_response, 0, sizeof(disabled_response));
+    get_len = snprintf(request_url, sizeof(request_url),
+        "GET %s HTTP/1.1\r\nHost: localhost\r\n\r\n", url_disabled);
+    ASSERT_EQ(_send_and_recv(sock, request_url, (size_t)get_len,
+                             disabled_response, sizeof(disabled_response), 5000), 0);
+    EXPECT_EQ(strstr(disabled_response, "Content-Type: application/x-ndjson"), nullptr);
+    char* disabled_body = strstr(disabled_response, "\r\n\r\n");
+    ASSERT_NE(disabled_body, nullptr);
+    EXPECT_STREQ(disabled_body + 4, body);
+
     free(url);
 }
 
