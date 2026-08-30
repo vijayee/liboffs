@@ -90,12 +90,13 @@ static void _notify_load_tuple(readable_off_stream_t* stream) {
                 load_tuple_payload_destroy);
 }
 
-/* Tuple-completion point: tally the resolved tuple, emit the counted progress
- * event, then process the next queued tuple. */
-static void _complete_tuple_loaded(readable_off_stream_t* stream) {
+/* Tuple-completion point: tally the resolved tuple and emit the counted
+ * progress event. Must be called BEFORE any render/finished/complete/close
+ * notification so consumers always observe the final tuple count before the
+ * stream closes. */
+static void _tally_tuple_loaded(readable_off_stream_t* stream) {
   stream->tuples_loaded++;
   _notify_load_tuple(stream);
-  _drain_tuple_queue(stream);
 }
 
 /* Destroy every node of a fetch list (pending or stale), releasing the hash
@@ -115,6 +116,31 @@ static void _clear_stale_fetches(readable_off_stream_t* stream) {
   stream->stale_fetches = NULL;
 }
 
+/* Unlink and destroy the pending fetch node matching `hash`, if any. Called at
+ * the moment a block result is consumed for the live tuple, so an answered
+ * fetch never lingers in pending_fetches. Only because of this prune does
+ * _skip_pending_tuple park STRICTLY UNANSWERED hashes in stale_fetches — which
+ * is what makes matching late results by hash sound (see _consume_stale_fetch).
+ * A node's hash buffer is a private reference on the tuple's hash (taken by
+ * _start_block_fetches), so destroying the node's reference never frees the
+ * hash the tuple still owns. */
+static void _prune_answered_fetch(readable_off_stream_t* stream, buffer_t* hash) {
+  if (hash == NULL) {
+    return;
+  }
+  pending_block_fetch_t** current = &stream->pending_fetches;
+  while (*current != NULL) {
+    pending_block_fetch_t* fetch_node = *current;
+    if (buffer_compare(fetch_node->hash, hash) == 0) {
+      *current = fetch_node->next;
+      DESTROY(fetch_node->hash, buffer);
+      free(fetch_node);
+      return;
+    }
+    current = &fetch_node->next;
+  }
+}
+
 /* If the result hash belongs to a tuple that was already skipped, consume the
  * matching stale entry and report the late result as dropped. Late results for
  * a skipped tuple must never accumulate into the live tuple's XOR accumulator.
@@ -124,7 +150,19 @@ static void _clear_stale_fetches(readable_off_stream_t* stream) {
  * result->hash (network.c wanted-list notify, store/accept relay notify and
  * the timeout sweep all build the payload from a 32-byte wanted-list hash).
  * A direct-return network result therefore matches a stale entry the same way
- * a cache result does — no generation counter is needed. */
+ * a cache result does — no generation counter is needed.
+ *
+ * Duplicate-hash safety: after _prune_answered_fetch, a hash can appear in
+ * BOTH this list and the live tuple's request set only when two requests for
+ * it were issued and NEITHER has been answered yet. Both block_cache and the
+ * network deliver exactly one reply per outstanding request (one reply per
+ * pending_get_t in block_cache.c; the network's wanted-list sweep guarantees a
+ * found=0 NETWORK_FIND_BLOCK_RESULT for every requester), so the abandoned
+ * tuple's unanswered request and the next tuple's fresh request for the same
+ * hash each get their own reply: the first reply drains the stale entry
+ * (dropping one duplicate of identical content — same hash means same block
+ * bytes), and the reply for the live request is processed normally. Both
+ * replies deliver, so the live tuple's block count still completes. */
 static uint8_t _consume_stale_fetch(readable_off_stream_t* stream, buffer_t* hash) {
   if (hash == NULL) {
     return 0;
@@ -144,10 +182,12 @@ static uint8_t _consume_stale_fetch(readable_off_stream_t* stream, buffer_t* has
 }
 
 /* Load-mode skip: abandon the in-flight tuple, tally the miss, and park its
- * outstanding fetches in stale_fetches so their late results get dropped
- * (see _consume_stale_fetch). Blocks that already arrived were accumulated
- * into the abandoned xor_accumulator, which is destroyed together with the
- * tuple. */
+ * still-outstanding fetches in stale_fetches so their late results get dropped
+ * (see _consume_stale_fetch). Fetches that were already answered were pruned
+ * from pending_fetches as their results arrived (_prune_answered_fetch), so
+ * only strictly unanswered hashes are parked and matching late results by hash
+ * stays one-to-one. Blocks that already arrived were accumulated into the
+ * abandoned xor_accumulator, which is destroyed together with the tuple. */
 static void _skip_pending_tuple(readable_off_stream_t* stream) {
   stream->tuples_skipped++;
   pending_block_fetch_t* fetch_node = stream->pending_fetches;
@@ -166,6 +206,9 @@ static void _skip_pending_tuple(readable_off_stream_t* stream) {
   stream->pending_tuple = NULL;
   stream->blocks_expected = 0;
   stream->blocks_received = 0;
+  /* Leave the state live: AWAITING_NETWORK would be a dead state once no
+   * network request is outstanding. */
+  stream->state = OFF_STREAM_FETCHING_BLOCKS;
   _notify_load_tuple(stream);
   _drain_tuple_queue(stream);
 }
@@ -178,6 +221,12 @@ static void _finish_decode_and_render(readable_off_stream_t* stream) {
   }
 
   tuple_cache_put(stream->tc, stream->pending_tuple, stream->xor_accumulator);
+
+  /* Tally and notify BEFORE rendering: the render path may emit the
+   * finished/complete/close notifications, and consumers must always observe
+   * the final tuple count before the stream closes. */
+  _tally_tuple_loaded(stream);
+
   _render_origin_data(stream, stream->xor_accumulator);
   DESTROY(stream->xor_accumulator, buffer);
   stream->xor_accumulator = NULL;
@@ -190,7 +239,8 @@ static void _finish_decode_and_render(readable_off_stream_t* stream) {
   _clear_fetch_list(stream->pending_fetches);
   stream->pending_fetches = NULL;
 
-  _complete_tuple_loaded(stream);
+  /* Queued tuples can only start once the finished tuple is fully cleared. */
+  _drain_tuple_queue(stream);
 }
 
 static void _start_block_fetches(readable_off_stream_t* stream) {
@@ -278,12 +328,14 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
         break;
       }
       if (result->value != NULL) {
-        /* Cache hit — render directly */
+        /* Cache hit — tally, then render directly (the tally must be observed
+         * before any close notification the render may emit). */
+        _tally_tuple_loaded(stream);
         _render_origin_data(stream, result->value);
         DESTROY(result->value, buffer);
         DESTROY(stream->pending_tuple, tuple);
         stream->pending_tuple = NULL;
-        _complete_tuple_loaded(stream);
+        _drain_tuple_queue(stream);
       } else {
         /* Cache miss — start fetching blocks */
         _start_block_fetches(stream);
@@ -363,7 +415,10 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
         break;
       }
 
-      /* Accumulate block into XOR result */
+      /* Accumulate block into XOR result. First prune the matching fetch from
+       * pending_fetches: this result has been answered, and it must not be
+       * parked in stale_fetches if the tuple is later skipped. */
+      _prune_answered_fetch(stream, result->hash);
       if (stream->xor_accumulator == NULL) {
         stream->xor_accumulator = buffer_copy(result->block->data);
       } else {
@@ -404,7 +459,10 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
       if (result->found) {
         if (result->block != NULL) {
           /* Direct-return: network provided the block. XOR-accumulate it
-           * directly instead of re-fetching from the cache. */
+           * directly instead of re-fetching from the cache. Prune the matching
+           * fetch from pending_fetches first — answered fetches must never be
+           * parked in stale_fetches by a later skip. */
+          _prune_answered_fetch(stream, result->hash);
           if (stream->xor_accumulator == NULL) {
             stream->xor_accumulator = buffer_copy(result->block->data);
           } else {
@@ -530,6 +588,10 @@ void readable_off_stream_destroy(readable_off_stream_t* stream) {
     }
     if (stream->pending_tuple != NULL) {
       DESTROY(stream->pending_tuple, tuple);
+    }
+    if (stream->xor_accumulator != NULL) {
+      DESTROY(stream->xor_accumulator, buffer);
+      stream->xor_accumulator = NULL;
     }
     pending_block_fetch_t* fetch = stream->pending_fetches;
     while (fetch != NULL) {

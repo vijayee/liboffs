@@ -64,8 +64,10 @@ typedef struct {
   size_t blocks_expected;
   size_t blocks_received;
   pending_block_fetch_t* pending_fetches;
-  /* Hashes of an already-skipped tuple: late results matching these are
-   * dropped so they cannot XOR-accumulate into the next tuple. */
+  /* Hashes of an already-skipped tuple that are STRICTLY UNANSWERED (answered
+   * fetches are pruned from pending_fetches as their results are consumed, see
+   * readable_off_stream.c): late results matching these are dropped so they
+   * cannot corrupt the live tuple's XOR accumulator. */
   pending_block_fetch_t* stale_fetches;
   /* Queue of tuples waiting to be processed */
   pending_tuple_t* tuple_queue;

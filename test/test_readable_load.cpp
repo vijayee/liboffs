@@ -39,8 +39,13 @@ struct LoadRecorder {
   size_t expected;
   std::promise<void> skip_promise;
   uint8_t skip_seen;
+  uint8_t done_seen;         /* guards done_promise against extra events */
+  uint8_t close_before_loads; /* set if close fired before the full tally */
+  uint8_t close_seen;
 
-  explicit LoadRecorder(size_t expected_count) : expected(expected_count), skip_seen(0) {}
+  explicit LoadRecorder(size_t expected_count)
+      : expected(expected_count), skip_seen(0), done_seen(0),
+        close_before_loads(0), close_seen(0) {}
 
   void record(size_t tuples_loaded, size_t tuples_skipped) {
     pthread_mutex_lock(&mutex);
@@ -49,8 +54,20 @@ struct LoadRecorder {
       skip_seen = 1;
       skip_promise.set_value();
     }
-    if (entries.size() >= expected) {
+    if (entries.size() >= expected && !done_seen) {
+      done_seen = 1;
       done_promise.set_value();
+    }
+    pthread_mutex_unlock(&mutex);
+  }
+
+  /* Close handler: load_mode counts a tuple before it renders, so by the time
+   * close fires every load event must already have been observed. */
+  void note_close() {
+    pthread_mutex_lock(&mutex);
+    close_seen = 1;
+    if (entries.size() < expected) {
+      close_before_loads = 1;
     }
     pthread_mutex_unlock(&mutex);
   }
@@ -156,6 +173,24 @@ static void on_load_record(void* ctx, void* data) {
   }
 }
 
+static void on_load_count(void* ctx, void* data) {
+  (void)data;  /* load payload lifetime is owned by the notify machinery */
+  (*static_cast<size_t*>(ctx))++;
+}
+
+static void on_close_note_loads(void* ctx, void* data) {
+  (void)data;
+  auto* recorder = static_cast<LoadRecorder*>(ctx);
+  recorder->note_close();
+}
+
+/* A single 32-byte hash that exists nowhere — for building custom tuples. */
+static buffer_t* make_missing_hash(uint8_t hash_seed) {
+  uint8_t hash_bytes[BLAKE3_OUT_LEN];
+  memset(hash_bytes, hash_seed, sizeof(hash_bytes));
+  return buffer_create_from_pointer_copy(hash_bytes, BLAKE3_OUT_LEN);
+}
+
 static buffer_t* make_file_hash(void) {
   uint8_t hash_bytes[BLAKE3_OUT_LEN];
   for (size_t index = 0; index < BLAKE3_OUT_LEN; index++) {
@@ -215,6 +250,7 @@ TEST(ReadableOffLoadModeLoad, CountsAndEmits) {
 
   LoadRecorder load_recorder(TUPLE_SIZE);
   stream_subscribe((stream_t*)stream, load_tuple_event, &load_recorder, on_load_record, NULL);
+  stream_subscribe((stream_t*)stream, close_event, &load_recorder, on_close_note_loads, NULL);
 
   std::promise<void> close_promise;
   stream_subscribe((stream_t*)stream, close_event, &close_promise, on_close_set_promise, NULL);
@@ -239,6 +275,12 @@ TEST(ReadableOffLoadModeLoad, CountsAndEmits) {
     EXPECT_EQ(load_recorder.entries[index].loaded, index + 1);
     EXPECT_EQ(load_recorder.entries[index].skipped, 0u);
   }
+  /* Every tuple written resolves: loaded + skipped == tuples written. */
+  EXPECT_EQ(load_recorder.entries.back().loaded + load_recorder.entries.back().skipped,
+            TUPLE_SIZE);
+  /* All load events were observed before close fired. */
+  EXPECT_EQ(load_recorder.close_before_loads, 0);
+  EXPECT_EQ(load_recorder.close_seen, 1);
 
   scheduler_pool_stop(pool);
 
@@ -291,6 +333,7 @@ TEST(ReadableOffLoadModeLoad, SkipMissingTupleContinues) {
 
   LoadRecorder load_recorder(TUPLE_SIZE);
   stream_subscribe((stream_t*)stream, load_tuple_event, &load_recorder, on_load_record, NULL);
+  stream_subscribe((stream_t*)stream, close_event, &load_recorder, on_close_note_loads, NULL);
 
   std::promise<void> close_promise;
   stream_subscribe((stream_t*)stream, close_event, &close_promise, on_close_set_promise, NULL);
@@ -317,6 +360,10 @@ TEST(ReadableOffLoadModeLoad, SkipMissingTupleContinues) {
   EXPECT_EQ(load_recorder.entries[1].skipped, 1u);
   EXPECT_EQ(load_recorder.entries[2].loaded, 2u);
   EXPECT_EQ(load_recorder.entries[2].skipped, 1u);
+  EXPECT_EQ(load_recorder.entries[2].loaded + load_recorder.entries[2].skipped, TUPLE_SIZE);
+  /* All load events (including the skip) were observed before close fired. */
+  EXPECT_EQ(load_recorder.close_before_loads, 0);
+  EXPECT_EQ(load_recorder.close_seen, 1);
   EXPECT_EQ(stream->stream.is_deactivated, 0);
 
   scheduler_pool_stop(pool);
@@ -368,6 +415,10 @@ TEST(ReadableOffNormalMode, MissStillDeactivates) {
   std::vector<uint8_t> data_events;
   stream_subscribe((stream_t*)stream, data_event, &data_events, on_data_record, NULL);
 
+  /* Normal mode never emits load-mode progress events. */
+  size_t load_event_count = 0;
+  stream_subscribe((stream_t*)stream, load_tuple_event, &load_event_count, on_load_count, NULL);
+
   std::promise<void> error_promise;
   stream_subscribe((stream_t*)stream, error_event, &error_promise, on_error_set_promise, NULL);
 
@@ -382,6 +433,7 @@ TEST(ReadableOffNormalMode, MissStillDeactivates) {
   EXPECT_EQ(stream->stream.is_deactivated, 1);
   EXPECT_EQ(data_events.size(), 1u);
   EXPECT_EQ(data_events[0], 1);
+  EXPECT_EQ(load_event_count, 0u);
 
   scheduler_pool_stop(pool);
 
@@ -433,6 +485,7 @@ TEST(ReadableOffLoadModeLoad, SkippedTupleLateResultDropped) {
 
   LoadRecorder load_recorder(TUPLE_SIZE);
   stream_subscribe((stream_t*)stream, load_tuple_event, &load_recorder, on_load_record, NULL);
+  stream_subscribe((stream_t*)stream, close_event, &load_recorder, on_close_note_loads, NULL);
   /* Capture the skip future before any writes: the promise is set once a
    * skipped tuple is observed. */
   auto skip_future = load_recorder.skip_promise.get_future();
@@ -485,6 +538,10 @@ TEST(ReadableOffLoadModeLoad, SkippedTupleLateResultDropped) {
   EXPECT_EQ(load_recorder.entries[1].skipped, 1u);
   EXPECT_EQ(load_recorder.entries[2].loaded, 2u);
   EXPECT_EQ(load_recorder.entries[2].skipped, 1u);
+  EXPECT_EQ(load_recorder.entries[2].loaded + load_recorder.entries[2].skipped, TUPLE_SIZE);
+  /* All load events (including the skip) were observed before close fired. */
+  EXPECT_EQ(load_recorder.close_before_loads, 0);
+  EXPECT_EQ(load_recorder.close_seen, 1);
 
   scheduler_pool_stop(pool);
 
@@ -498,6 +555,127 @@ TEST(ReadableOffLoadModeLoad, SkippedTupleLateResultDropped) {
   destroy_seeded(&last);
   DESTROY(missing, tuple);
   DESTROY(garbage_data, buffer);
+  DESTROY(file_hash, buffer);
+  ori_destroy(ori);
+  timer_actor_destroy(timer);
+  scheduler_pool_destroy(pool);
+}
+/* ---- load mode: a block hash shared by a skipped tuple and a live tuple ----
+ * Regression for the answered-fetch prune (see _prune_answered_fetch in
+ * readable_off_stream.c). Tuple A [h1,h2,h3] consumes h1's hit BEFORE h2's
+ * miss skips it. Without the prune the answered h1 node stayed in
+ * pending_fetches, the skip parked it in stale_fetches, and tuple B's
+ * legitimate h1 reply was stale-dropped forever — B wedged at 2/3 blocks with
+ * no error (silent hang). With the prune, h1 never reaches stale_fetches and
+ * tuple B completes and renders correctly. */
+TEST(ReadableOffLoadModeLoad, SharedHashAcrossSkipDoesNotHang) {
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  scheduler_pool_start(pool);
+  timer_actor_t* timer = timer_actor_create(pool);
+
+  char* cache_path = (char*)"test_readable_load_bc_shared";
+  rm_rf(cache_path);
+  mkdir_p(cache_path);
+  block_cache_t* block_cache = block_cache_create(
+      config_t{.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0,
+               .section_size = 128000, .section_wait = 0, .section_max_wait = 0,
+               .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
+      cache_path, standard, timer, pool, NULL, 0);
+  tuple_cache_t* tuple_cache = tuple_cache_create(100, pool);
+
+  /* The shared block: its hash h1 is requested by BOTH tuples. Tuple A's
+   * request is answered (and the fetch node pruned) while A is still live;
+   * tuple B then re-requests the same hash after the skip. */
+  buffer_t* shared_data = buffer_create(BLOCK_SIZE);
+  memset(shared_data->data, 0x22, BLOCK_SIZE);
+  block_t* shared_block = block_create_existing_data_by_type(shared_data, standard);
+  block_t* random4 = block_create_random_block_by_type(standard);
+  block_t* random5 = block_create_random_block_by_type(standard);
+  ASSERT_NE(shared_block, nullptr);
+  ASSERT_NE(random4, nullptr);
+  ASSERT_NE(random5, nullptr);
+  block_cache_put(block_cache, shared_block, 0, NULL);
+  block_cache_put(block_cache, random4, 0, NULL);
+  block_cache_put(block_cache, random5, 0, NULL);
+
+  buffer_t* first_xor = buffer_xor(shared_data, random4->data);
+  buffer_t* expected = buffer_xor(first_xor, random5->data);
+  DESTROY(first_xor, buffer);
+
+  buffer_t* missing2 = make_missing_hash(0x71);
+  buffer_t* missing3 = make_missing_hash(0x72);
+  tuple_t* tuple_a = tuple_create(TUPLE_SIZE);
+  tuple_push(tuple_a, shared_block->hash);
+  tuple_push(tuple_a, missing2);
+  tuple_push(tuple_a, missing3);
+  tuple_t* tuple_b = tuple_create(TUPLE_SIZE);
+  tuple_push(tuple_b, shared_block->hash);
+  tuple_push(tuple_b, random4->hash);
+  tuple_push(tuple_b, random5->hash);
+  scheduler_pool_wait_for_idle(pool);
+
+  buffer_t* file_hash = make_file_hash();
+  /* Only tuple B is rendered: tuple A is skipped, so the final byte is one
+   * block past the origin start. */
+  ori_t* ori = ori_create(BLOCK_SIZE);
+  ori->block_type = standard;
+  ori->file_offset = 0;
+  ori->file_hash = REFERENCE(file_hash, buffer_t);
+
+  readable_off_stream_t* stream =
+      readable_off_stream_create_ex(pool, block_cache, tuple_cache, ori, 0, NULL, 1);
+  ASSERT_NE(stream, nullptr);
+
+  std::vector<uint8_t> data_events;
+  stream_subscribe((stream_t*)stream, data_event, &data_events, on_data_record, NULL);
+
+  LoadRecorder load_recorder(2);
+  stream_subscribe((stream_t*)stream, load_tuple_event, &load_recorder, on_load_record, NULL);
+  stream_subscribe((stream_t*)stream, close_event, &load_recorder, on_close_note_loads, NULL);
+
+  std::promise<void> close_promise;
+  stream_subscribe((stream_t*)stream, close_event, &close_promise, on_close_set_promise, NULL);
+
+  readable_off_stream_write(stream, tuple_a);
+  readable_off_stream_write(stream, tuple_b);
+
+  auto close_future = close_promise.get_future();
+  EXPECT_EQ(close_future.wait_for(std::chrono::seconds(5)), std::future_status::ready)
+      << "tuple B wedged below blocks_expected — an answered fetch was parked as stale";
+  auto load_future = load_recorder.done_promise.get_future();
+  EXPECT_EQ(load_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+
+  scheduler_pool_wait_for_idle(pool);
+
+  /* Tuple B completed: the shared h1 result was not dropped as stale. */
+  ASSERT_EQ(data_events.size(), 1u);
+  EXPECT_EQ(data_events[0], expected->data[0]);
+  ASSERT_EQ(load_recorder.entries.size(), 2u);
+  EXPECT_EQ(load_recorder.entries[0].loaded, 0u);
+  EXPECT_EQ(load_recorder.entries[0].skipped, 1u);
+  EXPECT_EQ(load_recorder.entries[1].loaded, 1u);
+  EXPECT_EQ(load_recorder.entries[1].skipped, 1u);
+  EXPECT_EQ(load_recorder.entries[1].loaded + load_recorder.entries[1].skipped, 2u);
+  EXPECT_EQ(load_recorder.close_before_loads, 0);
+  EXPECT_EQ(load_recorder.close_seen, 1);
+  EXPECT_EQ(stream->stream.is_deactivated, 0);
+  /* The skip must not leave the state dead at AWAITING_NETWORK. */
+  EXPECT_EQ(stream->state, OFF_STREAM_FETCHING_BLOCKS);
+
+  scheduler_pool_stop(pool);
+
+  readable_off_stream_destroy(stream);
+  tuple_cache_destroy(tuple_cache);
+  block_cache_destroy(block_cache);
+  block_destroy(shared_block);
+  block_destroy(random4);
+  block_destroy(random5);
+  DESTROY(tuple_a, tuple);
+  DESTROY(tuple_b, tuple);
+  DESTROY(missing2, buffer);
+  DESTROY(missing3, buffer);
+  DESTROY(shared_data, buffer);
+  DESTROY(expected, buffer);
   DESTROY(file_hash, buffer);
   ori_destroy(ori);
   timer_actor_destroy(timer);
