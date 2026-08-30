@@ -188,6 +188,76 @@ export class HttpTransport {
   }
 
   /**
+   * Cache-only load: GET offUrl + '?load=1'. The daemon pulls the file's
+   * blocks into its block cache without serving file data and streams
+   * application/x-ndjson progress, one JSON object per line:
+   *   {"tuples_loaded":n,"tuples_total":m}          — per resolved tuple
+   *   {"status":"loaded|partial|failed",...}         — terminal line
+   * The terminal line is also reported through onEnd.
+   * @param {string} offUrl
+   * @param {import('../types.js').OffsGetCallbacks} callbacks
+   * @param {{start?: number, end?: number}} [range]
+   * @returns {Promise<void>}
+   */
+  async load(offUrl, callbacks = {}, range) {
+    const separator = offUrl.includes('?') ? '&' : '?';
+    const response = await fetch(`${offUrl}${separator}load=1`, {
+      method: 'GET',
+      headers: range
+        ? { ...this.authHeaders(), 'Range': `bytes=${range.start || 0}-${range.end || 0}` }
+        : this.authHeaders(),
+      signal: this.abortController?.signal,
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Load failed: ${response.status} ${text}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) return;
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let newlineIndex;
+        while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, newlineIndex).trim();
+          buffer = buffer.slice(newlineIndex + 1);
+          if (line) this._handleLoadLine(line, callbacks);
+        }
+      }
+      buffer += decoder.decode();
+      const line = buffer.trim();
+      if (line) this._handleLoadLine(line, callbacks);
+    } catch (err) {
+      callbacks.onError?.(0, String(err));
+    }
+  }
+
+  /**
+   * Parse one ndjson progress/status line and dispatch to callbacks.
+   * @param {string} line
+   * @param {import('../types.js').OffsGetCallbacks} callbacks
+   */
+  _handleLoadLine(line, callbacks) {
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch (_err) {
+      throw new Error(`Bad ndjson line: ${line}`);
+    }
+    if (message.status !== undefined) {
+      callbacks.onEnd?.(message.status, message.tuples_loaded || 0, message.tuples_total || 0);
+    } else {
+      callbacks.onProgress?.(message.tuples_loaded || 0, message.tuples_total || 0);
+    }
+  }
+
+  /**
    * Delete content.
    * @param {string} offUrl
    * @returns {Promise<void>}

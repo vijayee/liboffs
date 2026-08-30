@@ -39,7 +39,21 @@ export const MSG = {
   CONFIG_SET_REQUEST: 35,
   CONFIG_SET_RESPONSE: 36,
   CONFIG_RELOAD_REQUEST: 37,
-  CONFIG_RELOAD_RESPONSE: 38
+  CONFIG_RELOAD_RESPONSE: 38,
+  LOAD_REQUEST: 39,
+  LOAD_PROGRESS: 40,
+  LOAD_END: 41
+};
+
+/**
+ * Load terminal status. CBOR LOAD_END frames carry these as numbers;
+ * the HTTP ?load=1 ndjson terminal line uses the string form
+ * ("loaded"/"partial"/"failed").
+ */
+export const LOAD_STATUS = {
+  loaded: 0,
+  partial: 1,
+  failed: 2
 };
 
 /**
@@ -185,6 +199,67 @@ export function decodeGetData(bytes) {
 export function isGetEnd(bytes) {
   const arr = decode(bytes);
   return Array.isArray(arr) && arr[0] === MSG.GET_END;
+}
+
+// --- Load ---
+
+/**
+ * Ask the daemon to pull a file's blocks into its block cache without
+ * sending the file data. Uses the same optional-range shape as the C-side
+ * client_api_load_request_encode: an unranged request is
+ * `[LOAD_REQUEST, oriString]`, a ranged request is
+ * `[LOAD_REQUEST, oriString, 1, start, end]` (literal flag 1 in position 2).
+ * @param {string} oriString
+ * @param {{start?: number, end?: number}} [range]
+ * @returns {Uint8Array}
+ */
+export function encodeLoadRequest(oriString, range) {
+  const hasRange = range && (range.start !== undefined || range.end !== undefined);
+  if (!hasRange) {
+    return encoder.encode([MSG.LOAD_REQUEST, oriString]);
+  }
+  return encoder.encode([
+    MSG.LOAD_REQUEST,
+    oriString,
+    1,
+    range.start || 0,
+    range.end || 0
+  ]);
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {{tuplesLoaded: number, tuplesTotal: number}}
+ */
+export function decodeLoadProgress(bytes) {
+  const arr = decode(bytes);
+  if (!(Array.isArray(arr) && arr[0] === MSG.LOAD_PROGRESS)) {
+    throw new Error('Not a load progress');
+  }
+  return { tuplesLoaded: arr[1], tuplesTotal: arr[2] };
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+export function isLoadEnd(bytes) {
+  const arr = decode(bytes);
+  return Array.isArray(arr) && arr[0] === MSG.LOAD_END;
+}
+
+/**
+ * Terminal frame of a load operation: [LOAD_END, status, tuplesLoaded, tuplesTotal].
+ * @param {Uint8Array} bytes
+ * @returns {{status: number, tuplesLoaded: number, tuplesTotal: number}}
+ *   status: 0=loaded, 1=partial (some tuples skipped), 2=failed
+ */
+export function decodeLoadEnd(bytes) {
+  const arr = decode(bytes);
+  if (!(Array.isArray(arr) && arr[0] === MSG.LOAD_END)) {
+    throw new Error('Not a load end');
+  }
+  return { status: arr[1], tuplesLoaded: arr[2], tuplesTotal: arr[3] };
 }
 
 // --- Error ---

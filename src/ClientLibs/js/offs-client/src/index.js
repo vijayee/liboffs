@@ -329,6 +329,48 @@ export class OffsClient {
   }
 
   /**
+   * Load a file's blocks into the daemon's block cache without downloading
+   * the file data. Progress is reported per resolved tuple; the operation
+   * ends with a terminal status.
+   *
+   * HTTP transports stream an application/x-ndjson body whose progress lines
+   * are {"tuples_loaded":n,"tuples_total":m} objects and whose terminal line
+   * carries a status string ("loaded"|"partial"|"failed"). CBOR transports
+   * use LOAD_PROGRESS/LOAD_END frames whose status is numeric
+   * (0=loaded, 1=partial, 2=failed) — see wire.LOAD_STATUS.
+   *
+   * @param {string} oriString
+   * @param {Object} [callbacks]
+   * @param {(tuplesLoaded: number, tuplesTotal: number) => void} [callbacks.onProgress]
+   * @param {(status: string|number, tuplesLoaded: number, tuplesTotal: number) => void} [callbacks.onEnd]
+   * @param {(statusCode: number, message: string) => void} [callbacks.onError]
+   * @param {{start?: number, end?: number}} [range]
+   * @returns {Promise<void>}
+   */
+  async load(oriString, callbacks = {}, range) {
+    if (this.transport instanceof HttpTransport) {
+      return this.transport.load(oriString, callbacks, range);
+    }
+
+    const requestBytes = wire.encodeLoadRequest(oriString, range);
+    await this.transport.send(requestBytes);
+
+    let endBytes = null;
+    while (true) {
+      const bytes = await this._waitForResponse([wire.MSG.LOAD_PROGRESS, wire.MSG.LOAD_END]);
+      if (wire.isLoadEnd(bytes)) {
+        endBytes = bytes;
+        break;
+      }
+      const progress = wire.decodeLoadProgress(bytes);
+      callbacks.onProgress?.(progress.tuplesLoaded, progress.tuplesTotal);
+    }
+
+    const end = wire.decodeLoadEnd(endBytes);
+    callbacks.onEnd?.(end.status, end.tuplesLoaded, end.tuplesTotal);
+  }
+
+  /**
    * @param {Uint8Array} data
    * @param {number} [encoding=0]
    * @returns {Promise<{status: number, hash: Uint8Array|string}>}
