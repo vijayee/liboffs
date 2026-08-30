@@ -61,6 +61,8 @@ typedef void (*offs_block_delete_cb_t)(void* ctx, uint8_t status);
 typedef void (*offs_health_cb_t)(void* ctx, const char* json_response);
 typedef void (*offs_peer_info_cb_t)(void* ctx, uint8_t format, const uint8_t* data, size_t data_len);
 typedef void (*offs_peer_connect_cb_t)(void* ctx, uint8_t status);
+typedef void (*offs_load_progress_cb_t)(void* ctx, size_t tuples_loaded, size_t tuples_total);
+typedef void (*offs_load_end_cb_t)(void* ctx, uint8_t status, size_t tuples_loaded, size_t tuples_total);
 
 /* Connection lifecycle */
 offs_client_t* offs_client_connect(const char* transport_url, const char* api_key);
@@ -150,6 +152,25 @@ int offs_client_friend_add(offs_client_t* client, uint8_t format,
                            offs_peer_connect_cb_t callback, void* ctx);
 int offs_client_friend_add_qr(offs_client_t* client, const uint8_t* ppm, size_t ppm_len,
                               offs_peer_connect_cb_t callback, void* ctx);
+
+/* Load a file's blocks into the daemon's block cache without receiving file
+   data. has_range + range_start/range_end limit which portion of the ORI is
+   preloaded; has_range = 0 loads the whole file (bounds ignored). Passed as
+   flat scalars rather than a struct because the public header exposes no
+   range type — consistent with the header's flat-parameter style.
+   progress_cb fires once per resolved tuple; end_cb fires EXACTLY ONCE with
+   the terminal status (CLIENT_API_LOAD_STATUS_LOADED/PARTIAL/FAILED,
+   defined in ClientAPI/client_api_wire.h).
+   Error delivery: daemon-side rejections (unauthorized, undecodable ORI,
+   etc.) arrive as ERROR frames dispatched to the error callback registered
+   via offs_client_get()'s callbacks — if no error callback is registered,
+   failures before the first LOAD_PROGRESS are silent.
+   Concurrency: only one load may be outstanding per connection (shared
+   one-op-per-slot rule; see peer operations above). */
+int offs_client_load(offs_client_t* client, const char* ori_string,
+                     uint8_t has_range, size_t range_start, size_t range_end,
+                     offs_load_progress_cb_t progress_cb, void* progress_ctx,
+                     offs_load_end_cb_t end_cb, void* end_ctx);
 
 /* Raw HTTP GET — opens a temporary TCP connection to fetch data from a URL.
    Returns a buffer_t* with the response body, or NULL on error.

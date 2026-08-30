@@ -168,6 +168,10 @@ struct offs_client_t {
   void* peer_info_cb_ctx;
   offs_peer_connect_cb_t peer_connect_cb;
   void* peer_connect_cb_ctx;
+  offs_load_progress_cb_t load_progress_cb;
+  void* load_progress_cb_ctx;
+  offs_load_end_cb_t load_end_cb;
+  void* load_end_cb_ctx;
 };
 
 /* Forward declaration — needed for MsQuic callbacks that call _handle_frame */
@@ -518,6 +522,10 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
   void* peer_info_cb_ctx = client->peer_info_cb_ctx;
   offs_peer_connect_cb_t peer_connect_cb = client->peer_connect_cb;
   void* peer_connect_cb_ctx = client->peer_connect_cb_ctx;
+  offs_load_progress_cb_t load_progress_cb = client->load_progress_cb;
+  void* load_progress_cb_ctx = client->load_progress_cb_ctx;
+  offs_load_end_cb_t load_end_cb = client->load_end_cb;
+  void* load_end_cb_ctx = client->load_end_cb_ctx;
   platform_mutex_unlock(client->lock);
 
   switch (type) {
@@ -626,6 +634,24 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
           peer_connect_cb(peer_connect_cb_ctx, msg.status);
         }
         client_api_peer_connect_result_destroy(&msg);
+      }
+      break;
+    }
+    case CLIENT_API_LOAD_PROGRESS: {
+      size_t tuples_loaded = 0, tuples_total = 0;
+      if (client_api_load_progress_decode(frame, &tuples_loaded, &tuples_total) == 0) {
+        if (load_progress_cb != NULL) {
+          load_progress_cb(load_progress_cb_ctx, tuples_loaded, tuples_total);
+        }
+      }
+      break;
+    }
+    case CLIENT_API_LOAD_END: {
+      uint8_t status = 0; size_t loaded = 0, total = 0;
+      if (client_api_load_end_decode(frame, &status, &loaded, &total) == 0) {
+        if (load_end_cb != NULL) {
+          load_end_cb(load_end_cb_ctx, status, loaded, total);
+        }
       }
       break;
     }
@@ -1966,6 +1992,33 @@ int offs_client_friend_add(offs_client_t* client, uint8_t format,
 int offs_client_friend_add_qr(offs_client_t* client, const uint8_t* ppm, size_t ppm_len,
                               offs_peer_connect_cb_t callback, void* ctx) {
   return offs_client_friend_add(client, 2, ppm, ppm_len, callback, ctx);
+}
+
+int offs_client_load(offs_client_t* client, const char* ori_string,
+                     uint8_t has_range, size_t range_start, size_t range_end,
+                     offs_load_progress_cb_t progress_cb, void* progress_ctx,
+                     offs_load_end_cb_t end_cb, void* end_ctx) {
+  if (client == NULL || !client->connected || ori_string == NULL) return -1;
+
+  client_api_load_request_t msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.ori_string = (char*)ori_string;
+  msg.has_range = has_range;
+  msg.range_start = range_start;
+  msg.range_end = range_end;
+
+  cbor_item_t* frame = client_api_load_request_encode(&msg);
+  if (frame == NULL) return -1;  /* cbor allocation failure */
+
+  platform_mutex_lock(client->lock);
+  client->load_progress_cb = progress_cb;
+  client->load_progress_cb_ctx = progress_ctx;
+  client->load_end_cb = end_cb;
+  client->load_end_cb_ctx = end_ctx;
+  platform_mutex_unlock(client->lock);
+
+  _send_frame(client, frame);
+  return 0;
 }
 
 buffer_t* offs_http_get(const char* url) {
