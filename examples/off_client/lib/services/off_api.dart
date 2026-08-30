@@ -204,6 +204,79 @@ class OffApi extends ChangeNotifier {
     }
   }
 
+  /// Load a file's blocks into the daemon's block cache without transferring
+  /// the data ("pin to node"). Streams application/x-ndjson progress:
+  /// {"tuples_loaded":n,"tuples_total":m} per resolved tuple, terminated by
+  /// {"status":"loaded|partial|failed","tuples_loaded":n,"tuples_total":m}.
+  /// onProgress fires per progress line; the returned map is the terminal line.
+  Future<Map<String, dynamic>> loadContent(
+    String offUrl, {
+    void Function(int loaded, int total)? onProgress,
+  }) async {
+    final uri = Uri.parse(offUrl);
+    final request = http.Request('GET', uri);
+    final client = http.Client();
+    try {
+      final streamed = await client.send(request);
+      try {
+        if (streamed.statusCode != 200) {
+          final errorBody = await streamed.stream.bytesToString();
+          throw Exception('Load failed: ${streamed.statusCode} $errorBody');
+        }
+
+        Map<String, dynamic>? terminal;
+        String lineBuffer = '';
+
+        void handleLine(String line) {
+          final trimmed = line.trim();
+          if (trimmed.isEmpty) return;
+          Object? decoded;
+          try {
+            decoded = json.decode(trimmed);
+          } on FormatException {
+            throw FormatException('Bad ndjson line: $trimmed');
+          }
+          if (decoded is! Map<String, dynamic>) {
+            throw FormatException('Bad ndjson line: $trimmed');
+          }
+          if (decoded.containsKey('status')) {
+            terminal = decoded;
+          } else {
+            onProgress?.call(
+              (decoded['tuples_loaded'] as num).toInt(),
+              (decoded['tuples_total'] as num).toInt(),
+            );
+          }
+        }
+
+        await for (final chunk in streamed.stream) {
+          lineBuffer += utf8.decode(chunk, allowMalformed: true);
+          var newlineIndex = lineBuffer.indexOf('\n');
+          while (newlineIndex >= 0) {
+            handleLine(lineBuffer.substring(0, newlineIndex));
+            lineBuffer = lineBuffer.substring(newlineIndex + 1);
+            newlineIndex = lineBuffer.indexOf('\n');
+          }
+        }
+        // Tolerate a final line missing its terminating newline.
+        if (lineBuffer.trim().isNotEmpty) {
+          handleLine(lineBuffer);
+        }
+
+        if (terminal == null) {
+          throw StateError('load stream ended without terminal line');
+        }
+        return terminal!;
+      } finally {
+        // Ensure the connection is released on early exits (non-200, parse
+        // errors) as well as the happy path.
+        await streamed.stream.drain<void>().catchError((_) {});
+      }
+    } finally {
+      client.close();
+    }
+  }
+
   Future<void> deleteContent(String offUrl) async {
     final uri = Uri.parse(offUrl);
     final request = http.Request('DELETE', uri);
@@ -262,6 +335,22 @@ class OffApi extends ChangeNotifier {
     throw Exception('Peer connect failed: ${response.statusCode}');
   }
 
+  /// Connect to a peer from a QR image (binary P6 PPM, exactly the bytes the
+  /// daemon's /peer/info?format=qrcode returns). Posts image/x-portable-pixmap.
+  /// Returns the daemon's status json ({"status": 0..4, "message": ...}).
+  Future<Map<String, dynamic>> connectPeerImage(Uint8List ppmBytes) async {
+    final uri = Uri.parse('$baseUrl/peer/connect');
+    final response = await http.post(uri, headers: {
+      if (_apiKey != null) 'Authorization': 'Bearer $_apiKey',
+      'Content-Type': 'image/x-portable-pixmap',
+    }, body: ppmBytes);
+    if (response.statusCode == 200) {
+      return json.decode(utf8.decode(response.bodyBytes))
+          as Map<String, dynamic>;
+    }
+    throw Exception('Peer connect failed: ${response.statusCode}');
+  }
+
   Future<List<Map<String, dynamic>>> listPeers() async {
     final uri = Uri.parse('$baseUrl/peers');
     final response = await http.get(uri, headers: {
@@ -284,6 +373,23 @@ class OffApi extends ChangeNotifier {
     if (response.statusCode != 200) {
       throw Exception('Friend add failed: ${response.statusCode}');
     }
+  }
+
+  /// Add a friend from a QR image (binary P6 PPM, exactly the bytes the
+  /// daemon's /peer/info?format=qrcode returns). Posts image/x-portable-pixmap.
+  /// Returns the daemon's status json ({"status": "added"} on success); a
+  /// non-200 response (e.g. 409 already_friend) throws, mirroring addFriend.
+  Future<Map<String, dynamic>> addFriendImage(Uint8List ppmBytes) async {
+    final uri = Uri.parse('$baseUrl/friends');
+    final response = await http.post(uri, headers: {
+      if (_apiKey != null) 'Authorization': 'Bearer $_apiKey',
+      'Content-Type': 'image/x-portable-pixmap',
+    }, body: ppmBytes);
+    if (response.statusCode == 200) {
+      return json.decode(utf8.decode(response.bodyBytes))
+          as Map<String, dynamic>;
+    }
+    throw Exception('Friend add failed: ${response.statusCode}');
   }
 
   Future<void> removeFriend(String nodeId) async {
