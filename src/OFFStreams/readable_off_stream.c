@@ -392,7 +392,11 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
             result->hash = NULL;
           }
         } else if (stream->load_mode) {
-          /* Load mode, local-only: skip the tuple and keep the stream alive. */
+          /* Load mode, local-only: skip the tuple and keep the stream alive.
+           * Prune the triggering miss's node — a not-found reply is still an
+           * answer; parking it answered would let a later tuple's only reply
+           * for this hash be consumed as a late result (silent wedge). */
+          _prune_answered_fetch(stream, result->hash);
           if (result->hash != NULL) {
             DESTROY(result->hash, buffer);
             result->hash = NULL;
@@ -484,7 +488,11 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
         }
       } else if (stream->load_mode) {
         /* Load mode: block never found on the network — skip the tuple and
-         * keep the stream alive. */
+         * keep the stream alive. Prune the triggering miss's node — a
+         * not-found reply is still an answer; parking it answered would let
+         * a later tuple's only reply for this hash be consumed as a late
+         * result (silent wedge). */
+        _prune_answered_fetch(stream, result->hash);
         if (result->hash != NULL) {
           DESTROY(result->hash, buffer);
           result->hash = NULL;

@@ -22,6 +22,10 @@ extern "C" {
 #include "../src/Util/mkdir_p.h"
 #include "../src/Util/rm_rf.h"
 #include "../src/Util/allocator.h"
+#include "../src/Actor/actor.h"
+#include "../src/Actor/message.h"
+#include "../src/Network/network.h"
+#include "../src/Network/wanted_list.h"
 #include "../../deps/BLAKE3/c/blake3.h"
 }
 
@@ -199,16 +203,13 @@ static buffer_t* make_file_hash(void) {
   return buffer_create_from_pointer_copy(hash_bytes, BLAKE3_OUT_LEN);
 }
 
-/* Destroy the message payload the test built for a late CACHE_GET_RESULT. */
-static void late_result_destroy(void* ptr) {
-  cache_get_result_payload_t* result = (cache_get_result_payload_t*)ptr;
-  if (result->block != NULL) {
-    DESTROY(result->block, block);
-  }
-  if (result->hash != NULL) {
-    DESTROY(result->hash, buffer);
-  }
-  free(result);
+/* No-op actor dispatch for the tests' stub network_t: a worker may pull the
+ * network actor after actor_send injects it, so a valid no-op dispatch is
+ * required. The dispatch must NOT call msg->payload_destroy — actor_run frees
+ * the payload itself after dispatch returns. */
+static void load_test_network_noop_dispatch(void* state, message_t* msg) {
+  (void)state;
+  (void)msg;
 }
 
 /* ---- load mode: counts and emits ---- */
@@ -450,6 +451,20 @@ TEST(ReadableOffNormalMode, MissStillDeactivates) {
 
 /* ---- load mode: a late result for a skipped tuple must not pollute the next tuple ---- */
 
+/* Destroy a heap-allocated NETWORK_FIND_BLOCK_RESULT payload the test built.
+ * The dispatch already consumed (destroyed and nulled) the hash/block fields
+ * in every branch the tests exercise; this frees whatever is left. */
+static void late_network_result_destroy(void* ptr) {
+  network_find_block_result_payload_t* result = (network_find_block_result_payload_t*)ptr;
+  if (result->block != NULL) {
+    DESTROY(result->block, block);
+  }
+  if (result->hash != NULL) {
+    DESTROY(result->hash, buffer);
+  }
+  free(result);
+}
+
 TEST(ReadableOffLoadModeLoad, SkippedTupleLateResultDropped) {
   scheduler_pool_t* pool = scheduler_pool_create(2);
   scheduler_pool_start(pool);
@@ -465,25 +480,37 @@ TEST(ReadableOffLoadModeLoad, SkippedTupleLateResultDropped) {
       cache_path, standard, timer, pool, NULL, 0);
   tuple_cache_t* tuple_cache = tuple_cache_create(100, pool);
 
-  SeededTuple first = seed_tuple(block_cache, 1);
+  /* A no-reply stub network: the skip is driven through the network's
+   * found=0 path (injected by this test), so the parked hashes NEVER get a
+   * real reply. That makes the stale entries persist deterministically until
+   * the injected late result is dispatched — no race with real backend
+   * replies draining them first. */
+  network_t* network = (network_t*)get_clear_memory(sizeof(network_t));
+  actor_init(&network->actor, network, load_test_network_noop_dispatch, pool);
+  network->wanted_list = wanted_list_create();
+
   SeededTuple last = seed_tuple(block_cache, 3);
   tuple_t* missing = make_missing_tuple(0xAB);
   scheduler_pool_wait_for_idle(pool);
 
   buffer_t* file_hash = make_file_hash();
-  ori_t* ori = ori_create(2 * BLOCK_SIZE);
+  /* Only the seeded tuple is rendered: the missing tuple is skipped. */
+  ori_t* ori = ori_create(BLOCK_SIZE);
   ori->block_type = standard;
   ori->file_offset = 0;
   ori->file_hash = REFERENCE(file_hash, buffer_t);
 
   readable_off_stream_t* stream =
-      readable_off_stream_create_ex(pool, block_cache, tuple_cache, ori, 0, NULL, 1);
+      readable_off_stream_create_ex(pool, block_cache, tuple_cache, ori, 0, network, 1);
   ASSERT_NE(stream, nullptr);
 
   std::vector<uint8_t> data_events;
   stream_subscribe((stream_t*)stream, data_event, &data_events, on_data_record, NULL);
 
-  LoadRecorder load_recorder(TUPLE_SIZE);
+  std::promise<void> error_promise;
+  stream_subscribe((stream_t*)stream, error_event, &error_promise, on_error_set_promise, NULL);
+
+  LoadRecorder load_recorder(2);
   stream_subscribe((stream_t*)stream, load_tuple_event, &load_recorder, on_load_record, NULL);
   stream_subscribe((stream_t*)stream, close_event, &load_recorder, on_close_note_loads, NULL);
   /* Capture the skip future before any writes: the promise is set once a
@@ -493,55 +520,80 @@ TEST(ReadableOffLoadModeLoad, SkippedTupleLateResultDropped) {
   std::promise<void> close_promise;
   stream_subscribe((stream_t*)stream, close_event, &close_promise, on_close_set_promise, NULL);
 
-  readable_off_stream_write(stream, first.tuple);
   readable_off_stream_write(stream, missing);
   readable_off_stream_write(stream, last.tuple);
+  /* Let the three block misses reach the (no-reply) network. */
+  scheduler_pool_wait_for_idle(pool);
 
-  /* Wait for the skip to be observed, then inject a late CACHE_GET_RESULT for
-   * one of the skipped tuple's hashes carrying garbage block data. If the
-   * stale-fetch guard works, the result is dropped and the last tuple's
-   * rendered bytes are unaffected. */
+  /* Inject the skip: a found=0 NETWORK_FIND_BLOCK_RESULT for the FIRST
+   * missing hash — the same reply a real network would deliver for the
+   * requester whose FIND is outstanding. Per the review's finding, this
+   * reply IS an answer: the fix prunes the triggering node before parking,
+   * so a later tuple's fresh request for the same hash can never be
+   * consumed as a late result of this skip. The other two missing hashes
+   * stay parked as unanswered stale entries (their FINDs got no reply from
+   * the stub network). */
+  buffer_t* trigger_hash = tuple_get(missing, 0);
+  network_find_block_result_payload_t* miss_result =
+      (network_find_block_result_payload_t*)get_clear_memory(
+          sizeof(network_find_block_result_payload_t));
+  miss_result->hash = REFERENCE(trigger_hash, buffer_t);
+  miss_result->found = 0;
+  message_t miss_msg;
+  miss_msg.type = NETWORK_FIND_BLOCK_RESULT;
+  miss_msg.payload = miss_result;
+  miss_msg.payload_destroy = late_network_result_destroy;
+  actor_send(&stream->stream.actor, &miss_msg);
+
+  /* Wait for the skip to be observed, then inject a LATE result for the
+   * SECOND missing hash — one of the hashes that stayed PARKED as
+   * unanswered stale — carrying garbage block data. If the stale-fetch
+   * guard works, the result is dropped and the seeded tuple's rendered
+   * bytes are unaffected. */
   EXPECT_EQ(skip_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
 
   buffer_t* garbage_data = buffer_create(BLOCK_SIZE);
   memset(garbage_data->data, 0xEE, BLOCK_SIZE);
-  buffer_t* stale_hash = tuple_get(missing, 0);
+  buffer_t* stale_hash = tuple_get(missing, 1);
   block_t* garbage_block = block_create_existing_data_hash(garbage_data, stale_hash);
   ASSERT_NE(garbage_block, nullptr);
 
-  cache_get_result_payload_t* late_result =
-      (cache_get_result_payload_t*)get_clear_memory(sizeof(cache_get_result_payload_t));
+  network_find_block_result_payload_t* late_result =
+      (network_find_block_result_payload_t*)get_clear_memory(
+          sizeof(network_find_block_result_payload_t));
   late_result->hash = REFERENCE(stale_hash, buffer_t);
+  late_result->found = 1;
   late_result->block = garbage_block;  /* ownership moves to the message below */
   garbage_block = NULL;
   message_t late_msg;
-  late_msg.type = CACHE_GET_RESULT;
+  late_msg.type = NETWORK_FIND_BLOCK_RESULT;
   late_msg.payload = late_result;
-  late_msg.payload_destroy = late_result_destroy;
+  late_msg.payload_destroy = late_network_result_destroy;
   actor_send(&stream->stream.actor, &late_msg);
 
   auto close_future = close_promise.get_future();
   EXPECT_EQ(close_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
   auto load_future = load_recorder.done_promise.get_future();
   EXPECT_EQ(load_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  EXPECT_EQ(error_promise.get_future().wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout)
+      << "stream must not surface an error event";
 
   scheduler_pool_wait_for_idle(pool);
 
   /* The late block must never reach the live tuple's accumulator. */
-  EXPECT_EQ(data_events.size(), 2u);
-  EXPECT_EQ(data_events[0], 1);
-  EXPECT_EQ(data_events[1], 3);
-  ASSERT_EQ(load_recorder.entries.size(), TUPLE_SIZE);
-  EXPECT_EQ(load_recorder.entries[0].loaded, 1u);
-  EXPECT_EQ(load_recorder.entries[0].skipped, 0u);
+  EXPECT_EQ(data_events.size(), 1u);
+  EXPECT_EQ(data_events[0], 3);
+  ASSERT_EQ(load_recorder.entries.size(), 2u);
+  EXPECT_EQ(load_recorder.entries[0].loaded, 0u);
+  EXPECT_EQ(load_recorder.entries[0].skipped, 1u);
   EXPECT_EQ(load_recorder.entries[1].loaded, 1u);
   EXPECT_EQ(load_recorder.entries[1].skipped, 1u);
-  EXPECT_EQ(load_recorder.entries[2].loaded, 2u);
-  EXPECT_EQ(load_recorder.entries[2].skipped, 1u);
-  EXPECT_EQ(load_recorder.entries[2].loaded + load_recorder.entries[2].skipped, TUPLE_SIZE);
+  EXPECT_EQ(load_recorder.entries[1].loaded + load_recorder.entries[1].skipped, 2u);
   /* All load events (including the skip) were observed before close fired. */
   EXPECT_EQ(load_recorder.close_before_loads, 0);
   EXPECT_EQ(load_recorder.close_seen, 1);
+  EXPECT_EQ(stream->stream.is_deactivated, 0);
 
   scheduler_pool_stop(pool);
 
@@ -551,7 +603,9 @@ TEST(ReadableOffLoadModeLoad, SkippedTupleLateResultDropped) {
   readable_off_stream_destroy(stream);
   tuple_cache_destroy(tuple_cache);
   block_cache_destroy(block_cache);
-  destroy_seeded(&first);
+  wanted_list_destroy(network->wanted_list);
+  actor_destroy(&network->actor);
+  free(network);
   destroy_seeded(&last);
   DESTROY(missing, tuple);
   DESTROY(garbage_data, buffer);
@@ -676,6 +730,136 @@ TEST(ReadableOffLoadModeLoad, SharedHashAcrossSkipDoesNotHang) {
   DESTROY(missing3, buffer);
   DESTROY(shared_data, buffer);
   DESTROY(expected, buffer);
+  DESTROY(file_hash, buffer);
+  ori_destroy(ori);
+  timer_actor_destroy(timer);
+  scheduler_pool_destroy(pool);
+}
+
+/* ---- load mode: the shared hash across the skip boundary is the MISSING one ---- */
+
+TEST(ReadableOffLoadModeLoad, SharedMissingHashAcrossSkipDoesNotHang) {
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  scheduler_pool_start(pool);
+  timer_actor_t* timer = timer_actor_create(pool);
+
+  char* cache_path = (char*)"test_readable_load_bc_shared_missing";
+  rm_rf(cache_path);
+  mkdir_p(cache_path);
+  block_cache_t* block_cache = block_cache_create(
+      config_t{.index_bucket_size = 10, .index_wait = 0, .index_max_wait = 0,
+               .section_size = 128000, .section_wait = 0, .section_max_wait = 0,
+               .cache_size = 50, .max_tuple_size = 30, .lru_size = 50},
+      cache_path, standard, timer, pool, NULL, 0);
+  tuple_cache_t* tuple_cache = tuple_cache_create(100, pool);
+
+  /* The shared hash M is MISSING from the cache and is requested by BOTH
+   * tuples. Tuple A = [M, a1, a2] — M is local-only (no network, load mode),
+   * so A skips on M's index-miss. Tuple B = [M, b1, b2] is queued behind A
+   * and re-requests M, so M's hash appears both in A's parked stale entry
+   * (if unpruned) and in B's live request set. */
+  block_t* a1 = block_create_random_block_by_type(standard);
+  block_t* a2 = block_create_random_block_by_type(standard);
+  block_t* b1 = block_create_random_block_by_type(standard);
+  block_t* b2 = block_create_random_block_by_type(standard);
+  ASSERT_NE(a1, nullptr);
+  ASSERT_NE(a2, nullptr);
+  ASSERT_NE(b1, nullptr);
+  ASSERT_NE(b2, nullptr);
+  block_cache_put(block_cache, a1, 0, NULL);
+  block_cache_put(block_cache, a2, 0, NULL);
+  block_cache_put(block_cache, b1, 0, NULL);
+  block_cache_put(block_cache, b2, 0, NULL);
+
+  SeededTuple tuple_c = seed_tuple(block_cache, 5);
+  SeededTuple tuple_d = seed_tuple(block_cache, 6);
+  buffer_t* missing_shared = make_missing_hash(0x83);
+  tuple_t* tuple_a = tuple_create(TUPLE_SIZE);
+  tuple_push(tuple_a, missing_shared);
+  tuple_push(tuple_a, a1->hash);
+  tuple_push(tuple_a, a2->hash);
+  tuple_t* tuple_b = tuple_create(TUPLE_SIZE);
+  tuple_push(tuple_b, missing_shared);
+  tuple_push(tuple_b, b1->hash);
+  tuple_push(tuple_b, b2->hash);
+  scheduler_pool_wait_for_idle(pool);
+
+  buffer_t* file_hash = make_file_hash();
+  /* Only the two seeded tuples are rendered: A and B are skipped. */
+  ori_t* ori = ori_create(2 * BLOCK_SIZE);
+  ori->block_type = standard;
+  ori->file_offset = 0;
+  ori->file_hash = REFERENCE(file_hash, buffer_t);
+
+  readable_off_stream_t* stream =
+      readable_off_stream_create_ex(pool, block_cache, tuple_cache, ori, 0, NULL, 1);
+  ASSERT_NE(stream, nullptr);
+
+  std::vector<uint8_t> data_events;
+  stream_subscribe((stream_t*)stream, data_event, &data_events, on_data_record, NULL);
+
+  std::promise<void> error_promise;
+  stream_subscribe((stream_t*)stream, error_event, &error_promise, on_error_set_promise, NULL);
+
+  LoadRecorder load_recorder(4);
+  stream_subscribe((stream_t*)stream, load_tuple_event, &load_recorder, on_load_record, NULL);
+  stream_subscribe((stream_t*)stream, close_event, &load_recorder, on_close_note_loads, NULL);
+
+  std::promise<void> close_promise;
+  stream_subscribe((stream_t*)stream, close_event, &close_promise, on_close_set_promise, NULL);
+
+  readable_off_stream_write(stream, tuple_a);
+  readable_off_stream_write(stream, tuple_b);
+  readable_off_stream_write(stream, tuple_c.tuple);
+  readable_off_stream_write(stream, tuple_d.tuple);
+
+  auto close_future = close_promise.get_future();
+  EXPECT_EQ(close_future.wait_for(std::chrono::seconds(5)), std::future_status::ready)
+      << "tuple B wedged below blocks_expected — its own miss for the shared "
+         "hash was consumed as a late result of tuple A's skip";
+  auto load_future = load_recorder.done_promise.get_future();
+  EXPECT_EQ(load_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  EXPECT_EQ(error_promise.get_future().wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout)
+      << "stream must not surface an error event";
+
+  scheduler_pool_wait_for_idle(pool);
+
+  /* A skipped on M's miss; B skipped on ITS OWN miss for M (not dropped as a
+   * late result); the two seeded tuples loaded and rendered in order. */
+  ASSERT_EQ(data_events.size(), 2u);
+  EXPECT_EQ(data_events[0], 5);
+  EXPECT_EQ(data_events[1], 6);
+  ASSERT_EQ(load_recorder.entries.size(), 4u);
+  EXPECT_EQ(load_recorder.entries[0].loaded, 0u);
+  EXPECT_EQ(load_recorder.entries[0].skipped, 1u);
+  EXPECT_EQ(load_recorder.entries[1].loaded, 0u);
+  EXPECT_EQ(load_recorder.entries[1].skipped, 2u);
+  EXPECT_EQ(load_recorder.entries[2].loaded, 1u);
+  EXPECT_EQ(load_recorder.entries[2].skipped, 2u);
+  EXPECT_EQ(load_recorder.entries[3].loaded, 2u);
+  EXPECT_EQ(load_recorder.entries[3].skipped, 2u);
+  EXPECT_EQ(load_recorder.entries[3].loaded + load_recorder.entries[3].skipped, 4u);
+  EXPECT_EQ(load_recorder.close_before_loads, 0);
+  EXPECT_EQ(load_recorder.close_seen, 1);
+  EXPECT_EQ(stream->stream.is_deactivated, 0);
+  /* The skips must not leave the state dead at AWAITING_NETWORK. */
+  EXPECT_EQ(stream->state, OFF_STREAM_FETCHING_BLOCKS);
+
+  scheduler_pool_stop(pool);
+
+  readable_off_stream_destroy(stream);
+  tuple_cache_destroy(tuple_cache);
+  block_cache_destroy(block_cache);
+  destroy_seeded(&tuple_c);
+  destroy_seeded(&tuple_d);
+  block_destroy(a1);
+  block_destroy(a2);
+  block_destroy(b1);
+  block_destroy(b2);
+  DESTROY(tuple_a, tuple);
+  DESTROY(tuple_b, tuple);
+  DESTROY(missing_shared, buffer);
   DESTROY(file_hash, buffer);
   ori_destroy(ori);
   timer_actor_destroy(timer);
