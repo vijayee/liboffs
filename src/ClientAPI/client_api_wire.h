@@ -46,6 +46,9 @@
 #define CLIENT_API_CONFIG_SET_RESPONSE    36
 #define CLIENT_API_CONFIG_RELOAD_REQUEST  37
 #define CLIENT_API_CONFIG_RELOAD_RESPONSE 38
+#define CLIENT_API_LOAD_REQUEST          39
+#define CLIENT_API_LOAD_PROGRESS         40
+#define CLIENT_API_LOAD_END              41
 
 // Status codes for responses
 #define CLIENT_API_STATUS_OK                0
@@ -120,6 +123,28 @@ typedef struct {
 // --- GET End (download complete) ---
 // [type] — no payload
 // (no struct needed, encode/decode handle it directly)
+
+// --- Load Request ---
+// [type, ori_string] or [type, ori_string, range_start, range_end] — the
+// optional-range shape mirrors GET_REQUEST: the two range elements are present
+// only when a range is wanted, and has_range on the struct is derived from the
+// array shape on decode. Asks the daemon to pull the file's blocks into its
+// block cache without sending file data; progress arrives as LOAD_PROGRESS
+// frames, terminated by LOAD_END.
+typedef struct {
+  char* ori_string;
+  uint8_t has_range;    /* 0 → no range elements; 1 → following two present */
+  size_t range_start;
+  size_t range_end;
+} client_api_load_request_t;
+
+// --- Load Progress ---
+// [type, tuples_loaded: uint, tuples_total: uint]
+// (tuples_total - tuples_loaded includes both in-flight and skipped tuples)
+
+// --- Load End ---
+// [type, status: uint, tuples_loaded: uint, tuples_total: uint]
+// status: 0 = loaded, 1 = partial (some tuples skipped), 2 = failed
 
 // --- Error ---
 // [type, status_code, message_string]
@@ -307,6 +332,9 @@ cbor_item_t* client_api_get_request_encode(const client_api_get_request_t* msg);
 cbor_item_t* client_api_get_response_start_encode(const client_api_get_response_start_t* msg);
 cbor_item_t* client_api_get_data_encode(const client_api_get_data_t* msg);
 cbor_item_t* client_api_get_end_encode(void);
+cbor_item_t* client_api_load_request_encode(const client_api_load_request_t* msg);
+cbor_item_t* client_api_load_progress_encode(size_t tuples_loaded, size_t tuples_total);
+cbor_item_t* client_api_load_end_encode(uint8_t status, size_t tuples_loaded, size_t tuples_total);
 cbor_item_t* client_api_error_encode(const client_api_error_t* msg);
 
 // Decode functions — fill existing struct, return 0 on success, -1 on error
@@ -318,6 +346,9 @@ int client_api_get_request_decode(cbor_item_t* item, client_api_get_request_t* m
 int client_api_get_response_start_decode(cbor_item_t* item, client_api_get_response_start_t* msg);
 int client_api_get_data_decode(cbor_item_t* item, client_api_get_data_t* msg);
 int client_api_get_end_decode(cbor_item_t* item);
+int client_api_load_request_decode(cbor_item_t* item, client_api_load_request_t* msg);
+int client_api_load_progress_decode(cbor_item_t* item, size_t* tuples_loaded, size_t* tuples_total);
+int client_api_load_end_decode(cbor_item_t* item, uint8_t* status, size_t* tuples_loaded, size_t* tuples_total);
 int client_api_error_decode(cbor_item_t* item, client_api_error_t* msg);
 
 cbor_item_t* client_api_auth_request_encode(const client_api_auth_request_t* auth);
@@ -423,6 +454,7 @@ void client_api_put_response_destroy(client_api_put_response_t* msg);
 void client_api_get_request_destroy(client_api_get_request_t* msg);
 void client_api_get_response_start_destroy(client_api_get_response_start_t* msg);
 void client_api_get_data_destroy(client_api_get_data_t* msg);
+void client_api_load_request_destroy(client_api_load_request_t* msg);
 void client_api_error_destroy(client_api_error_t* msg);
 
 #endif // OFFS_CLIENT_API_WIRE_H

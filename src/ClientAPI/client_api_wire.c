@@ -568,7 +568,202 @@ int client_api_get_end_decode(cbor_item_t* item) {
   return type == CLIENT_API_GET_END ? 0 : -1;
 }
 
-// --- Error ---
+// --- Load Request ---
+// [type, ori_string] or [type, ori_string, range_start, range_end]
+
+cbor_item_t* client_api_load_request_encode(const client_api_load_request_t* msg) {
+  /* 2 elements without a range, 4 with — the same conditional-element
+     convention as GET_REQUEST. */
+  size_t count = msg->has_range ? 4 : 2;
+  cbor_item_t* array = cbor_new_definite_array(count);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_LOAD_REQUEST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _encode_string(msg->ori_string);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  if (msg->has_range) {
+    item = cbor_build_uint64(msg->range_start);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+
+    item = cbor_build_uint64(msg->range_end);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+  }
+
+  return array;
+}
+
+int client_api_load_request_decode(cbor_item_t* item, client_api_load_request_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_LOAD_REQUEST) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* ori = cbor_array_get(item, 1);
+  msg->ori_string = _decode_string(ori, OFFS_MAX_ORI_STRING_LEN);
+  cbor_decref(&ori);
+
+  if (msg->ori_string == NULL) {
+    return -1;
+  }
+
+  /* Range elements are only meaningful in the 4-element shape; has_range is
+     set by shape, mirroring how GET_REQUEST treats its optional elements. */
+  if (cbor_array_size(item) >= 4) {
+    cbor_item_t* range_start = cbor_array_get(item, 2);
+    if (!cbor_isa_uint(range_start)) {
+      cbor_decref(&range_start);
+      client_api_load_request_destroy(msg);
+      return -1;
+    }
+    msg->range_start = _decode_size(range_start);
+    cbor_decref(&range_start);
+
+    cbor_item_t* range_end = cbor_array_get(item, 3);
+    if (!cbor_isa_uint(range_end)) {
+      cbor_decref(&range_end);
+      client_api_load_request_destroy(msg);
+      return -1;
+    }
+    msg->range_end = _decode_size(range_end);
+    cbor_decref(&range_end);
+
+    msg->has_range = 1;
+  }
+
+  return 0;
+}
+
+void client_api_load_request_destroy(client_api_load_request_t* msg) {
+  if (msg == NULL) return;
+  free(msg->ori_string);
+}
+
+// --- Load Progress ---
+// [type, tuples_loaded: uint, tuples_total: uint]
+
+cbor_item_t* client_api_load_progress_encode(size_t tuples_loaded, size_t tuples_total) {
+  cbor_item_t* array = cbor_new_definite_array(3);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_LOAD_PROGRESS);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(tuples_loaded);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(tuples_total);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_load_progress_decode(cbor_item_t* item, size_t* tuples_loaded, size_t* tuples_total) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 3) return -1;
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_LOAD_PROGRESS) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* loaded_item = cbor_array_get(item, 1);
+  if (!cbor_isa_uint(loaded_item)) {
+    cbor_decref(&loaded_item);
+    return -1;
+  }
+  *tuples_loaded = _decode_size(loaded_item);
+  cbor_decref(&loaded_item);
+
+  cbor_item_t* total_item = cbor_array_get(item, 2);
+  if (!cbor_isa_uint(total_item)) {
+    cbor_decref(&total_item);
+    return -1;
+  }
+  *tuples_total = _decode_size(total_item);
+  cbor_decref(&total_item);
+
+  return 0;
+}
+
+// --- Load End ---
+// [type, status: uint, tuples_loaded: uint, tuples_total: uint]
+// status: 0 = loaded, 1 = partial (some tuples skipped), 2 = failed
+
+cbor_item_t* client_api_load_end_encode(uint8_t status, size_t tuples_loaded, size_t tuples_total) {
+  cbor_item_t* array = cbor_new_definite_array(4);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_LOAD_END);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(status);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(tuples_loaded);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(tuples_total);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_load_end_decode(cbor_item_t* item, uint8_t* status, size_t* tuples_loaded, size_t* tuples_total) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 4) return -1;
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_LOAD_END) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* status_item = cbor_array_get(item, 1);
+  if (!cbor_isa_uint(status_item)) {
+    cbor_decref(&status_item);
+    return -1;
+  }
+  *status = cbor_get_uint8(status_item);
+  cbor_decref(&status_item);
+
+  cbor_item_t* loaded_item = cbor_array_get(item, 2);
+  if (!cbor_isa_uint(loaded_item)) {
+    cbor_decref(&loaded_item);
+    return -1;
+  }
+  *tuples_loaded = _decode_size(loaded_item);
+  cbor_decref(&loaded_item);
+
+  cbor_item_t* total_item = cbor_array_get(item, 3);
+  if (!cbor_isa_uint(total_item)) {
+    cbor_decref(&total_item);
+    return -1;
+  }
+  *tuples_total = _decode_size(total_item);
+  cbor_decref(&total_item);
+
+  return 0;
+}
 // [type, status_code, message_string]
 
 cbor_item_t* client_api_error_encode(const client_api_error_t* msg) {
