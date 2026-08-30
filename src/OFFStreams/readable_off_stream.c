@@ -56,6 +56,10 @@ static void _render_origin_data(readable_off_stream_t* stream, buffer_t* data) {
   stream->sent_bytes += length;
 
   if (stream->sent_bytes >= stream->ori->final_byte) {
+    /* Mark closed before notifying: the close notification is queued through
+     * the actor mailbox, and consumers of an earlier load_tuple_event must
+     * already observe the closed flag when they run request_close. */
+    stream->closed = 1;
     stream_notify((stream_t*)stream, finished_event, NULL, NULL);
     stream_notify((stream_t*)stream, complete_event, NULL, NULL);
     stream_notify((stream_t*)stream, close_event, NULL, NULL);
@@ -64,6 +68,7 @@ static void _render_origin_data(readable_off_stream_t* stream, buffer_t* data) {
 
 static void _start_tuple_cache_lookup(readable_off_stream_t* stream, tuple_t* tuple);
 static void _drain_tuple_queue(readable_off_stream_t* stream);
+static void _close_stream(readable_off_stream_t* stream);
 
 load_tuple_payload_t* load_tuple_payload_create(size_t tuples_loaded, size_t tuples_skipped) {
   load_tuple_payload_t* payload = get_clear_memory(sizeof(load_tuple_payload_t));
@@ -517,39 +522,59 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
       break;
     }
     case CLOSE_STREAM: {
-      if (stream->pending_tuple != NULL) {
-        DESTROY(stream->pending_tuple, tuple);
-        stream->pending_tuple = NULL;
+      if (!stream->stream.is_deactivated) {
+        _close_stream(stream);
       }
-      if (stream->xor_accumulator != NULL) {
-        DESTROY(stream->xor_accumulator, buffer);
-        stream->xor_accumulator = NULL;
-      }
-      pending_tuple_t* queued = stream->tuple_queue;
-      while (queued != NULL) {
-        pending_tuple_t* next = queued->next;
-        DESTROY(queued->tuple, tuple);
-        free(queued);
-        queued = next;
-      }
-      stream->tuple_queue = NULL;
-      pending_block_fetch_t* fetch = stream->pending_fetches;
-      while (fetch != NULL) {
-        pending_block_fetch_t* next = fetch->next;
-        DESTROY(fetch->hash, buffer);
-        free(fetch);
-        fetch = next;
-      }
-      stream->pending_fetches = NULL;
-      _clear_stale_fetches(stream);
-      stream_notify((stream_t*)stream, close_event, NULL, NULL);
-      stream->stream.is_deactivated = 1;
       break;
     }
     default:
       stream_dispatch(state, msg);
       break;
   }
+}
+
+/* Run exactly the CLOSE_STREAM cleanup and notify close_event without an
+ * error. Used by the CLOSE_STREAM message and by request_close so the two
+ * entry points cannot drift. */
+static void _close_stream(readable_off_stream_t* stream) {
+  if (stream->pending_tuple != NULL) {
+    DESTROY(stream->pending_tuple, tuple);
+    stream->pending_tuple = NULL;
+  }
+  if (stream->xor_accumulator != NULL) {
+    DESTROY(stream->xor_accumulator, buffer);
+    stream->xor_accumulator = NULL;
+  }
+  pending_tuple_t* queued = stream->tuple_queue;
+  while (queued != NULL) {
+    pending_tuple_t* next = queued->next;
+    DESTROY(queued->tuple, tuple);
+    free(queued);
+    queued = next;
+  }
+  stream->tuple_queue = NULL;
+  pending_block_fetch_t* fetch = stream->pending_fetches;
+  while (fetch != NULL) {
+    pending_block_fetch_t* next = fetch->next;
+    DESTROY(fetch->hash, buffer);
+    free(fetch);
+    fetch = next;
+  }
+  stream->pending_fetches = NULL;
+  _clear_stale_fetches(stream);
+  stream->closed = 1;
+  stream_notify((stream_t*)stream, close_event, NULL, NULL);
+  stream->stream.is_deactivated = 1;
+}
+
+void readable_off_stream_request_close(readable_off_stream_t* stream) {
+  if (stream == NULL) {
+    return;
+  }
+  if (stream->stream.is_deactivated || stream->closed) {
+    return;
+  }
+  _close_stream(stream);
 }
 
 static void _readable_off_stream_on_write(stream_t* stream, void* data) {

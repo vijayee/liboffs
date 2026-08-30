@@ -320,7 +320,11 @@ TEST(ReadableOffLoadModeLoad, SkipMissingTupleContinues) {
   scheduler_pool_wait_for_idle(pool);
 
   buffer_t* file_hash = make_file_hash();
-  ori_t* ori = ori_create(2 * BLOCK_SIZE);  /* only tuples 1 and 3 are served */
+  /* True descriptor-derived final_byte: the descriptor enumerates three
+   * tuples, so the file spans three blocks. Tuple 2 is skipped — the rendered
+   * bytes (2 blocks) can never reach final_byte, so the stream cannot close
+   * via the render path and pipeline-driven completion is required. */
+  ori_t* ori = ori_create(TUPLE_SIZE * BLOCK_SIZE);
   ori->block_type = standard;
   ori->file_offset = 0;
   ori->file_hash = REFERENCE(file_hash, buffer_t);
@@ -339,12 +343,13 @@ TEST(ReadableOffLoadModeLoad, SkipMissingTupleContinues) {
   std::promise<void> close_promise;
   stream_subscribe((stream_t*)stream, close_event, &close_promise, on_close_set_promise, NULL);
 
+  std::promise<void> error_promise;
+  stream_subscribe((stream_t*)stream, error_event, &error_promise, on_error_set_promise, NULL);
+
   readable_off_stream_write(stream, first.tuple);
   readable_off_stream_write(stream, missing);
   readable_off_stream_write(stream, last.tuple);
 
-  auto close_future = close_promise.get_future();
-  EXPECT_EQ(close_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
   auto load_future = load_recorder.done_promise.get_future();
   EXPECT_EQ(load_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
 
@@ -362,10 +367,35 @@ TEST(ReadableOffLoadModeLoad, SkipMissingTupleContinues) {
   EXPECT_EQ(load_recorder.entries[2].loaded, 2u);
   EXPECT_EQ(load_recorder.entries[2].skipped, 1u);
   EXPECT_EQ(load_recorder.entries[2].loaded + load_recorder.entries[2].skipped, TUPLE_SIZE);
+  /* The skip must not have torn the stream down on its own. */
+  EXPECT_EQ(stream->stream.is_deactivated, 0);
+  EXPECT_EQ(error_promise.get_future().wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout)
+      << "stream must not surface an error event";
+
+  /* Pipeline-driven completion: the tally reached the descriptor total but
+   * sent_bytes (2 rendered blocks) < final_byte (3 blocks), so the render
+   * path cannot close. The consumer requests the close exactly as the LOAD
+   * pipelines do. */
+  EXPECT_LT(stream->sent_bytes, stream->ori->final_byte);
+  readable_off_stream_request_close(stream);
+
+  auto close_future = close_promise.get_future();
+  EXPECT_EQ(close_future.wait_for(std::chrono::seconds(5)), std::future_status::ready)
+      << "load stream must close once every tuple resolved, even with a "
+         "skipped tuple short of final_byte";
+  /* Idempotent: a second request after the close must be a no-op. */
+  std::promise<void> close_promise2;
+  stream_subscribe((stream_t*)stream, close_event, &close_promise2, on_close_set_promise, NULL);
+  readable_off_stream_request_close(stream);
+  EXPECT_EQ(close_promise2.get_future().wait_for(std::chrono::milliseconds(200)),
+            std::future_status::timeout)
+      << "request_close must not fire close_event twice";
+
   /* All load events (including the skip) were observed before close fired. */
   EXPECT_EQ(load_recorder.close_before_loads, 0);
   EXPECT_EQ(load_recorder.close_seen, 1);
-  EXPECT_EQ(stream->stream.is_deactivated, 0);
+  EXPECT_EQ(stream->stream.is_deactivated, 1);
 
   scheduler_pool_stop(pool);
 
@@ -494,8 +524,9 @@ TEST(ReadableOffLoadModeLoad, SkippedTupleLateResultDropped) {
   scheduler_pool_wait_for_idle(pool);
 
   buffer_t* file_hash = make_file_hash();
-  /* Only the seeded tuple is rendered: the missing tuple is skipped. */
-  ori_t* ori = ori_create(BLOCK_SIZE);
+  /* True descriptor-derived final_byte: two tuples are enumerated (the
+   * missing one is skipped), so the file spans two blocks. */
+  ori_t* ori = ori_create(2 * BLOCK_SIZE);
   ori->block_type = standard;
   ori->file_offset = 0;
   ori->file_hash = REFERENCE(file_hash, buffer_t);
@@ -571,8 +602,6 @@ TEST(ReadableOffLoadModeLoad, SkippedTupleLateResultDropped) {
   late_msg.payload_destroy = late_network_result_destroy;
   actor_send(&stream->stream.actor, &late_msg);
 
-  auto close_future = close_promise.get_future();
-  EXPECT_EQ(close_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
   auto load_future = load_recorder.done_promise.get_future();
   EXPECT_EQ(load_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
   EXPECT_EQ(error_promise.get_future().wait_for(std::chrono::milliseconds(0)),
@@ -590,10 +619,22 @@ TEST(ReadableOffLoadModeLoad, SkippedTupleLateResultDropped) {
   EXPECT_EQ(load_recorder.entries[1].loaded, 1u);
   EXPECT_EQ(load_recorder.entries[1].skipped, 1u);
   EXPECT_EQ(load_recorder.entries[1].loaded + load_recorder.entries[1].skipped, 2u);
+  /* The skip must not have torn the stream down on its own. */
+  EXPECT_EQ(stream->stream.is_deactivated, 0);
+
+  /* Pipeline-driven completion: the tally reached the descriptor total but
+   * the skipped tuple means sent_bytes < final_byte, so the consumer requests
+   * the close exactly as the LOAD pipelines do. */
+  EXPECT_LT(stream->sent_bytes, stream->ori->final_byte);
+  readable_off_stream_request_close(stream);
+
+  auto close_future = close_promise.get_future();
+  EXPECT_EQ(close_future.wait_for(std::chrono::seconds(5)), std::future_status::ready)
+      << "load stream must close once every tuple resolved";
   /* All load events (including the skip) were observed before close fired. */
   EXPECT_EQ(load_recorder.close_before_loads, 0);
   EXPECT_EQ(load_recorder.close_seen, 1);
-  EXPECT_EQ(stream->stream.is_deactivated, 0);
+  EXPECT_EQ(stream->stream.is_deactivated, 1);
 
   scheduler_pool_stop(pool);
 
@@ -669,9 +710,9 @@ TEST(ReadableOffLoadModeLoad, SharedHashAcrossSkipDoesNotHang) {
   scheduler_pool_wait_for_idle(pool);
 
   buffer_t* file_hash = make_file_hash();
-  /* Only tuple B is rendered: tuple A is skipped, so the final byte is one
-   * block past the origin start. */
-  ori_t* ori = ori_create(BLOCK_SIZE);
+  /* True descriptor-derived final_byte: two tuples are enumerated (A is
+   * skipped, B is loaded), so the file spans two blocks. */
+  ori_t* ori = ori_create(2 * BLOCK_SIZE);
   ori->block_type = standard;
   ori->file_offset = 0;
   ori->file_hash = REFERENCE(file_hash, buffer_t);
@@ -693,11 +734,9 @@ TEST(ReadableOffLoadModeLoad, SharedHashAcrossSkipDoesNotHang) {
   readable_off_stream_write(stream, tuple_a);
   readable_off_stream_write(stream, tuple_b);
 
-  auto close_future = close_promise.get_future();
-  EXPECT_EQ(close_future.wait_for(std::chrono::seconds(5)), std::future_status::ready)
-      << "tuple B wedged below blocks_expected — an answered fetch was parked as stale";
   auto load_future = load_recorder.done_promise.get_future();
-  EXPECT_EQ(load_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  EXPECT_EQ(load_future.wait_for(std::chrono::seconds(5)), std::future_status::ready)
+      << "tuple B wedged below blocks_expected — an answered fetch was parked as stale";
 
   scheduler_pool_wait_for_idle(pool);
 
@@ -710,11 +749,21 @@ TEST(ReadableOffLoadModeLoad, SharedHashAcrossSkipDoesNotHang) {
   EXPECT_EQ(load_recorder.entries[1].loaded, 1u);
   EXPECT_EQ(load_recorder.entries[1].skipped, 1u);
   EXPECT_EQ(load_recorder.entries[1].loaded + load_recorder.entries[1].skipped, 2u);
-  EXPECT_EQ(load_recorder.close_before_loads, 0);
-  EXPECT_EQ(load_recorder.close_seen, 1);
   EXPECT_EQ(stream->stream.is_deactivated, 0);
   /* The skip must not leave the state dead at AWAITING_NETWORK. */
   EXPECT_EQ(stream->state, OFF_STREAM_FETCHING_BLOCKS);
+
+  /* Pipeline-driven completion: the tally reached the descriptor total but
+   * the skipped tuple means sent_bytes < final_byte, so the consumer requests
+   * the close exactly as the LOAD pipelines do. */
+  EXPECT_LT(stream->sent_bytes, stream->ori->final_byte);
+  readable_off_stream_request_close(stream);
+  std::future<void> close_future = close_promise.get_future();
+  EXPECT_EQ(close_future.wait_for(std::chrono::seconds(5)), std::future_status::ready)
+      << "load stream must close once every tuple resolved";
+  EXPECT_EQ(load_recorder.close_before_loads, 0);
+  EXPECT_EQ(load_recorder.close_seen, 1);
+  EXPECT_EQ(stream->stream.is_deactivated, 1);
 
   scheduler_pool_stop(pool);
 
@@ -785,8 +834,9 @@ TEST(ReadableOffLoadModeLoad, SharedMissingHashAcrossSkipDoesNotHang) {
   scheduler_pool_wait_for_idle(pool);
 
   buffer_t* file_hash = make_file_hash();
-  /* Only the two seeded tuples are rendered: A and B are skipped. */
-  ori_t* ori = ori_create(2 * BLOCK_SIZE);
+  /* True descriptor-derived final_byte: four tuples are enumerated (A and B
+   * are skipped, C and D are loaded), so the file spans four blocks. */
+  ori_t* ori = ori_create(4 * BLOCK_SIZE);
   ori->block_type = standard;
   ori->file_offset = 0;
   ori->file_hash = REFERENCE(file_hash, buffer_t);
@@ -813,12 +863,10 @@ TEST(ReadableOffLoadModeLoad, SharedMissingHashAcrossSkipDoesNotHang) {
   readable_off_stream_write(stream, tuple_c.tuple);
   readable_off_stream_write(stream, tuple_d.tuple);
 
-  auto close_future = close_promise.get_future();
-  EXPECT_EQ(close_future.wait_for(std::chrono::seconds(5)), std::future_status::ready)
+  auto load_future = load_recorder.done_promise.get_future();
+  EXPECT_EQ(load_future.wait_for(std::chrono::seconds(5)), std::future_status::ready)
       << "tuple B wedged below blocks_expected — its own miss for the shared "
          "hash was consumed as a late result of tuple A's skip";
-  auto load_future = load_recorder.done_promise.get_future();
-  EXPECT_EQ(load_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
   EXPECT_EQ(error_promise.get_future().wait_for(std::chrono::milliseconds(0)),
             std::future_status::timeout)
       << "stream must not surface an error event";
@@ -840,11 +888,21 @@ TEST(ReadableOffLoadModeLoad, SharedMissingHashAcrossSkipDoesNotHang) {
   EXPECT_EQ(load_recorder.entries[3].loaded, 2u);
   EXPECT_EQ(load_recorder.entries[3].skipped, 2u);
   EXPECT_EQ(load_recorder.entries[3].loaded + load_recorder.entries[3].skipped, 4u);
-  EXPECT_EQ(load_recorder.close_before_loads, 0);
-  EXPECT_EQ(load_recorder.close_seen, 1);
   EXPECT_EQ(stream->stream.is_deactivated, 0);
   /* The skips must not leave the state dead at AWAITING_NETWORK. */
   EXPECT_EQ(stream->state, OFF_STREAM_FETCHING_BLOCKS);
+
+  /* Pipeline-driven completion: the tally reached the descriptor total but
+   * the skipped tuples mean sent_bytes < final_byte, so the consumer requests
+   * the close exactly as the LOAD pipelines do. */
+  EXPECT_LT(stream->sent_bytes, stream->ori->final_byte);
+  readable_off_stream_request_close(stream);
+  std::future<void> close_future = close_promise.get_future();
+  EXPECT_EQ(close_future.wait_for(std::chrono::seconds(5)), std::future_status::ready)
+      << "load stream must close once every tuple resolved";
+  EXPECT_EQ(load_recorder.close_before_loads, 0);
+  EXPECT_EQ(load_recorder.close_seen, 1);
+  EXPECT_EQ(stream->stream.is_deactivated, 1);
 
   scheduler_pool_stop(pool);
 

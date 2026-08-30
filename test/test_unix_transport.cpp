@@ -10,7 +10,9 @@ extern "C" {
 #include "../src/BlockCache/block_cache.h"
 #include "../src/BlockCache/block.h"
 #include "../src/OFFStreams/ofd_cache.h"
+#include "../src/OFFStreams/off_url.h"
 #include "../src/OFFStreams/tuple_cache.h"
+#include "../src/Buffer/buffer.h"
 #include "../src/Scheduler/scheduler.h"
 #include "../src/Configuration/config.h"
 #include "../src/Network/authority.h"
@@ -473,6 +475,17 @@ TEST_F(TestUnixTransport, LoadRoundTrip) {
         cbor_decref(&response);
     }
 
+    /* Exactly-once terminal: after the LOAD_END, drain a few more frames with
+     * a short timeout and assert no second LOAD_END arrives. */
+    for (int index = 0; index < 4; index++) {
+        cbor_item_t* extra = _recv_frame(sock, framer, 300);
+        if (extra != nullptr) {
+            EXPECT_NE(client_api_wire_get_type(extra), CLIENT_API_LOAD_END)
+                << "LOAD_END must be sent exactly once per LOAD request";
+            cbor_decref(&extra);
+        }
+    }
+
     /* Close the client connection before asserting so a failure path cannot
      * stall transport teardown with a live socket. */
     stream_framer_destroy(framer);
@@ -483,6 +496,189 @@ TEST_F(TestUnixTransport, LoadRoundTrip) {
     EXPECT_EQ(end_status, CLIENT_API_LOAD_STATUS_LOADED);
     EXPECT_EQ(end_loaded, (size_t)2);
     EXPECT_EQ(end_total, (size_t)2);
+}
+
+/* PUT a 3-tuple file on one transport, DELETE one of the file's data blocks
+ * from the block cache, then LOAD the same ORI on a SECOND transport with a
+ * fresh tuple cache. Two transports are required for a true partial state:
+ * the PUT path seeds the tuple cache with the assembled tuples
+ * (writeable_off_stream.c:123), so a LOAD on the same tuple cache resolves
+ * every tuple without ever touching a block. On the second transport any
+ * hash that is not the descriptor block belongs to exactly one tuple, so the
+ * damaged tuple must be skipped and tallied: LOAD_END must arrive with
+ * PARTIAL status and loaded == 2 of total == 3. This is the terminal frame
+ * that could never fire before the pipeline-driven completion fix — a
+ * skipped tuple never renders and never advances the stream's sent_bytes, so
+ * the render path could not close the stream and the client hung with no
+ * LOAD_END at all. */
+TEST_F(TestUnixTransport, LoadPartialSkipsMissingTuples) {
+    char partial_path[128];
+    _make_socket_path(partial_path, sizeof(partial_path), "partial");
+    platform_local_cleanup(partial_path);
+
+    tuple_cache_t* partial_tc = tuple_cache_create(100, pool);
+    unix_transport_t* partial = unix_transport_create(
+        pool, bc, ofd_cache, partial_tc, partial_path, NULL, NULL);
+    ASSERT_NE(partial, nullptr);
+    unix_transport_start(partial);
+
+    platform_socket_t* sock = _connect_with_retry(partial_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
+
+    /* 384000 bytes spans three 128000-byte standard blocks -> 3 tuples. */
+    const size_t data_size = 384000;
+    std::vector<uint8_t> data(data_size);
+    for (size_t index = 0; index < data_size; index++) {
+        data[index] = (uint8_t)((index * 7) & 0xFF);
+    }
+
+    client_api_put_request_t put_req;
+    memset(&put_req, 0, sizeof(put_req));
+    put_req.content_type = (char*)"application/octet-stream";
+    put_req.file_name = (char*)"load_partial.bin";
+    put_req.stream_length = data_size;
+    put_req.server_address = NULL;
+    put_req.data = data.data();
+    put_req.data_size = data_size;
+
+    cbor_item_t* frame = client_api_put_request_encode(&put_req);
+    ASSERT_NE(frame, nullptr);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
+
+    stream_framer_t* framer = stream_framer_create();
+    cbor_item_t* response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+    ASSERT_EQ(client_api_wire_get_type(response), CLIENT_API_PUT_RESPONSE);
+
+    client_api_put_response_t put_resp;
+    memset(&put_resp, 0, sizeof(put_resp));
+    ASSERT_EQ(client_api_put_response_decode(response, &put_resp), 0);
+    ASSERT_NE(put_resp.ori_string, nullptr);
+    char* ori_string = strdup(put_resp.ori_string);
+    client_api_put_response_destroy(&put_resp);
+    cbor_decref(&response);
+
+    /* Corrupt the block cache: remove one stored block that is not the
+     * descriptor block. The PUT response proves every block of the file is
+     * stored, so the index must contain at least ten entries (nine data
+     * blocks for the three tuples + the descriptor). */
+    off_url_t* url = off_url_parse(ori_string);
+    ASSERT_NE(url, nullptr);
+    ASSERT_NE(url->descriptor_hash, nullptr);
+    index_entry_vec_t* entries = index_to_array(bc->index);
+    ASSERT_NE(entries, nullptr);
+    buffer_t* victim_hash = NULL;
+    for (int index = 0; index < entries->length; index++) {
+        index_entry_t* entry = entries->data[index];
+        if (buffer_compare(entry->hash, url->descriptor_hash) != 0) {
+            victim_hash = entry->hash;
+            break;
+        }
+    }
+    ASSERT_NE(victim_hash, nullptr) << "no data block found in the cache index";
+    /* Copy the victim hash before the removal releases the entry's storage. */
+    buffer_t* victim_copy = buffer_copy(victim_hash);
+    ASSERT_NE(victim_copy, nullptr);
+    block_cache_remove(bc, victim_copy, NULL);
+    off_url_destroy(url);
+    scheduler_pool_wait_for_idle(pool);
+
+    /* Close the PUT-side connection: the LOAD runs on a second transport so
+     * its cold tuple cache forces the load through the block cache, where the
+     * victim block is now missing. */
+    stream_framer_destroy(framer);
+    platform_socket_destroy(sock);
+    framer = stream_framer_create();
+
+    char load_path[128];
+    _make_socket_path(load_path, sizeof(load_path), "partial_load");
+    platform_local_cleanup(load_path);
+
+    tuple_cache_t* load_tc = tuple_cache_create(100, pool);
+    unix_transport_t* load_transport = unix_transport_create(
+        pool, bc, ofd_cache, load_tc, load_path, NULL, NULL);
+    ASSERT_NE(load_transport, nullptr);
+    unix_transport_start(load_transport);
+
+    sock = _connect_with_retry(load_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
+    platform_socket_set_nonblocking(sock);
+
+    client_api_load_request_t load_req;
+    memset(&load_req, 0, sizeof(load_req));
+    load_req.ori_string = ori_string;
+    load_req.has_range = 0;
+
+    frame = client_api_load_request_encode(&load_req);
+    ASSERT_NE(frame, nullptr);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
+    free(ori_string);
+    ori_string = NULL;
+
+    /* Read frames until LOAD_END. Three progress frames are expected (one
+     * per resolved tuple, loaded or skipped); the delete victim's tuple is
+     * skipped, so the frame sequence order depends on which tuple was hit —
+     * only the counts are asserted. */
+    size_t progress_frames = 0;
+    uint8_t end_status = 0xFF;
+    size_t end_loaded = 0;
+    size_t end_total = 0;
+    bool saw_load_end = false;
+
+    for (int index = 0; index < 16; index++) {
+        response = _recv_frame(sock, framer, 2000);
+        if (response == nullptr) {
+            break;
+        }
+        uint8_t type = client_api_wire_get_type(response);
+        if (type == CLIENT_API_LOAD_PROGRESS) {
+            size_t loaded = 0;
+            size_t total = 0;
+            EXPECT_EQ(client_api_load_progress_decode(response, &loaded, &total), 0);
+            EXPECT_EQ(total, (size_t)3);
+            EXPECT_LE(loaded, (size_t)2);
+            progress_frames++;
+        } else if (type == CLIENT_API_LOAD_END) {
+            EXPECT_EQ(client_api_load_end_decode(response, &end_status, &end_loaded, &end_total), 0);
+            saw_load_end = true;
+            cbor_decref(&response);
+            break;
+        }
+        cbor_decref(&response);
+    }
+
+    /* Exactly-once terminal: drain a few more frames with a short timeout;
+     * none may be a second LOAD_END. */
+    for (int index = 0; index < 4; index++) {
+        cbor_item_t* extra = _recv_frame(sock, framer, 300);
+        if (extra != nullptr) {
+            EXPECT_NE(client_api_wire_get_type(extra), CLIENT_API_LOAD_END);
+            cbor_decref(&extra);
+        }
+    }
+
+    /* Close the client connection before asserting so a failure path cannot
+     * stall transport teardown with a live socket. */
+    stream_framer_destroy(framer);
+    platform_socket_destroy(sock);
+
+    EXPECT_TRUE(saw_load_end)
+        << "partial load never terminated: LOAD_END missing after the tally completed";
+    EXPECT_EQ(progress_frames, (size_t)3);
+    EXPECT_EQ(end_status, CLIENT_API_LOAD_STATUS_PARTIAL);
+    EXPECT_EQ(end_loaded, (size_t)2);
+    EXPECT_EQ(end_total, (size_t)3);
+    DESTROY(victim_copy, buffer);
+
+    unix_transport_stop(load_transport);
+    unix_transport_destroy(load_transport);
+    tuple_cache_destroy(load_tc);
+    platform_local_cleanup(load_path);
+
+    unix_transport_stop(partial);
+    unix_transport_destroy(partial);
+    tuple_cache_destroy(partial_tc);
+    platform_local_cleanup(partial_path);
 }
 
 TEST_F(TestUnixTransport, MaxConnections) {

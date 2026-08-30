@@ -59,6 +59,7 @@ typedef struct {
   size_t offset_remainder;
   uint8_t offset_applied;
   uint8_t load_mode;                /* 1 = missing data tuples are skipped and tallied */
+  uint8_t closed;                   /* 1 = close_event already notified (render or request_close) */
   size_t tuples_loaded;             /* tuples whose data was served / rendered */
   size_t tuples_skipped;            /* tuples abandoned because blocks were missing */
   off_stream_state_e state;         /* stream state */
@@ -91,5 +92,12 @@ readable_off_stream_t* readable_off_stream_create(
 void readable_off_stream_destroy(readable_off_stream_t* stream);
 void readable_off_stream_dispatch(void* state, message_t* msg);
 void readable_off_stream_write(readable_off_stream_t* stream, tuple_t* tuple);
+
+/* Load mode: close the stream after the last tuple resolved (loaded+skipped
+   reached the enumerator's total), when rendering cannot complete because
+   skipped tuples never advance sent_bytes. Idempotent: no-op if already
+   deactivated or closed. Performs the same cleanup as CLOSE_STREAM and
+   notifies close_event (no error). */
+void readable_off_stream_request_close(readable_off_stream_t* stream);
 
 #endif //OFFS_READABLE_OFF_STREAM_H

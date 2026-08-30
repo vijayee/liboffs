@@ -556,6 +556,17 @@ static void _ws_load_on_tuple_loaded(void* ctx, void* data) {
   cbor_item_t* frame = client_api_load_progress_encode(
       pipeline->tuples_loaded, pipeline->tuples_total);
   _ws_connection_send_frame(pipeline->conn, frame);
+
+  /* Pipeline-driven completion: a skipped tuple never renders and never
+   * advances sent_bytes, so the render path cannot close the stream once the
+   * tally completes. When every tuple the descriptor enumerates has resolved
+   * (loaded + skipped reached the computed total), close the load stream so
+   * its close_event subscriber sends the terminal LOAD_END. close_event — not
+   * this tally — is the single LOAD_END trigger; request_close is idempotent,
+   * so the all-loaded path (already closed by render) is unaffected. */
+  if (pipeline->tuples_loaded + pipeline->tuples_skipped >= pipeline->tuples_total) {
+    readable_off_stream_request_close(pipeline->rs);
+  }
 }
 
 static void _ws_load_on_rs_close(void* ctx, void* unused) {
