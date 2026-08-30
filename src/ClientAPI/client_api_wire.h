@@ -46,9 +46,9 @@
 #define CLIENT_API_CONFIG_SET_RESPONSE    36
 #define CLIENT_API_CONFIG_RELOAD_REQUEST  37
 #define CLIENT_API_CONFIG_RELOAD_RESPONSE 38
-#define CLIENT_API_LOAD_REQUEST          39
-#define CLIENT_API_LOAD_PROGRESS         40
-#define CLIENT_API_LOAD_END              41
+#define CLIENT_API_LOAD_REQUEST            39
+#define CLIENT_API_LOAD_PROGRESS           40
+#define CLIENT_API_LOAD_END                41
 
 // Status codes for responses
 #define CLIENT_API_STATUS_OK                0
@@ -146,6 +146,9 @@ typedef struct {
 // --- Load End ---
 // [type, status: uint, tuples_loaded: uint, tuples_total: uint]
 // status: 0 = loaded, 1 = partial (some tuples skipped), 2 = failed
+#define CLIENT_API_LOAD_STATUS_LOADED    0
+#define CLIENT_API_LOAD_STATUS_PARTIAL   1
+#define CLIENT_API_LOAD_STATUS_FAILED    2
 
 // --- Error ---
 // [type, status_code, message_string]

@@ -621,20 +621,21 @@ int client_api_load_request_decode(cbor_item_t* item, client_api_load_request_t*
   msg->ori_string = _decode_string(ori, OFFS_MAX_ORI_STRING_LEN);
   cbor_decref(&ori);
 
-  if (msg->ori_string == NULL) {
+  if (validate_ori_string(msg->ori_string) != 0) {
+    free(msg->ori_string);
+    msg->ori_string = NULL;
     return -1;
   }
 
   /* The 5-element ranged shape mirrors GET_REQUEST: a literal 1 flag in
-     position 2, then the range bounds. has_range is set by shape. */
+     position 2, then the range bounds. has_range is derived from the array
+     shape alone, not from decoding the flag element. */
   if (cbor_array_size(item) >= 5) {
-    cbor_item_t* has_range = cbor_array_get(item, 2);
-    cbor_decref(&has_range);
-
     cbor_item_t* range_start = cbor_array_get(item, 3);
     if (!cbor_isa_uint(range_start)) {
       cbor_decref(&range_start);
       client_api_load_request_destroy(msg);
+      memset(msg, 0, sizeof(*msg));
       return -1;
     }
     msg->range_start = _decode_size(range_start);
@@ -644,6 +645,7 @@ int client_api_load_request_decode(cbor_item_t* item, client_api_load_request_t*
     if (!cbor_isa_uint(range_end)) {
       cbor_decref(&range_end);
       client_api_load_request_destroy(msg);
+      memset(msg, 0, sizeof(*msg));
       return -1;
     }
     msg->range_end = _decode_size(range_end);
@@ -658,6 +660,7 @@ int client_api_load_request_decode(cbor_item_t* item, client_api_load_request_t*
 void client_api_load_request_destroy(client_api_load_request_t* msg) {
   if (msg == NULL) return;
   free(msg->ori_string);
+  msg->ori_string = NULL;
 }
 
 // --- Load Progress ---

@@ -38,7 +38,7 @@ TEST(LoadRequestWire, EncodeDecodeRoundTripNoRange) {
 }
 
 TEST(LoadRequestWire, EncodeDecodeRoundTripWithRange) {
-  client_api_load_request_t req = _make_req("ori-string", 1, 128000, 256000);
+  client_api_load_request_t req = _make_req("https://n/offsystem/v3/standard/10/a/b/f", 1, 128000, 256000);
   cbor_item_t* frame = client_api_load_request_encode(&req);
   ASSERT_NE(frame, nullptr);
 
@@ -130,4 +130,140 @@ TEST(LoadWire, FrameTypesDoNotCollide) {
   EXPECT_EQ(41, CLIENT_API_LOAD_END);
 }
 
+/* Build a LOAD-shaped frame of arbitrary element count with per-slot types. */
+static cbor_item_t* _build_load_frame(uint8_t type_byte, size_t element_count) {
+  cbor_item_t* frame = cbor_new_definite_array(element_count);
+  cbor_item_t* item = cbor_build_uint8(type_byte);
+  (void)cbor_array_push(frame, item);
+  cbor_decref(&item);
+  return frame;
+}
+
+static void _push_string(cbor_item_t* frame, const char* value) {
+  cbor_item_t* item = cbor_build_string(value);
+  (void)cbor_array_push(frame, item);
+  cbor_decref(&item);
+}
+
+static void _push_uint64(cbor_item_t* frame, uint64_t value) {
+  cbor_item_t* item = cbor_build_uint64(value);
+  (void)cbor_array_push(frame, item);
+  cbor_decref(&item);
+}
+
+TEST(LoadRequestWire, DecodeRejectsWrongTypeByte) {
+  /* Well-shaped 5-element frame carrying a non-LOAD type byte (38 is
+     CONFIG_RELOAD_RESPONSE). */
+  cbor_item_t* frame = _build_load_frame(38, 5);
+  _push_string(frame, "http://n/offsystem/v3/standard/10/a/b/f");
+  _push_uint64(frame, 1);
+  _push_uint64(frame, 0);
+  _push_uint64(frame, 0);
+
+  client_api_load_request_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  EXPECT_EQ(-1, client_api_load_request_decode(frame, &decoded));
+  cbor_decref(&frame);
+}
+
+TEST(LoadRequestWire, DecodeRejectsNonArrayInput) {
+  cbor_item_t* not_array = cbor_build_string("not a frame");
+  client_api_load_request_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  EXPECT_EQ(-1, client_api_load_request_decode(not_array, &decoded));
+  cbor_decref(&not_array);
+}
+
+TEST(LoadRequestWire, DecodeRejectsOneElementFrame) {
+  cbor_item_t* frame = _build_load_frame(39, 1);
+  client_api_load_request_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  EXPECT_EQ(-1, client_api_load_request_decode(frame, &decoded));
+  cbor_decref(&frame);
+}
+
+TEST(LoadRequestWire, DecodeRejectsNonStringOri) {
+  cbor_item_t* frame = _build_load_frame(39, 2);
+  _push_uint64(frame, 5); /* ori slot holds a uint, not a string */
+
+  client_api_load_request_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  EXPECT_EQ(-1, client_api_load_request_decode(frame, &decoded));
+  cbor_decref(&frame);
+}
+
+TEST(LoadRequestWire, DecodeRejectsNonStringOriSafeCallerCleanup) {
+  /* SAFE-CALLER pattern: the client treats every decode failure the same way
+     — destroy the struct and move on. With a non-uint range_start the decoder
+     fails after freeing ori_string; destroy must not double-free. */
+  cbor_item_t* frame = _build_load_frame(39, 5);
+  _push_string(frame, "http://n/offsystem/v3/standard/10/a/b/f");
+  _push_uint64(frame, 1);
+  _push_string(frame, "not-a-number"); /* range_start: tstr instead of uint */
+  _push_uint64(frame, 2000);
+
+  client_api_load_request_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  EXPECT_EQ(-1, client_api_load_request_decode(frame, &decoded));
+  client_api_load_request_destroy(&decoded);
+  /* A second destroy is safe: decode leaves the struct zeroed after cleanup. */
+  client_api_load_request_destroy(&decoded);
+  cbor_decref(&frame);
+}
+
+TEST(LoadRequestWire, DecodeRejectsInvalidOriString) {
+  cbor_item_t* frame = _build_load_frame(39, 2);
+  _push_string(frame, "not-an-off-url");
+
+  client_api_load_request_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  EXPECT_EQ(-1, client_api_load_request_decode(frame, &decoded));
+  cbor_decref(&frame);
+}
+
+TEST(LoadRequestWire, DecodeShortFramesTreatAsUnranged) {
+  /* 3- and 4-element LOAD frames are not the ranged shape; decode pins them
+     as unranged requests with has_range == 0. */
+  for (size_t element_count = 3; element_count <= 4; element_count++) {
+    cbor_item_t* frame = _build_load_frame(39, element_count);
+    _push_string(frame, "http://n/offsystem/v3/standard/10/a/b/f");
+    if (element_count >= 3) _push_uint64(frame, 1);
+    if (element_count >= 4) _push_uint64(frame, 1000);
+
+    client_api_load_request_t decoded;
+    memset(&decoded, 0, sizeof(decoded));
+    ASSERT_EQ(0, client_api_load_request_decode(frame, &decoded));
+    EXPECT_EQ(0, decoded.has_range);
+    EXPECT_EQ(0u, decoded.range_start);
+    EXPECT_EQ(0u, decoded.range_end);
+    EXPECT_STREQ("http://n/offsystem/v3/standard/10/a/b/f", decoded.ori_string);
+
+    client_api_load_request_destroy(&decoded);
+    cbor_decref(&frame);
+  }
+}
+
+TEST(LoadProgressWire, DecodeRejectsNonUintCount) {
+  cbor_item_t* frame = _build_load_frame(40, 3);
+  _push_string(frame, "not-a-number"); /* tuples_loaded slot */
+  _push_uint64(frame, 20);
+
+  size_t loaded = 0, total = 0;
+  EXPECT_EQ(-1, client_api_load_progress_decode(frame, &loaded, &total));
+  cbor_decref(&frame);
+}
+
+TEST(LoadEndWire, DecodeRejectsNonUintCount) {
+  cbor_item_t* frame = _build_load_frame(41, 4);
+  _push_uint64(frame, 0);
+  _push_string(frame, "not-a-number"); /* tuples_loaded slot */
+  _push_uint64(frame, 20);
+
+  uint8_t status = 99;
+  size_t loaded = 0, total = 0;
+  EXPECT_EQ(-1, client_api_load_end_decode(frame, &status, &loaded, &total));
+  cbor_decref(&frame);
+}
+
 }  // namespace load_wire_test
+
