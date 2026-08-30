@@ -162,8 +162,21 @@ Request:
     `application/cbor` (404 if neither the OFD cache nor block cache has it).
   - Without `?ofd=raw`, directory URLs resolve `index.html` (if the name ends
     in `.ofd`) or the named path inside the OFD; 404 if unresolvable.
+  - `?load=1` (or bare `?load`) — **cache-load mode**: the daemon pulls the
+    file's tuples into its block cache WITHOUT sending any file data. Any
+    other value (`?load=0`, etc.) is ignored and data is served normally.
 - Optional header `Range: bytes=start-end | start- | -suffix`
-  (single range; multi-range rejected).
+  (single range; multi-range rejected). With `?load=1`, Range selects which
+  tuples are loaded (trimmed to the byte range); 206/416 semantics are the
+  same as a ranged GET.
+- `?load=1` response is `application/x-ndjson`, one JSON object per line:
+  - Progress (one per resolved tuple): `{"tuples_loaded":n,"tuples_total":m}`
+  - Terminal: `{"status":"loaded|partial|failed","tuples_loaded":n,"tuples_total":m}`
+    (`partial` = some tuples skipped; `failed` = none loaded)
+- `?load=1` on a directory ORI (after resolution) →
+  `400` "Load requires a file ORI, not a directory".
+- Known limitation: loads taking longer than ~60 s are truncated by the
+  connection idle/hard timers (tracked as OFFS-190).
 
 Response:
 
@@ -396,6 +409,9 @@ Message types (`client_api_wire.h:13-48`):
 | 36 | CONFIG_SET_RESPONSE | `[36, status: uint, restart_required: uint, message: tstr]` (status 0=staged, 1=rejected) |
 | 37 | CONFIG_RELOAD_REQUEST | `[37]` |
 | 38 | CONFIG_RELOAD_RESPONSE | `[38, status: uint, message: tstr]` (0=restarting, 1=none/error) |
+| 39 | LOAD_REQUEST | `[39, ori_string]` or `[39, ori_string, has_range, range_start, range_end]` — same optional-range shape as GET_REQUEST; pulls the file's blocks into the cache, no data sent back |
+| 40 | LOAD_PROGRESS | `[40, tuples_loaded: uint, tuples_total: uint]` (one per resolved tuple; `total - loaded` includes in-flight and skipped) |
+| 41 | LOAD_END | `[41, status: uint, tuples_loaded: uint, tuples_total: uint]` (status 0=loaded, 1=partial, 2=failed) |
 
 Peer-info payloads (PEER_INFO_RESPONSE/PEER_CONNECT/FRIEND_ADD data) are
 capped at 2 MB (`CLIENT_API_PEER_INFO_MAX_PAYLOAD`, `client_api_wire.c`) —
@@ -426,7 +442,22 @@ Status codes (`client_api_wire.h:51-56`):
 3. `[7, chunk: bstr]` repeated
 4. `[8]` GET_END, or `[11, status, message]` (status 4 = range not satisfiable).
 
-### 3.3 Other socket-only surfaces
+### 3.3 LOAD flow (socket)
+
+1. `[39, ori_string, has_range?, range_start?, range_end?]`
+2. `[40, tuples_loaded, tuples_total]` repeated (one per resolved tuple)
+3. `[41, status, tuples_loaded, tuples_total]`, or `[11, status, message]`
+   (daemon-side rejections — bad ORI, unauthorized — arrive as ERROR frames
+   before the first LOAD_PROGRESS).
+
+Transport note: LOAD is **network-aware on the unix transport** (the unix
+connection has access to the node's network actor, so missing tuples are
+fetched from peers). WS/TCP LOAD is **cache-only** — those connections carry
+no network actor, so only tuples already in the block cache resolve (missing
+tuples are skipped → `partial`). WebTransport has no LOAD (it has no GET
+support either).
+
+### 3.4 Other socket-only surfaces
 
 - Update status (31/32) JSON:
   `{"enabled": bool, "channel": str, "check_interval_hours": n, "state": str|"idle", "current_version": str, "available_version": str|"none"}`
@@ -445,6 +476,7 @@ version, help`. Transport: Unix socket, CBOR frames (§3).
 |---|---|---|---|
 | `offs put <file>` | `--temporary`, `--recycler <url>`, `--tuple-size N`, `--help` | Streaming PUT (§3.1); content type from extension; chunks 63 MiB | progress on stderr (`Putting <file>: n/total bytes (pct)`); success prints ORI |
 | `offs get <ori> [--output <path>]` | `--output` | GET flow (§3.2); detects truncation (no GET_END) | bytes to stdout/file |
+| `offs load <ori>` | — | LOAD flow (§3.3): pull the file's tuples into the daemon cache, no file data | progress on stderr; exit 0 loaded/partial, 1 failed |
 | `offs block put <data>` | `--encoding base58` | BLOCK_PUT | hash |
 | `offs block get <hash>` | hash | BLOCK_GET | raw block bytes |
 | `offs block delete <hash>` | hash | BLOCK_DELETE | "ok" |
@@ -549,6 +581,11 @@ sharing mechanism.
 - Sends `AUTH_REQUEST [12, api_key]` immediately on connect when a key is set.
 - Operations: `put` (buffered, auto-chunks >1 MB), `put_stream_start/data/end`,
   `get` (data/end/error callbacks, range supported on the wire),
+  `load` (`offs_client_load(ori, has_range, range_start, range_end,
+  progress_cb, progress_ctx, end_cb, end_ctx)` — cache-load without file
+  data; progress_cb fires per resolved tuple, end_cb fires exactly once with
+  status `CLIENT_API_LOAD_STATUS_LOADED/PARTIAL/FAILED`; one load
+  outstanding per connection),
   `block_put/get/delete`, `health`, plus `offs_http_get(url)` (blocking HTTP/1.1).
 - Callback model (`offs_client.h:52-61`) — a GUI download manager should
   mirror this event model:
@@ -567,6 +604,11 @@ sharing mechanism.
 - `putStreamStart/putStreamData/putStreamEnd` (CBOR transports only).
 - `get(ori, {onStart, onData, onEnd, onError}, range)` — parses
   `Content-Type`, `Content-Length`, `Content-Range`.
+- `load(ori, {onProgress, onEnd, onError}, range)` — cache-load without file
+  data. On HTTP transports streams the `?load=1` ndjson body; on CBOR
+  transports uses LOAD_PROGRESS/LOAD_END frames (status is the string
+  `"loaded"|"partial"|"failed"` on HTTP, numeric on CBOR —
+  `wire.LOAD_STATUS` map: `loaded: 0, partial: 1, failed: 2`).
 - `delete(offUrl)`.
 - `blockPut(data, encoding)`, `blockGet(hash)`, `blockDelete(hash)`.
 - `health()`, `peerInfo(format)` (format `'cbor'` (default) | `'base58'` |
@@ -628,6 +670,10 @@ Channels: `stable|rc|dev`.
 - [ ] Error surface: 400 bad URL, 404 unresolved, socket statuses 1–5
 - [ ] Known gap: GET of a missing block can hang (no wanted-list expiry — see
       `docs/PRODUCTION_BLOCKERS.md`); the GUI should implement its own timeout/cancel
+- [x] Cache load / pin to node (pre-fetch a file's tuples into the daemon block
+      cache without receiving file data) — implemented across all surfaces:
+      HTTP `GET ...?load=1` (ndjson progress), wire frames 39–41, C
+      `offs_client_load`, JS `load()`, Dart `loadContent`, CLI `offs load`
 
 **Uploads**
 - [ ] File upload with `type`, `file-name`, `stream-length` headers (or wire PUT flow)
