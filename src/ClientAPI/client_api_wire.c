@@ -569,14 +569,17 @@ int client_api_get_end_decode(cbor_item_t* item) {
 }
 
 // --- Load Request ---
-// [type, ori_string] or [type, ori_string, range_start, range_end]
+// [type, ori_string] or [type, ori_string, has_range, range_start, range_end]
 
 cbor_item_t* client_api_load_request_encode(const client_api_load_request_t* msg) {
-  /* 2 elements without a range, 4 with — the same conditional-element
-     convention as GET_REQUEST. */
-  size_t count = msg->has_range ? 4 : 2;
-  cbor_item_t* array = cbor_new_definite_array(count);
+  cbor_item_t* array;
   cbor_item_t* item;
+
+  if (msg->has_range) {
+    array = cbor_new_definite_array(5);
+  } else {
+    array = cbor_new_definite_array(2);
+  }
 
   item = cbor_build_uint8(CLIENT_API_LOAD_REQUEST);
   (void)cbor_array_push(array, item);
@@ -587,6 +590,10 @@ cbor_item_t* client_api_load_request_encode(const client_api_load_request_t* msg
   cbor_decref(&item);
 
   if (msg->has_range) {
+    item = cbor_build_uint8(1);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+
     item = cbor_build_uint64(msg->range_start);
     (void)cbor_array_push(array, item);
     cbor_decref(&item);
@@ -618,10 +625,13 @@ int client_api_load_request_decode(cbor_item_t* item, client_api_load_request_t*
     return -1;
   }
 
-  /* Range elements are only meaningful in the 4-element shape; has_range is
-     set by shape, mirroring how GET_REQUEST treats its optional elements. */
-  if (cbor_array_size(item) >= 4) {
-    cbor_item_t* range_start = cbor_array_get(item, 2);
+  /* The 5-element ranged shape mirrors GET_REQUEST: a literal 1 flag in
+     position 2, then the range bounds. has_range is set by shape. */
+  if (cbor_array_size(item) >= 5) {
+    cbor_item_t* has_range = cbor_array_get(item, 2);
+    cbor_decref(&has_range);
+
+    cbor_item_t* range_start = cbor_array_get(item, 3);
     if (!cbor_isa_uint(range_start)) {
       cbor_decref(&range_start);
       client_api_load_request_destroy(msg);
@@ -630,7 +640,7 @@ int client_api_load_request_decode(cbor_item_t* item, client_api_load_request_t*
     msg->range_start = _decode_size(range_start);
     cbor_decref(&range_start);
 
-    cbor_item_t* range_end = cbor_array_get(item, 3);
+    cbor_item_t* range_end = cbor_array_get(item, 4);
     if (!cbor_isa_uint(range_end)) {
       cbor_decref(&range_end);
       client_api_load_request_destroy(msg);

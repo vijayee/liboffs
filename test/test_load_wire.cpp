@@ -42,6 +42,15 @@ TEST(LoadRequestWire, EncodeDecodeRoundTripWithRange) {
   cbor_item_t* frame = client_api_load_request_encode(&req);
   ASSERT_NE(frame, nullptr);
 
+  /* Ranged shape mirrors GET_REQUEST: [39, ori, 1, start, end] — 5 elements
+     with the literal has_range flag in position 2. */
+  ASSERT_TRUE(cbor_isa_array(frame));
+  EXPECT_EQ(5u, cbor_array_size(frame));
+  cbor_item_t* flag = cbor_array_get(frame, 2);
+  ASSERT_TRUE(cbor_isa_uint(flag));
+  EXPECT_EQ(1u, cbor_get_uint8(flag));
+  cbor_decref(&flag);
+
   client_api_load_request_t decoded;
   memset(&decoded, 0, sizeof(decoded));
   ASSERT_EQ(0, client_api_load_request_decode(frame, &decoded));
@@ -51,6 +60,42 @@ TEST(LoadRequestWire, EncodeDecodeRoundTripWithRange) {
 
   client_api_load_request_destroy(&decoded);
   client_api_load_request_destroy(&req);
+  cbor_decref(&frame);
+}
+
+TEST(LoadRequestWire, DecodeFiveElementFrameSetsHasRangeByShape) {
+  /* Hand-build the same 5-element shape GET_REQUEST produces:
+     [39, ori, 1, start, end]. */
+  cbor_item_t* frame = cbor_new_definite_array(5);
+  cbor_item_t* item = cbor_build_uint8(39);
+  (void)cbor_array_push(frame, item);
+  cbor_decref(&item);
+
+  item = cbor_build_string("http://n/offsystem/v3/standard/10/a/b/f");
+  (void)cbor_array_push(frame, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(1); /* literal has_range flag */
+  (void)cbor_array_push(frame, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(1000);
+  (void)cbor_array_push(frame, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(2000);
+  (void)cbor_array_push(frame, item);
+  cbor_decref(&item);
+
+  client_api_load_request_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  ASSERT_EQ(0, client_api_load_request_decode(frame, &decoded));
+  EXPECT_EQ(1, decoded.has_range);
+  EXPECT_EQ(1000u, decoded.range_start);
+  EXPECT_EQ(2000u, decoded.range_end);
+  EXPECT_STREQ("http://n/offsystem/v3/standard/10/a/b/f", decoded.ori_string);
+
+  client_api_load_request_destroy(&decoded);
   cbor_decref(&frame);
 }
 

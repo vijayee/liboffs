@@ -125,12 +125,13 @@ typedef struct {
 // (no struct needed, encode/decode handle it directly)
 
 // --- Load Request ---
-// [type, ori_string] or [type, ori_string, range_start, range_end] — the
-// optional-range shape mirrors GET_REQUEST: the two range elements are present
-// only when a range is wanted, and has_range on the struct is derived from the
-// array shape on decode. Asks the daemon to pull the file's blocks into its
-// block cache without sending file data; progress arrives as LOAD_PROGRESS
-// frames, terminated by LOAD_END.
+// [type, ori_string] or [type, ori_string, has_range, range_start, range_end] —
+// the same optional-range shape as GET_REQUEST: an unranged request is 2
+// elements, a ranged request carries the literal has_range flag (uint8 1) in
+// position 2 followed by the two range bounds, and has_range on the struct is
+// derived from the array shape on decode. Asks the daemon to pull the file's
+// blocks into its block cache without sending file data; progress arrives as
+// LOAD_PROGRESS frames, terminated by LOAD_END.
 typedef struct {
   char* ori_string;
   uint8_t has_range;    /* 0 → no range elements; 1 → following two present */
