@@ -20,6 +20,7 @@ extern "C" {
 #include "../src/Node/node.h"
 #include "../src/Timer/timer_actor.h"
 #include "../src/Util/rm_rf.h"
+#include "../src/Util/base58.h"
 #include "../src/Platform/platform.h"
 #include "../src/Platform/platform_posix_compat.h"
 #include <string.h>
@@ -681,6 +682,82 @@ TEST_F(TestUnixTransport, LoadPartialSkipsMissingTuples) {
     platform_local_cleanup(partial_path);
 }
 
+/* Directory ORIs are rejected at the unix LOAD handler before any pipeline is
+   built, so the client gets exactly one ERROR frame with BAD_REQUEST and the
+   explicit directory message — and no LOAD_PROGRESS/LOAD_END tail afterward.
+   The ORI uses real base58-encoded hashes so off_url_parse succeeds and the
+   directory check (not the parse fallback "Invalid OFF URL") is what rejects. */
+TEST_F(TestUnixTransport, LoadDirectoryOriRejected) {
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
+
+    uint8_t file_hash_bytes[32];
+    uint8_t descriptor_hash_bytes[32];
+    for (size_t index = 0; index < sizeof(file_hash_bytes); index++) {
+        file_hash_bytes[index] = (uint8_t)(index + 1);
+        descriptor_hash_bytes[index] = (uint8_t)(0xA0 + index);
+    }
+    char file_hash_b58[64];
+    char descriptor_hash_b58[64];
+    ASSERT_GT(base58_encode(file_hash_bytes, sizeof(file_hash_bytes),
+                            file_hash_b58, sizeof(file_hash_b58)), 0);
+    ASSERT_GT(base58_encode(descriptor_hash_bytes, sizeof(descriptor_hash_bytes),
+                            descriptor_hash_b58, sizeof(descriptor_hash_b58)), 0);
+
+    char directory_ori[512];
+    snprintf(directory_ori, sizeof(directory_ori),
+             "http://localhost:23402/offsystem/v3/offsystem/directory/%zu/%s/%s/dir_test.bin",
+             (size_t)4096, file_hash_b58, descriptor_hash_b58);
+
+    client_api_load_request_t load_req;
+    memset(&load_req, 0, sizeof(load_req));
+    load_req.ori_string = directory_ori;
+    load_req.has_range = 0;
+
+    cbor_item_t* frame = client_api_load_request_encode(&load_req);
+    ASSERT_NE(frame, nullptr);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
+
+    /* Nonblocking so the drain loop below is bounded by timeouts. */
+    platform_socket_set_nonblocking(sock);
+
+    stream_framer_t* framer = stream_framer_create();
+    cbor_item_t* response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+
+    uint8_t type = client_api_wire_get_type(response);
+    EXPECT_EQ(type, CLIENT_API_ERROR);
+    if (type == CLIENT_API_ERROR) {
+        client_api_error_t err;
+        memset(&err, 0, sizeof(err));
+        int decode_result = client_api_error_decode(response, &err);
+        EXPECT_EQ(decode_result, 0);
+        if (decode_result == 0) {
+            EXPECT_EQ(err.status_code, CLIENT_API_STATUS_BAD_REQUEST);
+            ASSERT_NE(err.message, nullptr);
+            EXPECT_STREQ(err.message, "Load requires a file ORI, not a directory");
+            client_api_error_destroy(&err);
+        }
+    }
+    cbor_decref(&response);
+
+    /* Rejection fires before any pipeline exists: no load frames follow. */
+    for (int index = 0; index < 4; index++) {
+        cbor_item_t* extra = _recv_frame(sock, framer, 300);
+        if (extra != nullptr) {
+            uint8_t extra_type = client_api_wire_get_type(extra);
+            EXPECT_NE(extra_type, CLIENT_API_LOAD_PROGRESS)
+                << "directory ORI must not enter the load pipeline";
+            EXPECT_NE(extra_type, CLIENT_API_LOAD_END)
+                << "directory ORI must not reach the load pipeline";
+            cbor_decref(&extra);
+        }
+    }
+
+    stream_framer_destroy(framer);
+    platform_socket_destroy(sock);
+}
+
 TEST_F(TestUnixTransport, MaxConnections) {
     char limited_path[128];
     _make_socket_path(limited_path, sizeof(limited_path), "limited");
@@ -807,6 +884,50 @@ static void _assert_peer_frame_unauthorized(platform_socket_t* sock, cbor_item_t
     stream_framer_destroy(framer);
 }
 
+/* Same gate as peer frames: the reply must be exactly one ERROR frame with
+ * the auth-required message, and no follow-up frames may arrive. */
+static void _assert_load_frame_unauthorized(platform_socket_t* sock, cbor_item_t* frame) {
+    ASSERT_NE(frame, nullptr);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
+
+    stream_framer_t* framer = stream_framer_create();
+    cbor_item_t* response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+
+    uint8_t type = client_api_wire_get_type(response);
+    EXPECT_EQ(type, CLIENT_API_ERROR);
+    if (type == CLIENT_API_ERROR) {
+        client_api_error_t err;
+        memset(&err, 0, sizeof(err));
+        int decode_result = client_api_error_decode(response, &err);
+        EXPECT_EQ(decode_result, 0);
+        if (decode_result == 0) {
+            EXPECT_EQ(err.status_code, CLIENT_API_STATUS_UNAUTHORIZED);
+            ASSERT_NE(err.message, nullptr);
+            EXPECT_STREQ(err.message, "Authentication required");
+            client_api_error_destroy(&err);
+        }
+    }
+    cbor_decref(&response);
+
+    /* Nonblocking so the drain loop below is bounded by the recv timeout
+       (the error reply has already been consumed above). */
+    platform_socket_set_nonblocking(sock);
+
+    /* The handler rejected the frame before building any pipeline: no load
+       frames ever follow the error. */
+    for (int index = 0; index < 4; index++) {
+        cbor_item_t* extra = _recv_frame(sock, framer, 300);
+        if (extra != nullptr) {
+            uint8_t extra_type = client_api_wire_get_type(extra);
+            EXPECT_NE(extra_type, CLIENT_API_LOAD_PROGRESS);
+            EXPECT_NE(extra_type, CLIENT_API_LOAD_END);
+            cbor_decref(&extra);
+        }
+    }
+    stream_framer_destroy(framer);
+}
+
 class TestUnixTransportPeerRouting : public testing::Test {
 protected:
     scheduler_pool_t* pool;
@@ -893,6 +1014,23 @@ TEST_F(TestUnixTransportPeerRouting, FriendListRequestRoutedToHandler) {
     platform_socket_t* sock = _connect_with_retry(socket_path);
     ASSERT_NE(sock, (platform_socket_t*)NULL);
     _assert_peer_frame_unauthorized(sock, client_api_friend_list_request_encode());
+    platform_socket_destroy(sock);
+}
+
+/* An unauthenticated LOAD_REQUEST is rejected at the handler's auth gate
+ * (same posture as peer/friend frames) before any ORI parsing. */
+TEST_F(TestUnixTransportPeerRouting, LoadRequestUnauthorized) {
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
+
+    client_api_load_request_t load_req;
+    memset(&load_req, 0, sizeof(load_req));
+    load_req.ori_string = (char*)"http://localhost:23402/offsystem/v3/"
+                                 "application/octet-stream/1/z/z/file.bin";
+    load_req.has_range = 0;
+    cbor_item_t* frame = client_api_load_request_encode(&load_req);
+    ASSERT_NE(frame, nullptr);
+    _assert_load_frame_unauthorized(sock, frame);
     platform_socket_destroy(sock);
 }
 
