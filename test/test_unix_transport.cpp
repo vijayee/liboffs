@@ -566,20 +566,35 @@ TEST_F(TestUnixTransport, LoadPartialSkipsMissingTuples) {
     off_url_t* url = off_url_parse(ori_string);
     ASSERT_NE(url, nullptr);
     ASSERT_NE(url->descriptor_hash, nullptr);
-    index_entry_vec_t* entries = index_to_array(bc->index);
-    ASSERT_NE(entries, nullptr);
-    buffer_t* victim_hash = NULL;
-    for (int index = 0; index < entries->length; index++) {
-        index_entry_t* entry = entries->data[index];
-        if (buffer_compare(entry->hash, url->descriptor_hash) != 0) {
-            victim_hash = entry->hash;
-            break;
+    /* The PUT response is emitted when the descriptor closes, but the store
+     * actor's payload-block index inserts can still be in flight on the
+     * pool: drain it and rescan the index (bounded retries) until a
+     * non-descriptor entry shows up. */
+    buffer_t* victim_copy = NULL;
+    for (int attempt = 0; attempt < 50 && victim_copy == NULL; attempt++) {
+        scheduler_pool_wait_for_idle(pool);
+        index_entry_vec_t* entries = index_to_array(bc->index);
+        ASSERT_NE(entries, nullptr);
+        buffer_t* victim_hash = NULL;
+        for (int index = 0; index < entries->length; index++) {
+            index_entry_t* entry = entries->data[index];
+            if (buffer_compare(entry->hash, url->descriptor_hash) != 0) {
+                victim_hash = entry->hash;
+                break;
+            }
         }
+        if (victim_hash != NULL) {
+            /* Copy the victim hash before the removal releases the entry's
+             * storage. */
+            victim_copy = buffer_copy(victim_hash);
+            ASSERT_NE(victim_copy, nullptr);
+        } else {
+            platform_sleep_ms(20);
+        }
+        vec_deinit(entries);
+        free(entries);
     }
-    ASSERT_NE(victim_hash, nullptr) << "no data block found in the cache index";
-    /* Copy the victim hash before the removal releases the entry's storage. */
-    buffer_t* victim_copy = buffer_copy(victim_hash);
-    ASSERT_NE(victim_copy, nullptr);
+    ASSERT_NE(victim_copy, nullptr) << "no data block found in the cache index";
     block_cache_remove(bc, victim_copy, NULL);
     off_url_destroy(url);
     scheduler_pool_wait_for_idle(pool);
@@ -699,10 +714,17 @@ TEST_F(TestUnixTransport, LoadDirectoryOriRejected) {
     }
     char file_hash_b58[64];
     char descriptor_hash_b58[64];
-    ASSERT_GT(base58_encode(file_hash_bytes, sizeof(file_hash_bytes),
-                            file_hash_b58, sizeof(file_hash_b58)), 0);
-    ASSERT_GT(base58_encode(descriptor_hash_bytes, sizeof(descriptor_hash_bytes),
-                            descriptor_hash_b58, sizeof(descriptor_hash_b58)), 0);
+    /* base58_encode does not null-terminate; the caller owns the terminator. */
+    int file_hash_len = base58_encode(file_hash_bytes, sizeof(file_hash_bytes),
+                                      file_hash_b58, sizeof(file_hash_b58));
+    ASSERT_GT(file_hash_len, 0);
+    file_hash_b58[file_hash_len] = '\0';
+    int descriptor_hash_len = base58_encode(descriptor_hash_bytes,
+                                            sizeof(descriptor_hash_bytes),
+                                            descriptor_hash_b58,
+                                            sizeof(descriptor_hash_b58));
+    ASSERT_GT(descriptor_hash_len, 0);
+    descriptor_hash_b58[descriptor_hash_len] = '\0';
 
     char directory_ori[512];
     snprintf(directory_ori, sizeof(directory_ori),

@@ -353,6 +353,7 @@ TEST_F(TestOffRoutesLoad, LoadStreamsNdjsonTerminalLoaded) {
     ASSERT_NE(disabled_body, nullptr);
     EXPECT_STREQ(disabled_body + 4, body);
 
+    platform_socket_destroy(sock);
     free(url);
 }
 
@@ -391,6 +392,8 @@ TEST_F(TestOffRoutesLoad, LoadPartialSkipsMissingTuples) {
     ASSERT_NE(victim_hash, nullptr) << "no data block found in the cache index";
     buffer_t* victim_copy = buffer_copy(victim_hash);
     ASSERT_NE(victim_copy, nullptr);
+    vec_deinit(entries);
+    free(entries);
     block_cache_remove(bc, victim_copy, NULL);
     off_url_destroy(parsed);
     scheduler_pool_wait_for_idle(pool);
