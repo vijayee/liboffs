@@ -26,7 +26,11 @@ static void _send_headers(http_response_t* response) {
   }
   response->headers_sent = 1;
 
-  if (http_headers_get(&response->headers, "Content-Length") == NULL) {
+  /* The body length of an unknown-length response only settles when the
+     response ends — emit close-delimited framing instead of stamping a
+     Content-Length from the bytes written so far. */
+  if (!response->unknown_length &&
+      http_headers_get(&response->headers, "Content-Length") == NULL) {
     char content_length_str[32];
     snprintf(content_length_str, sizeof(content_length_str), "%zu", response->body_length);
     http_headers_set(&response->headers, "Content-Length", content_length_str);

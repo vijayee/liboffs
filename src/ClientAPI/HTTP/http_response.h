@@ -19,6 +19,12 @@ typedef struct http_response_t {
   uint8_t headers_sent;
   uint8_t is_piped;
   uint8_t keep_alive;
+  /* 1 = the body length is not known until the response ends (e.g. the load
+     ndjson surface). _send_headers must NOT stamp a Content-Length from the
+     accumulated body_length; the response is close-delimited, and the caller
+     forces keep_alive = 0 before the first write so it terminates the
+     connection at http_response_end. */
+  uint8_t unknown_length;
   size_t body_length;
   http_connection_t* connection;
 } http_response_t;

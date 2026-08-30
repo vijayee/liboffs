@@ -7,6 +7,7 @@
 #endif
 #include "off_routes.h"
 #include "http_response.h"
+#include "../client_api_wire.h"
 #include "http_request.h"
 #include "http_connection.h"
 #include "http_server.h"
@@ -255,6 +256,288 @@ static void _setup_stream_pipeline(http_response_t* response, scheduler_pool_t* 
     readable_descriptor_push(desc);
 }
 
+/* ---- ?load=1 cache-load pipeline ---- */
+
+/* True when the request's query string carries the given parameter, either
+   bare ("?load") or with a value ("?load=1"). Parameters are '&'-separated,
+   so a file NAME that happens to contain "load" can never match (names live
+   in the path, not the query string). */
+static int _query_has_param(const char* query_string, const char* name) {
+    if (query_string == NULL) return 0;
+    size_t name_len = strlen(name);
+    const char* cursor = query_string;
+    while (*cursor != '\0') {
+        const char* separator = strchr(cursor, '&');
+        size_t token_len = separator != NULL ? (size_t)(separator - cursor) : strlen(cursor);
+        if ((token_len == name_len ||
+             (token_len > name_len && cursor[name_len] == '=')) &&
+            strncmp(cursor, name, name_len) == 0) {
+            return 1;
+        }
+        if (separator == NULL) break;
+        cursor = separator + 1;
+    }
+    return 0;
+}
+
+/* Pipeline context for GET ...?load=1: pulls a file's blocks into the block
+ * cache without serving file data, forwarding tuple-level progress as ndjson
+ * lines and terminating with exactly one terminal line. Refcount discipline
+ * mirrors get_pipeline_t; the terminal state machine mirrors the unix
+ * _unix_load_pipeline_t. */
+typedef struct {
+    refcounter_t refcounter;
+    http_response_t* response;
+    readable_off_stream_t* rs;
+    readable_descriptor_t* desc;
+    ori_t* ori;
+    size_t tuples_total;   /* ceil(final_byte / block_size) - offset tuples */
+    size_t tuples_loaded;  /* maintained from load_tuple_event payloads */
+    size_t tuples_skipped; /* maintained from load_tuple_event payloads */
+    uint8_t failed;           /* an error_event fired on desc or rs */
+    uint8_t terminal_written; /* guards the single terminal line */
+    /* desc_done ensures desc contributes exactly one pipeline deref,
+       whether close or error fires first (stream_deactivate emits both). */
+    uint8_t desc_done;
+} off_load_pipeline_t;
+
+static void _load_pipeline_free(off_load_pipeline_t* pipeline) {
+    DESTROY(pipeline->ori, ori);
+    free(pipeline);
+}
+
+/* The single ndjson terminal line and the end of the response. The
+   connection lifetime mirrors http_response_pipe's _pipe_on_close: the load
+   setup took one reference each on the response and connection, released
+   here once the response is ended (keep_alive is 0, so end() closes the
+   socket — the body is close-delimited). */
+static void _load_pipeline_terminal(off_load_pipeline_t* pipeline) {
+    if (pipeline->terminal_written) {
+        return;
+    }
+    pipeline->terminal_written = 1;
+    uint8_t status = CLIENT_API_LOAD_STATUS_LOADED;
+    if (pipeline->failed) {
+        status = CLIENT_API_LOAD_STATUS_FAILED;
+    } else if (pipeline->tuples_total > 0 && pipeline->tuples_loaded == 0) {
+        status = CLIENT_API_LOAD_STATUS_FAILED;
+    } else if (pipeline->tuples_skipped > 0) {
+        status = CLIENT_API_LOAD_STATUS_PARTIAL;
+    }
+    char line[128];
+    int line_len = snprintf(line, sizeof(line),
+                            "{\"status\":\"%s\",\"tuples_loaded\":%zu,\"tuples_total\":%zu}\n",
+                            status == CLIENT_API_LOAD_STATUS_FAILED ? "failed" :
+                            status == CLIENT_API_LOAD_STATUS_PARTIAL ? "partial" : "loaded",
+                            pipeline->tuples_loaded, pipeline->tuples_total);
+    http_response_t* response = pipeline->response;
+    http_connection_t* connection = response->connection;
+    if (connection == NULL) {
+        return;  /* Client vanished mid-stream; response already torn down. */
+    }
+    http_response_write(response, line, (size_t)line_len);
+    http_response_end(response);
+    response->connection = NULL;
+    http_response_destroy(response);
+    http_connection_destroy(connection);
+}
+
+/* The load_tuple_event payload is CONSUME-transferred: the notify machinery
+ * holds the reference and destroys it after dispatch. Copy the counters,
+ * never destroy or dereference the payload here. */
+static void _load_pipeline_on_tuple_loaded(void* ctx, void* data) {
+    off_load_pipeline_t* pipeline = (off_load_pipeline_t*)ctx;
+    load_tuple_payload_t* progress = (load_tuple_payload_t*)data;
+    if (progress != NULL) {
+        pipeline->tuples_loaded = progress->tuples_loaded;
+        pipeline->tuples_skipped = progress->tuples_skipped;
+    }
+    char line[64];
+    int line_len = snprintf(line, sizeof(line),
+                            "{\"tuples_loaded\":%zu,\"tuples_total\":%zu}\n",
+                            pipeline->tuples_loaded, pipeline->tuples_total);
+    /* The terminal tears the response down (exactly once) — never touch it
+       past that point. */
+    if (!pipeline->terminal_written && pipeline->response->connection != NULL) {
+        http_response_write(pipeline->response, line, (size_t)line_len);
+    }
+
+    /* Pipeline-driven completion: a skipped tuple never renders and never
+       advances sent_bytes, so the render path cannot close the stream once
+       the tally completes. close_event — not this tally — is the single
+       terminal trigger; request_close is idempotent, so the all-loaded path
+       (already closed by render) is unaffected. */
+    if (pipeline->tuples_loaded + pipeline->tuples_skipped >= pipeline->tuples_total) {
+        readable_off_stream_request_close(pipeline->rs);
+    }
+}
+
+static void _load_pipeline_on_tuple(void* ctx, void* data) {
+    off_load_pipeline_t* pipeline = (off_load_pipeline_t*)ctx;
+    tuple_t* tuple = (tuple_t*)data;
+    readable_off_stream_write(pipeline->rs, tuple);
+}
+
+static void _load_pipeline_on_rs_close(void* ctx, void* unused) {
+    (void)unused;
+    off_load_pipeline_t* pipeline = (off_load_pipeline_t*)ctx;
+    readable_off_stream_t* rs = pipeline->rs;
+    /* Tally-before-close ordering (Task 2) guarantees the tuple counters
+       were updated before this terminal line is written. */
+    _load_pipeline_terminal(pipeline);
+    int is_zero = refcounter_dereference_is_zero((refcounter_t*)pipeline);
+    stream_deferred_deref((stream_t*)rs);
+    if (is_zero) {
+        _load_pipeline_free(pipeline);
+    }
+}
+
+static void _load_pipeline_on_rs_error(void* ctx, void* error) {
+    (void)error;
+    off_load_pipeline_t* pipeline = (off_load_pipeline_t*)ctx;
+    pipeline->failed = 1;
+    /* Deactivating queues rs close_event right after this error; that close
+       writes the single terminal line and tears down the response. Only
+       deactivate when the error did not already come from one —
+       stream_deactivate re-notifies error_event UNCONDITIONALLY, so an
+       unguarded re-deactivate here would loop forever. */
+    if (!pipeline->rs->stream.is_deactivated) {
+        stream_deactivate((stream_t*)pipeline->rs, NULL);
+    }
+}
+
+static void _load_pipeline_on_desc_close(void* ctx, void* unused) {
+    (void)unused;
+    off_load_pipeline_t* pipeline = (off_load_pipeline_t*)ctx;
+    readable_descriptor_t* desc = pipeline->desc;
+    int is_zero = 0;
+    if (!pipeline->desc_done) {
+        pipeline->desc_done = 1;
+        is_zero = refcounter_dereference_is_zero((refcounter_t*)pipeline);
+    }
+    /* desc close while the final tuple is still in flight must NOT end the
+       response — only the rs close_event does that. */
+    stream_deferred_deref((stream_t*)desc);
+    if (is_zero) {
+        _load_pipeline_free(pipeline);
+    }
+}
+
+static void _load_pipeline_on_desc_error(void* ctx, void* error) {
+    (void)error;
+    off_load_pipeline_t* pipeline = (off_load_pipeline_t*)ctx;
+    pipeline->failed = 1;
+    /* Mark failed and end the load via the rs close path (exactly one
+       terminal); DESC_ERROR implies DESC_CLOSE right after. No desc
+       re-deactivate here — the error already fired FROM a deactivated
+       descriptor, and re-deactivating would re-queue error_event. */
+    if (!pipeline->rs->stream.is_deactivated) {
+        stream_deactivate((stream_t*)pipeline->rs, NULL);
+    }
+    int is_zero = 0;
+    if (!pipeline->desc_done) {
+        pipeline->desc_done = 1;
+        is_zero = refcounter_dereference_is_zero((refcounter_t*)pipeline);
+    }
+    if (is_zero) {
+        _load_pipeline_free(pipeline);
+    }
+}
+
+static void _setup_load_pipeline(http_response_t* response, scheduler_pool_t* pool,
+                                 block_cache_t* bc, tuple_cache_t* tc, ori_t* stream_ori,
+                                 size_t descriptor_pad, network_t* network) {
+    readable_off_stream_t* rs = readable_off_stream_create_ex(pool, bc, tc, stream_ori,
+                                                              descriptor_pad, network, 1);
+    readable_descriptor_t* desc = readable_descriptor_create(pool, bc, stream_ori,
+                                                             descriptor_pad, network);
+
+    off_load_pipeline_t* pipeline = get_clear_memory(sizeof(off_load_pipeline_t));
+    pipeline->desc = desc;
+    pipeline->rs = rs;
+    pipeline->response = response;
+    pipeline->ori = stream_ori;
+    size_t block_size = off_block_size_for_type(stream_ori->block_type);
+    pipeline->tuples_total = (stream_ori->final_byte / block_size) +
+                             ((stream_ori->final_byte % block_size) > 0 ? 1 : 0) -
+                             (stream_ori->file_offset / block_size);
+    /* Two derefs total: one for rs-done (close), one for desc-done (close or
+       error, whichever fires first — guarded by desc_done). */
+    refcounter_init((refcounter_t*)pipeline);
+    refcounter_reference((refcounter_t*)pipeline);
+
+    stream_subscribe((stream_t*)rs, load_tuple_event, pipeline,
+                     (void (*)(void*, void*))_load_pipeline_on_tuple_loaded, NULL);
+    stream_once((stream_t*)rs, close_event, pipeline,
+                (void (*)(void*, void*))_load_pipeline_on_rs_close, NULL);
+    stream_subscribe((stream_t*)rs, error_event, pipeline,
+                     (void (*)(void*, void*))_load_pipeline_on_rs_error, NULL);
+    stream_once((stream_t*)desc, close_event, pipeline,
+                (void (*)(void*, void*))_load_pipeline_on_desc_close, NULL);
+    stream_once((stream_t*)desc, error_event, pipeline,
+                (void (*)(void*, void*))_load_pipeline_on_desc_error, NULL);
+    /* The descriptor feeds tuples into the off_stream; in load mode the
+       stream tallies/skips them instead of rendering file data. */
+    stream_subscribe((stream_t*)desc, data_event, pipeline,
+                     (void (*)(void*, void*))_load_pipeline_on_tuple, NULL);
+
+    /* Unknown-length streaming body: no Content-Length is possible (the
+       terminal status and line count settle only at the end), so the
+       response is close-delimited and the connection is closed at the
+       terminal. Hold the response/connection for the duration, exactly like
+       http_response_pipe does. */
+    response->unknown_length = 1;
+    response->keep_alive = 0;
+    response->is_piped = 1;
+    response->connection->piped_pending = 1;
+    refcounter_reference((refcounter_t*)response);
+    refcounter_reference((refcounter_t*)response->connection);
+
+    readable_descriptor_push(desc);
+}
+
+/* GET ...?load=1 — pull the file's blocks into the block cache and stream
+   tuple-level progress as application/x-ndjson. Same ORI construction as
+   the GET data path, minus content-length framing. */
+static void _off_load_stream(http_request_t* request, http_response_t* response,
+                             off_routes_context_t* ctx, off_url_t* url) {
+    size_t file_size = url->stream_length;
+    const char* range_header = http_request_header(request, "Range");
+    range_request_t range = parse_range_header(range_header, file_size);
+
+    http_response_set_status(response, HTTP_STATUS_OK);
+    http_response_set_header(response, "Content-Type", "application/x-ndjson");
+    http_response_set_header(response, "Cache-Control", "no-store");
+
+    if (range_header != NULL && !range.valid) {
+        http_response_set_status(response, HTTP_STATUS_RANGE_NOT_SATISFIABLE);
+        char cr_str[64];
+        snprintf(cr_str, sizeof(cr_str), "bytes */%zu", file_size);
+        http_response_set_header(response, "Content-Range", cr_str);
+        http_response_end(response);
+        return;
+    }
+
+    ori_t* stream_ori = ori_create(file_size);
+    stream_ori->descriptor_hash = buffer_copy(url->descriptor_hash);
+    stream_ori->file_hash = buffer_copy(url->file_hash);
+    stream_ori->file_name = strdup(url->file_name);
+    stream_ori->block_type = standard;
+    stream_ori->tuple_size = 3;
+
+    if (range.valid) {
+        http_response_set_status(response, HTTP_STATUS_PARTIAL_CONTENT);
+        char cr_str[128];
+        snprintf(cr_str, sizeof(cr_str), "bytes %zu-%zu/%zu",
+                 range.start, range.end, file_size);
+        http_response_set_header(response, "Content-Range", cr_str);
+        stream_ori->file_offset = range.start;
+        stream_ori->final_byte = range.end + 1;
+    }
+
+    _setup_load_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32, ctx->network);
+}
+
 /* ---- Async GET handler state ---- */
 
 typedef enum {
@@ -343,6 +626,25 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
     if (!url) {
         http_response_set_status(response, 400);
         http_response_end(response);
+        return;
+    }
+
+    /* ?load=1 (or bare ?load) — cache-load flow: pull the file's blocks into
+       the block cache without serving file data; progress streams as ndjson.
+       Checked BEFORE the directory branch: v1 rejects directory ORIs with a
+       clear 400 (parity with the socket LOAD handler). */
+    if (_query_has_param(request->query_string, "load")) {
+        if (url->content_type != NULL &&
+            strstr(url->content_type, "offsystem/directory") != NULL) {
+            http_response_set_status(response, 400);
+            http_response_write(response, "Load requires a file ORI, not a directory",
+                                strlen("Load requires a file ORI, not a directory"));
+            http_response_end(response);
+            off_url_destroy(url);
+            return;
+        }
+        _off_load_stream(request, response, ctx, url);
+        off_url_destroy(url);
         return;
     }
 
