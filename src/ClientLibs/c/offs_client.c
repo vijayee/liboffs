@@ -14,6 +14,8 @@
 #include "offs_client.h"
 #include "../../ClientAPI/client_api_wire.h"
 #include "../../Network/stream_framer.h"
+#include "../../Network/node_id.h"
+#include "../../Util/base58.h"
 #include "../../Buffer/buffer.h"
 #include "../../Util/allocator.h"
 #include "../../Util/log.h"
@@ -172,6 +174,10 @@ struct offs_client_t {
   void* load_progress_cb_ctx;
   offs_load_end_cb_t load_end_cb;
   void* load_end_cb_ctx;
+  offs_peer_list_cb_t peer_list_cb;
+  void* peer_list_cb_ctx;
+  offs_friend_list_cb_t friend_list_cb;
+  void* friend_list_cb_ctx;
 };
 
 /* Forward declaration — needed for MsQuic callbacks that call _handle_frame */
@@ -526,6 +532,10 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
   void* load_progress_cb_ctx = client->load_progress_cb_ctx;
   offs_load_end_cb_t load_end_cb = client->load_end_cb;
   void* load_end_cb_ctx = client->load_end_cb_ctx;
+  offs_peer_list_cb_t peer_list_cb = client->peer_list_cb;
+  void* peer_list_cb_ctx = client->peer_list_cb_ctx;
+  offs_friend_list_cb_t friend_list_cb = client->friend_list_cb;
+  void* friend_list_cb_ctx = client->friend_list_cb_ctx;
   platform_mutex_unlock(client->lock);
 
   switch (type) {
@@ -652,6 +662,117 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
         if (load_end_cb != NULL) {
           load_end_cb(load_end_cb_ctx, status, loaded, total);
         }
+      }
+      break;
+    }
+    case CLIENT_API_PEER_LIST_RESPONSE: {
+      client_api_peer_list_response_t msg;
+      memset(&msg, 0, sizeof(msg));
+      if (client_api_peer_list_response_decode(frame, &msg) == 0) {
+        if (cbor_isa_array(msg.peers)) {
+          size_t array_size = cbor_array_size(msg.peers);
+          /* Flattened snapshot handed to the callback; freed here after the
+             callback returns (the caller does not own it). */
+          offs_peer_list_entry_t* entries =
+              get_clear_memory(array_size * sizeof(offs_peer_list_entry_t));
+          if (array_size == 0 || entries != NULL) {
+            size_t entry_count = 0;
+            for (size_t index = 0; index < array_size; index++) {
+              cbor_item_t* map_item = cbor_array_get(msg.peers, index);
+              if (cbor_isa_map(map_item)) {
+                offs_peer_list_entry_t* entry = &entries[entry_count];
+                size_t map_size = cbor_map_size(map_item);
+                struct cbor_pair* pairs = cbor_map_handle(map_item);
+                for (size_t pair_index = 0; pair_index < map_size; pair_index++) {
+                  cbor_item_t* key = pairs[pair_index].key;
+                  cbor_item_t* val = pairs[pair_index].value;
+                  if (!cbor_isa_uint(key)) continue;
+                  switch (cbor_get_uint8(key)) {
+                    case CLIENT_API_PEER_LIST_KEY_NODE_ID: {
+                      if (cbor_isa_bytestring(val)) {
+                        const uint8_t* node_id = cbor_bytestring_handle(val);
+                        size_t node_id_len = cbor_bytestring_length(val);
+                        if (base58_encode(node_id, node_id_len, entry->node_id,
+                                          sizeof(entry->node_id)) < 0) {
+                          entry->node_id[0] = '\0';
+                        }
+                      }
+                      break;
+                    }
+                    case CLIENT_API_PEER_LIST_KEY_CONNECTED:
+                      if (cbor_isa_uint(val)) {
+                        entry->connected = cbor_get_uint8(val) ? 1 : 0;
+                      }
+                      break;
+                    case CLIENT_API_PEER_LIST_KEY_IS_FRIEND:
+                      if (cbor_isa_uint(val)) {
+                        entry->is_friend = cbor_get_uint8(val) ? 1 : 0;
+                      }
+                      break;
+                    case CLIENT_API_PEER_LIST_KEY_RTT_MS:
+                      if (cbor_is_float(val)) {
+                        entry->rtt_ms = cbor_float_get_float(val);
+                      }
+                      break;
+                    default:
+                      break;
+                  }
+                }
+                entry_count++;
+              }
+              cbor_decref(&map_item);
+            }
+            if (peer_list_cb != NULL) {
+              peer_list_cb(peer_list_cb_ctx, CLIENT_API_STATUS_OK, entries,
+                           entry_count);
+            }
+          }
+          free(entries);
+        }
+        client_api_peer_list_response_destroy(&msg);
+      }
+      break;
+    }
+    case CLIENT_API_FRIEND_LIST_RESPONSE: {
+      client_api_friend_list_response_t msg;
+      memset(&msg, 0, sizeof(msg));
+      if (client_api_friend_list_response_decode(frame, &msg) == 0) {
+        if (cbor_isa_array(msg.friends)) {
+          size_t array_size = cbor_array_size(msg.friends);
+          /* Snapshot handed to the callback; freed here after the callback
+             returns (the caller does not own it). */
+          char** friend_ids = get_clear_memory(array_size * sizeof(char*));
+          if (array_size == 0 || friend_ids != NULL) {
+            size_t count = 0;
+            for (size_t index = 0; index < array_size; index++) {
+              cbor_item_t* bstr_item = cbor_array_get(msg.friends, index);
+              if (cbor_isa_bytestring(bstr_item)) {
+                const uint8_t* blob = cbor_bytestring_handle(bstr_item);
+                size_t blob_len = cbor_bytestring_length(bstr_item);
+                /* Each entry is a serialized CBOR peer_info blob; deliver it
+                   base58-encoded as a NUL-terminated string. */
+                size_t b58_size = base58_encoded_length(blob_len) + 1;
+                char* b58 = get_memory(b58_size);
+                if (b58 != NULL &&
+                    base58_encode(blob, blob_len, b58, b58_size) >= 0) {
+                  friend_ids[count++] = b58;
+                } else {
+                  free(b58);
+                }
+              }
+              cbor_decref(&bstr_item);
+            }
+            if (friend_list_cb != NULL) {
+              friend_list_cb(friend_list_cb_ctx, CLIENT_API_STATUS_OK,
+                             (const char* const*)friend_ids, count);
+            }
+            for (size_t index = 0; index < count; index++) {
+              free(friend_ids[index]);
+            }
+          }
+          free(friend_ids);
+        }
+        client_api_friend_list_response_destroy(&msg);
       }
       break;
     }
@@ -1992,6 +2113,80 @@ int offs_client_friend_add(offs_client_t* client, uint8_t format,
 int offs_client_friend_add_qr(offs_client_t* client, const uint8_t* ppm, size_t ppm_len,
                               offs_peer_connect_cb_t callback, void* ctx) {
   return offs_client_friend_add(client, 2, ppm, ppm_len, callback, ctx);
+}
+
+int offs_client_peer_list(offs_client_t* client,
+                          offs_peer_list_cb_t callback, void* ctx) {
+  if (client == NULL || !client->connected) return -1;
+
+  platform_mutex_lock(client->lock);
+  client->peer_list_cb = callback;
+  client->peer_list_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
+  cbor_item_t* frame = client_api_peer_list_request_encode();
+  _send_frame(client, frame);
+  return 0;
+}
+
+int offs_client_friend_list(offs_client_t* client,
+                            offs_friend_list_cb_t callback, void* ctx) {
+  if (client == NULL || !client->connected) return -1;
+
+  platform_mutex_lock(client->lock);
+  client->friend_list_cb = callback;
+  client->friend_list_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
+  cbor_item_t* frame = client_api_friend_list_request_encode();
+  _send_frame(client, frame);
+  return 0;
+}
+
+int offs_client_friend_remove(offs_client_t* client, const char* node_id_b58,
+                              offs_peer_connect_cb_t callback, void* ctx) {
+  if (client == NULL || !client->connected || node_id_b58 == NULL ||
+      node_id_b58[0] == '\0') return -1;
+
+  /* Decode the base58 id to the 32-byte hash the wire carries (mirrors
+     node_id_from_string's strict full-length check). */
+  size_t str_len = strlen(node_id_b58);
+  if (str_len >= NODE_ID_STRING_SIZE) return -1;
+
+  uint8_t node_id_hash[NODE_ID_HASH_SIZE];
+  size_t bytes_written = 0;
+  if (base58_decode(node_id_b58, node_id_hash, NODE_ID_HASH_SIZE,
+                    &bytes_written) != 0 ||
+      bytes_written != NODE_ID_HASH_SIZE) {
+    return -1;
+  }
+
+  client_api_friend_remove_t msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.node_id = node_id_hash;
+  msg.node_id_len = NODE_ID_HASH_SIZE;
+
+  cbor_item_t* frame = client_api_friend_remove_encode(&msg);
+  if (frame == NULL) return -1;  /* cbor allocation failure */
+
+  platform_mutex_lock(client->lock);
+  client->peer_connect_cb = callback;
+  client->peer_connect_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
+  _send_frame(client, frame);
+  return 0;
+}
+
+int offs_client_set_error_cb(offs_client_t* client,
+                             offs_error_cb_t callback, void* ctx) {
+  if (client == NULL) return -1;
+
+  platform_mutex_lock(client->lock);
+  client->error_cb = callback;
+  client->error_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+  return 0;
 }
 
 int offs_client_load(offs_client_t* client, const char* ori_string,

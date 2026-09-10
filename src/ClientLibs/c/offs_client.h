@@ -64,6 +64,22 @@ typedef void (*offs_peer_connect_cb_t)(void* ctx, uint8_t status);
 typedef void (*offs_load_progress_cb_t)(void* ctx, size_t tuples_loaded, size_t tuples_total);
 typedef void (*offs_load_end_cb_t)(void* ctx, uint8_t status, size_t tuples_loaded, size_t tuples_total);
 
+/* Flattened peer list entry — mirrors the daemon's keyed peer map
+   (peer_handlers.c: node_id bstr, connected, is_friend, rtt_ms). */
+typedef struct {
+  char node_id[48];  /* base58 of the 32-byte node id */
+  uint8_t connected;
+  uint8_t is_friend;
+  double rtt_ms;
+} offs_peer_list_entry_t;
+
+typedef void (*offs_peer_list_cb_t)(void* ctx, uint8_t status,
+    const offs_peer_list_entry_t* entries, size_t entry_count);
+
+/* Friend list: each entry is a CBOR peer_info blob, base58-encoded. */
+typedef void (*offs_friend_list_cb_t)(void* ctx, uint8_t status,
+    const char* const* friend_ids_b58, size_t count);
+
 /* Connection lifecycle */
 offs_client_t* offs_client_connect(const char* transport_url, const char* api_key);
 offs_client_t* offs_client_connect_ex(const char* transport_url, const char* api_key,
@@ -152,6 +168,26 @@ int offs_client_friend_add(offs_client_t* client, uint8_t format,
                            offs_peer_connect_cb_t callback, void* ctx);
 int offs_client_friend_add_qr(offs_client_t* client, const uint8_t* ppm, size_t ppm_len,
                               offs_peer_connect_cb_t callback, void* ctx);
+
+/* List all peers known to the daemon's connection manager. Entries are
+   delivered as one array snapshot; the entries array is owned by the client
+   library and is only valid for the duration of the callback. */
+int offs_client_peer_list(offs_client_t* client, offs_peer_list_cb_t cb, void* ctx);
+
+/* List friends. Each string is the base58 encoding of the friend's serialized
+   CBOR peer_info blob (feed it to peer_info_from_base58 to decode); the array
+   of pointers is owned by the client library and is only valid for the
+   duration of the callback. */
+int offs_client_friend_list(offs_client_t* client, offs_friend_list_cb_t cb, void* ctx);
+
+/* Remove a friend by its base58 node id. Replies PEER_CONNECT_RESULT, so
+   offs_peer_connect_cb_t is reused. */
+int offs_client_friend_remove(offs_client_t* client, const char* node_id_b58,
+                              offs_peer_connect_cb_t cb, void* ctx);
+
+/* Register the shared ERROR-frame callback without sending a GET.
+   Peer/friend/load daemon-side rejections arrive here. */
+int offs_client_set_error_cb(offs_client_t* client, offs_error_cb_t cb, void* ctx);
 
 /* Load a file's blocks into the daemon's block cache without receiving file
    data. has_range + range_start/range_end limit which portion of the ORI is

@@ -299,6 +299,13 @@ typedef struct {
 
 // --- Peer List Response ---
 // [type, peers: cbor_array]
+// Each entry is a keyed map: node_id (bstr), connected (uint),
+// is_friend (uint), rtt_ms (float).
+#define CLIENT_API_PEER_LIST_KEY_NODE_ID    1
+#define CLIENT_API_PEER_LIST_KEY_CONNECTED  2
+#define CLIENT_API_PEER_LIST_KEY_IS_FRIEND  3
+#define CLIENT_API_PEER_LIST_KEY_RTT_MS     4
+
 typedef struct {
   cbor_item_t* peers;  // owned by struct, freed by _destroy
 } client_api_peer_list_response_t;

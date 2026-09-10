@@ -11,11 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* CBOR map keys for peer list entries */
-#define PEER_LIST_KEY_NODE_ID    1
-#define PEER_LIST_KEY_CONNECTED  2
-#define PEER_LIST_KEY_IS_FRIEND  3
-#define PEER_LIST_KEY_RTT_MS     4
+/* Peer-list entry map keys live in client_api_wire.h
+   (CLIENT_API_PEER_LIST_KEY_*); shared with the C client binding. */
 
 int peer_info_from_payload(uint8_t format, const uint8_t* data,
                            size_t data_size, peer_info_t* info) {
@@ -247,28 +244,28 @@ void peer_handle_list_request(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     cbor_item_t* peer_map = cbor_new_definite_map(4);
 
     /* node_id (bstr) */
-    cbor_item_t* key = cbor_build_uint8(PEER_LIST_KEY_NODE_ID);
+    cbor_item_t* key = cbor_build_uint8(CLIENT_API_PEER_LIST_KEY_NODE_ID);
     cbor_item_t* val = cbor_build_bytestring(peer->remote_node_id.hash, NODE_ID_HASH_SIZE);
     (void)cbor_map_add(peer_map, (struct cbor_pair){.key = key, .value = val});
     cbor_decref(&key);
     cbor_decref(&val);
 
     /* connected (uint) */
-    key = cbor_build_uint8(PEER_LIST_KEY_CONNECTED);
+    key = cbor_build_uint8(CLIENT_API_PEER_LIST_KEY_CONNECTED);
     val = cbor_build_uint8(peer->connected ? 1 : 0);
     (void)cbor_map_add(peer_map, (struct cbor_pair){.key = key, .value = val});
     cbor_decref(&key);
     cbor_decref(&val);
 
     /* is_friend (uint) */
-    key = cbor_build_uint8(PEER_LIST_KEY_IS_FRIEND);
+    key = cbor_build_uint8(CLIENT_API_PEER_LIST_KEY_IS_FRIEND);
     val = cbor_build_uint8(peer->is_friend ? 1 : 0);
     (void)cbor_map_add(peer_map, (struct cbor_pair){.key = key, .value = val});
     cbor_decref(&key);
     cbor_decref(&val);
 
     /* rtt_ms (float) */
-    key = cbor_build_uint8(PEER_LIST_KEY_RTT_MS);
+    key = cbor_build_uint8(CLIENT_API_PEER_LIST_KEY_RTT_MS);
     val = cbor_build_float8(peer->rtt_ewma);
     (void)cbor_map_add(peer_map, (struct cbor_pair){.key = key, .value = val});
     cbor_decref(&key);
