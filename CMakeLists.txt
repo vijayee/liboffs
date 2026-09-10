@@ -3,6 +3,18 @@ project(offs LANGUAGES C CXX VERSION 0.1.0)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
+# Optional build surface (all default ON, so a plain configure is unchanged).
+# Embedding projects (e.g. a Flutter desktop app linking only the offs static
+# library) set these to OFF to skip every test executable, tool, and example
+# target. These must be declared here — before the standalone test executables
+# defined below (test_offs_ofd_resolver, test_peer_info) and before the guarded
+# add_subdirectory(tools|test|examples) calls further down — otherwise the
+# guards would see undefined variables and silently skip targets even in
+# default builds.
+option(OFFS_BUILD_TESTS "Build liboffs test binaries" ON)
+option(OFFS_BUILD_TOOLS "Build offs-ca / offs-release-sign tools" ON)
+option(OFFS_BUILD_EXAMPLES "Build examples (off_client/off_server)" ON)
+
 # msquic QUIC is a required submodule dependency (pinned in .gitmodules as
 # deps/msquic). The project depends on it for QUIC / relay / WebTransport /
 # NAT-detection and peer-to-peer networking, so the build fails entirely if
@@ -273,6 +285,7 @@ target_link_libraries(offs PRIVATE bcrypt_os)
 # offs_http_get both live in offs.lib on every platform (offs_client.c now
 # builds on Windows via the platform_socket/Winsock2 shim), so the test links
 # them from offs.lib — no per-target source or stub needed.
+if(OFFS_BUILD_TESTS)
 add_executable(test_offs_ofd_resolver
   src/ClientLibs/c/test_offs_ofd_resolver.c
 )
@@ -299,6 +312,7 @@ target_link_libraries(test_peer_info PUBLIC cbor)
 target_include_directories(test_peer_info PRIVATE ${C_INC})
 target_include_directories(test_peer_info PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_include_directories(test_peer_info PUBLIC ${LIBCBOR_BUILD_PATH}/include)
+endif()
 
 # msquic QUIC library — required submodule dependency. Built unconditionally
 # when deps/msquic is present; a missing submodule is a loud, actionable
@@ -446,12 +460,20 @@ else()
   message(FATAL_ERROR "deps/quirc submodule missing. Run: git submodule update --init --recursive")
 endif()
 
+# Platform and Relay are hard requirements of the offs library itself — they
+# are added unconditionally, even when every optional target below is off.
 add_subdirectory(src/Platform)
 add_subdirectory(src/Network/Relay)
-add_subdirectory(tools/offs-ca)
-add_subdirectory(tools/offs-release-sign)
-add_subdirectory(test)
-add_subdirectory(examples)
+if(OFFS_BUILD_TOOLS)
+  add_subdirectory(tools/offs-ca)
+  add_subdirectory(tools/offs-release-sign)
+endif()
+if(OFFS_BUILD_TESTS)
+  add_subdirectory(test)
+endif()
+if(OFFS_BUILD_EXAMPLES)
+  add_subdirectory(examples)
+endif()
 
 # ---------------------------------------------------------------------------
 # Install / packaging
