@@ -80,6 +80,17 @@ typedef void (*offs_peer_list_cb_t)(void* ctx, uint8_t status,
 typedef void (*offs_friend_list_cb_t)(void* ctx, uint8_t status,
     const char* const* friend_ids_b58, size_t count);
 
+/* Config set/reload result. status: 0 = accepted, nonzero = rejected
+   (daemon-defined). restart_required is 1 when the staged config needs a
+   node restart to apply (config_set only; always 0 for config_reload). */
+typedef void (*offs_config_set_cb_t)(void* ctx, uint8_t status,
+    uint8_t restart_required, const char* message);
+
+/* Generic JSON-string response callback (config show, update status).
+   json is a NUL-terminated UTF-8 JSON document, owned by the library and
+   only valid for the duration of the callback. */
+typedef void (*offs_json_cb_t)(void* ctx, uint8_t status, const char* json);
+
 /* Connection lifecycle */
 offs_client_t* offs_client_connect(const char* transport_url, const char* api_key);
 offs_client_t* offs_client_connect_ex(const char* transport_url, const char* api_key,
@@ -188,6 +199,28 @@ int offs_client_friend_remove(offs_client_t* client, const char* node_id_b58,
 /* Register the shared ERROR-frame callback without sending a GET.
    Peer/friend/load daemon-side rejections arrive here. */
 int offs_client_set_error_cb(offs_client_t* client, offs_error_cb_t cb, void* ctx);
+
+/* Config operations. config_show replies with the full current config as a
+   JSON document; config_set stages a field update (value is always sent as a
+   string — the
+   daemon parses it to the field's type); config_reload applies the pending
+   config by restarting the node. For config_reload, restart_required is
+   always delivered as 0 (the frame carries no such field).
+   Error delivery: daemon-side rejections (unauthorized, etc.) arrive as
+   ERROR frames dispatched to the error callback registered via
+   offs_client_get()'s callbacks — if no error callback is registered,
+   failures are silent. Success results arrive on the per-operation callback.
+   Concurrency: config_set and config_reload SHARE the config_set callback
+   slot — issuing one before the previous result arrives delivers the first
+   result to the second callback. */
+int offs_client_config_show(offs_client_t* client, offs_json_cb_t cb, void* ctx);
+int offs_client_config_set(offs_client_t* client, const char* field, const char* value,
+                           offs_config_set_cb_t cb, void* ctx);
+int offs_client_config_reload(offs_client_t* client, offs_config_set_cb_t cb, void* ctx);
+
+/* Ask the daemon for its update status as a JSON document. Error delivery
+   and concurrency follow the config operations above (its own slot). */
+int offs_client_update_status(offs_client_t* client, offs_json_cb_t cb, void* ctx);
 
 /* Load a file's blocks into the daemon's block cache without receiving file
    data. has_range + range_start/range_end limit which portion of the ORI is

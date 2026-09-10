@@ -178,6 +178,14 @@ struct offs_client_t {
   void* peer_list_cb_ctx;
   offs_friend_list_cb_t friend_list_cb;
   void* friend_list_cb_ctx;
+  offs_json_cb_t config_show_cb;
+  void* config_show_cb_ctx;
+  /* Shared by config_set and config_reload (serialized use by the caller;
+     see the peer operations' concurrency note in offs_client.h). */
+  offs_config_set_cb_t config_set_cb;
+  void* config_set_cb_ctx;
+  offs_json_cb_t update_status_cb;
+  void* update_status_cb_ctx;
 };
 
 /* Forward declaration — needed for MsQuic callbacks that call _handle_frame */
@@ -536,6 +544,12 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
   void* peer_list_cb_ctx = client->peer_list_cb_ctx;
   offs_friend_list_cb_t friend_list_cb = client->friend_list_cb;
   void* friend_list_cb_ctx = client->friend_list_cb_ctx;
+  offs_json_cb_t config_show_cb = client->config_show_cb;
+  void* config_show_cb_ctx = client->config_show_cb_ctx;
+  offs_config_set_cb_t config_set_cb = client->config_set_cb;
+  void* config_set_cb_ctx = client->config_set_cb_ctx;
+  offs_json_cb_t update_status_cb = client->update_status_cb;
+  void* update_status_cb_ctx = client->update_status_cb_ctx;
   platform_mutex_unlock(client->lock);
 
   switch (type) {
@@ -781,6 +795,50 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
           free(friend_ids);
         }
         client_api_friend_list_response_destroy(&msg);
+      }
+      break;
+    }
+    case CLIENT_API_CONFIG_SHOW_RESPONSE: {
+      client_api_config_show_response_t msg;
+      memset(&msg, 0, sizeof(msg));
+      if (client_api_config_show_response_decode(frame, &msg) == 0) {
+        if (config_show_cb != NULL) {
+          config_show_cb(config_show_cb_ctx, CLIENT_API_STATUS_OK, msg.json_data);
+        }
+        client_api_config_show_response_destroy(&msg);
+      }
+      break;
+    }
+    case CLIENT_API_CONFIG_SET_RESPONSE: {
+      client_api_config_set_response_t msg;
+      memset(&msg, 0, sizeof(msg));
+      if (client_api_config_set_response_decode(frame, &msg) == 0) {
+        if (config_set_cb != NULL) {
+          config_set_cb(config_set_cb_ctx, msg.status, msg.restart_required, msg.message);
+        }
+        client_api_config_set_response_destroy(&msg);
+      }
+      break;
+    }
+    case CLIENT_API_CONFIG_RELOAD_RESPONSE: {
+      client_api_config_reload_response_t msg;
+      memset(&msg, 0, sizeof(msg));
+      if (client_api_config_reload_response_decode(frame, &msg) == 0) {
+        if (config_set_cb != NULL) {
+          config_set_cb(config_set_cb_ctx, msg.status, 0, msg.message);
+        }
+        client_api_config_reload_response_destroy(&msg);
+      }
+      break;
+    }
+    case CLIENT_API_UPDATE_STATUS_RESPONSE: {
+      client_api_update_status_response_t msg;
+      memset(&msg, 0, sizeof(msg));
+      if (client_api_update_status_response_decode(frame, &msg) == 0) {
+        if (update_status_cb != NULL) {
+          update_status_cb(update_status_cb_ctx, CLIENT_API_STATUS_OK, msg.json_data);
+        }
+        client_api_update_status_response_destroy(&msg);
       }
       break;
     }
@@ -2182,6 +2240,72 @@ int offs_client_friend_remove(offs_client_t* client, const char* node_id_b58,
   client->peer_connect_cb_ctx = ctx;
   platform_mutex_unlock(client->lock);
 
+  _send_frame(client, frame);
+  return 0;
+}
+
+int offs_client_config_show(offs_client_t* client,
+                            offs_json_cb_t cb, void* ctx) {
+  if (client == NULL || !client->connected) return -1;
+
+  platform_mutex_lock(client->lock);
+  client->config_show_cb = cb;
+  client->config_show_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
+  cbor_item_t* frame = client_api_config_show_request_encode();
+  _send_frame(client, frame);
+  return 0;
+}
+
+int offs_client_config_set(offs_client_t* client, const char* field, const char* value,
+                           offs_config_set_cb_t cb, void* ctx) {
+  if (client == NULL || !client->connected || field == NULL ||
+      value == NULL) return -1;
+
+  client_api_config_set_request_t msg;
+  memset(&msg, 0, sizeof(msg));
+  /* The wire struct's string fields are non-const, but the encoder only
+     reads them (it copies into the frame); cast const away as the CLI does. */
+  msg.field = (char*)field;
+  msg.value = (char*)value;
+
+  cbor_item_t* frame = client_api_config_set_request_encode(&msg);
+  if (frame == NULL) return -1;  /* cbor allocation failure */
+
+  platform_mutex_lock(client->lock);
+  client->config_set_cb = cb;
+  client->config_set_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
+  _send_frame(client, frame);
+  return 0;
+}
+
+int offs_client_config_reload(offs_client_t* client,
+                              offs_config_set_cb_t cb, void* ctx) {
+  if (client == NULL || !client->connected) return -1;
+
+  platform_mutex_lock(client->lock);
+  client->config_set_cb = cb;
+  client->config_set_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
+  cbor_item_t* frame = client_api_config_reload_request_encode();
+  _send_frame(client, frame);
+  return 0;
+}
+
+int offs_client_update_status(offs_client_t* client,
+                              offs_json_cb_t cb, void* ctx) {
+  if (client == NULL || !client->connected) return -1;
+
+  platform_mutex_lock(client->lock);
+  client->update_status_cb = cb;
+  client->update_status_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
+  cbor_item_t* frame = client_api_update_status_request_encode();
   _send_frame(client, frame);
   return 0;
 }
