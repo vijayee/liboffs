@@ -1903,6 +1903,9 @@ int offs_client_put_ex(offs_client_t* client,
                        offs_put_response_cb_t callback,
                        void* ctx) {
   if (client == NULL || !client->connected || options == NULL) return -1;
+  /* The daemon only enforces the upper bound (max_tuple_size); reject
+     tuple_size < 2 locally. */
+  if (options->has_tuple_size != 0 && options->tuple_size < 2) return -1;
 
   /* If the data fits comfortably under the frame cap (with CBOR envelope
      headroom), send it as a single buffered frame — the original fast path. */
@@ -1945,6 +1948,9 @@ int offs_client_put_ex(offs_client_t* client,
 int offs_client_put_stream_start_ex(offs_client_t* client,
                                      const offs_put_options_t* options) {
   if (client == NULL || !client->connected || options == NULL) return -1;
+  /* The daemon only enforces the upper bound (max_tuple_size); reject
+     tuple_size < 2 locally. */
+  if (options->has_tuple_size != 0 && options->tuple_size < 2) return -1;
 
   client_api_put_request_t msg;
   _fill_put_request(&msg, options, NULL, 0);

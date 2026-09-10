@@ -43,8 +43,8 @@ typedef struct {
   const char** recycler_urls;
   size_t recycler_count;
   uint8_t temporary;
-  uint8_t has_tuple_size;  /* 0 = omit (daemon default), 1 = send tuple_size */
-  uint8_t tuple_size;      /* 2..daemon max_tuple_size */
+  uint8_t has_tuple_size;  /* nonzero = send tuple_size, 0 = omit (daemon default) */
+  uint8_t tuple_size;      /* accepted range: 2..daemon max_tuple_size; values < 2 are rejected client-side */
 } offs_put_options_t;
 
 /* Opaque client handle */
