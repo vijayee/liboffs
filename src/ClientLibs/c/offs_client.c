@@ -2248,12 +2248,14 @@ int offs_client_config_show(offs_client_t* client,
                             offs_json_cb_t cb, void* ctx) {
   if (client == NULL || !client->connected) return -1;
 
+  cbor_item_t* frame = client_api_config_show_request_encode();
+  if (frame == NULL) return -1;  /* cbor allocation failure */
+
   platform_mutex_lock(client->lock);
   client->config_show_cb = cb;
   client->config_show_cb_ctx = ctx;
   platform_mutex_unlock(client->lock);
 
-  cbor_item_t* frame = client_api_config_show_request_encode();
   _send_frame(client, frame);
   return 0;
 }
@@ -2286,12 +2288,14 @@ int offs_client_config_reload(offs_client_t* client,
                               offs_config_set_cb_t cb, void* ctx) {
   if (client == NULL || !client->connected) return -1;
 
+  cbor_item_t* frame = client_api_config_reload_request_encode();
+  if (frame == NULL) return -1;  /* cbor allocation failure */
+
   platform_mutex_lock(client->lock);
   client->config_set_cb = cb;
   client->config_set_cb_ctx = ctx;
   platform_mutex_unlock(client->lock);
 
-  cbor_item_t* frame = client_api_config_reload_request_encode();
   _send_frame(client, frame);
   return 0;
 }
@@ -2300,12 +2304,14 @@ int offs_client_update_status(offs_client_t* client,
                               offs_json_cb_t cb, void* ctx) {
   if (client == NULL || !client->connected) return -1;
 
+  cbor_item_t* frame = client_api_update_status_request_encode();
+  if (frame == NULL) return -1;  /* cbor allocation failure */
+
   platform_mutex_lock(client->lock);
   client->update_status_cb = cb;
   client->update_status_cb_ctx = ctx;
   platform_mutex_unlock(client->lock);
 
-  cbor_item_t* frame = client_api_update_status_request_encode();
   _send_frame(client, frame);
   return 0;
 }

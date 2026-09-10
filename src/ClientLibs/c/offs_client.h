@@ -210,6 +210,13 @@ int offs_client_set_error_cb(offs_client_t* client, offs_error_cb_t cb, void* ct
    ERROR frames dispatched to the error callback registered via
    offs_client_get()'s callbacks — if no error callback is registered,
    failures are silent. Success results arrive on the per-operation callback.
+   For config_set and config_reload, field-level rejections (bad field name,
+   unparseable value, etc.) are NOT ERROR frames: the daemon replies with a
+   result frame whose status is nonzero, delivered on the per-operation
+   callback with the daemon's message.
+   config_reload restarts the node and closes the connection; after a
+   successful reload the client must reconnect (offs_client_disconnect +
+   offs_client_connect) before issuing further requests.
    Concurrency: config_set and config_reload SHARE the config_set callback
    slot — issuing one before the previous result arrives delivers the first
    result to the second callback. */
