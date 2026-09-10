@@ -692,9 +692,13 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
                       if (cbor_isa_bytestring(val)) {
                         const uint8_t* node_id = cbor_bytestring_handle(val);
                         size_t node_id_len = cbor_bytestring_length(val);
-                        if (base58_encode(node_id, node_id_len, entry->node_id,
-                                          sizeof(entry->node_id)) < 0) {
+                        int encoded_len = base58_encode(
+                            node_id, node_id_len, entry->node_id,
+                            sizeof(entry->node_id));
+                        if (encoded_len < 0) {
                           entry->node_id[0] = '\0';
+                        } else {
+                          entry->node_id[encoded_len] = '\0';
                         }
                       }
                       break;
@@ -753,12 +757,16 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
                    base58-encoded as a NUL-terminated string. */
                 size_t b58_size = base58_encoded_length(blob_len) + 1;
                 char* b58 = get_memory(b58_size);
-                if (b58 != NULL &&
-                    base58_encode(blob, blob_len, b58, b58_size) >= 0) {
-                  friend_ids[count++] = b58;
-                } else {
+                int b58_len =
+                    b58 == NULL
+                        ? -1
+                        : base58_encode(blob, blob_len, b58, b58_size);
+                if (b58_len < 0) {
                   free(b58);
+                  continue;
                 }
+                b58[b58_len] = '\0';
+                friend_ids[count++] = b58;
               }
               cbor_decref(&bstr_item);
             }
