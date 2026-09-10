@@ -694,7 +694,7 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
                         size_t node_id_len = cbor_bytestring_length(val);
                         int encoded_len = base58_encode(
                             node_id, node_id_len, entry->node_id,
-                            sizeof(entry->node_id));
+                            sizeof(entry->node_id) - 1);
                         if (encoded_len < 0) {
                           entry->node_id[0] = '\0';
                         } else {
