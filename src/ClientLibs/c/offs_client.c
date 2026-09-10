@@ -1892,6 +1892,8 @@ static void _fill_put_request(client_api_put_request_t* msg, const offs_put_opti
   msg->recycler_urls = (char**)options->recycler_urls;
   msg->recycler_count = options->recycler_count;
   msg->temporary = options->temporary;
+  msg->tuple_size = (size_t)options->tuple_size;
+  msg->has_tuple_size = options->has_tuple_size;
 }
 
 int offs_client_put_ex(offs_client_t* client,
