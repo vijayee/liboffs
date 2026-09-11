@@ -3,6 +3,7 @@
  */
 
 #include "topology_report.h"
+#include "../Util/allocator.h"
 #include "../Util/log.h"
 #include "../Platform/platform_posix_compat.h"
 #include <stdlib.h>
