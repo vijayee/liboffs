@@ -89,6 +89,15 @@ static uint32_t _retry_delay_ms(const offs_client_config_t* config, uint32_t att
   return delay + offset - jitter_range;
 }
 
+/* Mutex-protected singly-linked list of payloads that were handed to a user
+ * callback and are waiting for the consumer to release them (see
+ * offs_client_release_payload). The recv thread appends under client->lock;
+ * the consumer unlinks+frees under the same lock. */
+struct held_payload {
+  void* ptr;
+  struct held_payload* next;
+};
+
 struct offs_client_t {
   offs_transport_type_e transport_type;
   volatile uint8_t connected;
@@ -148,6 +157,10 @@ struct offs_client_t {
 
   /* Auth */
   char* api_key;
+
+  /* Payloads passed to callbacks, held until the consumer releases them
+     (see the payload-ownership docs in offs_client.h). */
+  struct held_payload* held_payloads;
 
   /* Callbacks */
   offs_put_response_cb_t put_cb;
@@ -513,6 +526,43 @@ static void _send_auth_request(offs_client_t* client) {
   _send_frame(client, frame);
 }
 
+/* Records a payload that was passed to a user callback so the consumer can
+ * release it later via offs_client_release_payload. Called AFTER the callback
+ * returns, from _handle_frame (recv thread). NULL is a no-op. If the node
+ * allocation fails the payload is freed instead so it never leaks; the
+ * consumer's later release of that unknown pointer is a no-op. */
+static void _hold_payload(offs_client_t* client, void* ptr) {
+  struct held_payload* node;
+  if (ptr == NULL) return;
+  node = get_clear_memory(sizeof(*node));
+  if (node == NULL) {
+    free(ptr);
+    return;
+  }
+  node->ptr = ptr;
+  platform_mutex_lock(client->lock);
+  node->next = client->held_payloads;
+  client->held_payloads = node;
+  platform_mutex_unlock(client->lock);
+}
+
+/* Frees and discards every currently held payload. Used by disconnect (so
+ * unreleased payloads do not outlive the transport) and by destroy (final
+ * sweep). */
+static void _release_all_payloads(offs_client_t* client) {
+  struct held_payload* node;
+  platform_mutex_lock(client->lock);
+  node = client->held_payloads;
+  client->held_payloads = NULL;
+  platform_mutex_unlock(client->lock);
+  while (node != NULL) {
+    struct held_payload* next = node->next;
+    free(node->ptr);
+    free(node);
+    node = next;
+  }
+}
+
 static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* frame) {
   /* Snapshot callbacks under lock to avoid data race with public API setters */
   platform_mutex_lock(client->lock);
@@ -558,7 +608,10 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       memset(&msg, 0, sizeof(msg));
       if (client_api_put_response_decode(frame, &msg) == 0) {
         if (put_cb != NULL) {
-          put_cb(put_cb_ctx, msg.ori_string);
+          void* payload = msg.ori_string;
+          msg.ori_string = NULL;
+          put_cb(put_cb_ctx, (const char*)payload);
+          _hold_payload(client, payload);
         }
         client_api_put_response_destroy(&msg);
       }
@@ -572,7 +625,10 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       memset(&msg, 0, sizeof(msg));
       if (client_api_get_data_decode(frame, &msg) == 0) {
         if (get_data_cb != NULL) {
-          get_data_cb(get_data_cb_ctx, msg.data, msg.data_size);
+          void* payload = msg.data;
+          msg.data = NULL;
+          get_data_cb(get_data_cb_ctx, (const uint8_t*)payload, msg.data_size);
+          _hold_payload(client, payload);
         }
         free(msg.data);
       }
@@ -589,7 +645,10 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       memset(&msg, 0, sizeof(msg));
       if (client_api_error_decode(frame, &msg) == 0) {
         if (error_cb != NULL) {
-          error_cb(error_cb_ctx, msg.status_code, msg.message);
+          void* payload = msg.message;
+          msg.message = NULL;
+          error_cb(error_cb_ctx, msg.status_code, (const char*)payload);
+          _hold_payload(client, payload);
         }
         client_api_error_destroy(&msg);
       }
@@ -600,7 +659,11 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       memset(&msg, 0, sizeof(msg));
       if (client_api_block_put_response_decode(frame, &msg) == 0) {
         if (block_put_cb != NULL) {
-          block_put_cb(block_put_cb_ctx, msg.status, msg.hash_data, msg.hash_len, msg.hash_is_text);
+          void* payload = msg.hash_data;
+          msg.hash_data = NULL;
+          block_put_cb(block_put_cb_ctx, msg.status, (const uint8_t*)payload,
+                       msg.hash_len, msg.hash_is_text);
+          _hold_payload(client, payload);
         }
         client_api_block_put_response_destroy(&msg);
       }
@@ -611,7 +674,11 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       memset(&msg, 0, sizeof(msg));
       if (client_api_block_get_response_decode(frame, &msg) == 0) {
         if (block_get_cb != NULL) {
-          block_get_cb(block_get_cb_ctx, msg.status, msg.data, msg.data_size);
+          void* payload = msg.data;
+          msg.data = NULL;
+          block_get_cb(block_get_cb_ctx, msg.status, (const uint8_t*)payload,
+                       msg.data_size);
+          _hold_payload(client, payload);
         }
         client_api_block_get_response_destroy(&msg);
       }
@@ -633,7 +700,10 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       memset(&msg, 0, sizeof(msg));
       if (client_api_health_response_decode(frame, &msg) == 0) {
         if (health_cb != NULL) {
-          health_cb(health_cb_ctx, msg.json_data);
+          void* payload = msg.json_data;
+          msg.json_data = NULL;
+          health_cb(health_cb_ctx, (const char*)payload);
+          _hold_payload(client, payload);
         }
         client_api_health_response_destroy(&msg);
       }
@@ -644,7 +714,11 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       memset(&msg, 0, sizeof(msg));
       if (client_api_peer_info_response_decode(frame, &msg) == 0) {
         if (peer_info_cb != NULL) {
-          peer_info_cb(peer_info_cb_ctx, msg.format, msg.data, msg.data_size);
+          void* payload = msg.data;
+          msg.data = NULL;
+          peer_info_cb(peer_info_cb_ctx, msg.format, (const uint8_t*)payload,
+                       msg.data_size);
+          _hold_payload(client, payload);
         }
         client_api_peer_info_response_destroy(&msg);
       }
@@ -685,8 +759,9 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       if (client_api_peer_list_response_decode(frame, &msg) == 0) {
         if (cbor_isa_array(msg.peers)) {
           size_t array_size = cbor_array_size(msg.peers);
-          /* Flattened snapshot handed to the callback; freed here after the
-             callback returns (the caller does not own it). */
+          /* Flattened snapshot handed to the callback; held after the
+             callback returns so the consumer can release it via
+             offs_client_release_payload. */
           offs_peer_list_entry_t* entries =
               get_clear_memory(array_size * sizeof(offs_peer_list_entry_t));
           if (array_size == 0 || entries != NULL) {
@@ -743,9 +818,13 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
             if (peer_list_cb != NULL) {
               peer_list_cb(peer_list_cb_ctx, CLIENT_API_STATUS_OK, entries,
                            entry_count);
+              /* The flattened array stays alive for the consumer to release
+                 via offs_client_release_payload. */
+              _hold_payload(client, entries);
+            } else {
+              free(entries);
             }
           }
-          free(entries);
         }
         client_api_peer_list_response_destroy(&msg);
       }
@@ -757,8 +836,9 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       if (client_api_friend_list_response_decode(frame, &msg) == 0) {
         if (cbor_isa_array(msg.friends)) {
           size_t array_size = cbor_array_size(msg.friends);
-          /* Snapshot handed to the callback; freed here after the callback
-             returns (the caller does not own it). */
+          /* Snapshot handed to the callback; held after the callback returns
+             so the consumer can release each string and the array via
+             offs_client_release_payload. */
           char** friend_ids = get_clear_memory(array_size * sizeof(char*));
           if (array_size == 0 || friend_ids != NULL) {
             size_t count = 0;
@@ -787,12 +867,19 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
             if (friend_list_cb != NULL) {
               friend_list_cb(friend_list_cb_ctx, CLIENT_API_STATUS_OK,
                              (const char* const*)friend_ids, count);
-            }
-            for (size_t index = 0; index < count; index++) {
-              free(friend_ids[index]);
+              /* The string array AND each string stay alive for the consumer
+                 to release (count + 1 offs_client_release_payload calls). */
+              for (size_t index = 0; index < count; index++) {
+                _hold_payload(client, friend_ids[index]);
+              }
+              _hold_payload(client, friend_ids);
+            } else {
+              for (size_t index = 0; index < count; index++) {
+                free(friend_ids[index]);
+              }
+              free(friend_ids);
             }
           }
-          free(friend_ids);
         }
         client_api_friend_list_response_destroy(&msg);
       }
@@ -803,7 +890,11 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       memset(&msg, 0, sizeof(msg));
       if (client_api_config_show_response_decode(frame, &msg) == 0) {
         if (config_show_cb != NULL) {
-          config_show_cb(config_show_cb_ctx, CLIENT_API_STATUS_OK, msg.json_data);
+          void* payload = msg.json_data;
+          msg.json_data = NULL;
+          config_show_cb(config_show_cb_ctx, CLIENT_API_STATUS_OK,
+                         (const char*)payload);
+          _hold_payload(client, payload);
         }
         client_api_config_show_response_destroy(&msg);
       }
@@ -814,7 +905,11 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       memset(&msg, 0, sizeof(msg));
       if (client_api_config_set_response_decode(frame, &msg) == 0) {
         if (config_set_cb != NULL) {
-          config_set_cb(config_set_cb_ctx, msg.status, msg.restart_required, msg.message);
+          void* payload = msg.message;
+          msg.message = NULL;
+          config_set_cb(config_set_cb_ctx, msg.status, msg.restart_required,
+                        (const char*)payload);
+          _hold_payload(client, payload);
         }
         client_api_config_set_response_destroy(&msg);
       }
@@ -825,7 +920,10 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       memset(&msg, 0, sizeof(msg));
       if (client_api_config_reload_response_decode(frame, &msg) == 0) {
         if (config_set_cb != NULL) {
-          config_set_cb(config_set_cb_ctx, msg.status, 0, msg.message);
+          void* payload = msg.message;
+          msg.message = NULL;
+          config_set_cb(config_set_cb_ctx, msg.status, 0, (const char*)payload);
+          _hold_payload(client, payload);
         }
         client_api_config_reload_response_destroy(&msg);
       }
@@ -836,7 +934,11 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       memset(&msg, 0, sizeof(msg));
       if (client_api_update_status_response_decode(frame, &msg) == 0) {
         if (update_status_cb != NULL) {
-          update_status_cb(update_status_cb_ctx, CLIENT_API_STATUS_OK, msg.json_data);
+          void* payload = msg.json_data;
+          msg.json_data = NULL;
+          update_status_cb(update_status_cb_ctx, CLIENT_API_STATUS_OK,
+                           (const char*)payload);
+          _hold_payload(client, payload);
         }
         client_api_update_status_response_destroy(&msg);
       }
@@ -1794,6 +1896,7 @@ void offs_client_disconnect(offs_client_t* client) {
    * there. */
   if (client->recv_thread != NULL) {
     platform_thread_join(client->recv_thread);
+    client->recv_thread = NULL;
   }
 
   switch (client->transport_type) {
@@ -1828,15 +1931,19 @@ void offs_client_disconnect(offs_client_t* client) {
         const struct QUIC_API_TABLE* msquic = (const struct QUIC_API_TABLE*)client->transport.wt.msquic;
         if (client->transport.wt.stream != NULL) {
           msquic->StreamClose((HQUIC)client->transport.wt.stream);
+          client->transport.wt.stream = NULL;
         }
         if (client->transport.wt.connection != NULL) {
           msquic->ConnectionClose((HQUIC)client->transport.wt.connection);
+          client->transport.wt.connection = NULL;
         }
         if (client->transport.wt.configuration != NULL) {
           msquic->ConfigurationClose((HQUIC)client->transport.wt.configuration);
+          client->transport.wt.configuration = NULL;
         }
         if (client->transport.wt.registration != NULL) {
           msquic->RegistrationClose((HQUIC)client->transport.wt.registration);
+          client->transport.wt.registration = NULL;
         }
         offs_msquic_close();
       }
@@ -1858,10 +1965,47 @@ void offs_client_disconnect(offs_client_t* client) {
 
   if (client->framer != NULL) {
     stream_framer_destroy(client->framer);
+    client->framer = NULL;
   }
+
+  /* Sweep payloads that were never released by the consumer. The mutex, the
+     api key, and the struct itself stay alive until offs_client_destroy so
+     late cross-thread callback consumers can still call
+     offs_client_release_payload safely (a late release finds an empty list
+     and is a no-op). */
+  _release_all_payloads(client);
+}
+
+void offs_client_destroy(offs_client_t* client) {
+  if (client == NULL) return;
+
+  /* Final sweep for payloads that outlived disconnect (should be none after
+     a disconnect, but destroy must not leak them if it is called directly). */
+  _release_all_payloads(client);
   platform_mutex_destroy(client->lock);
   free(client->api_key);
   free(client);
+}
+
+void offs_client_release_payload(offs_client_t* client, void* payload) {
+  struct held_payload** link;
+  struct held_payload* node;
+  if (client == NULL || payload == NULL) return;
+
+  platform_mutex_lock(client->lock);
+  link = &client->held_payloads;
+  while (*link != NULL) {
+    if ((*link)->ptr == payload) {
+      node = *link;
+      *link = node->next;
+      platform_mutex_unlock(client->lock);
+      free(node->ptr);
+      free(node);
+      return;
+    }
+    link = &(*link)->next;
+  }
+  platform_mutex_unlock(client->lock);
 }
 
 int offs_client_put(offs_client_t* client,

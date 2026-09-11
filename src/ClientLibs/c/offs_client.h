@@ -51,6 +51,16 @@ typedef struct {
 typedef struct offs_client_t offs_client_t;
 
 /* Callback types */
+/* Payload ownership for every callback below: pointer arguments handed to a
+ * callback (payload strings, data buffers, the flattened peer/friend arrays)
+ * remain VALID until the consumer calls offs_client_release_payload on each
+ * pointer exactly once (after copying whatever it wants to keep), or until
+ * offs_client_destroy tears the client down. The library no longer frees the
+ * payload itself when the callback returns, so the pointer stays valid after
+ * the callback returns — cross-thread consumers (NativeCallable.listener,
+ * etc.) may copy it later. Releasing a payload twice, releasing an unknown
+ * pointer, or releasing after disconnect is a safe no-op. Unreleased
+ * payloads are reclaimed at disconnect/destroy. */
 typedef void (*offs_put_response_cb_t)(void* ctx, const char* ori_string);
 typedef void (*offs_get_data_cb_t)(void* ctx, const uint8_t* data, size_t len);
 typedef void (*offs_get_end_cb_t)(void* ctx);
@@ -89,8 +99,9 @@ typedef void (*offs_config_set_cb_t)(void* ctx, uint8_t status,
     uint8_t restart_required, const char* message);
 
 /* Generic JSON-string response callback (config show, update status).
-   json is a NUL-terminated UTF-8 JSON document, owned by the library and
-   only valid for the duration of the callback. */
+   json is a NUL-terminated UTF-8 JSON document; per the payload-ownership
+   rule above it stays valid until released with offs_client_release_payload
+   (or until offs_client_destroy). */
 typedef void (*offs_json_cb_t)(void* ctx, uint8_t status, const char* json);
 
 /* Connection lifecycle */
@@ -98,6 +109,23 @@ offs_client_t* offs_client_connect(const char* transport_url, const char* api_ke
 offs_client_t* offs_client_connect_ex(const char* transport_url, const char* api_key,
                                        const offs_client_config_t* config);
 void offs_client_disconnect(offs_client_t* client);
+
+/* Final teardown — frees everything offs_client_disconnect left behind: any
+ * remaining held payloads, the client mutex, the api key copy, and the
+ * client struct itself. MUST be called AFTER offs_client_disconnect (the
+ * recv thread must be joined and the transport closed first); calling it
+ * while the client is still connected is undefined behavior.
+ * Splitting disconnect and destroy keeps the client struct (and its mutex)
+ * alive after disconnect so late cross-thread callback consumers can still
+ * call offs_client_release_payload safely. */
+void offs_client_destroy(offs_client_t* client);
+
+/* Releases a payload previously passed to a callback. The consumer must
+ * call this for every payload pointer it received once it has copied the
+ * data. Passing an unknown or already-released pointer is a no-op; a
+ * payload released twice, or after the client was disconnected or
+ * destroyed, is also a no-op. */
+void offs_client_release_payload(offs_client_t* client, void* payload);
 
 /* Buffered PUT — sends data in a single request */
 int offs_client_put(offs_client_t* client,
@@ -183,14 +211,17 @@ int offs_client_friend_add_qr(offs_client_t* client, const uint8_t* ppm, size_t 
                               offs_peer_connect_cb_t callback, void* ctx);
 
 /* List all peers known to the daemon's connection manager. Entries are
-   delivered as one array snapshot; the entries array is owned by the client
-   library and is only valid for the duration of the callback. */
+   delivered as one array snapshot; per the payload-ownership rule at the top
+   of this header the array stays valid until released with
+   offs_client_release_payload (one call for the array pointer itself). */
 int offs_client_peer_list(offs_client_t* client, offs_peer_list_cb_t cb, void* ctx);
 
 /* List friends. Each string is the base58 encoding of the friend's serialized
-   CBOR peer_info blob (feed it to peer_info_from_base58 to decode); the array
-   of pointers is owned by the client library and is only valid for the
-   duration of the callback. */
+   CBOR peer_info blob (feed it to peer_info_from_base58 to decode); per the
+   payload-ownership rule at the top of this header both the array of pointers
+   AND each string in it stay valid until released with
+   offs_client_release_payload (count + 1 calls: one per string, one for the
+   array). */
 int offs_client_friend_list(offs_client_t* client, offs_friend_list_cb_t cb, void* ctx);
 
 /* Remove a friend by its base58 node id. Replies PEER_CONNECT_RESULT, so

@@ -411,6 +411,7 @@ protected:
     }
 
     offs_client_disconnect(client);
+    offs_client_destroy(client);
   }
 };
 

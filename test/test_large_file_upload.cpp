@@ -725,7 +725,7 @@ cleanup:
     // Cleanup on any assertion failure between here and the disconnect
     struct ClientGuard {
       offs_client_t* c;
-      ~ClientGuard() { if (c) offs_client_disconnect(c); }
+      ~ClientGuard() { if (c) { offs_client_disconnect(c); offs_client_destroy(c); } }
     } guard{client};
 
     PutCbContext put_ctx;
@@ -1150,6 +1150,7 @@ TEST_F(StreamingPutConnectionDrop, MidStreamDisconnect_UnixSocket) {
   // offs_client_put_stream_end. The server side will receive EOF
   // (or the equivalent hangup) and must clean up.
   offs_client_disconnect(client);
+  offs_client_destroy(client);
   client = nullptr;  // Guard against accidental reuse.
 
   // Poll waitpid for the child to exit on its own. The server's
