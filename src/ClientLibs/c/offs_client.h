@@ -62,6 +62,7 @@ typedef struct offs_client_t offs_client_t;
  * pointer, or releasing after disconnect is a safe no-op. Unreleased
  * payloads are reclaimed at disconnect/destroy. */
 typedef void (*offs_put_response_cb_t)(void* ctx, const char* ori_string);
+/* ori_string is NULL when the PUT failed (daemon ERROR frame). */
 typedef void (*offs_get_data_cb_t)(void* ctx, const uint8_t* data, size_t len);
 typedef void (*offs_get_end_cb_t)(void* ctx);
 typedef void (*offs_error_cb_t)(void* ctx, uint8_t status_code, const char* message);
@@ -71,7 +72,11 @@ typedef void (*offs_block_get_cb_t)(void* ctx, uint8_t status,
     const uint8_t* data, size_t data_len);
 typedef void (*offs_block_delete_cb_t)(void* ctx, uint8_t status);
 typedef void (*offs_health_cb_t)(void* ctx, const char* json_response);
+/* json_response is NULL when the health check failed (daemon ERROR frame) —
+ * the callback type carries no status, so NULL is the failure signal. */
 typedef void (*offs_peer_info_cb_t)(void* ctx, uint8_t format, const uint8_t* data, size_t data_len);
+/* data is NULL when the peer_info request failed (daemon ERROR frame) — the
+ * callback type carries no status, so NULL data is the failure signal. */
 typedef void (*offs_peer_connect_cb_t)(void* ctx, uint8_t status);
 typedef void (*offs_load_progress_cb_t)(void* ctx, size_t tuples_loaded, size_t tuples_total);
 typedef void (*offs_load_end_cb_t)(void* ctx, uint8_t status, size_t tuples_loaded, size_t tuples_total);
@@ -188,10 +193,11 @@ int offs_client_health(offs_client_t* client,
 /* Peer operations. format: 0 = raw CBOR peer_info, 1 = base58 text,
    2 = PPM QR image. The _qr forms are sugar for format 2.
    Error delivery: daemon-side rejections (unauthorized, undecodable peer
-   info, etc.) arrive as ERROR frames dispatched to the error callback
-   registered via offs_client_get()'s callbacks — if no error callback is
-   registered, failures are silent. Success results arrive on the
-   per-operation callback.
+   info, etc.) arrive as ERROR frames and complete the per-operation callback
+   with the daemon's error status (see the generic ERROR-frame completion
+   note at offs_client_set_error_cb); the shared error callback (if
+   registered via offs_client_set_error_cb) also fires. Success results
+   arrive on the per-operation callback.
    Concurrency: one outstanding operation per callback slot — issuing
    peer_connect and then friend_add before the first result arrives
    delivers the first result to the second callback. */
@@ -230,7 +236,20 @@ int offs_client_friend_remove(offs_client_t* client, const char* node_id_b58,
                               offs_peer_connect_cb_t cb, void* ctx);
 
 /* Register the shared ERROR-frame callback without sending a GET.
-   Peer/friend/load daemon-side rejections arrive here. */
+   Peer/friend/load daemon-side rejections arrive here.
+
+   Generic ERROR-frame completion: when the daemon rejects an op (ERROR
+   frame), the shared error callback fires AND every currently-registered
+   single-response op callback is completed with the error status so its
+   awaiter resolves instead of hanging until its own timeout. Ops whose
+   callback carries a status parameter (peer_connect/friend_add/friend_remove,
+   block_*, peer_list, friend_list, config_set/config_reload, load end)
+   receive the daemon's status byte; ops without one (put, health, peer_info)
+   receive a NULL payload as the failure signal. get() is NOT auto-completed:
+   its errors are delivered via the error callback passed to
+   offs_client_set_error_cb (offs_client_get installs its own). The completed
+   slots are cleared afterwards, so a late duplicate frame cannot refire
+   them. */
 int offs_client_set_error_cb(offs_client_t* client, offs_error_cb_t cb, void* ctx);
 
 /* Config operations. config_show replies with the full current config as a
@@ -240,9 +259,11 @@ int offs_client_set_error_cb(offs_client_t* client, offs_error_cb_t cb, void* ct
    config by restarting the node. For config_reload, restart_required is
    always delivered as 0 (the frame carries no such field).
    Error delivery: daemon-side rejections (unauthorized, etc.) arrive as
-   ERROR frames dispatched to the error callback registered via
-   offs_client_get()'s callbacks — if no error callback is registered,
-   failures are silent. Success results arrive on the per-operation callback.
+   ERROR frames and complete the per-operation callback with the daemon's
+   error status and the frame's message string (see the generic ERROR-frame
+   completion note at offs_client_set_error_cb); the shared error callback
+   (if registered) also fires. Success results arrive on the per-operation
+   callback.
    For config_set and config_reload, field-level rejections (bad field name,
    unparseable value, etc.) are NOT ERROR frames: the daemon replies with a
    result frame whose status is nonzero, delivered on the per-operation
@@ -271,9 +292,10 @@ int offs_client_update_status(offs_client_t* client, offs_json_cb_t cb, void* ct
    the terminal status (CLIENT_API_LOAD_STATUS_LOADED/PARTIAL/FAILED,
    defined in ClientAPI/client_api_wire.h).
    Error delivery: daemon-side rejections (unauthorized, undecodable ORI,
-   etc.) arrive as ERROR frames dispatched to the error callback registered
-   via offs_client_get()'s callbacks — if no error callback is registered,
-   failures before the first LOAD_PROGRESS are silent.
+   etc.) arrive as ERROR frames and complete end_cb with the daemon's error
+   status and (0, 0) counts (see the generic ERROR-frame completion note at
+   offs_client_set_error_cb); the shared error callback (if registered) also
+   fires.
    Concurrency: only one load may be outstanding per connection (shared
    one-op-per-slot rule; see peer operations above). */
 int offs_client_load(offs_client_t* client, const char* ori_string,

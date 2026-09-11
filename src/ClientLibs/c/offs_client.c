@@ -644,10 +644,138 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       client_api_error_t msg;
       memset(&msg, 0, sizeof(msg));
       if (client_api_error_decode(frame, &msg) == 0) {
+        /* The ERROR frame carries the daemon's rejection status and message.
+           It is delivered to the shared error callback AND used to complete
+           every currently-registered single-response op callback (with NULL
+           payloads / the error status), so a client awaiting an op resolves
+           instead of hanging until its own timeout. get() is excluded: it
+           registers its own error callback in the shared error_cb slot. */
+        void* payload = msg.message;
+        msg.message = NULL;
         if (error_cb != NULL) {
-          void* payload = msg.message;
-          msg.message = NULL;
           error_cb(error_cb_ctx, msg.status_code, (const char*)payload);
+        }
+        if (put_cb != NULL) {
+          put_cb(put_cb_ctx, NULL);  /* NULL ori = PUT failed */
+        }
+        if (block_put_cb != NULL) {
+          block_put_cb(block_put_cb_ctx, msg.status_code, NULL, 0, 0);
+        }
+        if (block_get_cb != NULL) {
+          block_get_cb(block_get_cb_ctx, msg.status_code, NULL, 0);
+        }
+        if (block_delete_cb != NULL) {
+          block_delete_cb(block_delete_cb_ctx, msg.status_code);
+        }
+        if (health_cb != NULL) {
+          health_cb(health_cb_ctx, NULL);  /* NULL json = health failed */
+        }
+        if (peer_info_cb != NULL) {
+          peer_info_cb(peer_info_cb_ctx, 0, NULL, 0);  /* NULL data = failed */
+        }
+        if (peer_connect_cb != NULL) {
+          peer_connect_cb(peer_connect_cb_ctx, msg.status_code);
+        }
+        if (load_end_cb != NULL) {
+          load_end_cb(load_end_cb_ctx, msg.status_code, 0, 0);
+        }
+        if (peer_list_cb != NULL) {
+          peer_list_cb(peer_list_cb_ctx, msg.status_code, NULL, 0);
+        }
+        if (friend_list_cb != NULL) {
+          friend_list_cb(friend_list_cb_ctx, msg.status_code, NULL, 0);
+        }
+        if (config_show_cb != NULL) {
+          config_show_cb(config_show_cb_ctx, msg.status_code, NULL);
+        }
+        /* config_set/config_reload share a slot; the ERROR message doubles as
+           the callback's message string. */
+        if (config_set_cb != NULL) {
+          config_set_cb(config_set_cb_ctx, msg.status_code, 0,
+                        (const char*)payload);
+        }
+        if (update_status_cb != NULL) {
+          update_status_cb(update_status_cb_ctx, msg.status_code, NULL);
+        }
+        /* Clear every completed slot under lock so a late duplicate frame
+           cannot fire it again. Slots only registered for get() (get_data /
+           get_end / error_cb) are left alone — get's failure path is its own
+           error callback. A slot is cleared only when it still holds the
+           snapshot taken above, so a newer registration is never clobbered. */
+        platform_mutex_lock(client->lock);
+        if (client->put_cb == put_cb && client->put_cb_ctx == put_cb_ctx) {
+          client->put_cb = NULL;
+          client->put_cb_ctx = NULL;
+        }
+        if (client->block_put_cb == block_put_cb &&
+            client->block_put_cb_ctx == block_put_cb_ctx) {
+          client->block_put_cb = NULL;
+          client->block_put_cb_ctx = NULL;
+        }
+        if (client->block_get_cb == block_get_cb &&
+            client->block_get_cb_ctx == block_get_cb_ctx) {
+          client->block_get_cb = NULL;
+          client->block_get_cb_ctx = NULL;
+        }
+        if (client->block_delete_cb == block_delete_cb &&
+            client->block_delete_cb_ctx == block_delete_cb_ctx) {
+          client->block_delete_cb = NULL;
+          client->block_delete_cb_ctx = NULL;
+        }
+        if (client->health_cb == health_cb &&
+            client->health_cb_ctx == health_cb_ctx) {
+          client->health_cb = NULL;
+          client->health_cb_ctx = NULL;
+        }
+        if (client->peer_info_cb == peer_info_cb &&
+            client->peer_info_cb_ctx == peer_info_cb_ctx) {
+          client->peer_info_cb = NULL;
+          client->peer_info_cb_ctx = NULL;
+        }
+        if (client->peer_connect_cb == peer_connect_cb &&
+            client->peer_connect_cb_ctx == peer_connect_cb_ctx) {
+          client->peer_connect_cb = NULL;
+          client->peer_connect_cb_ctx = NULL;
+        }
+        if (client->load_progress_cb == load_progress_cb &&
+            client->load_progress_cb_ctx == load_progress_cb_ctx) {
+          client->load_progress_cb = NULL;
+          client->load_progress_cb_ctx = NULL;
+        }
+        if (client->load_end_cb == load_end_cb &&
+            client->load_end_cb_ctx == load_end_cb_ctx) {
+          client->load_end_cb = NULL;
+          client->load_end_cb_ctx = NULL;
+        }
+        if (client->peer_list_cb == peer_list_cb &&
+            client->peer_list_cb_ctx == peer_list_cb_ctx) {
+          client->peer_list_cb = NULL;
+          client->peer_list_cb_ctx = NULL;
+        }
+        if (client->friend_list_cb == friend_list_cb &&
+            client->friend_list_cb_ctx == friend_list_cb_ctx) {
+          client->friend_list_cb = NULL;
+          client->friend_list_cb_ctx = NULL;
+        }
+        if (client->config_show_cb == config_show_cb &&
+            client->config_show_cb_ctx == config_show_cb_ctx) {
+          client->config_show_cb = NULL;
+          client->config_show_cb_ctx = NULL;
+        }
+        if (client->config_set_cb == config_set_cb &&
+            client->config_set_cb_ctx == config_set_cb_ctx) {
+          client->config_set_cb = NULL;
+          client->config_set_cb_ctx = NULL;
+        }
+        if (client->update_status_cb == update_status_cb &&
+            client->update_status_cb_ctx == update_status_cb_ctx) {
+          client->update_status_cb = NULL;
+          client->update_status_cb_ctx = NULL;
+        }
+        platform_mutex_unlock(client->lock);
+        /* Hand the ERROR message to the ownership model only when some
+           callback received it; otherwise destroy frees it below. */
+        if (payload != NULL && (error_cb != NULL || config_set_cb != NULL)) {
           _hold_payload(client, payload);
         }
         client_api_error_destroy(&msg);

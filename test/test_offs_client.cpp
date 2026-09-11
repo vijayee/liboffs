@@ -899,6 +899,154 @@ TEST_F(TestOffsClient, Health) {
     offs_client_disconnect(client);
 }
 
+struct SharedErrorCallbackContext {
+    std::atomic<int> called;
+    std::atomic<uint8_t> status;
+    char* message;
+    SharedErrorCallbackContext() : called(0), status(0), message(nullptr) {}
+};
+
+static void _shared_error_callback(void* ctx, uint8_t status_code,
+                                   const char* message) {
+    SharedErrorCallbackContext* ectx = (SharedErrorCallbackContext*)ctx;
+    ectx->status.store(status_code, std::memory_order_release);
+    if (message != NULL) {
+        free(ectx->message);
+        ectx->message = strdup(message);
+    }
+    ectx->called.store(1, std::memory_order_release);
+}
+
+struct PeerConnectCallbackContext {
+    std::atomic<int> called;
+    std::atomic<uint8_t> status;
+    PeerConnectCallbackContext() : called(0), status(0) {}
+};
+
+static void _peer_connect_callback(void* ctx, uint8_t status) {
+    PeerConnectCallbackContext* pctx = (PeerConnectCallbackContext*)ctx;
+    pctx->status.store(status, std::memory_order_release);
+    pctx->called.store(1, std::memory_order_release);
+}
+
+/* A daemon ERROR frame (here: undecodable format-0 peer_info) must complete
+   the pending op callback with the error status in addition to firing the
+   shared error callback, and clear the slot so the op can be reissued. */
+TEST_F(TestOffsClient, ErrorFrameCompletesPeerConnectCallback) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+
+    SharedErrorCallbackContext err_ctx;
+    PeerConnectCallbackContext pc_ctx;
+    EXPECT_EQ(offs_client_set_error_cb(client, _shared_error_callback, &err_ctx), 0);
+
+    /* Garbage bytes for format 0 (raw CBOR peer_info) — the daemon's decoder
+       rejects them with an ERROR frame (BAD_REQUEST). */
+    const uint8_t garbage[] = {0xde, 0xad, 0xbe, 0xef};
+    EXPECT_EQ(offs_client_peer_connect(client, 0, garbage, sizeof(garbage),
+                                       _peer_connect_callback, &pc_ctx), 0);
+
+    for (int attempts = 0; attempts < 200 &&
+         (!pc_ctx.called.load(std::memory_order_acquire) ||
+          !err_ctx.called.load(std::memory_order_acquire)); attempts++) {
+        platform_usleep(10000);
+    }
+    EXPECT_EQ(err_ctx.called.load(), 1);
+    EXPECT_EQ(err_ctx.status.load(), CLIENT_API_STATUS_BAD_REQUEST);
+    EXPECT_EQ(pc_ctx.called.load(), 1);
+    EXPECT_EQ(pc_ctx.status.load(), CLIENT_API_STATUS_BAD_REQUEST);
+
+    /* The slot was cleared on completion: the same op can be reissued and
+       fires again (with a fresh ERROR from the undecodable payload). */
+    err_ctx.called.store(0, std::memory_order_release);
+    pc_ctx.called.store(0, std::memory_order_release);
+    EXPECT_EQ(offs_client_peer_connect(client, 0, garbage, sizeof(garbage),
+                                       _peer_connect_callback, &pc_ctx), 0);
+    for (int attempts = 0; attempts < 200 &&
+         (!pc_ctx.called.load(std::memory_order_acquire) ||
+          !err_ctx.called.load(std::memory_order_acquire)); attempts++) {
+        platform_usleep(10000);
+    }
+    EXPECT_EQ(pc_ctx.called.load(), 1);
+    EXPECT_EQ(pc_ctx.status.load(), CLIENT_API_STATUS_BAD_REQUEST);
+
+    offs_client_disconnect(client);
+}
+
+struct ConfigShowCallbackContext {
+    std::atomic<int> called;
+    std::atomic<uint8_t> status;
+    char* json;  /* NULL when the op failed */
+    ConfigShowCallbackContext() : called(0), status(0), json(nullptr) {}
+};
+
+static void _config_show_callback(void* ctx, uint8_t status, const char* json) {
+    ConfigShowCallbackContext* cctx = (ConfigShowCallbackContext*)ctx;
+    cctx->status.store(status, std::memory_order_release);
+    if (json != NULL) {
+        cctx->json = strdup(json);
+    }
+    cctx->called.store(1, std::memory_order_release);
+}
+
+struct ConfigSetCallbackContext {
+    std::atomic<int> called;
+    std::atomic<uint8_t> status;
+    char* message;
+    ConfigSetCallbackContext() : called(0), status(0), message(nullptr) {}
+};
+
+static void _config_set_callback(void* ctx, uint8_t status,
+                                 uint8_t restart_required,
+                                 const char* message) {
+    ConfigSetCallbackContext* cctx = (ConfigSetCallbackContext*)ctx;
+    cctx->status.store(status, std::memory_order_release);
+    if (message != NULL) {
+        cctx->message = strdup(message);
+    }
+    (void)restart_required;
+    cctx->called.store(1, std::memory_order_release);
+}
+
+/* The test transport has no config node, so config frames are rejected with
+   INTERNAL_ERROR ERROR frames ("config not available"). Both config_show and
+   config_set must resolve their callbacks (the latter with the frame's
+   message) instead of leaving the slots pending. */
+TEST_F(TestOffsClient, ErrorFrameCompletesConfigCallbacks) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+
+    SharedErrorCallbackContext err_ctx;
+    ConfigShowCallbackContext show_ctx;
+    ConfigSetCallbackContext set_ctx;
+    EXPECT_EQ(offs_client_set_error_cb(client, _shared_error_callback, &err_ctx), 0);
+
+    EXPECT_EQ(offs_client_config_show(client, _config_show_callback, &show_ctx), 0);
+    for (int attempts = 0; attempts < 200 && !show_ctx.called.load(std::memory_order_acquire);
+         attempts++) {
+        platform_usleep(10000);
+    }
+    EXPECT_EQ(show_ctx.called.load(), 1);
+    EXPECT_EQ(show_ctx.status.load(), CLIENT_API_STATUS_INTERNAL_ERROR);
+    EXPECT_EQ(show_ctx.json, nullptr);
+
+    EXPECT_EQ(offs_client_config_set(client, "max_wals", "1",
+                                     _config_set_callback, &set_ctx), 0);
+    for (int attempts = 0; attempts < 200 && !set_ctx.called.load(std::memory_order_acquire);
+         attempts++) {
+        platform_usleep(10000);
+    }
+    EXPECT_EQ(set_ctx.called.load(), 1);
+    EXPECT_EQ(set_ctx.status.load(), CLIENT_API_STATUS_INTERNAL_ERROR);
+    ASSERT_NE(set_ctx.message, nullptr);
+    EXPECT_STREQ(set_ctx.message, "config not available");
+
+    free(err_ctx.message);
+    free(show_ctx.json);
+    free(set_ctx.message);
+    offs_client_disconnect(client);
+}
+
 } // namespace offs_client_test
 
 namespace offs_ws_client_test {
