@@ -204,6 +204,22 @@ struct offs_client_t {
 /* Forward declaration — needed for MsQuic callbacks that call _handle_frame */
 static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* frame);
 
+/* Clears a single-response callback slot after its response was delivered,
+   identity-guarded so a newer registration is never clobbered. Without this
+   the stale registration (cb/ctx of an op whose consumer already closed its
+   callback) stays registered and a later frame — e.g. an unrelated ERROR
+   frame completing every registered slot — would invoke a dead callback. */
+#define _clear_delivered_slot(client, cb_field)                          \
+  do {                                                                   \
+    platform_mutex_lock((client)->lock);                                 \
+    if ((client)->cb_field == cb_field &&                                \
+        (client)->cb_field##_ctx == cb_field##_ctx) {                    \
+      (client)->cb_field = NULL;                                         \
+      (client)->cb_field##_ctx = NULL;                                   \
+    }                                                                    \
+    platform_mutex_unlock((client)->lock);                               \
+  } while (0)
+
 #ifdef HAS_MSQUIC
 typedef struct {
   uint8_t* frame;
@@ -612,6 +628,7 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
           msg.ori_string = NULL;
           put_cb(put_cb_ctx, (const char*)payload);
           _hold_payload(client, payload);
+          _clear_delivered_slot(client, put_cb);
         }
         client_api_put_response_destroy(&msg);
       }
@@ -637,6 +654,12 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
     case CLIENT_API_GET_END: {
       if (get_end_cb != NULL) {
         get_end_cb(get_end_cb_ctx);
+        /* The stream is over: drop the data/end registrations. error_cb is
+           deliberately left alone — the shared slot also holds the
+           persistent set_error_cb registration, and the get's error
+           callback (installed there) is released by the consumer. */
+        _clear_delivered_slot(client, get_data_cb);
+        _clear_delivered_slot(client, get_end_cb);
       }
       break;
     }
@@ -697,82 +720,25 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
         if (update_status_cb != NULL) {
           update_status_cb(update_status_cb_ctx, msg.status_code, NULL);
         }
-        /* Clear every completed slot under lock so a late duplicate frame
-           cannot fire it again. Slots only registered for get() (get_data /
-           get_end / error_cb) are left alone — get's failure path is its own
-           error callback. A slot is cleared only when it still holds the
-           snapshot taken above, so a newer registration is never clobbered. */
-        platform_mutex_lock(client->lock);
-        if (client->put_cb == put_cb && client->put_cb_ctx == put_cb_ctx) {
-          client->put_cb = NULL;
-          client->put_cb_ctx = NULL;
-        }
-        if (client->block_put_cb == block_put_cb &&
-            client->block_put_cb_ctx == block_put_cb_ctx) {
-          client->block_put_cb = NULL;
-          client->block_put_cb_ctx = NULL;
-        }
-        if (client->block_get_cb == block_get_cb &&
-            client->block_get_cb_ctx == block_get_cb_ctx) {
-          client->block_get_cb = NULL;
-          client->block_get_cb_ctx = NULL;
-        }
-        if (client->block_delete_cb == block_delete_cb &&
-            client->block_delete_cb_ctx == block_delete_cb_ctx) {
-          client->block_delete_cb = NULL;
-          client->block_delete_cb_ctx = NULL;
-        }
-        if (client->health_cb == health_cb &&
-            client->health_cb_ctx == health_cb_ctx) {
-          client->health_cb = NULL;
-          client->health_cb_ctx = NULL;
-        }
-        if (client->peer_info_cb == peer_info_cb &&
-            client->peer_info_cb_ctx == peer_info_cb_ctx) {
-          client->peer_info_cb = NULL;
-          client->peer_info_cb_ctx = NULL;
-        }
-        if (client->peer_connect_cb == peer_connect_cb &&
-            client->peer_connect_cb_ctx == peer_connect_cb_ctx) {
-          client->peer_connect_cb = NULL;
-          client->peer_connect_cb_ctx = NULL;
-        }
-        if (client->load_progress_cb == load_progress_cb &&
-            client->load_progress_cb_ctx == load_progress_cb_ctx) {
-          client->load_progress_cb = NULL;
-          client->load_progress_cb_ctx = NULL;
-        }
-        if (client->load_end_cb == load_end_cb &&
-            client->load_end_cb_ctx == load_end_cb_ctx) {
-          client->load_end_cb = NULL;
-          client->load_end_cb_ctx = NULL;
-        }
-        if (client->peer_list_cb == peer_list_cb &&
-            client->peer_list_cb_ctx == peer_list_cb_ctx) {
-          client->peer_list_cb = NULL;
-          client->peer_list_cb_ctx = NULL;
-        }
-        if (client->friend_list_cb == friend_list_cb &&
-            client->friend_list_cb_ctx == friend_list_cb_ctx) {
-          client->friend_list_cb = NULL;
-          client->friend_list_cb_ctx = NULL;
-        }
-        if (client->config_show_cb == config_show_cb &&
-            client->config_show_cb_ctx == config_show_cb_ctx) {
-          client->config_show_cb = NULL;
-          client->config_show_cb_ctx = NULL;
-        }
-        if (client->config_set_cb == config_set_cb &&
-            client->config_set_cb_ctx == config_set_cb_ctx) {
-          client->config_set_cb = NULL;
-          client->config_set_cb_ctx = NULL;
-        }
-        if (client->update_status_cb == update_status_cb &&
-            client->update_status_cb_ctx == update_status_cb_ctx) {
-          client->update_status_cb = NULL;
-          client->update_status_cb_ctx = NULL;
-        }
-        platform_mutex_unlock(client->lock);
+        /* Clear every completed slot so a late duplicate frame cannot fire
+           it again (identity-guarded: a newer registration is never
+           clobbered). Slots only registered for get() (get_data / get_end /
+           error_cb) are left alone — get's failure path is its own error
+           callback. */
+        _clear_delivered_slot(client, put_cb);
+        _clear_delivered_slot(client, block_put_cb);
+        _clear_delivered_slot(client, block_get_cb);
+        _clear_delivered_slot(client, block_delete_cb);
+        _clear_delivered_slot(client, health_cb);
+        _clear_delivered_slot(client, peer_info_cb);
+        _clear_delivered_slot(client, peer_connect_cb);
+        _clear_delivered_slot(client, load_progress_cb);
+        _clear_delivered_slot(client, load_end_cb);
+        _clear_delivered_slot(client, peer_list_cb);
+        _clear_delivered_slot(client, friend_list_cb);
+        _clear_delivered_slot(client, config_show_cb);
+        _clear_delivered_slot(client, config_set_cb);
+        _clear_delivered_slot(client, update_status_cb);
         /* Hand the ERROR message to the ownership model only when some
            callback received it; otherwise destroy frees it below. */
         if (payload != NULL && (error_cb != NULL || config_set_cb != NULL)) {
@@ -792,6 +758,7 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
           block_put_cb(block_put_cb_ctx, msg.status, (const uint8_t*)payload,
                        msg.hash_len, msg.hash_is_text);
           _hold_payload(client, payload);
+          _clear_delivered_slot(client, block_put_cb);
         }
         client_api_block_put_response_destroy(&msg);
       }
@@ -807,6 +774,7 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
           block_get_cb(block_get_cb_ctx, msg.status, (const uint8_t*)payload,
                        msg.data_size);
           _hold_payload(client, payload);
+          _clear_delivered_slot(client, block_get_cb);
         }
         client_api_block_get_response_destroy(&msg);
       }
@@ -818,6 +786,7 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       if (client_api_block_delete_response_decode(frame, &msg) == 0) {
         if (block_delete_cb != NULL) {
           block_delete_cb(block_delete_cb_ctx, msg.status);
+          _clear_delivered_slot(client, block_delete_cb);
         }
         client_api_block_delete_response_destroy(&msg);
       }
@@ -832,6 +801,7 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
           msg.json_data = NULL;
           health_cb(health_cb_ctx, (const char*)payload);
           _hold_payload(client, payload);
+          _clear_delivered_slot(client, health_cb);
         }
         client_api_health_response_destroy(&msg);
       }
@@ -847,6 +817,7 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
           peer_info_cb(peer_info_cb_ctx, msg.format, (const uint8_t*)payload,
                        msg.data_size);
           _hold_payload(client, payload);
+          _clear_delivered_slot(client, peer_info_cb);
         }
         client_api_peer_info_response_destroy(&msg);
       }
@@ -858,6 +829,7 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       if (client_api_peer_connect_result_decode(frame, &msg) == 0) {
         if (peer_connect_cb != NULL) {
           peer_connect_cb(peer_connect_cb_ctx, msg.status);
+          _clear_delivered_slot(client, peer_connect_cb);
         }
         client_api_peer_connect_result_destroy(&msg);
       }
@@ -877,6 +849,8 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       if (client_api_load_end_decode(frame, &status, &loaded, &total) == 0) {
         if (load_end_cb != NULL) {
           load_end_cb(load_end_cb_ctx, status, loaded, total);
+          _clear_delivered_slot(client, load_progress_cb);
+          _clear_delivered_slot(client, load_end_cb);
         }
       }
       break;
@@ -949,6 +923,7 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
               /* The flattened array stays alive for the consumer to release
                  via offs_client_release_payload. */
               _hold_payload(client, entries);
+              _clear_delivered_slot(client, peer_list_cb);
             } else {
               free(entries);
             }
@@ -1001,6 +976,7 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
                 _hold_payload(client, friend_ids[index]);
               }
               _hold_payload(client, friend_ids);
+              _clear_delivered_slot(client, friend_list_cb);
             } else {
               for (size_t index = 0; index < count; index++) {
                 free(friend_ids[index]);
@@ -1023,6 +999,7 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
           config_show_cb(config_show_cb_ctx, CLIENT_API_STATUS_OK,
                          (const char*)payload);
           _hold_payload(client, payload);
+          _clear_delivered_slot(client, config_show_cb);
         }
         client_api_config_show_response_destroy(&msg);
       }
@@ -1038,6 +1015,7 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
           config_set_cb(config_set_cb_ctx, msg.status, msg.restart_required,
                         (const char*)payload);
           _hold_payload(client, payload);
+          _clear_delivered_slot(client, config_set_cb);
         }
         client_api_config_set_response_destroy(&msg);
       }
@@ -1052,6 +1030,7 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
           msg.message = NULL;
           config_set_cb(config_set_cb_ctx, msg.status, 0, (const char*)payload);
           _hold_payload(client, payload);
+          _clear_delivered_slot(client, config_set_cb);
         }
         client_api_config_reload_response_destroy(&msg);
       }
@@ -1067,6 +1046,7 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
           update_status_cb(update_status_cb_ctx, CLIENT_API_STATUS_OK,
                            (const char*)payload);
           _hold_payload(client, payload);
+          _clear_delivered_slot(client, update_status_cb);
         }
         client_api_update_status_response_destroy(&msg);
       }
