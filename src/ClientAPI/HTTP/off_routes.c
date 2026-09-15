@@ -558,7 +558,8 @@ static void _off_load_stream(http_request_t* request, http_response_t* response,
 typedef enum {
     OFF_GET_RESOLVE_DIR,      /* Resolving directory path */
     OFF_GET_RESOLVE_INDEX,    /* Resolving index.html in .ofd directory */
-    OFF_GET_FETCH_RAW_OFD     /* Fetching raw OFD block (?ofd=raw) */
+    OFF_GET_FETCH_RAW_OFD,    /* Fetching raw OFD bytes (?ofd=raw) */
+    OFF_GET_FETCH_DIR         /* Fetching directory bytes from block cache on miss */
 } off_get_phase_t;
 
 typedef struct {
@@ -569,17 +570,188 @@ typedef struct {
     off_url_t* url;
     char* resolve_path;
     off_get_phase_t phase;
+    off_get_phase_t resolve_phase;  /* Original RESOLVE_* phase before fetch */
+    /* Used when the in-memory OFD cache misses and we must stream the directory
+       CBOR from the block cache via its descriptor hash. */
+    buffer_t* dir_buffer;
+    readable_off_stream_t* dir_rs;
+    readable_descriptor_t* dir_desc;
+    ori_t* dir_ori;
+    uint8_t dir_fetch_error;
+    uint8_t dir_raw_return;    /* 1 = return raw CBOR, 0 = decode and resolve */
 } off_get_state_t;
 
 static void _off_get_state_destroy(off_get_state_t* state) {
     if (state->url) off_url_destroy(state->url);
     if (state->resolve_path) free(state->resolve_path);
+    if (state->dir_buffer) buffer_destroy(state->dir_buffer);
+    if (state->dir_rs) stream_deferred_deref((stream_t*)state->dir_rs);
+    if (state->dir_desc) stream_deferred_deref((stream_t*)state->dir_desc);
+    if (state->dir_ori) DESTROY(state->dir_ori, ori);
     http_connection_t* conn = state->connection;
     http_response_destroy(state->response);
     if (conn) http_connection_destroy(conn);
     atomic_fetch_or(&state->actor.flags, ACTOR_FLAG_DESTROY);
     actor_destroy(&state->actor);
     scheduler_pool_defer_cleanup(state->ctx->pool, state, free);
+}
+
+/* ---- Directory block-cache fallback ----
+ * When the in-memory OFD cache misses, treat the directory CBOR as a regular
+ * file stream (descriptor_hash -> blocks), accumulate the bytes, decode the
+ * OFD, cache it, and continue resolving the requested internal path. */
+
+static void _dir_fetch_data(void* ctx, void* data) {
+    off_get_state_t* state = (off_get_state_t*)ctx;
+    buffer_t* chunk = (buffer_t*)data;
+    if (state->dir_fetch_error || !chunk || chunk->size == 0) return;
+
+    if (state->dir_buffer == NULL) {
+        state->dir_buffer = buffer_create_with_capacity(0, chunk->size);
+    }
+    size_t old_size = state->dir_buffer->size;
+    buffer_ensure_capacity(state->dir_buffer, old_size + chunk->size);
+    memcpy(state->dir_buffer->data + old_size, chunk->data, chunk->size);
+    state->dir_buffer->size = old_size + chunk->size;
+}
+
+static void _dir_fetch_error_handler(void* ctx, void* unused) {
+    (void)unused;
+    off_get_state_t* state = (off_get_state_t*)ctx;
+    if (state->dir_fetch_error) return;
+    state->dir_fetch_error = 1;
+    http_response_set_status(state->response, 404);
+    http_response_end(state->response);
+    _off_get_state_destroy(state);
+}
+
+static void _dir_fetch_finished(off_get_state_t* state);
+
+static void _dir_fetch_close(void* ctx, void* unused) {
+    (void)unused;
+    off_get_state_t* state = (off_get_state_t*)ctx;
+    if (state->dir_fetch_error) return;
+    _dir_fetch_finished(state);
+}
+
+static void _dir_fetch_resolve_and_serve(off_get_state_t* state);
+
+static void _dir_fetch_finished(off_get_state_t* state) {
+    buffer_t* buf = state->dir_buffer;
+    state->dir_buffer = NULL;
+
+    if (buf == NULL || buf->size == 0) {
+        if (buf) buffer_destroy(buf);
+        http_response_set_status(state->response, 404);
+        http_response_end(state->response);
+        _off_get_state_destroy(state);
+        return;
+    }
+
+    if (state->dir_raw_return) {
+        /* ?ofd=raw: return the CBOR bytes directly but also cache the decoded
+           OFD for future requests. */
+        ofd_t* ofd = ofd_decode(buf);
+        if (ofd != NULL) {
+            ofd_cache_put(state->ctx->ofd_cache, state->url->file_hash, ofd);
+        }
+        http_response_set_header(state->response, "Content-Type", "application/cbor");
+        http_response_write(state->response, (const char*)buf->data, buf->size);
+        http_response_end(state->response);
+        buffer_destroy(buf);
+        _off_get_state_destroy(state);
+        return;
+    }
+
+    ofd_t* ofd = ofd_decode(buf);
+    buffer_destroy(buf);
+    if (ofd == NULL) {
+        http_response_set_status(state->response, 404);
+        http_response_end(state->response);
+        _off_get_state_destroy(state);
+        return;
+    }
+
+    ofd_cache_put(state->ctx->ofd_cache, state->url->file_hash, ofd);
+
+    /* Now that the OFD is cached, continue resolving the original request. */
+    _dir_fetch_resolve_and_serve(state);
+}
+
+static void _dir_fetch_resolve_and_serve(off_get_state_t* state) {
+    if (state->resolve_phase == OFF_GET_RESOLVE_INDEX) {
+        ofd_cache_resolve(state->ctx->ofd_cache, state->url->file_hash, "index.html", &state->actor);
+        return;
+    }
+
+    if (state->resolve_phase == OFF_GET_RESOLVE_DIR) {
+        ofd_cache_resolve(state->ctx->ofd_cache, state->url->file_hash,
+                          state->resolve_path, &state->actor);
+        return;
+    }
+
+    /* Should not happen */
+    http_response_set_status(state->response, 404);
+    http_response_end(state->response);
+    _off_get_state_destroy(state);
+}
+
+static void _dir_fetch_on_tuple(void* ctx, void* data) {
+    off_get_state_t* state = (off_get_state_t*)ctx;
+    tuple_t* tuple = (tuple_t*)data;
+    if (state->dir_rs) {
+        readable_off_stream_write(state->dir_rs, tuple);
+    }
+}
+
+static void _dir_fetch_desc_close(void* ctx, void* unused) {
+    (void)unused;
+    off_get_state_t* state = (off_get_state_t*)ctx;
+    if (state->dir_desc) {
+        stream_deferred_deref((stream_t*)state->dir_desc);
+        state->dir_desc = NULL;
+    }
+}
+
+static void _dir_fetch_start(off_get_state_t* state) {
+    if (state->phase != OFF_GET_FETCH_DIR) {
+        state->resolve_phase = state->phase;
+    }
+    state->phase = OFF_GET_FETCH_DIR;
+
+    ori_t* dir_ori = ori_create(state->url->stream_length);
+    dir_ori->descriptor_hash = buffer_copy(state->url->descriptor_hash);
+    dir_ori->file_hash = buffer_copy(state->url->file_hash);
+    dir_ori->file_name = strdup(state->url->file_name);
+    dir_ori->block_type = standard;
+    dir_ori->tuple_size = 3;
+    state->dir_ori = dir_ori;
+
+    readable_off_stream_t* rs = readable_off_stream_create(
+        state->ctx->pool, state->ctx->bc, state->ctx->tc, dir_ori, 32, state->ctx->network);
+    readable_descriptor_t* desc = readable_descriptor_create(
+        state->ctx->pool, state->ctx->bc, dir_ori, 32, state->ctx->network);
+    state->dir_rs = rs;
+    state->dir_desc = desc;
+
+    /* Reference streams so they stay alive until we're done. */
+    refcounter_reference((refcounter_t*)rs);
+    refcounter_reference((refcounter_t*)desc);
+
+    stream_subscribe((stream_t*)desc, data_event, state,
+                     (void (*)(void*, void*))_dir_fetch_on_tuple, NULL);
+    stream_once((stream_t*)desc, close_event, state,
+                (void (*)(void*, void*))_dir_fetch_desc_close, NULL);
+    stream_once((stream_t*)desc, error_event, state,
+                (void (*)(void*, void*))_dir_fetch_error_handler, NULL);
+    stream_subscribe((stream_t*)rs, data_event, state,
+                     (void (*)(void*, void*))_dir_fetch_data, NULL);
+    stream_once((stream_t*)rs, close_event, state,
+                (void (*)(void*, void*))_dir_fetch_close, NULL);
+    stream_once((stream_t*)rs, error_event, state,
+                (void (*)(void*, void*))_dir_fetch_error_handler, NULL);
+
+    readable_descriptor_push(desc);
 }
 
 static void _send_stream_response(http_response_t* response, off_routes_context_t* ctx,
@@ -675,29 +847,74 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
         refcounter_reference((refcounter_t*)state->response);
         state->url = url;
 
-        /* ?ofd=raw — serve raw OFD bytes via async cache lookup.
-           Falls back to block_cache if not cached. */
+        /* Directory resolve — use async resolver.
+           The URL file_name may be "dir.ofd" (serve index.html) or
+           "dir.ofd/<internal/path>" (resolve the internal path). Split on the
+           first slash to separate the OFD name from the path inside it. */
+        const char* file_name = url->file_name;
+        size_t name_len = strlen(file_name);
+        const char* subpath = NULL;
+        char* slash = strchr(file_name, '/');
+        if (slash != NULL) {
+            name_len = (size_t)(slash - file_name);
+            subpath = slash + 1;
+        }
+
+        uint8_t is_bare_ofd = (name_len > 4 &&
+                               strncmp(file_name + name_len - 4, ".ofd", 4) == 0 &&
+                               (subpath == NULL || subpath[0] == '\0'));
+
+        /* Redirect bare directory URLs to a trailing slash so browser relative
+           links (css/style.css, js/deck.js, assets/...) resolve inside the
+           directory instead of above it. Preserve any query string except
+           the raw OFD request. */
+        if (is_bare_ofd &&
+            (!request->query_string || strstr(request->query_string, "ofd=raw") == NULL) &&
+            request->path && request->path[0] &&
+            request->path[strlen(request->path) - 1] != '/') {
+            size_t path_len = strlen(request->path);
+            size_t query_len = request->query_string ? strlen(request->query_string) : 0;
+            char* location = get_clear_memory(path_len + 2 + (query_len ? query_len + 1 : 0));
+            memcpy(location, request->path, path_len);
+            location[path_len] = '/';
+            if (query_len) {
+                location[path_len + 1] = '?';
+                memcpy(location + path_len + 2, request->query_string, query_len);
+            }
+            http_response_set_status(response, HTTP_STATUS_FOUND);
+            http_response_set_header(response, "Location", location);
+            http_response_set_header(response, "Content-Type", "text/plain");
+            http_response_write(response, "Redirect", 8);
+            http_response_end(response);
+            off_url_destroy(url);
+            free(location);
+            return;
+        }
+
+        /* ?ofd=raw — serve raw OFD bytes. Try the in-memory cache first; on
+           miss stream the directory CBOR from the block cache via its
+           descriptor hash and return it directly. */
         if (request->query_string && strstr(request->query_string, "ofd=raw") != NULL) {
             state->phase = OFF_GET_FETCH_RAW_OFD;
+            state->resolve_phase = OFF_GET_FETCH_RAW_OFD;
             ofd_cache_get(ctx->ofd_cache, url->file_hash, &state->actor);
             return;
         }
 
-        /* Directory resolve — use async resolver */
-        const char* resolve_path = url->file_name;
-        size_t name_len = strlen(url->file_name);
-
-        if (name_len > 4 && strcmp(url->file_name + name_len - 4, ".ofd") == 0) {
-            /* Try index.html first */
+        if (is_bare_ofd) {
+            /* Bare .ofd URL — try index.html first */
             state->phase = OFF_GET_RESOLVE_INDEX;
+            state->resolve_phase = OFF_GET_RESOLVE_INDEX;
             ofd_cache_resolve(ctx->ofd_cache, url->file_hash, "index.html", &state->actor);
             return;
         }
 
-        /* Resolve the path within the OFD */
+        /* Resolve the internal path within the OFD */
         state->phase = OFF_GET_RESOLVE_DIR;
-        state->resolve_path = strdup(resolve_path);
-        ofd_cache_resolve(ctx->ofd_cache, url->file_hash, resolve_path, &state->actor);
+        state->resolve_phase = OFF_GET_RESOLVE_DIR;
+        state->resolve_path = strdup(subpath != NULL ? subpath : file_name);
+        ofd_cache_resolve(ctx->ofd_cache, url->file_hash,
+                          subpath != NULL ? subpath : file_name, &state->actor);
         return;
     }
 
@@ -770,39 +987,10 @@ static void _off_get_dispatch(void* state, message_t* msg) {
                     return;
                 }
 
-                /* Cache miss — fall back to block_cache */
-                result->hash = NULL;
-                block_cache_get(ctx->ctx->bc, ctx->url->file_hash, &ctx->actor);
-                return;
-            }
-            break;
-        }
-
-        case CACHE_GET_RESULT: {
-            /* ?ofd=raw — block_cache fallback, send the block data as CBOR */
-            if (ctx->phase == OFF_GET_FETCH_RAW_OFD) {
-                cache_get_result_payload_t* result = (cache_get_result_payload_t*)msg->payload;
-                block_t* block = result->block;
-
-                if (!block) {
-                    http_response_set_status(ctx->response, 404);
-                    http_response_end(ctx->response);
-                    /* payload_destroy handles hash and block cleanup */
-                    _off_get_state_destroy(ctx);
-                    return;
-                }
-
-                /* Populate OFD cache from raw block data */
-                ofd_t* ofd = ofd_decode(block->data);
-                if (ofd != NULL) {
-                    ofd_cache_put(ctx->ctx->ofd_cache, ctx->url->file_hash, ofd);
-                }
-
-                http_response_set_header(ctx->response, "Content-Type", "application/cbor");
-                http_response_write(ctx->response, (const char*)block->data->data, block->data->size);
-                http_response_end(ctx->response);
-                /* payload_destroy handles hash and block cleanup */
-                _off_get_state_destroy(ctx);
+                /* Cache miss — stream the directory CBOR from the block cache
+                   using its descriptor hash. */
+                ctx->dir_raw_return = 1;
+                _dir_fetch_start(ctx);
                 return;
             }
             break;
@@ -813,7 +1001,7 @@ static void _off_get_dispatch(void* state, message_t* msg) {
             /* payload_destroy cleans up hash, path, and ori.
                Transfer ori ownership by clearing the pointer before destroy. */
 
-            if (ctx->phase == OFF_GET_RESOLVE_INDEX) {
+            if (ctx->resolve_phase == OFF_GET_RESOLVE_INDEX) {
                 if (result->ori != NULL) {
                     _send_stream_response(ctx->response, ctx->ctx, result->ori, "text/html");
                     result->ori = NULL;
@@ -821,19 +1009,32 @@ static void _off_get_dispatch(void* state, message_t* msg) {
                     return;
                 }
 
-                ctx->phase = OFF_GET_RESOLVE_DIR;
-                ctx->resolve_path = strdup(ctx->url->file_name);
-                ofd_cache_resolve(ctx->ctx->ofd_cache, ctx->url->file_hash,
-                                        ctx->resolve_path, &ctx->actor);
+                if (ctx->phase != OFF_GET_FETCH_DIR) {
+                    /* First miss — fetch directory bytes from the block cache,
+                       decode, cache, and try again. */
+                    _dir_fetch_start(ctx);
+                    return;
+                }
+
+                /* Already fetched once and still missing — give up. */
+                http_response_set_status(ctx->response, 404);
+                http_response_end(ctx->response);
+                _off_get_state_destroy(ctx);
                 return;
             }
 
-            if (ctx->phase == OFF_GET_RESOLVE_DIR) {
+            if (ctx->resolve_phase == OFF_GET_RESOLVE_DIR) {
                 if (result->ori != NULL) {
                     const char* mime = mime_type_from_extension(ctx->resolve_path);
                     _send_stream_response(ctx->response, ctx->ctx, result->ori, mime);
                     result->ori = NULL;
+                } else if (ctx->phase != OFF_GET_FETCH_DIR) {
+                    /* First miss — fetch directory bytes from the block cache,
+                       decode, cache, and try again. */
+                    _dir_fetch_start(ctx);
+                    return;
                 } else {
+                    /* Already fetched once and path still missing — give up. */
                     http_response_set_status(ctx->response, 404);
                     http_response_end(ctx->response);
                 }

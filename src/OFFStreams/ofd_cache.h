@@ -25,11 +25,17 @@ typedef struct {
 
 typedef HASHMAP(buffer_t, ofd_cache_entry_t) ofd_map_t;
 
-/* Pending resolver — waiting for a block_cache response */
+/* Pending resolver — waiting for a block_cache response or a directory stream */
 typedef struct pending_resolver_t {
     buffer_t* waiting_hash;
     struct resolver_state_t* resolver;
     struct pending_resolver_t* next;
+    void* cache_ctx;               /* Owning ofd_cache_t*, for stream callbacks */
+    void* dir_rs;                  /* readable_off_stream_t* for directory fetch */
+    void* dir_desc;                /* readable_descriptor_t* for directory fetch */
+    ori_t* dir_ori;                /* ORI owned by the directory fetch streams */
+    buffer_t* dir_buffer;          /* Accumulated directory CBOR bytes */
+    uint8_t dir_fetch_error;       /* 1 if directory stream failed */
 } pending_resolver_t;
 
 typedef struct {

@@ -9,6 +9,11 @@
 #include "../Actor/actor.h"
 #include "../Actor/message.h"
 #include "../Scheduler/scheduler.h"
+#include "../OFFStreams/readable_descriptor.h"
+#include "../OFFStreams/readable_off_stream.h"
+#include "../OFFStreams/ori.h"
+#include "../OFFStreams/ofd.h"
+#include "../BlockCache/block.h"
 #include <hashmap.h>
 #include <string.h>
 
@@ -77,6 +82,7 @@ static void _resolver_save_pending(ofd_cache_t* cache, buffer_t* waiting_hash,
     pending_resolver_t* pending = get_clear_memory(sizeof(*pending));
     pending->waiting_hash = (buffer_t*)refcounter_reference((refcounter_t*)waiting_hash);
     pending->resolver = resolver;
+    pending->cache_ctx = cache;
     pending->next = cache->pending_resolvers;
     cache->pending_resolvers = pending;
 }
@@ -88,6 +94,10 @@ static void _resolver_remove_pending(ofd_cache_t* cache, resolver_state_t* resol
             pending_resolver_t* to_free = *prev;
             *prev = to_free->next;
             DESTROY(to_free->waiting_hash, buffer);
+            if (to_free->dir_buffer) buffer_destroy(to_free->dir_buffer);
+            if (to_free->dir_rs) stream_deferred_deref((stream_t*)to_free->dir_rs);
+            if (to_free->dir_desc) stream_deferred_deref((stream_t*)to_free->dir_desc);
+            if (to_free->dir_ori) DESTROY(to_free->dir_ori, ori);
             free(to_free);
             return;
         }
@@ -124,6 +134,141 @@ static void _resolver_cleanup(ofd_cache_t* cache, resolver_state_t* resolver) {
         resolver->path = NULL;
     }
     free(resolver);
+}
+
+/* ---- Nested directory stream fallback ----
+ * When a directory entry carries a descriptor hash, stream the directory CBOR
+ * from the block cache (descriptor -> tuples -> blocks) instead of trying to
+ * look it up by file hash. This keeps OFD metadata out of a separate disk
+ * cache; the block cache is the single source of truth. */
+
+typedef struct {
+    pending_resolver_t* pending;
+    buffer_t* dir_buffer;
+    uint8_t error;
+} ofd_cache_dir_fetched_payload_t;
+
+static void _ofd_cache_dir_fetched_payload_destroy(void* ptr) {
+    ofd_cache_dir_fetched_payload_t* p = (ofd_cache_dir_fetched_payload_t*)ptr;
+    if (p->dir_buffer) buffer_destroy(p->dir_buffer);
+    free(p);
+}
+
+static pending_resolver_t* _resolver_find_pending(ofd_cache_t* cache,
+                                                  resolver_state_t* resolver) {
+    pending_resolver_t* pending = cache->pending_resolvers;
+    while (pending) {
+        if (pending->resolver == resolver) return pending;
+        pending = pending->next;
+    }
+    return NULL;
+}
+
+static void _dir_stream_data(void* ctx, void* data) {
+    pending_resolver_t* pending = (pending_resolver_t*)ctx;
+    buffer_t* chunk = (buffer_t*)data;
+    if (pending->dir_fetch_error || !chunk || chunk->size == 0) return;
+
+    if (pending->dir_buffer == NULL) {
+        pending->dir_buffer = buffer_create_with_capacity(0, chunk->size);
+    }
+    size_t old_size = pending->dir_buffer->size;
+    buffer_ensure_capacity(pending->dir_buffer, old_size + chunk->size);
+    memcpy(pending->dir_buffer->data + old_size, chunk->data, chunk->size);
+    pending->dir_buffer->size = old_size + chunk->size;
+}
+
+static void _dir_stream_send_done(ofd_cache_t* cache, pending_resolver_t* pending,
+                                  buffer_t* buf, uint8_t error) {
+    ofd_cache_dir_fetched_payload_t* payload = get_clear_memory(sizeof(*payload));
+    payload->pending = pending;
+    payload->dir_buffer = buf;
+    payload->error = error;
+
+    message_t msg;
+    msg.type = OFD_CACHE_DIR_FETCHED;
+    msg.payload = payload;
+    msg.payload_destroy = _ofd_cache_dir_fetched_payload_destroy;
+    actor_send(&cache->actor, &msg);
+}
+
+static void _dir_stream_error(void* ctx, void* unused) {
+    (void)unused;
+    pending_resolver_t* pending = (pending_resolver_t*)ctx;
+    if (pending->dir_fetch_error) return;
+    pending->dir_fetch_error = 1;
+    _dir_stream_send_done((ofd_cache_t*)pending->cache_ctx, pending, NULL, 1);
+}
+
+static void _dir_stream_close(void* ctx, void* unused) {
+    (void)unused;
+    pending_resolver_t* pending = (pending_resolver_t*)ctx;
+    if (pending->dir_fetch_error) return;
+    buffer_t* buf = pending->dir_buffer;
+    pending->dir_buffer = NULL;
+    _dir_stream_send_done((ofd_cache_t*)pending->cache_ctx, pending, buf, 0);
+}
+
+static void _dir_stream_on_tuple(void* ctx, void* data) {
+    pending_resolver_t* pending = (pending_resolver_t*)ctx;
+    tuple_t* tuple = (tuple_t*)data;
+    if (pending->dir_rs) {
+        readable_off_stream_write((readable_off_stream_t*)pending->dir_rs, tuple);
+    }
+}
+
+static void _dir_stream_desc_close(void* ctx, void* unused) {
+    (void)unused;
+    pending_resolver_t* pending = (pending_resolver_t*)ctx;
+    if (pending->dir_desc) {
+        stream_deferred_deref((stream_t*)pending->dir_desc);
+        pending->dir_desc = NULL;
+    }
+}
+
+static void _dir_stream_start(ofd_cache_t* cache, resolver_state_t* resolver,
+                              buffer_t* dir_hash, buffer_t* descriptor_hash,
+                              size_t dir_size) {
+    pending_resolver_t* pending = _resolver_find_pending(cache, resolver);
+    if (!pending) {
+        /* Should not happen; create a pending entry to hold stream state. */
+        _resolver_save_pending(cache, dir_hash, resolver);
+        pending = _resolver_find_pending(cache, resolver);
+    }
+    if (!pending) return;
+
+    ori_t* dir_ori = ori_create(dir_size);
+    dir_ori->descriptor_hash = buffer_copy(descriptor_hash);
+    dir_ori->file_hash = buffer_copy(dir_hash);
+    dir_ori->file_name = strdup("dir.ofd");
+    dir_ori->block_type = standard;
+    dir_ori->tuple_size = 3;
+
+    readable_off_stream_t* rs = readable_off_stream_create(
+        cache->pool, cache->bc, NULL, dir_ori, 32, NULL);
+    readable_descriptor_t* desc = readable_descriptor_create(
+        cache->pool, cache->bc, dir_ori, 32, NULL);
+
+    pending->dir_rs = rs;
+    pending->dir_desc = desc;
+    pending->dir_ori = dir_ori;
+    refcounter_reference((refcounter_t*)rs);
+    refcounter_reference((refcounter_t*)desc);
+
+    stream_subscribe((stream_t*)desc, data_event, pending,
+                     (void (*)(void*, void*))_dir_stream_on_tuple, NULL);
+    stream_once((stream_t*)desc, close_event, pending,
+                (void (*)(void*, void*))_dir_stream_desc_close, NULL);
+    stream_once((stream_t*)desc, error_event, pending,
+                (void (*)(void*, void*))_dir_stream_error, NULL);
+    stream_subscribe((stream_t*)rs, data_event, pending,
+                     (void (*)(void*, void*))_dir_stream_data, NULL);
+    stream_once((stream_t*)rs, close_event, pending,
+                (void (*)(void*, void*))_dir_stream_close, NULL);
+    stream_once((stream_t*)rs, error_event, pending,
+                (void (*)(void*, void*))_dir_stream_error, NULL);
+
+    readable_descriptor_push(desc);
 }
 
 static void _resolver_continue_path(ofd_cache_t* cache, resolver_state_t* resolver);
@@ -291,6 +436,76 @@ static void _ofd_cache_handle_block_result(ofd_cache_t* cache, message_t* msg) {
     DESTROY(hash, buffer);
 }
 
+static void _ofd_cache_handle_dir_fetched(ofd_cache_t* cache, message_t* msg) {
+    ofd_cache_dir_fetched_payload_t* payload = (ofd_cache_dir_fetched_payload_t*)msg->payload;
+    msg->payload = NULL;
+
+    pending_resolver_t* pending = payload->pending;
+    buffer_t* buf = payload->dir_buffer;
+    payload->dir_buffer = NULL;
+    uint8_t error = payload->error;
+    free(payload);
+
+    if (!pending) {
+        if (buf) buffer_destroy(buf);
+        return;
+    }
+
+    /* Remove pending from the list and take ownership of its resolver. */
+    pending_resolver_t** prev = &cache->pending_resolvers;
+    while (*prev) {
+        if (*prev == pending) {
+            *prev = pending->next;
+            break;
+        }
+        prev = &(*prev)->next;
+    }
+
+    resolver_state_t* resolver = pending->resolver;
+    buffer_t* waiting_hash = pending->waiting_hash;
+    pending->resolver = NULL;
+    pending->waiting_hash = NULL;
+    if (pending->dir_rs) stream_deferred_deref((stream_t*)pending->dir_rs);
+    if (pending->dir_desc) stream_deferred_deref((stream_t*)pending->dir_desc);
+    if (pending->dir_ori) DESTROY(pending->dir_ori, ori);
+    if (pending->dir_buffer) buffer_destroy(pending->dir_buffer);
+    free(pending);
+
+    if (error || buf == NULL || buf->size == 0) {
+        if (buf) buffer_destroy(buf);
+        DESTROY(waiting_hash, buffer);
+        _resolver_send_result(cache, resolver, NULL);
+        _resolver_cleanup(cache, resolver);
+        return;
+    }
+
+    ofd_t* ofd = ofd_decode(buf);
+    buffer_destroy(buf);
+    if (ofd == NULL) {
+        DESTROY(waiting_hash, buffer);
+        _resolver_send_result(cache, resolver, NULL);
+        _resolver_cleanup(cache, resolver);
+        return;
+    }
+
+    ofd_cache_entry_t* existing = hashmap_get(&cache->cache, waiting_hash);
+    if (existing) {
+        ofd_destroy(existing->ofd);
+        existing->ofd = ofd;
+        existing->expires_at = _now_ms() + cache->ttl_ms;
+    } else {
+        ofd_cache_entry_t* entry = get_clear_memory(sizeof(*entry));
+        entry->hash = (buffer_t*)refcounter_reference((refcounter_t*)waiting_hash);
+        entry->ofd = ofd;
+        entry->expires_at = _now_ms() + cache->ttl_ms;
+        hashmap_put(&cache->cache, waiting_hash, entry);
+    }
+    DESTROY(waiting_hash, buffer);
+
+    resolver->current_ofd = ofd;
+    _resolver_continue_path(cache, resolver);
+}
+
 static void _resolver_continue_path(ofd_cache_t* cache, resolver_state_t* resolver) {
     char* segment = (resolver->saveptr == NULL)
         ? strtok_r(resolver->path, "/", &resolver->saveptr)
@@ -330,8 +545,17 @@ static void _resolver_continue_path(ofd_cache_t* cache, resolver_state_t* resolv
                 free(cached);
             }
 
-            /* Directory not cached — save resolver and fetch from block_cache */
+            /* Directory not cached. If the OFD entry carries a descriptor hash,
+               stream the directory CBOR from the block cache. Otherwise fall
+               back to the legacy file-hash lookup (will fail for directories
+               whose blocks are keyed by padded block hashes, but preserves old
+               behavior for any OFDs that happen to store dir_hash as a block). */
             _resolver_save_pending(cache, entry->dir_hash, resolver);
+            if (entry->dir_descriptor_hash != NULL && entry->dir_size > 0) {
+                _dir_stream_start(cache, resolver, entry->dir_hash,
+                                  entry->dir_descriptor_hash, entry->dir_size);
+                return;
+            }
             buffer_t* hash_ref = (buffer_t*)refcounter_reference((refcounter_t*)entry->dir_hash);
             block_cache_get(cache->bc, hash_ref, &cache->actor);
             DESTROY(hash_ref, buffer);
@@ -363,6 +587,10 @@ static void _ofd_cache_dispatch(void* state, message_t* msg) {
 
         case CACHE_GET_RESULT:
             _ofd_cache_handle_block_result(cache, msg);
+            break;
+
+        case OFD_CACHE_DIR_FETCHED:
+            _ofd_cache_handle_dir_fetched(cache, msg);
             break;
 
         default:
@@ -399,6 +627,10 @@ void ofd_cache_destroy(ofd_cache_t* cache) {
         if (pending->resolver->path) free(pending->resolver->path);
         free(pending->resolver);
         DESTROY(pending->waiting_hash, buffer);
+        if (pending->dir_buffer) buffer_destroy(pending->dir_buffer);
+        if (pending->dir_rs) stream_deferred_deref((stream_t*)pending->dir_rs);
+        if (pending->dir_desc) stream_deferred_deref((stream_t*)pending->dir_desc);
+        if (pending->dir_ori) DESTROY(pending->dir_ori, ori);
         free(pending);
         pending = next;
     }

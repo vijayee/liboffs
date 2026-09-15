@@ -231,7 +231,9 @@ static void _finish_decode_and_render(readable_off_stream_t* stream) {
     return;
   }
 
-  tuple_cache_put(stream->tc, stream->pending_tuple, stream->xor_accumulator);
+  if (stream->tc != NULL) {
+    tuple_cache_put(stream->tc, stream->pending_tuple, stream->xor_accumulator);
+  }
 
   /* Tally and notify BEFORE rendering: the render path may emit the
    * finished/complete/close notifications, and consumers must always observe
@@ -274,7 +276,11 @@ static void _start_block_fetches(readable_off_stream_t* stream) {
 
 static void _start_tuple_cache_lookup(readable_off_stream_t* stream, tuple_t* tuple) {
   stream->pending_tuple = (tuple_t*)refcounter_reference((refcounter_t*)tuple);
-  tuple_cache_get(stream->tc, tuple, &stream->stream.actor);
+  if (stream->tc != NULL) {
+    tuple_cache_get(stream->tc, tuple, &stream->stream.actor);
+  } else {
+    _start_block_fetches(stream);
+  }
 }
 
 /* Process next tuple from the queue if available. Called after a tuple finishes processing. */

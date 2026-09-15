@@ -47,7 +47,7 @@ TEST_F(TestOfd, AddDirectoryEntry) {
     for (int i = 0; i < 32; i++) hash_data[i] = (uint8_t)(i + 100);
     buffer_t* dir_hash = buffer_create_from_pointer_copy(hash_data, 32);
 
-    ofd_add_directory(ofd, "css", dir_hash);
+    ofd_add_directory(ofd, "css", dir_hash, NULL, 0);
     DESTROY(dir_hash, buffer);
     ASSERT_EQ(ofd->entries.length, 1);
     EXPECT_STREQ(ofd->entries.data[0].name, "css");
@@ -102,7 +102,7 @@ TEST_F(TestOfd, EncodeDecodeRoundTrip) {
     uint8_t dir_hash_data[32];
     for (int i = 0; i < 32; i++) dir_hash_data[i] = (uint8_t)(i + 50);
     buffer_t* dir_hash = buffer_create_from_pointer_copy(dir_hash_data, 32);
-    ofd_add_directory(ofd, "assets", dir_hash);
+    ofd_add_directory(ofd, "assets", dir_hash, NULL, 0);
     DESTROY(dir_hash, buffer);
 
     // Encode
