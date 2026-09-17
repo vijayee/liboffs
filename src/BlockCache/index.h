@@ -22,10 +22,14 @@ typedef struct {
   size_t section_id;
   size_t section_index;
   uint64_t ejection_date;
+  uint16_t ephemeral_count; /* 0 = permanent; >0 = ephemeral claims held */
+  uint32_t pin_count;       /* >0 = permanent blocks resist deletion */
 } index_entry_t;
 
 index_entry_t* index_entry_create(buffer_t* hash);
-index_entry_t* index_entry_from(buffer_t* hash, size_t section_id, size_t section_index, uint64_t ejection_date, fibonacci_hit_counter_t counter);
+index_entry_t* index_entry_from(buffer_t* hash, size_t section_id, size_t section_index,
+                                uint64_t ejection_date, fibonacci_hit_counter_t counter,
+                                uint16_t ephemeral_count, uint32_t pin_count);
 void index_entry_destroy(index_entry_t* entry);
 int index_entry_increment(index_entry_t* entry);
 void index_entry_set_ejection_date(index_entry_t* entry, uint64_t ejection_date);

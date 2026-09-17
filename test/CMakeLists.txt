@@ -42,6 +42,7 @@ if (BUILD_TESTING)
             test_index.cpp
             test_section.cpp
             test_block_cache.cpp
+            test_ephemeral.cpp
             test_file_stream.cpp
             test_message_queue.cpp
             test_actor.cpp

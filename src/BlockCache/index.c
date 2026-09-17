@@ -48,7 +48,7 @@ index_entry_t* index_entry_create(buffer_t* hash) {
   return entry;
 }
 
-index_entry_t* index_entry_from(buffer_t* hash, size_t section_id, size_t section_index, uint64_t ejection_date, fibonacci_hit_counter_t counter) {
+index_entry_t* index_entry_from(buffer_t* hash, size_t section_id, size_t section_index, uint64_t ejection_date, fibonacci_hit_counter_t counter, uint16_t ephemeral_count, uint32_t pin_count) {
   index_entry_t* entry = get_clear_memory(sizeof(index_entry_t));
   refcounter_init((refcounter_t*) entry);
   entry->hash= (buffer_t*) refcounter_reference((refcounter_t*) hash);
@@ -56,6 +56,8 @@ index_entry_t* index_entry_from(buffer_t* hash, size_t section_id, size_t sectio
   entry->section_id = section_id;
   entry->section_index = section_index;
   entry->ejection_date = ejection_date;
+  entry->ephemeral_count = ephemeral_count;
+  entry->pin_count = pin_count;
   return entry;
 }
 
@@ -79,18 +81,19 @@ void index_entry_set_ejection_date(index_entry_t* entry, uint64_t ejection_date)
 }
 
 cbor_item_t* index_entry_to_cbor(index_entry_t* entry) {
-  cbor_item_t* array = cbor_new_definite_array(5);
+  cbor_item_t* array = cbor_new_definite_array(7);
   bool success = cbor_array_push(array, cbor_move(fibonacci_hit_counter_to_cbor(&entry->counter)));
   success &= cbor_array_push(array, cbor_move(buffer_to_cbor(entry->hash)));
   success &= cbor_array_push(array, cbor_move(cbor_build_uint64(entry->section_index)));
   success &= cbor_array_push(array, cbor_move(cbor_build_uint64(entry->section_id)));
   success &= cbor_array_push(array, cbor_move(cbor_build_uint64(entry->ejection_date)));
+  success &= cbor_array_push(array, cbor_move(cbor_build_uint16(entry->ephemeral_count)));
+  success &= cbor_array_push(array, cbor_move(cbor_build_uint32(entry->pin_count)));
   if (!success) {
     cbor_decref(&array);
     return NULL;
-  } else {
-    return array;
   }
+  return array;
 }
 
 index_entry_t* cbor_to_index_entry(cbor_item_t* cbor) {
@@ -123,8 +126,26 @@ index_entry_t* cbor_to_index_entry(cbor_item_t* cbor) {
   cbor_decref(&item2);
   cbor_decref(&item3);
   cbor_decref(&item4);
+  uint16_t ephemeral_count = 0;
+  uint32_t pin_count = 0;
+  if (cbor_array_size(cbor) >= 6) {
+    cbor_item_t* ephemeral_item = cbor_array_get(cbor, 5);
+    if (cbor_isa_uint(ephemeral_item)) {
+      uint64_t ephemeral_value = cbor_get_int(ephemeral_item);
+      ephemeral_count = (ephemeral_value > UINT16_MAX) ? UINT16_MAX : (uint16_t)ephemeral_value;
+    }
+    cbor_decref(&ephemeral_item);
+  }
+  if (cbor_array_size(cbor) >= 7) {
+    cbor_item_t* pin_item = cbor_array_get(cbor, 6);
+    if (cbor_isa_uint(pin_item)) {
+      uint64_t pin_value = cbor_get_int(pin_item);
+      pin_count = (pin_value > UINT32_MAX) ? UINT32_MAX : (uint32_t)pin_value;
+    }
+    cbor_decref(&pin_item);
+  }
   refcounter_yield((refcounter_t*) hash);
-  return index_entry_from(hash, section_id, section_index, ejection_date, counter);
+  return index_entry_from(hash, section_id, section_index, ejection_date, counter, ephemeral_count, pin_count);
 }
 
 index_node_t* index_node_create(size_t bucket_size) {
@@ -687,6 +708,18 @@ int _index_node_to_crc(index_node_t* node, XXH64_state_t* const state) {
       if (XXH64_update(state, &section_id, sizeof(uint64_t)) == XXH_ERROR) {
         log_error("failed to update crc with section id");
         return 7;
+      }
+
+      uint32_t ephemeral_count = htobe32((uint32_t)cur_entry->ephemeral_count);
+      if (XXH64_update(state, &ephemeral_count, sizeof(uint32_t)) == XXH_ERROR) {
+        log_error("failed to update crc with ephemeral count");
+        return 8;
+      }
+
+      uint32_t pin_count = htobe32(cur_entry->pin_count);
+      if (XXH64_update(state, &pin_count, sizeof(uint32_t)) == XXH_ERROR) {
+        log_error("failed to update crc with pin count");
+        return 9;
       }
     }
     return 0;

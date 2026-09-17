@@ -112,7 +112,11 @@ int wal_read(wal_t* wal, wal_type_e* type, buffer_t** data, uint64_t* cursor, in
   switch (*type) {
     case 'a':
     case 'i':
-      size = 78;
+      /* Serialized index_entry_to_cbor output: array header (1) +
+         fibonacci counter array (16) + hash bytestring (34) +
+         section_index/section_id/ejection_date uint64s (27) +
+         ephemeral_count uint16 (3) + pin_count uint32 (5) = 86. */
+      size = 86;
       break;
     case 'e':
       size = 44;
