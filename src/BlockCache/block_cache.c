@@ -83,6 +83,48 @@ static void cache_get_payload_destroy(void* ptr) {
   free(payload);
 }
 
+static void cache_ephemeral_payload_destroy(void* ptr) {
+  cache_ephemeral_payload_t* payload = (cache_ephemeral_payload_t*)ptr;
+  if (payload->hash != NULL) {
+    DESTROY(payload->hash, buffer);
+  }
+  free(payload);
+}
+
+static void cache_pin_payload_destroy(void* ptr) {
+  cache_pin_payload_t* payload = (cache_pin_payload_t*)ptr;
+  if (payload->hash != NULL) {
+    DESTROY(payload->hash, buffer);
+  }
+  free(payload);
+}
+
+/* Tolerates the emptied shell (NULL arrays / count 0) that a consumer leaves
+   behind after stealing the arrays. */
+void cache_ephemeral_list_payload_destroy(cache_ephemeral_list_payload_t* payload) {
+  if (payload == NULL) return;
+  if (payload->hashes != NULL) {
+    for (size_t idx = 0; idx < payload->count; idx++) {
+      if (payload->hashes[idx] != NULL) {
+        DESTROY(payload->hashes[idx], buffer);
+      }
+    }
+    free(payload->hashes);
+  }
+  if (payload->ephemeral_counts != NULL) {
+    free(payload->ephemeral_counts);
+  }
+  if (payload->pin_counts != NULL) {
+    free(payload->pin_counts);
+  }
+  free(payload);
+}
+
+/* void* adapter so the typed destroy can serve as message_t.payload_destroy */
+static void cache_ephemeral_list_payload_destroy_adapter(void* ptr) {
+  cache_ephemeral_list_payload_destroy((cache_ephemeral_list_payload_t*)ptr);
+}
+
 void block_lru_cache_move(block_lru_cache_t* lru, block_lru_node_t* node);
 void block_cache_dispatch(void* state, message_t* msg);
 
@@ -256,6 +298,30 @@ void block_lru_cache_move(block_lru_cache_t* lru, block_lru_node_t* node) {
 }
 
 /* ---- block_cache dispatch ---- */
+
+/* Delete one entry from the index, LRU, and section store. `hash` must be a
+   buffer the caller holds a reference to (it outlives the entry: index_remove
+   drops the index's entry reference, which may free an entry that is not in
+   the LRU). Captures the section index before index_remove for the same
+   reason. */
+static void _block_cache_delete_entry(block_cache_t* block_cache, buffer_t* hash,
+                                      index_entry_t* entry) {
+  size_t section_index = entry->section_index;
+  index_remove(block_cache->index, hash);
+  timer_actor_debounce(block_cache->timer_actor, block_cache->index_wait, 0, &block_cache->actor, INDEX_SAVE);
+  block_cache->current_bytes -= (size_t)block_cache->type;
+  block_cache_update_capacity(block_cache);
+  block_lru_cache_delete(block_cache->lru, hash);
+  section_deallocate_payload_t dealloc_payload;
+  dealloc_payload.index = section_index;
+  dealloc_payload.reply_to = NULL;
+  dealloc_payload.result = -1;
+  message_t dealloc_msg;
+  dealloc_msg.type = SECTION_DEALLOCATE;
+  dealloc_msg.payload = &dealloc_payload;
+  dealloc_msg.payload_destroy = NULL;
+  sections_dispatch(block_cache->sections, &dealloc_msg);
+}
 
 static void _block_cache_add_pending_get(block_cache_t* block_cache, buffer_t* hash,
                                           index_entry_t* entry, actor_t* reply_to) {
@@ -515,22 +581,20 @@ void block_cache_dispatch(void* state, message_t* msg) {
       }
       if (entry == NULL) {
         p->result = 0;
+      } else if (entry->ephemeral_count > 0 && !p->force) {
+        log_warn("CACHE_REMOVE: hash holds %u ephemeral claims — remove rejected (use force)",
+                 (unsigned)entry->ephemeral_count);
+        p->result = CACHE_REMOVE_EPHEMERAL_CLAIMED;
+      } else if (entry->pin_count > 0 && !p->force) {
+        log_warn("CACHE_REMOVE: hash holds %u pins — remove rejected (use force)",
+                 (unsigned)entry->pin_count);
+        p->result = CACHE_REMOVE_PINNED;
       } else {
-        size_t section_index = entry->section_index;
-        index_remove(block_cache->index, p->hash);
-        timer_actor_debounce(block_cache->timer_actor, block_cache->index_wait, 0, &block_cache->actor, INDEX_SAVE);
-        block_cache->current_bytes -= (size_t)block_cache->type;
-        block_cache_update_capacity(block_cache);
-        block_lru_cache_delete(block_cache->lru, p->hash);
-        section_deallocate_payload_t dealloc_payload;
-        dealloc_payload.index = section_index;
-        dealloc_payload.reply_to = NULL;
-        dealloc_payload.result = -1;
-        message_t dealloc_msg;
-        dealloc_msg.type = SECTION_DEALLOCATE;
-        dealloc_msg.payload = &dealloc_payload;
-        dealloc_msg.payload_destroy = NULL;
-        sections_dispatch(block_cache->sections, &dealloc_msg);
+        if (p->force && entry->pin_count > 0) {
+          entry->pin_count = 0;
+          index_write_entry_metadata(block_cache->index, entry);
+        }
+        _block_cache_delete_entry(block_cache, p->hash, entry);
         p->result = 0;
       }
       DESTROY(p->hash, buffer);
@@ -660,6 +724,166 @@ void block_cache_dispatch(void* state, message_t* msg) {
     }
     case INDEX_SAVE: {
       index_debounce(block_cache->index);
+      break;
+    }
+    case CACHE_EPHEMERAL: {
+      cache_ephemeral_payload_t* p = (cache_ephemeral_payload_t*)msg->payload;
+      p->result = CACHE_EPHEMERAL_NOT_FOUND;
+      p->previous_count = 0;
+      p->new_count = 0;
+      index_entry_t* entry = block_lru_cache_peek_entry(block_cache->lru, p->hash);
+      if (entry == NULL) {
+        entry = index_peek(block_cache->index, p->hash);
+      }
+      if (entry != NULL) {
+        p->previous_count = entry->ephemeral_count;
+        switch (p->op) {
+          case CACHE_EPHEMERAL_ACQUIRE:
+            if (entry->ephemeral_count == UINT16_MAX) {
+              /* No silent saturation — the caller must be told the count is
+                 exhausted (each claim maps to a live consumer). */
+              log_warn("CACHE_EPHEMERAL: acquire rejected — ephemeral count saturated at %u",
+                       (unsigned)entry->ephemeral_count);
+              p->result = CACHE_EPHEMERAL_OVERFLOW;
+              p->new_count = entry->ephemeral_count;
+            } else {
+              entry->ephemeral_count++;
+              p->new_count = entry->ephemeral_count;
+              index_write_entry_metadata(block_cache->index, entry);
+              p->result = CACHE_EPHEMERAL_OK;
+            }
+            break;
+          case CACHE_EPHEMERAL_RELEASE:
+            if (entry->ephemeral_count > 0) {
+              entry->ephemeral_count--;
+              p->new_count = entry->ephemeral_count;
+              index_write_entry_metadata(block_cache->index, entry);
+              p->result = CACHE_EPHEMERAL_OK;
+              if (entry->ephemeral_count == 0) {
+                /* Last claim released — the block is deleted regardless of
+                   pin status: ephemeral claims win over pins. */
+                _block_cache_delete_entry(block_cache, p->hash, entry);
+              }
+            } else {
+              /* Releasing a block nobody claimed is a benign no-op. */
+              p->new_count = 0;
+              p->result = CACHE_EPHEMERAL_OK;
+            }
+            break;
+          case CACHE_EPHEMERAL_CLEAR:
+            /* Commit the count to zero; announce/remove is the caller's job. */
+            if (entry->ephemeral_count > 0) {
+              entry->ephemeral_count = 0;
+              index_write_entry_metadata(block_cache->index, entry);
+            }
+            p->new_count = 0;
+            p->result = CACHE_EPHEMERAL_OK;
+            break;
+          default:
+            log_warn("CACHE_EPHEMERAL: unknown op %d", (int)p->op);
+            break;
+        }
+      }
+      /* Async: send result back if reply_to is set */
+      if (p->reply_to != NULL) {
+        cache_ephemeral_result_payload_t* result = get_clear_memory(sizeof(cache_ephemeral_result_payload_t));
+        result->result = p->result;
+        result->previous_count = p->previous_count;
+        result->new_count = p->new_count;
+        result->reply_to = NULL;
+        message_t reply;
+        reply.type = CACHE_EPHEMERAL_RESULT;
+        reply.payload = result;
+        reply.payload_destroy = free;
+        actor_send(p->reply_to, &reply);
+      }
+      break;
+    }
+    case CACHE_PIN:
+    case CACHE_UNPIN: {
+      cache_pin_payload_t* p = (cache_pin_payload_t*)msg->payload;
+      p->result = CACHE_EPHEMERAL_NOT_FOUND;
+      p->previous_count = 0;
+      p->new_count = 0;
+      index_entry_t* entry = block_lru_cache_peek_entry(block_cache->lru, p->hash);
+      if (entry == NULL) {
+        entry = index_peek(block_cache->index, p->hash);
+      }
+      if (entry != NULL) {
+        p->previous_count = entry->pin_count;
+        if (msg->type == CACHE_PIN) {
+          if (entry->pin_count == UINT32_MAX) {
+            /* Saturate with a warning rather than wrapping to 0. */
+            log_warn("CACHE_PIN: pin count saturated at %u — holding",
+                     (unsigned)entry->pin_count);
+          } else {
+            entry->pin_count++;
+          }
+        } else if (entry->pin_count > 0) {
+          entry->pin_count--;
+        }
+        p->new_count = entry->pin_count;
+        index_write_entry_metadata(block_cache->index, entry);
+        p->result = CACHE_EPHEMERAL_OK;
+      }
+      /* Async: send result back if reply_to is set */
+      if (p->reply_to != NULL) {
+        cache_pin_result_payload_t* result = get_clear_memory(sizeof(cache_pin_result_payload_t));
+        result->result = p->result;
+        result->previous_count = p->previous_count;
+        result->new_count = p->new_count;
+        result->reply_to = NULL;
+        message_t reply;
+        reply.type = (msg->type == CACHE_PIN) ? CACHE_PIN_RESULT : CACHE_UNPIN_RESULT;
+        reply.payload = result;
+        reply.payload_destroy = free;
+        actor_send(p->reply_to, &reply);
+      }
+      break;
+    }
+    case CACHE_EPHEMERAL_LIST: {
+      cache_ephemeral_list_payload_t* p = (cache_ephemeral_list_payload_t*)msg->payload;
+      p->hashes = NULL;
+      p->ephemeral_counts = NULL;
+      p->pin_counts = NULL;
+      p->count = 0;
+      index_entry_vec_t* entries = index_to_array(block_cache->index);
+      size_t ephemeral_total = 0;
+      for (size_t entry_idx = 0; entry_idx < entries->length; entry_idx++) {
+        if (entries->data[entry_idx]->ephemeral_count > 0) {
+          ephemeral_total++;
+        }
+      }
+      if (ephemeral_total > 0) {
+        p->hashes = get_clear_memory(sizeof(buffer_t*) * ephemeral_total);
+        p->ephemeral_counts = get_clear_memory(sizeof(uint16_t) * ephemeral_total);
+        p->pin_counts = get_clear_memory(sizeof(uint32_t) * ephemeral_total);
+        size_t out_idx = 0;
+        for (size_t entry_idx = 0; entry_idx < entries->length; entry_idx++) {
+          index_entry_t* entry = entries->data[entry_idx];
+          if (entry->ephemeral_count > 0) {
+            p->hashes[out_idx] = (buffer_t*)refcounter_reference((refcounter_t*)entry->hash);
+            p->ephemeral_counts[out_idx] = entry->ephemeral_count;
+            p->pin_counts[out_idx] = entry->pin_count;
+            out_idx++;
+          }
+        }
+        p->count = ephemeral_total;
+      }
+      for (size_t entry_idx = 0; entry_idx < entries->length; entry_idx++) {
+        index_entry_destroy(entries->data[entry_idx]);
+      }
+      vec_deinit(entries);
+      free(entries);
+      if (p->reply_to != NULL) {
+        /* Mirror the same message (and payload) back to the reply actor. The
+           consumer steals the arrays and nulls them in the payload, then its
+           actor_run's payload_destroy frees the emptied shell. Null our copy
+           so this actor_run does not destroy the payload a second time. */
+        actor_send(p->reply_to, msg);
+        msg->payload = NULL;
+        msg->payload_destroy = NULL;
+      }
       break;
     }
     default:
@@ -818,6 +1042,7 @@ void block_cache_put(block_cache_t* block_cache, block_t* block, uint32_t incomi
   payload->incoming_fib = incoming_fib;
   payload->reply_to = reply_to;
   payload->result = CACHE_PUT_ERROR;
+  payload->acquire_ephemeral = 0;
 
   message_t msg;
   msg.type = CACHE_PUT;
@@ -828,15 +1053,85 @@ void block_cache_put(block_cache_t* block_cache, block_t* block, uint32_t incomi
 }
 
 void block_cache_remove(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to) {
+  block_cache_remove_ex(block_cache, hash, 0, reply_to);
+}
+
+void block_cache_remove_ex(block_cache_t* block_cache, buffer_t* hash, uint8_t force, actor_t* reply_to) {
   cache_remove_payload_t* payload = get_clear_memory(sizeof(cache_remove_payload_t));
   payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)hash);
   payload->reply_to = reply_to;
+  payload->force = force;
   payload->result = -1;
 
   message_t msg;
   msg.type = CACHE_REMOVE;
   msg.payload = payload;
   msg.payload_destroy = cache_remove_payload_destroy;
+
+  actor_send(&block_cache->actor, &msg);
+}
+
+void block_cache_ephemeral(block_cache_t* block_cache, buffer_t* hash, cache_ephemeral_op_e op, actor_t* reply_to) {
+  cache_ephemeral_payload_t* payload = get_clear_memory(sizeof(cache_ephemeral_payload_t));
+  payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)hash);
+  payload->reply_to = reply_to;
+  payload->op = op;
+  payload->result = CACHE_EPHEMERAL_NOT_FOUND;
+  payload->previous_count = 0;
+  payload->new_count = 0;
+
+  message_t msg;
+  msg.type = CACHE_EPHEMERAL;
+  msg.payload = payload;
+  msg.payload_destroy = cache_ephemeral_payload_destroy;
+
+  actor_send(&block_cache->actor, &msg);
+}
+
+void block_cache_pin(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to) {
+  cache_pin_payload_t* payload = get_clear_memory(sizeof(cache_pin_payload_t));
+  payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)hash);
+  payload->reply_to = reply_to;
+  payload->result = CACHE_EPHEMERAL_NOT_FOUND;
+  payload->previous_count = 0;
+  payload->new_count = 0;
+
+  message_t msg;
+  msg.type = CACHE_PIN;
+  msg.payload = payload;
+  msg.payload_destroy = cache_pin_payload_destroy;
+
+  actor_send(&block_cache->actor, &msg);
+}
+
+void block_cache_unpin(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to) {
+  cache_pin_payload_t* payload = get_clear_memory(sizeof(cache_pin_payload_t));
+  payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)hash);
+  payload->reply_to = reply_to;
+  payload->result = CACHE_EPHEMERAL_NOT_FOUND;
+  payload->previous_count = 0;
+  payload->new_count = 0;
+
+  message_t msg;
+  msg.type = CACHE_UNPIN;
+  msg.payload = payload;
+  msg.payload_destroy = cache_pin_payload_destroy;
+
+  actor_send(&block_cache->actor, &msg);
+}
+
+void block_cache_list_ephemeral(block_cache_t* block_cache, actor_t* reply_to) {
+  cache_ephemeral_list_payload_t* payload = get_clear_memory(sizeof(cache_ephemeral_list_payload_t));
+  payload->reply_to = reply_to;
+  payload->count = 0;
+  payload->hashes = NULL;
+  payload->ephemeral_counts = NULL;
+  payload->pin_counts = NULL;
+
+  message_t msg;
+  msg.type = CACHE_EPHEMERAL_LIST;
+  msg.payload = payload;
+  msg.payload_destroy = cache_ephemeral_list_payload_destroy_adapter;
 
   actor_send(&block_cache->actor, &msg);
 }

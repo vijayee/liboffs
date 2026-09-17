@@ -644,3 +644,319 @@ TEST(TestEphemeralIndex, LegacyRebuildWalRetiredByEagerRollover) {
   rm_rf(location);
   free(location);
 }
+
+/* ---- block-level ephemeral/pin ops ---- */
+
+/* Completion actor for async block_cache tests — mirrors the
+   bc_completion_t pattern in test_block_cache.cpp, extended with the
+   ephemeral/pin result fields. */
+typedef struct {
+  ATOMIC(uint8_t) done;
+  int put_result;
+  block_t* get_block;
+  buffer_t* get_hash;
+  int remove_result;
+} bc_completion_t;
+
+static void bc_completion_dispatch(void* state, message_t* msg) {
+  bc_completion_t* cs = (bc_completion_t*)state;
+  switch (msg->type) {
+    case CACHE_PUT_RESULT: {
+      cache_put_result_payload_t* r = (cache_put_result_payload_t*)msg->payload;
+      cs->put_result = r->result;
+      break;
+    }
+    case CACHE_GET_RESULT: {
+      cache_get_result_payload_t* r = (cache_get_result_payload_t*)msg->payload;
+      cs->get_block = r->block;
+      cs->get_hash = r->hash;
+      r->block = NULL;
+      r->hash = NULL;
+      break;
+    }
+    case CACHE_REMOVE_RESULT: {
+      cache_remove_result_payload_t* r = (cache_remove_result_payload_t*)msg->payload;
+      cs->remove_result = r->result;
+      break;
+    }
+    default:
+      break;
+  }
+  ATOMIC_STORE(&cs->done, 1);
+}
+
+/* Helper: put a block and wait for result (mirrors test_block_cache.cpp) */
+static int bc_put_sync(block_cache_t* bc, block_t* block, scheduler_pool_t* pool) {
+  bc_completion_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, bc_completion_dispatch, pool);
+
+  block_t* ref_block = (block_t*)refcounter_reference((refcounter_t*)block);
+  refcounter_yield((refcounter_t*)ref_block);
+  block_cache_put(bc, ref_block, 0, &comp);
+
+  /* comp is scheduled by actor_send when bc->actor delivers the result — do
+     NOT pre-inject it with an empty queue (that spawns a spurious no-op run
+     and a double-injection that races actor_destroy). */
+  while (!ATOMIC_LOAD(&cs.done)) { platform_sleep_ms(1); }
+  /* Wait for every pool worker to be idle before destroying the actor: a
+     worker may still be in the tail of actor_run(&comp) (between setting
+     cs.done and clearing ACTOR_FLAG_RUNNING), and actor_destroy must not
+     free the queue out from under it. */
+  scheduler_pool_wait_for_idle(pool);
+
+  actor_destroy(&comp);
+  return cs.put_result;
+}
+
+typedef struct {
+  ATOMIC(uint8_t) done;
+  int put_result;
+  int ephemeral_result;
+  uint16_t ephemeral_previous;
+  uint16_t ephemeral_new;
+  int pin_result;
+  uint32_t pin_previous;
+  uint32_t pin_new;
+  int remove_result;
+} eph_completion_t;
+
+static void eph_completion_dispatch(void* state, message_t* msg) {
+  eph_completion_t* cs = (eph_completion_t*)state;
+  switch (msg->type) {
+    case CACHE_PUT_RESULT: {
+      cache_put_result_payload_t* r = (cache_put_result_payload_t*)msg->payload;
+      cs->put_result = r->result;
+      break;
+    }
+    case CACHE_EPHEMERAL_RESULT: {
+      cache_ephemeral_result_payload_t* r = (cache_ephemeral_result_payload_t*)msg->payload;
+      cs->ephemeral_result = r->result;
+      cs->ephemeral_previous = r->previous_count;
+      cs->ephemeral_new = r->new_count;
+      break;
+    }
+    case CACHE_PIN_RESULT: {
+      cache_pin_result_payload_t* r = (cache_pin_result_payload_t*)msg->payload;
+      cs->pin_result = r->result;
+      cs->pin_previous = r->previous_count;
+      cs->pin_new = r->new_count;
+      break;
+    }
+    case CACHE_REMOVE_RESULT: {
+      cache_remove_result_payload_t* r = (cache_remove_result_payload_t*)msg->payload;
+      cs->remove_result = r->result;
+      break;
+    }
+    default:
+      break;
+  }
+  ATOMIC_STORE(&cs->done, 1);
+}
+
+/* Helper: run one op against the cache actor and wait for its result using
+   the completion-actor polling pattern (poll done, barrier on pool idle,
+   destroy the completion actor). */
+static void eph_wait(eph_completion_t* cs, actor_t* comp, scheduler_pool_t* pool) {
+  /* comp is scheduled by actor_send when the cache actor delivers the
+     result — do NOT pre-inject it with an empty queue. */
+  while (!ATOMIC_LOAD(&cs->done)) { platform_sleep_ms(1); }
+  /* Barrier before actor_destroy: a worker may still be in the tail of
+     actor_run(&comp). */
+  scheduler_pool_wait_for_idle(pool);
+  actor_destroy(comp);
+}
+
+static void eph_ephemeral_sync(block_cache_t* bc, buffer_t* hash, cache_ephemeral_op_e op,
+                               int* result, uint16_t* previous, uint16_t* new_count,
+                               scheduler_pool_t* pool) {
+  eph_completion_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, eph_completion_dispatch, pool);
+  block_cache_ephemeral(bc, hash, op, &comp);
+  eph_wait(&cs, &comp, pool);
+  *result = cs.ephemeral_result;
+  *previous = cs.ephemeral_previous;
+  *new_count = cs.ephemeral_new;
+}
+
+static void eph_pin_sync(block_cache_t* bc, buffer_t* hash,
+                         int* result, uint32_t* previous, uint32_t* new_count,
+                         scheduler_pool_t* pool) {
+  eph_completion_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, eph_completion_dispatch, pool);
+  block_cache_pin(bc, hash, &comp);
+  eph_wait(&cs, &comp, pool);
+  *result = cs.pin_result;
+  *previous = cs.pin_previous;
+  *new_count = cs.pin_new;
+}
+
+static int eph_remove_ex_sync(block_cache_t* bc, buffer_t* hash, uint8_t force,
+                              scheduler_pool_t* pool) {
+  eph_completion_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, eph_completion_dispatch, pool);
+  block_cache_remove_ex(bc, hash, force, &comp);
+  eph_wait(&cs, &comp, pool);
+  return cs.remove_result;
+}
+
+#define EPH_BLOCK_COUNT 4
+
+class TestEphemeralCache : public testing::Test {
+public:
+  block_size_e type = standard;
+  char* location;
+  timer_actor_t* timer_actor;
+  scheduler_pool_t* pool;
+  block_cache_t* block_cache;
+  block_t* blocks[EPH_BLOCK_COUNT];
+  config_t config;
+  void SetUp() override {
+    location = path_join("/tmp", "EphemeralCacheTest");
+    rm_rf(location);
+    pool = scheduler_pool_create(4);
+    scheduler_pool_start(pool);
+    timer_actor = timer_actor_create(pool);
+    mkdir_p(location);
+    block_cache = NULL;
+    config = config_default();
+    /* Long debounce window so the 5ms timer cannot fire mid-test. The
+       TearDown's explicit flush + sync handles persistence. */
+    config.index_wait = 60000;
+    config.index_max_wait = 60000;
+    for (size_t i = 0; i < EPH_BLOCK_COUNT; i++) {
+      blocks[i] = block_create_random_block_by_type(type);
+    }
+  }
+  void TearDown() override {
+    scheduler_pool_wait_for_idle(pool);
+    if (block_cache != NULL) {
+      block_cache_sync(block_cache);
+      block_cache_destroy(block_cache);
+    }
+    timer_actor_destroy(timer_actor);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
+    free(location);
+    for (size_t i = 0; i < EPH_BLOCK_COUNT; i++) {
+      block_destroy(blocks[i]);
+    }
+  }
+};
+
+/* ACQUIRE counts up, RELEASE counts down, and the last RELEASE deletes the
+   block — even when a pin is held (pins do not protect ephemeral blocks).
+   CLEAR zeroes the count without deleting the block (commit semantics:
+   the block stays as a permanent block until something removes it). */
+TEST_F(TestEphemeralCache, EphemeralAcquireReleaseClear) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  ASSERT_NE(block_cache, nullptr);
+  ASSERT_EQ(bc_put_sync(block_cache, blocks[0], pool), CACHE_PUT_NEW);
+  buffer_t* hash = blocks[0]->hash;
+
+  int result;
+  uint16_t previous;
+  uint16_t new_count;
+
+  eph_ephemeral_sync(block_cache, hash, CACHE_EPHEMERAL_ACQUIRE,
+                     &result, &previous, &new_count, pool);
+  EXPECT_EQ(result, CACHE_EPHEMERAL_OK);
+  EXPECT_EQ(previous, 0u);
+  EXPECT_EQ(new_count, 1u);
+
+  eph_ephemeral_sync(block_cache, hash, CACHE_EPHEMERAL_ACQUIRE,
+                     &result, &previous, &new_count, pool);
+  EXPECT_EQ(result, CACHE_EPHEMERAL_OK);
+  EXPECT_EQ(previous, 1u);
+  EXPECT_EQ(new_count, 2u);
+
+  /* Release one claim — the block stays while a claim is held. */
+  eph_ephemeral_sync(block_cache, hash, CACHE_EPHEMERAL_RELEASE,
+                     &result, &previous, &new_count, pool);
+  EXPECT_EQ(result, CACHE_EPHEMERAL_OK);
+  EXPECT_EQ(previous, 2u);
+  EXPECT_EQ(new_count, 1u);
+  EXPECT_GT(block_cache_count(block_cache), 0u);
+
+  /* Pin the block, then release the last claim — the block is deleted
+     regardless of the pin: ephemeral claims win over pins. */
+  int pin_result;
+  uint32_t pin_previous;
+  uint32_t pin_new;
+  eph_pin_sync(block_cache, hash, &pin_result, &pin_previous, &pin_new, pool);
+  EXPECT_EQ(pin_result, CACHE_EPHEMERAL_OK);
+  EXPECT_EQ(pin_previous, 0u);
+  EXPECT_EQ(pin_new, 1u);
+
+  eph_ephemeral_sync(block_cache, hash, CACHE_EPHEMERAL_RELEASE,
+                     &result, &previous, &new_count, pool);
+  EXPECT_EQ(result, CACHE_EPHEMERAL_OK);
+  EXPECT_EQ(previous, 1u);
+  EXPECT_EQ(new_count, 0u);
+  EXPECT_EQ(block_cache_count(block_cache), 0u);
+
+  /* CLEAR: count zeroed, metadata committed, block kept in place. */
+  ASSERT_EQ(bc_put_sync(block_cache, blocks[1], pool), CACHE_PUT_NEW);
+  eph_ephemeral_sync(block_cache, blocks[1]->hash, CACHE_EPHEMERAL_ACQUIRE,
+                     &result, &previous, &new_count, pool);
+  EXPECT_EQ(result, CACHE_EPHEMERAL_OK);
+  EXPECT_EQ(new_count, 1u);
+  eph_ephemeral_sync(block_cache, blocks[1]->hash, CACHE_EPHEMERAL_CLEAR,
+                     &result, &previous, &new_count, pool);
+  EXPECT_EQ(result, CACHE_EPHEMERAL_OK);
+  EXPECT_EQ(previous, 1u);
+  EXPECT_EQ(new_count, 0u);
+  EXPECT_EQ(block_cache_count(block_cache), 1u);
+}
+
+/* Pinned permanent blocks resist a plain remove and yield
+   CACHE_REMOVE_PINNED; a forced remove clears the pin and deletes. */
+TEST_F(TestEphemeralCache, PinnedPermanentRemoveRejectedAndForced) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  ASSERT_NE(block_cache, nullptr);
+  ASSERT_EQ(bc_put_sync(block_cache, blocks[0], pool), CACHE_PUT_NEW);
+  buffer_t* hash = blocks[0]->hash;
+
+  int pin_result;
+  uint32_t pin_previous;
+  uint32_t pin_new;
+  eph_pin_sync(block_cache, hash, &pin_result, &pin_previous, &pin_new, pool);
+  EXPECT_EQ(pin_result, CACHE_EPHEMERAL_OK);
+  EXPECT_EQ(pin_previous, 0u);
+  EXPECT_EQ(pin_new, 1u);
+
+  EXPECT_EQ(eph_remove_ex_sync(block_cache, hash, /*force=*/0, pool),
+            CACHE_REMOVE_PINNED);
+  EXPECT_EQ(block_cache_count(block_cache), 1u);
+
+  EXPECT_EQ(eph_remove_ex_sync(block_cache, hash, /*force=*/1, pool), 0);
+  EXPECT_EQ(block_cache_count(block_cache), 0u);
+}
+
+/* A claimed (ephemeral_count > 0) block resists a plain remove with
+   CACHE_REMOVE_EPHEMERAL_CLAIMED. */
+TEST_F(TestEphemeralCache, ClaimedEphemeralRemoveRejected) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  ASSERT_NE(block_cache, nullptr);
+  ASSERT_EQ(bc_put_sync(block_cache, blocks[0], pool), CACHE_PUT_NEW);
+  buffer_t* hash = blocks[0]->hash;
+
+  int result;
+  uint16_t previous;
+  uint16_t new_count;
+  eph_ephemeral_sync(block_cache, hash, CACHE_EPHEMERAL_ACQUIRE,
+                     &result, &previous, &new_count, pool);
+  ASSERT_EQ(result, CACHE_EPHEMERAL_OK);
+  ASSERT_EQ(new_count, 1u);
+
+  EXPECT_EQ(eph_remove_ex_sync(block_cache, hash, /*force=*/0, pool),
+            CACHE_REMOVE_EPHEMERAL_CLAIMED);
+  EXPECT_EQ(block_cache_count(block_cache), 1u);
+}

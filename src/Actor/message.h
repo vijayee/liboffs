@@ -238,6 +238,15 @@ typedef enum message_type_e {
   WT_CONNECTION_DATA,
   WT_CONNECTION_HANGUP,
   WT_CONNECTION_ERROR,
+  /* Ephemeral/pin block metadata */
+  CACHE_EPHEMERAL,
+  CACHE_PIN,
+  CACHE_UNPIN,
+  CACHE_EPHEMERAL_LIST,
+  CACHE_EPHEMERAL_RESULT,
+  CACHE_PIN_RESULT,
+  CACHE_UNPIN_RESULT,
+  CACHE_EPHEMERAL_LIST_RESULT,
 } message_type_e;
 
 /* Stream-to-network: request block from peers */

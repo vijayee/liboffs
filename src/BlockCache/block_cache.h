@@ -58,6 +58,7 @@ typedef struct {
   actor_t* reply_to;
   uint32_t incoming_fib;
   int result;
+  uint8_t acquire_ephemeral; /* 1 = set ephemeral_count to 1 on a new block */
 } cache_put_payload_t;
 
 /* Payload for CACHE_GET message.
@@ -76,7 +77,69 @@ typedef struct {
   buffer_t* hash;
   actor_t* reply_to;
   int result;
+  uint8_t force; /* 1 = remove even when pinned/claimed (pin count is reset) */
 } cache_remove_payload_t;
+
+/* CACHE_EPHEMERAL / CACHE_PIN op semantics */
+#define CACHE_EPHEMERAL_OK        0
+#define CACHE_EPHEMERAL_NOT_FOUND -1
+#define CACHE_EPHEMERAL_OVERFLOW  -2
+
+/* CACHE_REMOVE extended results (result is otherwise 0 / -1) */
+#define CACHE_REMOVE_PINNED             -3
+#define CACHE_REMOVE_EPHEMERAL_CLAIMED  -4
+
+typedef enum {
+  CACHE_EPHEMERAL_ACQUIRE = 0, /* count += 1; error at UINT16_MAX */
+  CACHE_EPHEMERAL_RELEASE = 1, /* count -= 1; block deleted when it reaches 0 */
+  CACHE_EPHEMERAL_CLEAR = 2    /* count = 0; commit (announce is caller's job) */
+} cache_ephemeral_op_e;
+
+/* Payload for CACHE_EPHEMERAL message */
+typedef struct {
+  buffer_t* hash;
+  actor_t* reply_to;
+  cache_ephemeral_op_e op;
+  int result;
+  uint16_t previous_count;
+  uint16_t new_count;
+} cache_ephemeral_payload_t;
+
+/* Result payload for CACHE_EPHEMERAL_RESULT */
+typedef struct {
+  int result;
+  uint16_t previous_count;
+  uint16_t new_count;
+  actor_t* reply_to;
+} cache_ephemeral_result_payload_t;
+
+/* Payload shared by CACHE_PIN / CACHE_UNPIN (and their results) */
+typedef struct {
+  buffer_t* hash;
+  actor_t* reply_to;
+  int result;
+  uint32_t previous_count;
+  uint32_t new_count;
+} cache_pin_payload_t;
+
+typedef struct {
+  int result;
+  uint32_t previous_count;
+  uint32_t new_count;
+  actor_t* reply_to;
+} cache_pin_result_payload_t;
+
+/* Payload for CACHE_EPHEMERAL_LIST — enumerates every ephemeral block.
+   hashes[i] are referenced buffers; arrays are owned by the payload. */
+typedef struct {
+  actor_t* reply_to;
+  size_t count;
+  buffer_t** hashes;
+  uint16_t* ephemeral_counts;
+  uint32_t* pin_counts;
+} cache_ephemeral_list_payload_t;
+
+void cache_ephemeral_list_payload_destroy(cache_ephemeral_list_payload_t* payload);
 
 /* Pending get request — tracks CACHE_GET requests awaiting SECTIONS_READ_RESULT */
 typedef struct pending_get_t {
@@ -159,6 +222,11 @@ void block_cache_dispatch(void* state, message_t* msg);
 void block_cache_get(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
 void block_cache_put(block_cache_t* block_cache, block_t* block, uint32_t incoming_fib, actor_t* reply_to);
 void block_cache_remove(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
+void block_cache_remove_ex(block_cache_t* block_cache, buffer_t* hash, uint8_t force, actor_t* reply_to);
+void block_cache_ephemeral(block_cache_t* block_cache, buffer_t* hash, cache_ephemeral_op_e op, actor_t* reply_to);
+void block_cache_pin(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
+void block_cache_unpin(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
+void block_cache_list_ephemeral(block_cache_t* block_cache, actor_t* reply_to);
 
 /* Advisory capacity check (unsynchronized): returns CACHE_FIT_OK if
  * current_bytes + required_bytes <= max_capacity_bytes, else CACHE_FIT_FULL.
