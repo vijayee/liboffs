@@ -72,15 +72,18 @@ New actor in `src/BlockCache/` (`ephemeral_registry.c` / `ephemeral_registry.h`)
 **Why an actor:** the registry is touched from many paths (ephemeral puts insert; mark-permanent and delete-ephemeral remove; recyclers check). The actor mailbox gives single-threaded mutation, no locks, consistent with the block cache/index actor pattern.
 
 **Messages:**
-- `EPHEMERAL_REGISTRY_ADD` — insert a descriptor hash (sent by the ephemeral put path when the descriptor block is stored)
+- `EPHEMERAL_REGISTRY_ADD` — insert a descriptor hash (sent by the ephemeral put path when the descriptor block is stored, and by the recycler's self-healing discovery, see below)
 - `EPHEMERAL_REGISTRY_CHECK` (request/result) — used by the recycler recipe
 - `EPHEMERAL_REGISTRY_REMOVE` — delete a descriptor hash from the filter. **Every path that unmarks or deletes an ephemeral ori must send this** — that is how the registry is maintained
 
 **Deletion:** an elastic bloom filter supports deletion as part of its design, so no rebuild is ever needed — `EPHEMERAL_REGISTRY_REMOVE` deletes the key directly. (The insert set includes each ephemeral representation's descriptor block hash, because the descriptor block created by an ephemeral put is itself one of the blocks the put creates and therefore carries an ephemeral claim.)
 
-**False positives are not authoritative:** on a `CHECK` hit, the recycler walks the actual descriptor and consults index entry counts. Confirmed ephemeral → error. FP hit with a clean walk → proceed normally. The filter is purely a fast pre-check; the index is exact.
+**The filter is advisory in both directions; the index is exact:**
+- *False positives:* on a `CHECK` hit, the recycler walks the actual descriptor and consults index entry counts. Confirmed ephemeral → error. FP hit with a clean walk → proceed normally.
+- *False negatives:* the recycler also checks each fetched recipe block's `ephemeral_count` at fetch time. Discovering a claimed block — even when the filter missed the source — errors exactly as a `CHECK` hit would (subject to the same override modes).
+- *Self-healing:* upon discovering at fetch time that a recycled source's blocks are ephemeral, the recycler sends `EPHEMERAL_REGISTRY_ADD` for the source's descriptor hash, repairing the stale filter so future checks hit. (In `commit` mode the source's blocks are cleared to permanent, so no add is performed; in default and `propagate` modes the source remains ephemeral and is added.)
 
-**Persistence:** filter file alongside the index (`<location>/ephemeral_registry.bf`), flushed on mutation (debounced, following the index's WAL/debounce pattern), loaded on node start. If the file is lost or corrupt, it can be reconstructed once from the index (entries with `ephemeral_count > 0`) as disaster recovery, but that is a recovery path, not the normal deletion path.
+**Persistence (backup copy, no WAL):** filter file alongside the index (`<location>/ephemeral_registry.bf`), flushed on mutation (debounced, following the index's debounce pattern). Each flush uses **two-file rotation, mirroring the index's `current_file`/`last_file` pattern**: write to a temp file, fsync, rotate the previous file to `ephemeral_registry.bf.last`, and move the new file into place — the previous flush is retained as a backup copy. On load: prefer the current file; if missing or corrupt, fall back to `ephemeral_registry.bf.last`; if both are unusable, reconstruct once from the index (entries with `ephemeral_count > 0`). A stale backup is always safe: extra keys only produce false positives, which the confirm-walk resolves, and genuine misses are caught by the fetch-time exact check and self-heal the filter.
 
 ## 3. Block cache semantics
 
@@ -127,7 +130,7 @@ When set:
 
 ### Recycle check
 
-`recycler_recipe` calls `EPHEMERAL_REGISTRY_CHECK` on each source ori's descriptor hash before using the source. On a confirmed-ephemeral source:
+`recycler_recipe` calls `EPHEMERAL_REGISTRY_CHECK` on each source ori's descriptor hash before using the source. Additionally, every recipe block the recycler fetches is checked at fetch time for `ephemeral_count > 0` — this is the exact enforcement that makes a stale or lost filter unable to silently admit an ephemeral source. On a confirmed-ephemeral source (via `CHECK` + confirm-walk, or via fetch-time discovery, which also sends `EPHEMERAL_REGISTRY_ADD` to heal the filter):
 - Default: hard error + warning to the caller (recycle source is ephemeral/unverified).
 - With the recycle-ephemeral override, the caller must **explicitly choose one mode** (there is no default):
   - `commit` — CLEAR the source's ephemeral blocks (they become permanent and are announced to the network); the new put proceeds as non-ephemeral.
@@ -170,12 +173,13 @@ New fields in `config.h` (documented in `docs/CONFIG_FIELDS.md`):
 | Delete a **claimed ephemeral** block via `CACHE_REMOVE` (default) | `CACHE_REMOVE_EPHEMERAL_CLAIMED` result + warning; block kept (release/clear are the proper paths) |
 | Delete a claimed ephemeral block with force | Warning logged; block deleted regardless of remaining claims |
 | `RELEASE` bringing an ephemeral block to 0 | Block deleted regardless of pin status |
-| Bloom filter file missing/corrupt | One-time reconstruction from index; log notice |
+| Bloom filter file missing/corrupt | Load falls back to `ephemeral_registry.bf.last`; if also unusable, one-time reconstruction from index; log notice |
+| Recycler fetches a claimed block despite a filter miss | Fetch-time check errors exactly as a `CHECK` hit; source descriptor hash self-heals into the filter via `ADD` |
 
 ## 6. Testing
 
 - Index: CBOR round-trip with old 5-element arrays (defaults applied) and new 7-element arrays; WAL `'m'` record replay incl. partial-write recovery; ephemeral count increment/decrement/clear; acquire-overflow rejection; pin saturation and clamp.
-- Registry actor: add/check/remove lifecycle (native elastic deletion, no rebuild); false-positive resolution via descriptor walk; persistence reload; one-time reconstruction from index on missing/corrupt file.
+- Registry actor: add/check/remove lifecycle (native elastic deletion, no rebuild); false-positive resolution via descriptor walk and false-negative enforcement via fetch-time check; self-healing `ADD` on fetch-time discovery; persistence reload incl. `.last` backup fallback and rotation on flush; one-time reconstruction from index when both files are unusable.
 - Block cache: `CACHE_EPHEMERAL` ACQUIRE/RELEASE/CLEAR; `CACHE_REMOVE_PINNED`, `CACHE_REMOVE_EPHEMERAL_CLAIMED` and their force paths; respiration victim selection excluding pinned permanent and ephemeral entries.
 - **Referential integrity (integration):** ephemeral A → propagate-recycle into ephemeral B → `delete-ephemeral(A)` leaves B's referenced blocks alive and B readable; `delete-ephemeral(B)` then removes them; ephemeral A → propagate into B → commit A leaves referenced blocks permanent, `delete-ephemeral(B)` removes only B's own blocks.
 - Flows (integration): ephemeral put → mark-permanent (blocks announced); ephemeral put → delete-ephemeral; recycle error and both override modes; get/load with pin; LRU/capacity behavior identical with and without pins.
