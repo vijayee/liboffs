@@ -178,6 +178,116 @@ TEST(TestEphemeralIndex, WalMetadataRecordReplayedFromWal) {
   free(location);
 }
 
+/* wal_write must append at the end of a lazily opened file: a second wal_t
+   opening a non-empty (crash-recovered) WAL would otherwise overwrite the
+   recovered records from offset 0. Writes one 'm' record per session and
+   verifies both replay, in order. */
+TEST(TestEphemeralIndex, WalWriteAppendsToRecoveredFile) {
+  char* location = path_join("/tmp", "ephemeral_wal_append");
+  rm_rf(location);
+  mkdir_p(location);
+
+  block_t* first_block = block_create_random_block_by_type(standard);
+  buffer_t* first_hash = (buffer_t*)refcounter_reference((refcounter_t*)first_block->hash);
+  block_destroy(first_block);
+  block_t* second_block = block_create_random_block_by_type(standard);
+  buffer_t* second_hash = (buffer_t*)refcounter_reference((refcounter_t*)second_block->hash);
+  block_destroy(second_block);
+
+  /* Session 1: write one 'm' record, then "crash" (destroy without sync
+     state beyond wal_sync, exactly like a prior session would leave on
+     disk). */
+  index_entry_t* first_meta = index_entry_from(first_hash, 0, 0, 0,
+                                               fibonacci_hit_counter_create(), 1, 0);
+  cbor_item_t* first_cbor = index_entry_to_cbor(first_meta);
+  ASSERT_NE(first_cbor, nullptr);
+  uint8_t* first_data;
+  size_t first_size;
+  cbor_serialize_alloc(first_cbor, &first_data, &first_size);
+  buffer_t* first_payload = buffer_create_from_existing_memory(first_data, first_size);
+  wal_t* first_wal = wal_create(location, 2);
+  ASSERT_NE(first_wal, nullptr);
+  wal_write(first_wal, metadata, first_payload);
+  EXPECT_EQ(wal_sync(first_wal), 0);
+  wal_destroy(first_wal);
+  buffer_destroy(first_payload);
+  cbor_decref(&first_cbor);
+  index_entry_destroy(first_meta);
+
+  /* Session 2: a fresh wal_t lazily opens the SAME non-empty file. */
+  index_entry_t* second_meta = index_entry_from(second_hash, 0, 0, 0,
+                                                fibonacci_hit_counter_create(), 2, 0);
+  cbor_item_t* second_cbor = index_entry_to_cbor(second_meta);
+  ASSERT_NE(second_cbor, nullptr);
+  uint8_t* second_data;
+  size_t second_size;
+  cbor_serialize_alloc(second_cbor, &second_data, &second_size);
+  buffer_t* second_payload = buffer_create_from_existing_memory(second_data, second_size);
+  wal_t* second_wal = wal_create(location, 2);
+  ASSERT_NE(second_wal, nullptr);
+  wal_write(second_wal, metadata, second_payload);
+  EXPECT_EQ(wal_sync(second_wal), 0);
+  wal_destroy(second_wal);
+  buffer_destroy(second_payload);
+  cbor_decref(&second_cbor);
+  index_entry_destroy(second_meta);
+
+  /* Replay: both records must come back, first one first, and then the
+     file must end. Without the append fix the second write overwrote the
+     first, so the second read would hit end-of-file. */
+  wal_t* reader = wal_create(location, 2);
+  ASSERT_NE(reader, nullptr);
+  wal_type_e record_type = addition;
+  buffer_t* record_data = NULL;
+  uint64_t cursor = 0;
+  int32_t wal_size = 0;
+
+  EXPECT_EQ(wal_read(reader, &record_type, &record_data, &cursor, &wal_size), 0);
+  ASSERT_NE(record_data, nullptr);
+  EXPECT_EQ(record_type, metadata);
+  {
+    struct cbor_load_result load_result;
+    cbor_item_t* record_cbor = cbor_load(record_data->data, record_data->size, &load_result);
+    ASSERT_NE(record_cbor, nullptr);
+    EXPECT_TRUE(load_result.read == record_data->size);
+    index_entry_t* record_entry = cbor_to_index_entry(record_cbor);
+    ASSERT_NE(record_entry, nullptr);
+    EXPECT_EQ(buffer_compare(record_entry->hash, first_hash), 0);
+    EXPECT_EQ(record_entry->ephemeral_count, 1u);
+    index_entry_destroy(record_entry);
+    cbor_decref(&record_cbor);
+  }
+  buffer_destroy(record_data);
+  record_data = NULL;
+
+  EXPECT_EQ(wal_read(reader, &record_type, &record_data, &cursor, &wal_size), 0);
+  ASSERT_NE(record_data, nullptr);
+  EXPECT_EQ(record_type, metadata);
+  {
+    struct cbor_load_result load_result;
+    cbor_item_t* record_cbor = cbor_load(record_data->data, record_data->size, &load_result);
+    ASSERT_NE(record_cbor, nullptr);
+    index_entry_t* record_entry = cbor_to_index_entry(record_cbor);
+    ASSERT_NE(record_entry, nullptr);
+    EXPECT_EQ(buffer_compare(record_entry->hash, second_hash), 0);
+    EXPECT_EQ(record_entry->ephemeral_count, 2u);
+    index_entry_destroy(record_entry);
+    cbor_decref(&record_cbor);
+  }
+  buffer_destroy(record_data);
+  record_data = NULL;
+
+  /* Exactly two records — the next read is end-of-file. */
+  EXPECT_NE(wal_read(reader, &record_type, &record_data, &cursor, &wal_size), 0);
+  EXPECT_EQ(record_data, nullptr);
+  wal_destroy(reader);
+
+  DESTROY(first_hash, buffer);
+  DESTROY(second_hash, buffer);
+  rm_rf(location);
+  free(location);
+}
+
 /* Legacy WAL framing: an 'a' record written by an older binary has a
    78-byte payload (5-element entry CBOR). wal_read must detect the
    legacy framing (first 86-byte attempt fails, 78-byte retry verifies,
@@ -340,9 +450,8 @@ TEST(TestEphemeralIndex, LegacySnapshotLoads) {
 
 /* Hand-write a legacy 78-byte 'a' record (5-element entry CBOR) into an
    already-open WAL, exactly as an older binary would have. All records for
-   one file must go through the same wal_t: wal_write positions at the start
-   of the (freshly opened) file, so a second wal_t would overwrite the first
-   record instead of appending. */
+   one file go through the same wal_t (wal_write appends at the end of the
+   lazily opened file). */
 static void WriteLegacyAdditionRecord(wal_t* wal, buffer_t* hash) {
   fibonacci_hit_counter_t counter = fibonacci_hit_counter_create();
   cbor_item_t* legacy_entry = cbor_new_definite_array(5);
@@ -470,8 +579,8 @@ TEST(TestEphemeralIndex, LegacyLiveWalRetiredByEagerRollover) {
 
   /* Phase 2: hand-write TWO legacy 'a' records into live WAL 2, as an older
      binary that crashed before its snapshot would have left behind. Both go
-     through one wal_t — wal_write positions at the start of a freshly opened
-     file, so a second wal_t would clobber the first record. */
+     through one wal_t (wal_write appends at the end of the lazily opened
+     file). */
   wal_t* legacy_wal = wal_create(location, 2);
   ASSERT_NE(legacy_wal, nullptr);
   WriteLegacyAdditionRecord(legacy_wal, first_hash);

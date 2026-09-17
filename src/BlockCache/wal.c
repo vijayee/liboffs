@@ -70,6 +70,18 @@ wal_t* wal_create_next(char* location, uint64_t next_id, char* last_file) {
 void wal_write(wal_t* wal,wal_type_e type, buffer_t* data) {
   if (wal->log == NULL) {
     wal->log = platform_file_open(wal->current_file, PLATFORM_O_RDWR | PLATFORM_O_CREAT, 0644);
+    if (wal->log == NULL) {
+      /* Cannot log — drop the record rather than write through a dead handle. */
+      return;
+    }
+    /* The lazily opened file can already hold records a prior session
+       crash-recovered into it. Position at the end so this record appends
+       after them instead of overwriting the recovered prefix from offset 0. */
+    if (platform_file_seek(wal->log, 0, PLATFORM_SEEK_END) < 0) {
+      platform_file_close(wal->log);
+      wal->log = NULL;
+      return;
+    }
   }
   uint32_t crc =  htonl(XXH32(data->data,data->size, 0));
   platform_file_write(wal->log, &type, 1);
