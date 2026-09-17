@@ -24,6 +24,9 @@ The libons flow this serves: put a representation as ephemeral → verify unique
 | Referential integrity | Ephemerality is a count (`ephemeral_count`, `uint16_t`): each ephemeral representation referencing a block holds one claim. `delete-ephemeral` releases the representation's claims and physically deletes only blocks whose count reaches 0, so recycling an ephemeral source with `propagate` can never be stranded by a later delete of the source |
 | Overflow | `ephemeral_count` acquires reject with an error at `UINT16_MAX` (no silent saturation); `pin_count` saturates at `UINT32_MAX` with a warning |
 | Pinned deletion | Pins protect **permanent** blocks only: explicit delete of a pinned permanent block warns and is rejected by default; a force/ignore flag bypasses (pin reset, block deleted). Ephemeral blocks are deleted at count 0 regardless of pin status |
+| Transitive commit | mark-permanent commits shared recycled blocks too, without warning — B can commit A's blocks if it recycled them; all claims release at once so nothing is stranded |
+| Failed ephemeral puts | Cleanup RELEASEs the put's created blocks (not recipe-received ones) and any claims it acquired on recycled blocks; crash-orphans are found via a list-ephemerals API and cleaned with the block-level ops |
+| Ephemeral ceiling | None — no automatic bound on ephemeral bytes; operators maintain discipline via the list-ephemerals API plus block-level status/delete ops |
 | Unpin | Yes — an unpin API decrements pin counts, clamped at zero |
 | Pin on get/load | A `pin` argument on get/load pins all blocks of the representation after the read completes; pins persist until unpin |
 | LRU interaction | Pinned entries do **not** affect the in-memory LRU cache; LRU and capacity behavior are identical regardless of pinning or ephemerality |
@@ -97,8 +100,9 @@ Following the existing `CACHE_GET/PUT/REMOVE` pattern with sync/async reply sema
   - `CLEAR` — `ephemeral_count = 0` (commit: block becomes permanent; the new put is announced to the network, see below).
 - `CACHE_PIN` — `pin_count += 1` (saturating at `UINT32_MAX` with a warning)
 - `CACHE_UNPIN` — `pin_count -= 1`, clamped at 0
+- `CACHE_EPHEMERAL_LIST` — enumerate every ephemeral block in the cache (hash, `ephemeral_count`, `pin_count`). The maintenance surface for operators: combined with the block-level ops above (`CACHE_EPHEMERAL` RELEASE/CLEAR, `CACHE_REMOVE`), it lets an operator find and clean up orphaned ephemeral data (e.g. blocks claimed by puts that failed before cleanup could run).
 
-Each writes an `'m'` WAL record and updates the referenced `index_entry_t` in place.
+Each mutation writes an `'m'` WAL record and updates the referenced `index_entry_t` in place.
 
 ### LRU and capacity: unchanged
 
@@ -127,6 +131,7 @@ The existing — currently unconsumed — `temporary` flag becomes the `ephemera
 When set:
 - `writeable_off_stream._create_tuple` acquires ephemeral claims (**ACQUIRE**, count starts at 1) on **only the blocks the put creates** (new_blocks_recipe randoms, each tuple's off_block, and the descriptor block written by `writeable_descriptor`) at `block_cache_put` time, via a new field on `cache_put_payload_t`. Blocks fetched by recycler recipes are **never** claimed by this path (see `propagate` below for how recycled blocks acquire claims).
 - On completion, the descriptor hash is inserted into the ephemeral registry (`EPHEMERAL_REGISTRY_ADD`).
+- **Failure cleanup:** the put tracks the hashes of every block it created (the ephemeral-marked ones — not blocks received from its recipes). If the put fails mid-stream (error, disconnect, overflow), the cleanup path sends `CACHE_EPHEMERAL` RELEASE for each created block — their only claim is the failed put's, so they reach 0 and are deleted — and RELEASEs any claims it acquired on recycled source blocks. If cleanup itself cannot run (crash), orphaned blocks are findable via `CACHE_EPHEMERAL_LIST` and clearable with the block-level ops.
 
 ### Recycle check
 
@@ -144,12 +149,12 @@ When set:
 
 Each resolves the URL → descriptor, walks the descriptor to enumerate its block hashes, then issues block-level messages:
 
-- **mark-permanent** — `CACHE_EPHEMERAL` CLEAR on every ephemeral block in the representation (releases all claims at once; other ephemeral representations referencing these blocks are unaffected — the blocks are now permanent and announced, so they can never be stranded); announce each newly-committed block to the network; send `EPHEMERAL_REGISTRY_REMOVE` for the representation's descriptor hash.
+- **mark-permanent** — `CACHE_EPHEMERAL` CLEAR on every ephemeral block in the representation's block set. This is **transitive and intentional**: a representation that recycled ephemeral blocks (via `propagate` or as an ephemeral put) commits those shared blocks too — B can commit A's blocks if it recycled them. All claims are released at once; other ephemeral representations referencing these blocks are unaffected — the blocks are now permanent and announced, so they can never be stranded. Announce each newly-committed block to the network; send `EPHEMERAL_REGISTRY_REMOVE` for the representation's descriptor hash.
 - **delete-ephemeral** — `CACHE_EPHEMERAL` RELEASE on every ephemeral block in the representation: each count is decremented and the block is physically deleted **only when its count reaches 0** (blocks still claimed by other ephemeral representations survive, regardless of pin status); sends `EPHEMERAL_REGISTRY_REMOVE` for the representation's descriptor hash.
 - **pin-all** — `CACHE_PIN` on every block in the representation (+1 each).
 - **unpin-all** — `CACHE_UNPIN` on every block in the representation (clamped at 0).
 
-Exposure: HTTP routes in `off_routes.c` alongside the existing OFF patterns; `client_api_wire.c` ops (WS/TCP/Unix/WT transports inherit); C client functions in `offs_client.h` (libons' interface); JS client.
+Exposure: HTTP routes in `off_routes.c` alongside the existing OFF patterns; `client_api_wire.c` ops (WS/TCP/Unix/WT transports inherit); C client functions in `offs_client.h` (libons' interface); JS client. The **list-ephemerals** maintenance API is exposed the same way, so operators (and libons) can enumerate ephemeral blocks and change or delete their status.
 
 ### Get/load + pin
 
@@ -177,6 +182,7 @@ New fields in `config.h` (documented in `docs/CONFIG_FIELDS.md`):
 | Delete a **claimed ephemeral** block via `CACHE_REMOVE` (default) | `CACHE_REMOVE_EPHEMERAL_CLAIMED` result + warning; block kept (release/clear are the proper paths) |
 | Delete a claimed ephemeral block with force | Warning logged; block deleted regardless of remaining claims |
 | `RELEASE` bringing an ephemeral block to 0 | Block deleted regardless of pin status |
+| Ephemeral put fails mid-stream | Cleanup RELEASEs the put's created blocks (deleted at 0) and its acquired claims; crash-orphans findable via list-ephemerals |
 | Bloom filter file missing/corrupt | Load falls back to `ephemeral_registry.bf.last`; if also unusable, one-time reconstruction from index; log notice |
 | Recycler fetches a claimed block despite a filter miss | If the new put is non-ephemeral: fetch-time check errors exactly as a `CHECK` hit; source descriptor hash self-heals into the filter via `ADD`. If the new put is ephemeral: no error — treated as propagate (claims acquired, source heal-added) |
 
@@ -184,7 +190,9 @@ New fields in `config.h` (documented in `docs/CONFIG_FIELDS.md`):
 
 - Index: CBOR round-trip with old 5-element arrays (defaults applied) and new 7-element arrays; WAL `'m'` record replay incl. partial-write recovery; ephemeral count increment/decrement/clear; acquire-overflow rejection; pin saturation and clamp.
 - Registry actor: add/check/remove lifecycle (native elastic deletion, no rebuild); false-positive resolution via descriptor walk and false-negative enforcement via fetch-time check (non-ephemeral puts); self-healing `ADD` on fetch-time discovery; persistence reload incl. `.last` backup fallback and rotation on flush; one-time reconstruction from index when both files are unusable.
-- Block cache: `CACHE_EPHEMERAL` ACQUIRE/RELEASE/CLEAR; `CACHE_REMOVE_PINNED`, `CACHE_REMOVE_EPHEMERAL_CLAIMED` and their force paths; respiration victim selection excluding pinned permanent and ephemeral entries.
+- Block cache: `CACHE_EPHEMERAL` ACQUIRE/RELEASE/CLEAR; `CACHE_EPHEMERAL_LIST` enumeration; `CACHE_REMOVE_PINNED`, `CACHE_REMOVE_EPHEMERAL_CLAIMED` and their force paths; respiration victim selection excluding pinned permanent and ephemeral entries.
 - **Referential integrity (integration):** ephemeral A → recycle into ephemeral B (no override needed — accepted as propagate) → `delete-ephemeral(A)` leaves B's referenced blocks alive and B readable; `delete-ephemeral(B)` then removes them; ephemeral A → recycle into B → commit A leaves referenced blocks permanent, `delete-ephemeral(B)` removes only B's own blocks; ephemeral put recycling an ephemeral source does not error even when the registry misses the source.
+- **Transitive commit:** ephemeral B (having recycled ephemeral A) → mark-permanent(B) commits A's shared blocks too; A's later `delete-ephemeral` touches only its descriptor/own blocks; B remains fully readable and permanent.
+- **Failed puts:** ephemeral put failing mid-stream (error, disconnect, overflow) cleans up its created blocks and acquired claims; nothing orphaned in the normal case; simulated crash leaves orphans recoverable via list-ephemerals + block-level ops.
 - Flows (integration): ephemeral put → mark-permanent (blocks announced); ephemeral put → delete-ephemeral; non-ephemeral recycle error and both override modes; get/load with pin; LRU/capacity behavior identical with and without pins.
 - All suites valgrind-clean per project convention.
