@@ -263,11 +263,17 @@ git commit -m "feat: add ephemeral_count and pin_count to index entries"
 
 ---
 
-### Task 2: WAL metadata record `'m'`
+### Task 2: WAL metadata record `'m'` (+ legacy-format migration)
 
 **Files:**
-- Modify: `src/BlockCache/wal.h:13-24` (enum), `src/BlockCache/index.h` (declare `index_write_entry_metadata`), `src/BlockCache/index.c:203-302` (`_index_replay_wal` switch)
+- Modify: `src/BlockCache/wal.h:13-24` (enum), `src/BlockCache/index.h` (declare `index_write_entry_metadata`), `src/BlockCache/index.c:203-302` (`_index_replay_wal` switch), `src/BlockCache/index.c:406-416` (snapshot CRC acceptance), `src/BlockCache/index.c:644+` (`_index_node_to_crc`), `src/BlockCache/wal.c` (`wal_read` sizing)
 - Test: `test/test_ephemeral.cpp`
+
+**Migration requirement (added after Task 1 review — user decision: "Read old formats").** The Task 1 change (7-element entry CBOR + new CRC fields + 86-byte WAL 'a'/'i' payload) breaks indexes written by older binaries: old snapshots fail the new CRC and old WALs misframe. This task makes both load with zeroed ephemeral/pin counts:
+
+1. **Legacy snapshot acceptance** — in `index_create`'s snapshot validation (index.c:406-416), when the recomputed CRC does not match the filename CRC, recompute once with a *legacy* CRC formula (identical to `_index_node_to_crc` but skipping the ephemeral_count and pin_count updates). If the legacy CRC matches, accept the snapshot with `log_info("legacy snapshot format — loaded with zeroed ephemeral/pin counts")`. Implement the legacy variant as a parameter to `_index_node_to_crc`/`_index_to_crc` (e.g. `int _index_to_crc_legacy(index_t*, uint64_t*)`) — do not duplicate the whole walker.
+2. **Legacy WAL framing** — in `wal_read` (wal.c:112-122 region), 'a'/'i' record sizes are fixed per format (86 new, 78 old). Add a per-WAL sticky legacy flag on `wal_t` (`uint8_t legacy_entry_size`, default 0). When reading an 'a'/'i' record and the flag is unset: read/verify at 86; on CRC failure, rewind the cursor and retry at 78; if the 78-byte framing CRC verifies, set the flag (a WAL file is written by a single binary version, so per-file sticky detection is sound) and return the record. When the flag is set, read at 78 directly. False-positive risk of an 86-byte record CRC-passing at the 78 offset is ~2^-32 (the CRC is read from the wrong file offset).
+3. Tests must cover both: a snapshot written in the old 5-element format (write a snapshot file by hand or via a helper that serializes 5-element entries and names it with the legacy CRC) loads with 0/0 counts; and a WAL containing a legacy 78-byte 'a' record replays correctly (construct the WAL bytes by hand in the test or via a legacy-size write helper).
 
 - [ ] **Step 1: Write the failing test**
 
