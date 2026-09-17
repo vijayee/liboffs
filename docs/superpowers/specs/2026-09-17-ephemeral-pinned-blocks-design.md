@@ -26,7 +26,7 @@ The libons flow this serves: put a representation as ephemeral → verify unique
 | Pin on get/load | A `pin` argument on get/load pins all blocks of the representation after the read completes; pins persist until unpin |
 | LRU interaction | Pinned entries do **not** affect the in-memory LRU cache; LRU and capacity behavior are identical regardless of pinning or ephemerality |
 | Ephemeral flag type | `uint8_t` (0 = permanent, 1 = ephemeral) |
-| Bloom filter concurrency | The elastic bloom filter is owned by a dedicated actor that manages concurrency and usage across APIs. Only recyclers check it; every path that unmarks an ephemeral ori must maintain (invalidate) it |
+| Bloom filter concurrency | The elastic bloom filter is owned by a dedicated actor that manages concurrency and usage across APIs. Only recyclers check it; every path that unmarks an ephemeral ori must maintain (remove from) it. Deletion is native to the elastic bloom filter — no rebuild is needed |
 
 ## 1. Data model & persistence
 
@@ -64,18 +64,18 @@ One new record type `'m'` (metadata) carrying `{hash, ephemeral, pin_count}`. Ev
 
 New actor in `src/BlockCache/` (`ephemeral_registry.c` / `ephemeral_registry.h`) owning a persistent **elastic (scalable) bloom filter** keyed by **descriptor hash** — the canonical representation identity (URLs have multiple encodings; one URL maps to one descriptor hash).
 
-**Why an actor:** the registry is touched from many paths (ephemeral puts insert; mark-permanent and delete-ephemeral invalidate; recyclers check). The actor mailbox gives single-threaded mutation, no locks, consistent with the block cache/index actor pattern.
+**Why an actor:** the registry is touched from many paths (ephemeral puts insert; mark-permanent and delete-ephemeral remove; recyclers check). The actor mailbox gives single-threaded mutation, no locks, consistent with the block cache/index actor pattern.
 
 **Messages:**
 - `EPHEMERAL_REGISTRY_ADD` — insert a descriptor hash (sent by the ephemeral put path when the descriptor block is stored)
 - `EPHEMERAL_REGISTRY_CHECK` (request/result) — used by the recycler recipe
-- `EPHEMERAL_REGISTRY_INVALIDATE` — mark the filter dirty. **Every path that unmarks or deletes an ephemeral ori must send this** — that is how the registry is maintained
+- `EPHEMERAL_REGISTRY_REMOVE` — delete a descriptor hash from the filter. **Every path that unmarks or deletes an ephemeral ori must send this** — that is how the registry is maintained
 
-**Deletion story:** bloom filters cannot delete entries, so an invalidate marks the filter dirty and the actor **rebuilds it from the authoritative index**: insert every index entry hash with `ephemeral == 1` (this includes each ephemeral representation's descriptor block, because the descriptor block created by an ephemeral put is itself one of the blocks the put creates and is therefore marked ephemeral; a committed representation's descriptor is no longer in the ephemeral set, so it drops out on rebuild). Rebuild runs lazily on the next `CHECK` after an invalidate, and at snapshot sync.
+**Deletion:** an elastic bloom filter supports deletion as part of its design, so no rebuild is ever needed — `EPHEMERAL_REGISTRY_REMOVE` deletes the key directly. (The insert set includes each ephemeral representation's descriptor block hash, because the descriptor block created by an ephemeral put is itself one of the blocks the put creates and is therefore marked ephemeral.)
 
 **False positives are not authoritative:** on a `CHECK` hit, the recycler walks the actual descriptor and consults index flags. Confirmed ephemeral → error. FP hit with a clean walk → proceed normally. The filter is purely a fast pre-check; the index is exact.
 
-**Persistence:** filter file alongside the index (`<location>/ephemeral_registry.bf`), written on rebuild completion, loaded on node start. Safe to lose or corrupt — derivable from the index.
+**Persistence:** filter file alongside the index (`<location>/ephemeral_registry.bf`), flushed on mutation (debounced, following the index's WAL/debounce pattern), loaded on node start. If the file is lost or corrupt, it can be reconstructed once from the index (entries with `ephemeral == 1`) as disaster recovery, but that is a recovery path, not the normal deletion path.
 
 ## 3. Block cache semantics
 
@@ -127,8 +127,8 @@ When set:
 
 Each resolves the URL → descriptor, walks the descriptor to enumerate its block hashes, then issues block-level messages:
 
-- **mark-permanent** — `CACHE_CLEAR_EPHEMERAL` on every ephemeral block in the representation; announce each newly-committed block to the network; send `EPHEMERAL_REGISTRY_INVALIDATE`.
-- **delete-ephemeral** — deletes **only** the ephemeral blocks of the representation (pinned blocks warn/skip unless force); sends `EPHEMERAL_REGISTRY_INVALIDATE`.
+- **mark-permanent** — `CACHE_CLEAR_EPHEMERAL` on every ephemeral block in the representation; announce each newly-committed block to the network; send `EPHEMERAL_REGISTRY_REMOVE` for the representation's descriptor hash.
+- **delete-ephemeral** — deletes **only** the ephemeral blocks of the representation (pinned blocks warn/skip unless force); sends `EPHEMERAL_REGISTRY_REMOVE` for the representation's descriptor hash.
 - **pin-all** — `CACHE_PIN` on every block in the representation (+1 each).
 - **unpin-all** — `CACHE_UNPIN` on every block in the representation (clamped at 0).
 
@@ -156,12 +156,12 @@ New fields in `config.h` (documented in `docs/CONFIG_FIELDS.md`):
 | Recycle an ephemeral source with override `propagate` | New put's new blocks marked ephemeral |
 | Delete a pinned block (default) | `CACHE_REMOVE_PINNED` result + warning; block kept |
 | Delete a pinned block with force | Warning logged; pin reset; block deleted |
-| Bloom filter file missing/corrupt | Rebuild from index; log notice |
+| Bloom filter file missing/corrupt | One-time reconstruction from index; log notice |
 
 ## 6. Testing
 
 - Index: CBOR round-trip with old 5-element arrays (defaults applied) and new 7-element arrays; WAL `'m'` record replay incl. partial-write recovery; pin saturation and clamp.
-- Registry actor: add/check/invalidate/rebuild lifecycle; false-positive resolution via descriptor walk; persistence reload.
+- Registry actor: add/check/remove lifecycle (native elastic deletion, no rebuild); false-positive resolution via descriptor walk; persistence reload; one-time reconstruction from index on missing/corrupt file.
 - Block cache: pin/unpin messages; `CACHE_REMOVE_PINNED` and force path; respiration victim selection excluding pinned and ephemeral entries.
 - Flows (integration): ephemeral put → mark-permanent (blocks announced); ephemeral put → delete-ephemeral; recycle error and both override modes; get/load with pin; LRU/capacity behavior identical with and without pins.
 - All suites valgrind-clean per project convention.
