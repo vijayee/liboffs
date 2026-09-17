@@ -20,7 +20,7 @@ The libons flow this serves: put a representation as ephemeral → verify unique
 | Restart behavior | Ephemeral blocks stay ephemeral across restart until explicitly committed or deleted |
 | Network visibility | Ephemeral blocks are local-only: never announced, never served to peers. On unmark (commit) they are announced to the network the same way a put operation would |
 | Block-level API | The block cache API has the ability to manipulate a block's pin and ephemeral status directly |
-| Recipe exclusion | Persistent elastic bloom filter registry of ephemeral ori/urls. Recycler errors + warns on a listed source. An ignore flag is available; with it the caller **must explicitly choose** `commit` (mark source ephemerals permanent) or `propagate` (mark the new representation's blocks ephemeral). No default mode |
+| Recipe exclusion | Persistent elastic bloom filter registry of ephemeral ori/urls. Recycler errors + warns on a listed source when the new representation is non-ephemeral. An ignore flag is available; with it the caller **must explicitly choose** `commit` (mark source ephemerals permanent) or `propagate` (mark the new representation's blocks ephemeral). No default mode. When the new put is itself ephemeral, an ephemeral source is accepted without error — the outcome is inherently propagate-like, with claims acquired for referential integrity |
 | Referential integrity | Ephemerality is a count (`ephemeral_count`, `uint16_t`): each ephemeral representation referencing a block holds one claim. `delete-ephemeral` releases the representation's claims and physically deletes only blocks whose count reaches 0, so recycling an ephemeral source with `propagate` can never be stranded by a later delete of the source |
 | Overflow | `ephemeral_count` acquires reject with an error at `UINT16_MAX` (no silent saturation); `pin_count` saturates at `UINT32_MAX` with a warning |
 | Pinned deletion | Pins protect **permanent** blocks only: explicit delete of a pinned permanent block warns and is rejected by default; a force/ignore flag bypasses (pin reset, block deleted). Ephemeral blocks are deleted at count 0 regardless of pin status |
@@ -79,9 +79,9 @@ New actor in `src/BlockCache/` (`ephemeral_registry.c` / `ephemeral_registry.h`)
 **Deletion:** an elastic bloom filter supports deletion as part of its design, so no rebuild is ever needed — `EPHEMERAL_REGISTRY_REMOVE` deletes the key directly. (The insert set includes each ephemeral representation's descriptor block hash, because the descriptor block created by an ephemeral put is itself one of the blocks the put creates and therefore carries an ephemeral claim.)
 
 **The filter is advisory in both directions; the index is exact:**
-- *False positives:* on a `CHECK` hit, the recycler walks the actual descriptor and consults index entry counts. Confirmed ephemeral → error. FP hit with a clean walk → proceed normally.
-- *False negatives:* the recycler also checks each fetched recipe block's `ephemeral_count` at fetch time. Discovering a claimed block — even when the filter missed the source — errors exactly as a `CHECK` hit would (subject to the same override modes).
-- *Self-healing:* upon discovering at fetch time that a recycled source's blocks are ephemeral, the recycler sends `EPHEMERAL_REGISTRY_ADD` for the source's descriptor hash, repairing the stale filter so future checks hit. (In `commit` mode the source's blocks are cleared to permanent, so no add is performed; in default and `propagate` modes the source remains ephemeral and is added.)
+- *False positives:* on a `CHECK` hit, the recycler walks the actual descriptor and consults index entry counts. Confirmed ephemeral → error (when the new representation is non-ephemeral, see recycle check). FP hit with a clean walk → proceed normally.
+- *False negatives:* when the new representation is non-ephemeral, the recycler also checks each fetched recipe block's `ephemeral_count` at fetch time. Discovering a claimed block — even when the filter missed the source — errors exactly as a `CHECK` hit would (subject to the same override modes).
+- *Self-healing:* upon discovering at fetch time that a recycled source's blocks are ephemeral, the recycler sends `EPHEMERAL_REGISTRY_ADD` for the source's descriptor hash, repairing the stale filter so future checks hit. (In `commit` mode the source's blocks are cleared to permanent, so no add is performed; in default and `propagate` modes, and in the ephemeral-put case, the source remains ephemeral and is added.)
 
 **Persistence (backup copy, no WAL):** filter file alongside the index (`<location>/ephemeral_registry.bf`), flushed on mutation (debounced, following the index's debounce pattern). Each flush uses **two-file rotation, mirroring the index's `current_file`/`last_file` pattern**: write to a temp file, fsync, rotate the previous file to `ephemeral_registry.bf.last`, and move the new file into place — the previous flush is retained as a backup copy. On load: prefer the current file; if missing or corrupt, fall back to `ephemeral_registry.bf.last`; if both are unusable, reconstruct once from the index (entries with `ephemeral_count > 0`). A stale backup is always safe: extra keys only produce false positives, which the confirm-walk resolves, and genuine misses are caught by the fetch-time exact check and self-heal the filter.
 
@@ -130,11 +130,15 @@ When set:
 
 ### Recycle check
 
-`recycler_recipe` calls `EPHEMERAL_REGISTRY_CHECK` on each source ori's descriptor hash before using the source. Additionally, every recipe block the recycler fetches is checked at fetch time for `ephemeral_count > 0` — this is the exact enforcement that makes a stale or lost filter unable to silently admit an ephemeral source. On a confirmed-ephemeral source (via `CHECK` + confirm-walk, or via fetch-time discovery, which also sends `EPHEMERAL_REGISTRY_ADD` to heal the filter):
+`recycler_recipe` calls `EPHEMERAL_REGISTRY_CHECK` on each source ori's descriptor hash before using the source. The exclusion rule's purpose is to keep unverified data out of **permanent** representations, so enforcement depends on what the new put is:
+
+**Non-ephemeral put:** every recipe block the recycler fetches is checked at fetch time for `ephemeral_count > 0` — the exact enforcement that makes a stale or lost filter unable to silently admit an ephemeral source. On a confirmed-ephemeral source (via `CHECK` + confirm-walk, or via fetch-time discovery, which also sends `EPHEMERAL_REGISTRY_ADD` to heal the filter):
 - Default: hard error + warning to the caller (recycle source is ephemeral/unverified).
 - With the recycle-ephemeral override, the caller must **explicitly choose one mode** (there is no default):
   - `commit` — CLEAR the source's ephemeral blocks (they become permanent and are announced to the network); the new put proceeds as non-ephemeral.
   - `propagate` — the new put's newly-created blocks acquire ephemeral claims (ACQUIRE, count 1), and **every ephemeral block referenced from the recycled source acquires an additional claim (ACQUIRE, +1)** so the source's later deletion cannot remove blocks still used by this representation. If a referenced block is at `UINT16_MAX` claims, the put fails with the overflow error.
+
+**Ephemeral put:** an ephemeral source is **accepted without error and without an override** — the outcome is inherently propagate-like, and no permanent contamination can occur because the new representation is itself temporary. The mechanics are the same as `propagate`: every ephemeral block referenced from the source acquires an additional claim (ACQUIRE, +1) for referential integrity, and the source's descriptor hash is heal-added to the registry (it remains ephemeral). Overflow at `UINT16_MAX` claims fails the put as above.
 
 ### Representation-level APIs (by ori/URL)
 
@@ -174,13 +178,13 @@ New fields in `config.h` (documented in `docs/CONFIG_FIELDS.md`):
 | Delete a claimed ephemeral block with force | Warning logged; block deleted regardless of remaining claims |
 | `RELEASE` bringing an ephemeral block to 0 | Block deleted regardless of pin status |
 | Bloom filter file missing/corrupt | Load falls back to `ephemeral_registry.bf.last`; if also unusable, one-time reconstruction from index; log notice |
-| Recycler fetches a claimed block despite a filter miss | Fetch-time check errors exactly as a `CHECK` hit; source descriptor hash self-heals into the filter via `ADD` |
+| Recycler fetches a claimed block despite a filter miss | If the new put is non-ephemeral: fetch-time check errors exactly as a `CHECK` hit; source descriptor hash self-heals into the filter via `ADD`. If the new put is ephemeral: no error — treated as propagate (claims acquired, source heal-added) |
 
 ## 6. Testing
 
 - Index: CBOR round-trip with old 5-element arrays (defaults applied) and new 7-element arrays; WAL `'m'` record replay incl. partial-write recovery; ephemeral count increment/decrement/clear; acquire-overflow rejection; pin saturation and clamp.
-- Registry actor: add/check/remove lifecycle (native elastic deletion, no rebuild); false-positive resolution via descriptor walk and false-negative enforcement via fetch-time check; self-healing `ADD` on fetch-time discovery; persistence reload incl. `.last` backup fallback and rotation on flush; one-time reconstruction from index when both files are unusable.
+- Registry actor: add/check/remove lifecycle (native elastic deletion, no rebuild); false-positive resolution via descriptor walk and false-negative enforcement via fetch-time check (non-ephemeral puts); self-healing `ADD` on fetch-time discovery; persistence reload incl. `.last` backup fallback and rotation on flush; one-time reconstruction from index when both files are unusable.
 - Block cache: `CACHE_EPHEMERAL` ACQUIRE/RELEASE/CLEAR; `CACHE_REMOVE_PINNED`, `CACHE_REMOVE_EPHEMERAL_CLAIMED` and their force paths; respiration victim selection excluding pinned permanent and ephemeral entries.
-- **Referential integrity (integration):** ephemeral A → propagate-recycle into ephemeral B → `delete-ephemeral(A)` leaves B's referenced blocks alive and B readable; `delete-ephemeral(B)` then removes them; ephemeral A → propagate into B → commit A leaves referenced blocks permanent, `delete-ephemeral(B)` removes only B's own blocks.
-- Flows (integration): ephemeral put → mark-permanent (blocks announced); ephemeral put → delete-ephemeral; recycle error and both override modes; get/load with pin; LRU/capacity behavior identical with and without pins.
+- **Referential integrity (integration):** ephemeral A → recycle into ephemeral B (no override needed — accepted as propagate) → `delete-ephemeral(A)` leaves B's referenced blocks alive and B readable; `delete-ephemeral(B)` then removes them; ephemeral A → recycle into B → commit A leaves referenced blocks permanent, `delete-ephemeral(B)` removes only B's own blocks; ephemeral put recycling an ephemeral source does not error even when the registry misses the source.
+- Flows (integration): ephemeral put → mark-permanent (blocks announced); ephemeral put → delete-ephemeral; non-ephemeral recycle error and both override modes; get/load with pin; LRU/capacity behavior identical with and without pins.
 - All suites valgrind-clean per project convention.
