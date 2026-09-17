@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <string.h>
+#include <cstdio>
 extern "C" {
 #include "../src/BlockCache/index.h"
 #include "../src/BlockCache/block_cache.h"
@@ -16,6 +17,11 @@ extern "C" {
 #include "../src/Platform/platform_time.h"
 #include <cbor.h>
 }
+
+/* Legacy (pre-ephemeral) snapshot CRC entry point under test — declared
+   here rather than in index.h because it is an internal migration helper
+   exercised directly by the legacy-acceptance test below. */
+extern "C" int _index_to_crc_ex(index_t* index, uint64_t* crc, int legacy);
 
 /* ---- index entry CBOR round-trip with the new fields ---- */
 
@@ -62,4 +68,268 @@ TEST(TestEphemeralIndex, EntryCborDecodeOldFiveElementArray) {
   cbor_decref(&array);
   index_entry_destroy(decoded);
   DESTROY(hash, buffer);
+}
+/* ---- WAL 'm' metadata record ---- */
+
+/* Persist ephemeral/pin counts via index_write_entry_metadata ('m' WAL
+   records), roll a snapshot, and verify the counts survive a full
+   destroy/re-create cycle. */
+TEST(TestEphemeralIndex, WalMetadataRecordRoundTrip) {
+  char* location = path_join("/tmp", "ephemeral_metadata_roundtrip");
+  rm_rf(location);
+  mkdir_p(location);
+  int error_code = 0;
+
+  block_t* block = block_create_random_block_by_type(standard);
+  buffer_t* hash = (buffer_t*)refcounter_reference((refcounter_t*)block->hash);
+  block_destroy(block);
+  index_entry_t* entry = index_entry_create(hash);
+
+  index_t* index = index_create(25, location, 60000, 60000, 3, 3, &error_code);
+  ASSERT_NE(index, nullptr);
+  EXPECT_EQ(error_code, 0);
+  index_add(index, CONSUME(entry, index_entry_t));
+
+  index_entry_t* held = REFERENCE(index_find(index, hash), index_entry_t);
+  ASSERT_NE(held, nullptr);
+  held->ephemeral_count = 2;
+  index_write_entry_metadata(index, held);
+  held->pin_count = 1;
+  index_write_entry_metadata(index, held);
+  DESTROY(held, index_entry);
+
+  index_debounce(index);
+  index_sync(index);
+  DESTROY(index, index);
+
+  index_t* reloaded = index_create(25, location, 60000, 60000, 3, 3, &error_code);
+  ASSERT_NE(reloaded, nullptr);
+  EXPECT_EQ(error_code, 0);
+  index_entry_t* found = REFERENCE(index_find(reloaded, hash), index_entry_t);
+  ASSERT_NE(found, nullptr);
+  EXPECT_EQ(found->ephemeral_count, 2u);
+  EXPECT_EQ(found->pin_count, 1u);
+  DESTROY(found, index_entry);
+  DESTROY(reloaded, index);
+
+  DESTROY(hash, buffer);
+  rm_rf(location);
+  free(location);
+}
+
+/* Replay path for the 'm' record: hand-write an 'm' record into the live
+   WAL (id 2) as if a prior session had set the metadata and crashed
+   before its snapshot, then verify the reloaded index applies the two
+   metadata fields from the WAL. */
+TEST(TestEphemeralIndex, WalMetadataRecordReplayedFromWal) {
+  char* location = path_join("/tmp", "ephemeral_metadata_replay");
+  rm_rf(location);
+  mkdir_p(location);
+  int error_code = 0;
+
+  block_t* block = block_create_random_block_by_type(standard);
+  buffer_t* hash = (buffer_t*)refcounter_reference((refcounter_t*)block->hash);
+  block_destroy(block);
+  index_entry_t* entry = index_entry_create(hash);
+
+  /* Phase 1: snapshot the entry with zeroed counts, rolling the live WAL
+     forward to id 2 (mirrors index_destroy's debounce rollover). */
+  index_t* index = index_create(25, location, 60000, 60000, 3, 3, &error_code);
+  ASSERT_NE(index, nullptr);
+  EXPECT_EQ(error_code, 0);
+  index_add(index, CONSUME(entry, index_entry_t));
+  DESTROY(index, index);
+
+  /* Phase 2: write an 'm' record carrying ephemeral=2/pin=1 into WAL 2
+     using the same framing wal_write applies at the index write sites. */
+  index_entry_t* meta = index_entry_from(hash, 0, 0, 0,
+                                         fibonacci_hit_counter_create(), 2, 1);
+  cbor_item_t* cbor_entry = index_entry_to_cbor(meta);
+  ASSERT_NE(cbor_entry, nullptr);
+  uint8_t* cbor_data;
+  size_t cbor_size;
+  cbor_serialize_alloc(cbor_entry, &cbor_data, &cbor_size);
+  EXPECT_EQ(cbor_size, 86u) << "'m' records carry the full 7-element entry CBOR";
+  buffer_t* payload = buffer_create_from_existing_memory(cbor_data, cbor_size);
+  wal_t* wal = wal_create(location, 2);
+  ASSERT_NE(wal, nullptr);
+  wal_write(wal, metadata, payload);
+  EXPECT_EQ(wal_sync(wal), 0);
+  wal_destroy(wal);
+  buffer_destroy(payload);
+  cbor_decref(&cbor_entry);
+  index_entry_destroy(meta);
+
+  /* Phase 3: reopen. The snapshot holds zeroed counts; the 'm' record in
+     the live WAL must replay onto the entry. */
+  index_t* reloaded = index_create(25, location, 60000, 60000, 3, 3, &error_code);
+  ASSERT_NE(reloaded, nullptr);
+  index_entry_t* found = REFERENCE(index_find(reloaded, hash), index_entry_t);
+  ASSERT_NE(found, nullptr);
+  EXPECT_EQ(found->ephemeral_count, 2u);
+  EXPECT_EQ(found->pin_count, 1u);
+  DESTROY(found, index_entry);
+  DESTROY(reloaded, index);
+
+  DESTROY(hash, buffer);
+  rm_rf(location);
+  free(location);
+}
+
+/* Legacy WAL framing: an 'a' record written by an older binary has a
+   78-byte payload (5-element entry CBOR). wal_read must detect the
+   legacy framing (first 86-byte attempt fails, 78-byte retry verifies,
+   detection is sticky) and _index_replay_wal must apply the entry with
+   zeroed ephemeral/pin counts. */
+TEST(TestEphemeralIndex, LegacyWalFramingReplaysOldEntryFormat) {
+  char* location = path_join("/tmp", "ephemeral_legacy_wal");
+  rm_rf(location);
+  mkdir_p(location);
+  int error_code = 0;
+
+  block_t* seed_block = block_create_random_block_by_type(standard);
+  buffer_t* seed_hash = (buffer_t*)refcounter_reference((refcounter_t*)seed_block->hash);
+  block_destroy(seed_block);
+  index_entry_t* seed_entry = index_entry_create(seed_hash);
+
+  block_t* block = block_create_random_block_by_type(standard);
+  buffer_t* hash = (buffer_t*)refcounter_reference((refcounter_t*)block->hash);
+  block_destroy(block);
+
+  /* Phase 1: snapshot with an unrelated seed entry so reopen takes the
+     happy path and replays the live WAL (id 2). */
+  index_t* index = index_create(25, location, 60000, 60000, 3, 3, &error_code);
+  ASSERT_NE(index, nullptr);
+  EXPECT_EQ(error_code, 0);
+  index_add(index, CONSUME(seed_entry, index_entry_t));
+  DESTROY(index, index);
+
+  /* Phase 2: hand-write a legacy 78-byte 'a' record into WAL 2. The old
+     format serializes [counter(16) + hash bytestring(34) + three
+     uint64s(27)] under a 5-element array header(1) = 78 bytes. */
+  fibonacci_hit_counter_t counter = fibonacci_hit_counter_create();
+  cbor_item_t* legacy_entry = cbor_new_definite_array(5);
+  (void)cbor_array_push(legacy_entry, cbor_move(fibonacci_hit_counter_to_cbor(&counter)));
+  (void)cbor_array_push(legacy_entry, cbor_move(buffer_to_cbor(hash)));
+  (void)cbor_array_push(legacy_entry, cbor_move(cbor_build_uint64(0)));
+  (void)cbor_array_push(legacy_entry, cbor_move(cbor_build_uint64(0)));
+  (void)cbor_array_push(legacy_entry, cbor_move(cbor_build_uint64(0)));
+  uint8_t* legacy_data;
+  size_t legacy_size;
+  cbor_serialize_alloc(legacy_entry, &legacy_data, &legacy_size);
+  ASSERT_EQ(legacy_size, 78u) << "legacy entry payload must be exactly 78 bytes";
+  buffer_t* payload = buffer_create_from_existing_memory(legacy_data, legacy_size);
+  wal_t* wal = wal_create(location, 2);
+  ASSERT_NE(wal, nullptr);
+  wal_write(wal, addition, payload);
+  EXPECT_EQ(wal_sync(wal), 0);
+  wal_destroy(wal);
+  buffer_destroy(payload);
+  cbor_decref(&legacy_entry);
+
+  /* Phase 3: reopen — snapshot loads, the legacy record in WAL 2 must
+     replay with zeroed ephemeral/pin counts. */
+  index_t* reloaded = index_create(25, location, 60000, 60000, 3, 3, &error_code);
+  ASSERT_NE(reloaded, nullptr);
+  index_entry_t* found = REFERENCE(index_find(reloaded, hash), index_entry_t);
+  ASSERT_NE(found, nullptr);
+  EXPECT_EQ(found->ephemeral_count, 0u);
+  EXPECT_EQ(found->pin_count, 0u);
+  DESTROY(found, index_entry);
+  index_entry_t* seed_found = REFERENCE(index_find(reloaded, seed_hash), index_entry_t);
+  ASSERT_NE(seed_found, nullptr);
+  DESTROY(seed_found, index_entry);
+  DESTROY(reloaded, index);
+
+  DESTROY(seed_hash, buffer);
+  DESTROY(hash, buffer);
+  rm_rf(location);
+  free(location);
+}
+
+/* Legacy snapshot acceptance: a snapshot whose entries are old-format
+   5-element CBOR arrays, named with the legacy (pre-ephemeral) CRC, must
+   load with zeroed ephemeral/pin counts instead of being rejected. The
+   legacy CRC for the filename is computed with the _index_to_crc_ex
+   legacy entry point on a scratch index built from the same snapshot
+   CBOR (the test target has no xxHash include path, so the CRC sequence
+   cannot be replicated by hand here — this is the sanctioned
+   alternative route). */
+TEST(TestEphemeralIndex, LegacySnapshotLoads) {
+  char* location = path_join("/tmp", "ephemeral_legacy_snapshot");
+  rm_rf(location);
+  mkdir_p(location);
+  char* scratch_location = path_join("/tmp", "ephemeral_legacy_snapshot_scratch");
+  rm_rf(scratch_location);
+  char* scratch_index_dir = path_join(scratch_location, "index");
+  mkdir_p(scratch_index_dir);
+  free(scratch_index_dir);
+  int error_code = 0;
+
+  block_t* block = block_create_random_block_by_type(standard);
+  buffer_t* hash = (buffer_t*)refcounter_reference((refcounter_t*)block->hash);
+  block_destroy(block);
+
+  /* Old-format snapshot CBOR: [node, bucket_size] where node is a single
+     leaf bucket holding one 5-element (legacy) entry. */
+  fibonacci_hit_counter_t counter = fibonacci_hit_counter_create();
+  cbor_item_t* entry_cbor = cbor_new_definite_array(5);
+  (void)cbor_array_push(entry_cbor, cbor_move(fibonacci_hit_counter_to_cbor(&counter)));
+  (void)cbor_array_push(entry_cbor, cbor_move(buffer_to_cbor(hash)));
+  (void)cbor_array_push(entry_cbor, cbor_move(cbor_build_uint64(0)));
+  (void)cbor_array_push(entry_cbor, cbor_move(cbor_build_uint64(0)));
+  (void)cbor_array_push(entry_cbor, cbor_move(cbor_build_uint64(0)));
+  cbor_item_t* bucket = cbor_new_definite_array(1);
+  (void)cbor_array_push(bucket, cbor_move(entry_cbor));
+  cbor_item_t* node = cbor_new_definite_array(1);
+  (void)cbor_array_push(node, cbor_move(bucket));
+  cbor_item_t* snapshot = cbor_new_definite_array(2);
+  (void)cbor_array_push(snapshot, cbor_move(node));
+  (void)cbor_array_push(snapshot, cbor_move(cbor_build_uint64(25)));
+  uint8_t* snapshot_data;
+  size_t snapshot_size;
+  cbor_serialize_alloc(snapshot, &snapshot_data, &snapshot_size);
+
+  /* Compute the legacy CRC the way an older binary would have named the
+     file, via a scratch index holding the same decoded entries. The
+     modern CRC must differ (it hashes the zeroed counts too), proving
+     this snapshot is only loadable through the legacy-acceptance branch. */
+  index_t* scratch = cbor_to_index(snapshot, scratch_location, 60000, 60000, 3, 3);
+  ASSERT_NE(scratch, nullptr);
+  uint64_t legacy_crc = 0;
+  EXPECT_EQ(_index_to_crc_ex(scratch, &legacy_crc, 1), 0);
+  uint64_t modern_crc = 0;
+  EXPECT_EQ(_index_to_crc_ex(scratch, &modern_crc, 0), 0);
+  EXPECT_NE(legacy_crc, modern_crc);
+  DESTROY(scratch, index);
+
+  char filename[64];
+  snprintf(filename, sizeof(filename), "1-%llu", (unsigned long long)legacy_crc);
+  char* index_dir = path_join(location, "index");
+  mkdir_p(index_dir);
+  char* file_path = path_join(index_dir, filename);
+  FILE* snapshot_file = fopen(file_path, "wb");
+  ASSERT_NE(snapshot_file, nullptr);
+  ASSERT_EQ(fwrite(snapshot_data, 1, snapshot_size, snapshot_file), snapshot_size);
+  ASSERT_EQ(fclose(snapshot_file), 0);
+  free(file_path);
+  free(index_dir);
+  free(snapshot_data);
+  cbor_decref(&snapshot);
+
+  index_t* index = index_create(25, location, 60000, 60000, 3, 3, &error_code);
+  ASSERT_NE(index, nullptr);
+  EXPECT_EQ(error_code, 0);
+  index_entry_t* found = REFERENCE(index_find(index, hash), index_entry_t);
+  ASSERT_NE(found, nullptr);
+  EXPECT_EQ(found->ephemeral_count, 0u);
+  EXPECT_EQ(found->pin_count, 0u);
+  DESTROY(found, index_entry);
+  DESTROY(index, index);
+
+  DESTROY(hash, buffer);
+  rm_rf(location);
+  free(location);
+  rm_rf(scratch_location);
+  free(scratch_location);
 }

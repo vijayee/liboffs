@@ -87,6 +87,7 @@ index_entry_vec_t* index_to_array(index_t* index);
 cbor_item_t* index_to_cbor(index_t* index);
 index_t* cbor_to_index(cbor_item_t* cbor, char* location, uint64_t wait, uint64_t max_wait, size_t max_snapshots, size_t max_wals);
 void index_set_entry_ejection(index_t* index, index_entry_t* entry, uint64_t date);
+void index_write_entry_metadata(index_t* index, index_entry_t* entry);
 void index_debounce(index_t* index);
 int index_sync(index_t* index);
 int _sort_indexes(const void *str1, const void *str2);

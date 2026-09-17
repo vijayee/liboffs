@@ -18,7 +18,8 @@
 
 void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node, size_t current);
 void index_split_node(index_t* index, index_node_t* node, size_t current);
-int _index_node_to_crc(index_node_t* node, XXH64_state_t* const state);
+int _index_node_to_crc(index_node_t* node, XXH64_state_t* const state, int legacy);
+int _index_to_crc_ex(index_t* index, uint64_t* crc, int legacy);
 int _index_to_crc(index_t* index, uint64_t* crc);
 int _sort_indexes( const void *str1, const void *str2 );
 int _index_get_id_crc(char* filename, uint64_t* id, uint64_t* crc);
@@ -298,6 +299,24 @@ static int _index_replay_wal(index_t* index, char* parent_location,
         }
         cbor_decref(&cbor);
         break;
+      case 'm':
+        cbor = cbor_load(data->data, data->size, &result);
+        if (result.error.code == CBOR_ERR_NONE) {
+          index_entry_t* entry = cbor_to_index_entry(cbor);
+          if (entry != NULL) {
+            index_entry_t* from_index = REFERENCE(index_find(index, entry->hash), index_entry_t);
+            if (from_index != NULL) {
+              from_index->ephemeral_count = entry->ephemeral_count;
+              from_index->pin_count = entry->pin_count;
+              DESTROY(from_index, index_entry);
+            }
+            DESTROY(entry, index_entry);
+          }
+          cbor_decref(&cbor);
+        } else {
+          cbor_decref(&cbor);
+        }
+        break;
       default:
         // Unknown type — stop replay here, keep the prefix. wal_read already
         // returned WAL_ERR_UNKNOWN_TYPE without allocating data, so nothing to
@@ -411,77 +430,86 @@ index_t* index_create(size_t bucket_size, char* location, uint64_t wait, uint64_
         continue;
       }
       if (crc != last_crc) { //Index is invalid, continue to iterate backward until we have a valid index
-        log_error("index_create: CRC mismatch for file %d (%s): computed=%lu, expected=%lu", i, last, crc, last_crc);
-        DESTROY(index, index);
-        continue;
-      } else {
-        if (i != (int)(files->length - 1)) {
-          index->is_rebuilding = 1;
-          for (int j = i + 1; j < files->length; j++) {
-            char* next = files->data[j];
-            uint64_t next_id = 0;
-            uint64_t next_crc = 0;
-            _index_get_id_crc(next, &next_id, &next_crc);
-            int replay_result = _index_replay_wal(index, parent_location, next_id);
-            // Stop-and-keep-prefix: any non-clean-EOF result stops the rebuild
-            // here. The snapshot + earlier WALs are kept; later WALs are not
-            // replayed. Do NOT bail to _index_new_empty — a torn tail or CRC
-            // error in one WAL loses only the bad record and the suffix, not
-            // the entire snapshot + replayed prefix. error_code is left as-is
-            // (a recoverable stop is not an error the caller should act on).
-            if (replay_result != -3) {
-              log_warn("index_create: WAL %lu replay stopped at code %d (stop-and-keep-prefix)",
-                       (unsigned long)next_id, replay_result);
-              break;
-            }
-          }
-
-          index->is_rebuilding = 0;
-          uint64_t current_id = (files->length - i) + last_id;
-          char id[20];
-          sprintf(id,"%lu", current_id);
-          /* INTENTIONAL off-by-one: see _index_new_empty for the rationale.
-             The first assignment below is overwritten by the second on the
-             next line; the second uses current_id + 1 so the freshly
-             loaded snapshot's WAL is followed by a next_id with a one-id
-             gap. */
-          index->next_id = most_recent_id + 2;
-          /* index_create_from (via cbor_to_index) already set current_file/
-             last_file for the loaded snapshot's WAL ids; the rebuilding
-             branch re-points them at the new snapshot's ids, so free the
-             intermediate strings before overwriting to avoid leaking them. */
-          free(index->current_file);
-          free(index->last_file);
-          index->current_file = path_join(index->location, id);
-          index->next_id = current_id + 1;
-          sprintf(id,"%lu", current_id - 1 );
-          index->last_file = path_join(index->location, id);
-          index->max_snapshots = max_snapshots;
-          index->max_wals = max_wals;
-          uint64_t first_kept_id = _index_prune_old_snapshots(index);
-          _index_prune_old_wals(index, first_kept_id);
-          destroy_files(files);
-          free(index_location);
-          free(parent_location);
-          return index;
-        } else {
-          // Happy path: the newest snapshot is valid. Replay the live WAL
-          // (id == last_id + 1) to recover writes since the last snapshot.
-          // Stop-and-keep-prefix: a torn tail or CRC error loses only the
-          // bad record, not the whole index.
-          int replay_rc = _index_replay_wal(index, parent_location, last_id + 1);
-          if (replay_rc != -3) {
-            log_warn("index_create: live WAL replay stopped at code %d (stop-and-keep-prefix)", replay_rc);
-          }
-          index->max_snapshots = max_snapshots;
-          index->max_wals = max_wals;
-          uint64_t first_kept_id_b = _index_prune_old_snapshots(index);
-          _index_prune_old_wals(index, first_kept_id_b);
-          free(index_location);
-          free(parent_location);
-          destroy_files(files);
-          return index;
+        /* Older binaries hashed entries without the ephemeral_count /
+           pin_count fields. A snapshot written by such a binary decodes
+           here with zeroed counts, so its modern CRC mismatches, but the
+           legacy formula must match — accept it rather than rejecting
+           the snapshot (user decision: read old formats). */
+        uint64_t legacy_crc;
+        int legacy_result = _index_to_crc_ex(index, &legacy_crc, 1);
+        if (legacy_result != 0 || legacy_crc != last_crc) {
+          log_error("index_create: CRC mismatch for file %d (%s): computed=%lu, expected=%lu", i, last, crc, last_crc);
+          DESTROY(index, index);
+          continue;
         }
+        log_info("index_create: legacy snapshot format for file %d (%s) — loaded with zeroed ephemeral/pin counts", i, last);
+      }
+      if (i != (int)(files->length - 1)) {
+        index->is_rebuilding = 1;
+        for (int j = i + 1; j < files->length; j++) {
+          char* next = files->data[j];
+          uint64_t next_id = 0;
+          uint64_t next_crc = 0;
+          _index_get_id_crc(next, &next_id, &next_crc);
+          int replay_result = _index_replay_wal(index, parent_location, next_id);
+          // Stop-and-keep-prefix: any non-clean-EOF result stops the rebuild
+          // here. The snapshot + earlier WALs are kept; later WALs are not
+          // replayed. Do NOT bail to _index_new_empty — a torn tail or CRC
+          // error in one WAL loses only the bad record and the suffix, not
+          // the entire snapshot + replayed prefix. error_code is left as-is
+          // (a recoverable stop is not an error the caller should act on).
+          if (replay_result != -3) {
+            log_warn("index_create: WAL %lu replay stopped at code %d (stop-and-keep-prefix)",
+                     (unsigned long)next_id, replay_result);
+            break;
+          }
+        }
+
+        index->is_rebuilding = 0;
+        uint64_t current_id = (files->length - i) + last_id;
+        char id[20];
+        sprintf(id,"%lu", current_id);
+        /* INTENTIONAL off-by-one: see _index_new_empty for the rationale.
+           The first assignment below is overwritten by the second on the
+           next line; the second uses current_id + 1 so the freshly
+           loaded snapshot's WAL is followed by a next_id with a one-id
+           gap. */
+        index->next_id = most_recent_id + 2;
+        /* index_create_from (via cbor_to_index) already set current_file/
+           last_file for the loaded snapshot's WAL ids; the rebuilding
+           branch re-points them at the new snapshot's ids, so free the
+           intermediate strings before overwriting to avoid leaking them. */
+        free(index->current_file);
+        free(index->last_file);
+        index->current_file = path_join(index->location, id);
+        index->next_id = current_id + 1;
+        sprintf(id,"%lu", current_id - 1 );
+        index->last_file = path_join(index->location, id);
+        index->max_snapshots = max_snapshots;
+        index->max_wals = max_wals;
+        uint64_t first_kept_id = _index_prune_old_snapshots(index);
+        _index_prune_old_wals(index, first_kept_id);
+        destroy_files(files);
+        free(index_location);
+        free(parent_location);
+        return index;
+      } else {
+        // Happy path: the newest snapshot is valid. Replay the live WAL
+        // (id == last_id + 1) to recover writes since the last snapshot.
+        // Stop-and-keep-prefix: a torn tail or CRC error loses only the
+        // bad record, not the whole index.
+        int replay_rc = _index_replay_wal(index, parent_location, last_id + 1);
+        if (replay_rc != -3) {
+          log_warn("index_create: live WAL replay stopped at code %d (stop-and-keep-prefix)", replay_rc);
+        }
+        index->max_snapshots = max_snapshots;
+        index->max_wals = max_wals;
+        uint64_t first_kept_id_b = _index_prune_old_snapshots(index);
+        _index_prune_old_wals(index, first_kept_id_b);
+        free(index_location);
+        free(parent_location);
+        destroy_files(files);
+        return index;
       }
     }
     log_warn("index_create: all %zu index files were invalid, creating empty index", files->length);
@@ -662,16 +690,20 @@ index_node_t* cbor_to_index_node(cbor_item_t* cbor, size_t bucket_size) {
   }
 }
 
-int _index_node_to_crc(index_node_t* node, XXH64_state_t* const state) {
+/* Legacy mode (legacy != 0) skips the ephemeral_count/pin_count updates,
+   reproducing the CRC formula used by binaries that predate those fields.
+   It exists so snapshots written by older binaries can be recognized and
+   accepted at load time instead of being rejected as corrupt. */
+int _index_node_to_crc(index_node_t* node, XXH64_state_t* const state, int legacy) {
   if (node == NULL) {
     return 0;
   }
   if (node->bucket == NULL) {
-    int result = _index_node_to_crc(node->left, state);
+    int result = _index_node_to_crc(node->left, state, legacy);
     if (result != 0) {
       return result;
     } else {
-      return _index_node_to_crc(node->right, state);
+      return _index_node_to_crc(node->right, state, legacy);
     }
   } else {
     for (int i = 0; i < node->bucket->length; i++) {
@@ -710,16 +742,18 @@ int _index_node_to_crc(index_node_t* node, XXH64_state_t* const state) {
         return 7;
       }
 
-      uint32_t ephemeral_count = htobe32((uint32_t)cur_entry->ephemeral_count);
-      if (XXH64_update(state, &ephemeral_count, sizeof(uint32_t)) == XXH_ERROR) {
-        log_error("failed to update crc with ephemeral count");
-        return 8;
-      }
+      if (!legacy) {
+        uint32_t ephemeral_count = htobe32((uint32_t)cur_entry->ephemeral_count);
+        if (XXH64_update(state, &ephemeral_count, sizeof(uint32_t)) == XXH_ERROR) {
+          log_error("failed to update crc with ephemeral count");
+          return 8;
+        }
 
-      uint32_t pin_count = htobe32(cur_entry->pin_count);
-      if (XXH64_update(state, &pin_count, sizeof(uint32_t)) == XXH_ERROR) {
-        log_error("failed to update crc with pin count");
-        return 9;
+        uint32_t pin_count = htobe32(cur_entry->pin_count);
+        if (XXH64_update(state, &pin_count, sizeof(uint32_t)) == XXH_ERROR) {
+          log_error("failed to update crc with pin count");
+          return 9;
+        }
       }
     }
     return 0;
@@ -1092,6 +1126,22 @@ void index_set_entry_ejection(index_t* index, index_entry_t* entry, uint64_t dat
   index_entry_set_ejection_date(entry, date);
 }
 
+/* Persist a metadata mutation (ephemeral_count / pin_count) as an 'm' WAL
+   record carrying the full entry CBOR. Replay applies only the two metadata
+   fields, so re-reading a stale record is idempotent. */
+void index_write_entry_metadata(index_t* index, index_entry_t* entry) {
+  if (!index->is_rebuilding) {
+    cbor_item_t* cbor_entry = index_entry_to_cbor(entry);
+    uint8_t* cbor_data;
+    size_t cbor_size;
+    cbor_serialize_alloc(cbor_entry, &cbor_data, &cbor_size);
+    buffer_t* cbor_buf = buffer_create_from_existing_memory(cbor_data, cbor_size);
+    wal_write(index->wal, metadata, cbor_buf);
+    buffer_destroy(cbor_buf);
+    cbor_decref(&cbor_entry);
+  }
+}
+
 static uint64_t _index_prune_old_snapshots(index_t* index) {
   if (index->max_snapshots == 0) return 0;
 
@@ -1225,7 +1275,7 @@ int index_sync(index_t* index) {
   if (index == NULL) return -1;
   return wal_sync(index->wal);
 }
-int _index_to_crc(index_t* index, uint64_t* crc) {
+int _index_to_crc_ex(index_t* index, uint64_t* crc, int legacy) {
   XXH64_state_t* const state = XXH64_createState();
   if (state == NULL) {
     log_error("failed to create crc");
@@ -1235,7 +1285,7 @@ int _index_to_crc(index_t* index, uint64_t* crc) {
     log_error("failed to init crc");
     return 2;
   }
-  int result = _index_node_to_crc(index->root, state);
+  int result = _index_node_to_crc(index->root, state, legacy);
   if (result != 0) {
     XXH64_freeState(state);
     return result;
@@ -1243,6 +1293,10 @@ int _index_to_crc(index_t* index, uint64_t* crc) {
   *crc = XXH64_digest(state);
   XXH64_freeState(state);
   return 0;
+}
+
+int _index_to_crc(index_t* index, uint64_t* crc) {
+  return _index_to_crc_ex(index, crc, 0);
 }
 
 int index_to_crc(index_t* index, uint64_t* crc) {

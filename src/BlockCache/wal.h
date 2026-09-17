@@ -14,7 +14,8 @@ typedef enum wal_type_e {
   addition = 'a',
   removal = 'r',
   increment = 'i',
-  ejection = 'e'
+  ejection = 'e',
+  metadata = 'm'
 } wal_type_e;
 
 // wal_read return codes. -3 is clean EOF; 0 is a complete valid record.
@@ -32,6 +33,11 @@ typedef struct {
   char* current_file;
   char* last_file;
   uint64_t next_id;
+  /* Sticky per-file framing classification: once an 'a'/'i' record verifies
+     at the legacy 78-byte payload size, every entry record in this WAL uses
+     it (a WAL file is written by a single binary version). Zeroed on
+     create/load. */
+  uint8_t legacy_entry_size;
 } wal_t;
 
 wal_t* wal_create(char* location, uint64_t id);
