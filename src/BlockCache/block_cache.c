@@ -23,6 +23,12 @@ bool block_cache_verify_read_hash(const buffer_t* data, const buffer_t* stored_h
   return block_verify_hash(data, stored_hash);
 }
 
+/* Victim-candidate check for respiration exhale: pinned permanent blocks and
+   ephemeral blocks are never shed. LRU/capacity behavior ignores both fields. */
+bool block_cache_entry_is_sheddable(const index_entry_t* entry) {
+  return entry != NULL && entry->pin_count == 0 && entry->ephemeral_count == 0;
+}
+
 void respiration_exhale_payload_destroy(void* ptr) {
   respiration_exhale_payload_t* payload = (respiration_exhale_payload_t*)ptr;
   if (payload == NULL) return;
@@ -473,6 +479,19 @@ void block_cache_dispatch(void* state, message_t* msg) {
         result_fib = entry->counter.fib;
         if (is_async) { block_destroy(p->block); p->block = NULL; }
         p->result = CACHE_PUT_EXISTS;
+      }
+      /* Apply the caller's ephemeral claim once the entry exists and the put
+         succeeded. entry is valid here on both branches: the NEW branch added
+         it to the index (the borrowed pointer stays live), the EXISTS branch
+         peeked it; the error paths leave entry NULL or break earlier. */
+      if (entry != NULL && p->acquire_ephemeral &&
+          p->result != CACHE_PUT_ERROR && p->result != CACHE_PUT_FULL) {
+        if (entry->ephemeral_count < UINT16_MAX) {
+          entry->ephemeral_count += 1;
+          index_write_entry_metadata(block_cache->index, entry);
+        } else {
+          log_error("CACHE_PUT: ephemeral claim overflow — put proceeds without claim");
+        }
       }
       /* Async: send result back if reply_to is set */
       if (p->reply_to != NULL) {
@@ -987,15 +1006,31 @@ void block_cache_update_capacity(block_cache_t* block_cache) {
     respiration_actor_t* respiration = block_cache->respiration;
     if (atomic_load(&respiration->state) == RESPIRATION_IDLE) {
       index_entry_vec_t* entries = index_entries_by_ejection_date(block_cache->index);
-      if (entries != NULL && entries->length > 0) {
+      /* Pinned permanent blocks and ephemeral blocks are never shed — count
+         the sheddable candidates first and skip the trigger entirely when
+         there is nothing to exhale. */
+      size_t candidate_count = 0;
+      if (entries != NULL) {
+        for (size_t entry_idx = 0; entry_idx < entries->length; entry_idx++) {
+          if (block_cache_entry_is_sheddable(entries->data[entry_idx])) {
+            candidate_count++;
+          }
+        }
+      }
+      if (candidate_count > 0) {
         respiration_exhale_payload_t* payload = get_clear_memory(sizeof(respiration_exhale_payload_t));
-        payload->count = (size_t)entries->length;
-        payload->hashes = get_clear_memory(sizeof(buffer_t*) * (size_t)entries->length);
-        payload->ejection_dates = get_clear_memory(sizeof(uint64_t) * (size_t)entries->length);
+        payload->count = candidate_count;
+        payload->hashes = get_clear_memory(sizeof(buffer_t*) * candidate_count);
+        payload->ejection_dates = get_clear_memory(sizeof(uint64_t) * candidate_count);
         payload->capacity = capacity;
-        for (int idx = 0; idx < entries->length; idx++) {
-          payload->hashes[idx] = (buffer_t*)refcounter_reference((refcounter_t*)entries->data[idx]->hash);
-          payload->ejection_dates[idx] = entries->data[idx]->ejection_date;
+        size_t out_idx = 0;
+        for (size_t entry_idx = 0; entry_idx < entries->length; entry_idx++) {
+          index_entry_t* entry = entries->data[entry_idx];
+          if (block_cache_entry_is_sheddable(entry)) {
+            payload->hashes[out_idx] = (buffer_t*)refcounter_reference((refcounter_t*)entry->hash);
+            payload->ejection_dates[out_idx] = entry->ejection_date;
+            out_idx++;
+          }
         }
         message_t msg;
         msg.type = RESPIRATION_EXHALE_TRIGGER;
@@ -1043,6 +1078,24 @@ void block_cache_put(block_cache_t* block_cache, block_t* block, uint32_t incomi
   payload->reply_to = reply_to;
   payload->result = CACHE_PUT_ERROR;
   payload->acquire_ephemeral = 0;
+
+  message_t msg;
+  msg.type = CACHE_PUT;
+  msg.payload = payload;
+  msg.payload_destroy = cache_put_payload_destroy;
+
+  actor_send(&block_cache->actor, &msg);
+}
+
+/* Put that acquires an ephemeral claim (count starts at 1) on the stored
+   block. Works for both a new put and a block that already exists. */
+void block_cache_put_ephemeral(block_cache_t* block_cache, block_t* block, actor_t* reply_to) {
+  cache_put_payload_t* payload = get_clear_memory(sizeof(cache_put_payload_t));
+  payload->block = (block_t*)refcounter_reference((refcounter_t*)block);
+  payload->incoming_fib = 0;
+  payload->reply_to = reply_to;
+  payload->acquire_ephemeral = 1;
+  payload->result = CACHE_PUT_ERROR;
 
   message_t msg;
   msg.type = CACHE_PUT;

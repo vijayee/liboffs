@@ -1069,3 +1069,174 @@ TEST_F(TestEphemeralCache, ClaimedEphemeralRemoveRejected) {
             CACHE_REMOVE_EPHEMERAL_CLAIMED);
   EXPECT_EQ(block_cache_count(block_cache), 1u);
 }
+
+/* ---- sheddable / servable helpers ---- */
+
+/* The respiration exhale victim filter and the peer find-block filter are
+   both pure functions of the two count fields — this pins the decision
+   table without needing an authority/network. */
+TEST(TestEphemeralHelpers, SheddableAndServable) {
+  block_t* block = block_create_random_block_by_type(standard);
+  buffer_t* hash = (buffer_t*)refcounter_reference((refcounter_t*)block->hash);
+  block_destroy(block);
+  index_entry_t* entry = index_entry_create(hash);
+
+  /* Freshly put block: sheddable, servable. */
+  EXPECT_TRUE(block_cache_entry_is_sheddable(entry));
+  EXPECT_TRUE(index_entry_is_servable(entry));
+
+  /* Pinned permanent: not sheddable, servable. */
+  entry->pin_count = 1;
+  EXPECT_FALSE(block_cache_entry_is_sheddable(entry));
+  EXPECT_TRUE(index_entry_is_servable(entry));
+
+  /* Ephemeral: not sheddable, not servable to peers. */
+  entry->pin_count = 0;
+  entry->ephemeral_count = 1;
+  EXPECT_FALSE(block_cache_entry_is_sheddable(entry));
+  EXPECT_FALSE(index_entry_is_servable(entry));
+
+  index_entry_destroy(entry);
+  DESTROY(hash, buffer);
+}
+
+/* Helper: synchronous CACHE_GET via a completion actor (mirrors bc_get_sync
+   in test_block_cache.cpp; local copy because that helper is static there). */
+static block_t* eph_get_sync(block_cache_t* bc, buffer_t* hash, scheduler_pool_t* pool) {
+  bc_completion_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, bc_completion_dispatch, pool);
+
+  block_cache_get(bc, hash, &comp);
+
+  /* comp is scheduled by actor_send when bc->actor delivers the result — do
+     NOT pre-inject it with an empty queue. */
+  while (!ATOMIC_LOAD(&cs.done)) { platform_sleep_ms(1); }
+  /* Barrier before actor_destroy: a worker may still be in the tail of
+     actor_run(&comp). */
+  scheduler_pool_wait_for_idle(pool);
+  actor_destroy(&comp);
+
+  if (cs.get_hash != NULL) {
+    DESTROY(cs.get_hash, buffer);
+  }
+  return cs.get_block;
+}
+
+/* block_cache_put_ephemeral stores the block with ephemeral_count == 1 and
+   the block stays readable through the local CACHE_GET path while claimed
+   (the peer-facing find-block filter is a separate, network-side concern). */
+TEST_F(TestEphemeralCache, EphemeralPutAcquiresClaim) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  ASSERT_NE(block_cache, nullptr);
+
+  block_t* ref_block = (block_t*)refcounter_reference((refcounter_t*)blocks[0]);
+  refcounter_yield((refcounter_t*)ref_block);
+  block_cache_put_ephemeral(block_cache, ref_block, NULL);
+  scheduler_pool_wait_for_idle(pool);
+
+  index_entry_t* entry = index_peek(block_cache->index, blocks[0]->hash);
+  ASSERT_NE(entry, nullptr);
+  EXPECT_EQ(entry->ephemeral_count, 1u);
+
+  /* Local reads still work while ephemeral. */
+  block_t* fetched = eph_get_sync(block_cache, blocks[0]->hash, pool);
+  EXPECT_NE(fetched, nullptr);
+  if (fetched != NULL) {
+    EXPECT_EQ(buffer_compare(fetched->hash, blocks[0]->hash), 0);
+    block_destroy(fetched);
+  }
+}
+
+/* Completion actor receiving the mirrored CACHE_EPHEMERAL_LIST message.
+   Exercises the documented consumer contract: steal the arrays, destroy the
+   stolen referenced hash buffers, free the arrays, and empty the shell
+   (NULL arrays, count = 0) while leaving msg->payload intact — this
+   actor_run's payload_destroy (cache_ephemeral_list_payload_destroy, via
+   its void* adapter) then frees the emptied shell exactly once, with no
+   double-destroy of the stolen contents. */
+typedef struct {
+  ATOMIC(uint8_t) done;
+  size_t count;
+  uint16_t claims[4];
+  uint32_t pins[4];
+} list_completion_t;
+
+static void list_completion_dispatch(void* state, message_t* msg) {
+  list_completion_t* cs = (list_completion_t*)state;
+  if (msg->type != CACHE_EPHEMERAL_LIST) {
+    return;
+  }
+  cache_ephemeral_list_payload_t* payload = (cache_ephemeral_list_payload_t*)msg->payload;
+  if (payload == NULL) {
+    ATOMIC_STORE(&cs->done, 1);
+    return;
+  }
+
+  /* Copy out what the consumer needs before emptying the shell. */
+  size_t copy_count = payload->count < 4 ? payload->count : 4;
+  for (size_t idx = 0; idx < copy_count; idx++) {
+    cs->claims[idx] = payload->ephemeral_counts[idx];
+    cs->pins[idx] = payload->pin_counts[idx];
+  }
+  cs->count = payload->count;
+
+  /* Steal the arrays: each hashes[i] is a referenced buffer — destroy it;
+     the three arrays are plain allocations — free them. */
+  if (payload->hashes != NULL) {
+    for (size_t idx = 0; idx < payload->count; idx++) {
+      if (payload->hashes[idx] != NULL) {
+        DESTROY(payload->hashes[idx], buffer);
+      }
+    }
+    free(payload->hashes);
+    payload->hashes = NULL;
+  }
+  if (payload->ephemeral_counts != NULL) {
+    free(payload->ephemeral_counts);
+    payload->ephemeral_counts = NULL;
+  }
+  if (payload->pin_counts != NULL) {
+    free(payload->pin_counts);
+    payload->pin_counts = NULL;
+  }
+  payload->count = 0;
+  /* msg->payload deliberately left non-NULL: actor_run's
+     payload_destroy(node->msg.payload) frees only the emptied shell. */
+  ATOMIC_STORE(&cs->done, 1);
+}
+
+/* The mirrored CACHE_EPHEMERAL_LIST reply hands the payload ownership to the
+   consumer; the contract above must leave exactly one shell free and zero
+   double-frees (valgrind verifies the second half). */
+TEST_F(TestEphemeralCache, ListEphemeralMirrorsPayload) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  ASSERT_NE(block_cache, nullptr);
+
+  /* put + acquire two blocks */
+  for (int idx = 0; idx < 2; idx++) {
+    block_t* ref_block = (block_t*)refcounter_reference((refcounter_t*)blocks[idx]);
+    refcounter_yield((refcounter_t*)ref_block);
+    block_cache_put_ephemeral(block_cache, ref_block, NULL);
+  }
+  scheduler_pool_wait_for_idle(pool);
+
+  list_completion_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, list_completion_dispatch, pool);
+  block_cache_list_ephemeral(block_cache, &comp);
+
+  /* comp is scheduled by actor_send when the cache actor mirrors the list —
+     do NOT pre-inject it with an empty queue. */
+  while (!ATOMIC_LOAD(&cs.done)) { platform_sleep_ms(1); }
+  /* Barrier before actor_destroy: a worker may still be in the tail of
+     actor_run(&comp). */
+  scheduler_pool_wait_for_idle(pool);
+  actor_destroy(&comp);
+
+  ASSERT_EQ(cs.count, 2u);
+  EXPECT_EQ(cs.claims[0], 1u);
+  EXPECT_EQ(cs.claims[1], 1u);
+}

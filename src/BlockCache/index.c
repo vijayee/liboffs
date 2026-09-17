@@ -49,6 +49,12 @@ index_entry_t* index_entry_create(buffer_t* hash) {
   return entry;
 }
 
+/* Ephemeral blocks are local-only: never served to peers in find-block
+   responses and never pushed by respiration. */
+bool index_entry_is_servable(const index_entry_t* entry) {
+  return entry != NULL && entry->ephemeral_count == 0;
+}
+
 index_entry_t* index_entry_from(buffer_t* hash, size_t section_id, size_t section_index, uint64_t ejection_date, fibonacci_hit_counter_t counter, uint16_t ephemeral_count, uint32_t pin_count) {
   index_entry_t* entry = get_clear_memory(sizeof(index_entry_t));
   refcounter_init((refcounter_t*) entry);

@@ -2725,6 +2725,11 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
     buffer_t* hash_buf = buffer_create_from_pointer_copy(find->block_hash, 32);
     if (hash_buf != NULL) {
       index_entry_t* entry = index_peek(network->block_cache->index, hash_buf);
+      if (entry != NULL && !index_entry_is_servable(entry)) {
+        // Ephemeral blocks are local-only — treat as not-found for peers so
+        // the request flows into the normal remote-search path below.
+        entry = NULL;
+      }
       if (entry != NULL) {
         // Block found locally — send FOUND response back along the path
         const node_id_t* reply_to = &find->original_source;

@@ -27,6 +27,9 @@ typedef struct {
 } index_entry_t;
 
 index_entry_t* index_entry_create(buffer_t* hash);
+/* Ephemeral blocks are local-only: never served to peers in find-block
+   responses and never pushed by respiration. */
+bool index_entry_is_servable(const index_entry_t* entry);
 index_entry_t* index_entry_from(buffer_t* hash, size_t section_id, size_t section_index,
                                 uint64_t ejection_date, fibonacci_hit_counter_t counter,
                                 uint16_t ephemeral_count, uint32_t pin_count);

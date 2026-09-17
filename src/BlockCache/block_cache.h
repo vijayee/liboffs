@@ -58,7 +58,7 @@ typedef struct {
   actor_t* reply_to;
   uint32_t incoming_fib;
   int result;
-  uint8_t acquire_ephemeral; /* 1 = set ephemeral_count to 1 on a new block */
+  uint8_t acquire_ephemeral; /* 1 = acquire an ephemeral claim (count += 1) on the stored block */
 } cache_put_payload_t;
 
 /* Payload for CACHE_GET message.
@@ -226,7 +226,29 @@ void block_cache_remove_ex(block_cache_t* block_cache, buffer_t* hash, uint8_t f
 void block_cache_ephemeral(block_cache_t* block_cache, buffer_t* hash, cache_ephemeral_op_e op, actor_t* reply_to);
 void block_cache_pin(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
 void block_cache_unpin(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
+
+/* Enumerate every ephemeral (ephemeral_count > 0) block in the cache.
+   Consumer contract for the mirrored reply: the cache actor processes the
+   message, fills the payload, and mirrors the SAME message (and payload)
+   back to reply_to, nulling its own copy — from that point the consumer's
+   actor_run owns the payload. In your dispatch: copy out what you need,
+   then free the stolen contents (each hashes[i] is a referenced buffer —
+   DESTROY it; free the hashes/ephemeral_counts/pin_counts arrays), NULL
+   the three array pointers and set count = 0 in the payload shell, and
+   leave msg->payload untouched — your actor_run's payload_destroy call
+   then frees the emptied shell exactly once
+   (cache_ephemeral_list_payload_destroy tolerates the emptied shell).
+   Alternatively you may set msg->payload = NULL and free the shell
+   yourself; actor_run guards a NULL payload either way. */
 void block_cache_list_ephemeral(block_cache_t* block_cache, actor_t* reply_to);
+
+/* Victim-candidate check for respiration exhale: pinned permanent blocks and
+   ephemeral blocks are never shed. LRU/capacity behavior ignores both fields. */
+bool block_cache_entry_is_sheddable(const index_entry_t* entry);
+
+/* Put that acquires an ephemeral claim (count starts at 1) on the stored
+   block. Works for both a new put and a block that already exists. */
+void block_cache_put_ephemeral(block_cache_t* block_cache, block_t* block, actor_t* reply_to);
 
 /* Advisory capacity check (unsynchronized): returns CACHE_FIT_OK if
  * current_bytes + required_bytes <= max_capacity_bytes, else CACHE_FIT_FULL.
