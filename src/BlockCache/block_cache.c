@@ -858,6 +858,13 @@ void block_cache_dispatch(void* state, message_t* msg) {
         reply.payload_destroy = free;
         actor_send(p->reply_to, &reply);
       }
+      /* An unpin can make entries sheddable again — a cache at capacity whose
+         entries were all pinned should be able to exhale now instead of
+         waiting for the next put or deletion. Self-guards on
+         max_capacity_bytes/authority, so no-network setups are unaffected. */
+      if (msg->type == CACHE_UNPIN && p->result == CACHE_EPHEMERAL_OK) {
+        block_cache_update_capacity(block_cache);
+      }
       break;
     }
     case CACHE_EPHEMERAL_LIST: {
@@ -1039,6 +1046,9 @@ void block_cache_update_capacity(block_cache_t* block_cache) {
         actor_send(&respiration->actor, &msg);
       }
       if (entries != NULL) {
+        for (size_t entry_idx = 0; entry_idx < entries->length; entry_idx++) {
+          index_entry_destroy(entries->data[entry_idx]);
+        }
         vec_deinit(entries);
         free(entries);
       }
@@ -1087,8 +1097,9 @@ void block_cache_put(block_cache_t* block_cache, block_t* block, uint32_t incomi
   actor_send(&block_cache->actor, &msg);
 }
 
-/* Put that acquires an ephemeral claim (count starts at 1) on the stored
-   block. Works for both a new put and a block that already exists. */
+/* Put that acquires one claim (count += 1) on the stored block; the first
+   claim on a fresh block makes it 1. Works for both a new put and a block
+   that already exists. */
 void block_cache_put_ephemeral(block_cache_t* block_cache, block_t* block, actor_t* reply_to) {
   cache_put_payload_t* payload = get_clear_memory(sizeof(cache_put_payload_t));
   payload->block = (block_t*)refcounter_reference((refcounter_t*)block);

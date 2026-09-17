@@ -1161,6 +1161,7 @@ typedef struct {
   size_t count;
   uint16_t claims[4];
   uint32_t pins[4];
+  buffer_t* hashes[4];
 } list_completion_t;
 
 static void list_completion_dispatch(void* state, message_t* msg) {
@@ -1174,11 +1175,16 @@ static void list_completion_dispatch(void* state, message_t* msg) {
     return;
   }
 
-  /* Copy out what the consumer needs before emptying the shell. */
+  /* Copy out what the consumer needs before emptying the shell. Take a
+     reference on each hash so the test can pin the payload content, not just
+     the shape, before the stolen originals are destroyed below. */
   size_t copy_count = payload->count < 4 ? payload->count : 4;
   for (size_t idx = 0; idx < copy_count; idx++) {
     cs->claims[idx] = payload->ephemeral_counts[idx];
     cs->pins[idx] = payload->pin_counts[idx];
+    if (payload->hashes != NULL && payload->hashes[idx] != NULL) {
+      cs->hashes[idx] = (buffer_t*)refcounter_reference((refcounter_t*)payload->hashes[idx]);
+    }
   }
   cs->count = payload->count;
 
@@ -1239,4 +1245,18 @@ TEST_F(TestEphemeralCache, ListEphemeralMirrorsPayload) {
   ASSERT_EQ(cs.count, 2u);
   EXPECT_EQ(cs.claims[0], 1u);
   EXPECT_EQ(cs.claims[1], 1u);
+  /* Pin the payload content, not just the shape: the mirrored hashes must be
+     exactly the two put blocks' hashes. Order follows the index tree walk, so
+     accept either assignment. */
+  ASSERT_NE(cs.hashes[0], nullptr);
+  ASSERT_NE(cs.hashes[1], nullptr);
+  if (cs.hashes[0] != NULL && cs.hashes[1] != NULL) {
+    bool forward = buffer_compare(cs.hashes[0], blocks[0]->hash) == 0 &&
+                   buffer_compare(cs.hashes[1], blocks[1]->hash) == 0;
+    bool swapped = buffer_compare(cs.hashes[0], blocks[1]->hash) == 0 &&
+                   buffer_compare(cs.hashes[1], blocks[0]->hash) == 0;
+    EXPECT_TRUE(forward || swapped);
+    DESTROY(cs.hashes[0], buffer);
+    DESTROY(cs.hashes[1], buffer);
+  }
 }

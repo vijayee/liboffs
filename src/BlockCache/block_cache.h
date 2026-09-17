@@ -246,8 +246,9 @@ void block_cache_list_ephemeral(block_cache_t* block_cache, actor_t* reply_to);
    ephemeral blocks are never shed. LRU/capacity behavior ignores both fields. */
 bool block_cache_entry_is_sheddable(const index_entry_t* entry);
 
-/* Put that acquires an ephemeral claim (count starts at 1) on the stored
-   block. Works for both a new put and a block that already exists. */
+/* Put that acquires one claim (count += 1) on the stored block; the first
+   claim on a fresh block makes it 1. Works for both a new put and a block
+   that already exists. */
 void block_cache_put_ephemeral(block_cache_t* block_cache, block_t* block, actor_t* reply_to);
 
 /* Advisory capacity check (unsynchronized): returns CACHE_FIT_OK if
