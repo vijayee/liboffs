@@ -229,8 +229,12 @@ index_t* _index_new_empty(size_t bucket_size, char* location, uint64_t wait, uin
 // whose framing+CRC were intact: skips that record and continues. The
 // caller treats -3 as success and anything else as "stop here, keep what
 // we have" — NOT a reason to bail to an empty index.
+// legacy_detected (nullable) is set to 1 when any 'a'/'i' record in this
+// WAL verified at the legacy 78-byte framing (wal_read's sticky per-file
+// classification). The caller uses it to retire the legacy WAL via an
+// eager rollover — see index_create.
 static int _index_replay_wal(index_t* index, char* parent_location,
-                             uint64_t wal_id) {
+                             uint64_t wal_id, uint8_t* legacy_detected) {
   wal_t* wal = wal_load(parent_location, wal_id);
   if (wal == NULL) return -3;  // OOM — nothing to replay (clean)
   wal_type_e type = 'r';
@@ -322,6 +326,9 @@ static int _index_replay_wal(index_t* index, char* parent_location,
         // returned WAL_ERR_UNKNOWN_TYPE without allocating data, so nothing to
         // free; this branch is defensive (wal_read filters unknown types
         // before the caller sees them).
+        if (legacy_detected != NULL && wal->legacy_entry_size) {
+          *legacy_detected = 1;
+        }
         DESTROY(wal, wal);
         return WAL_ERR_UNKNOWN_TYPE;
     }
@@ -336,6 +343,9 @@ static int _index_replay_wal(index_t* index, char* parent_location,
   if (data != NULL) {
     buffer_destroy(data);
     data = NULL;
+  }
+  if (legacy_detected != NULL && wal->legacy_entry_size) {
+    *legacy_detected = 1;
   }
   DESTROY(wal, wal);
   return read_result;  // -3 (clean EOF) or a short-read/CRC code (stop-and-keep-prefix)
@@ -445,13 +455,14 @@ index_t* index_create(size_t bucket_size, char* location, uint64_t wait, uint64_
         log_info("index_create: legacy snapshot format for file %d (%s) — loaded with zeroed ephemeral/pin counts", i, last);
       }
       if (i != (int)(files->length - 1)) {
+        uint8_t rebuild_legacy = 0;
         index->is_rebuilding = 1;
         for (int j = i + 1; j < files->length; j++) {
           char* next = files->data[j];
           uint64_t next_id = 0;
           uint64_t next_crc = 0;
           _index_get_id_crc(next, &next_id, &next_crc);
-          int replay_result = _index_replay_wal(index, parent_location, next_id);
+          int replay_result = _index_replay_wal(index, parent_location, next_id, &rebuild_legacy);
           // Stop-and-keep-prefix: any non-clean-EOF result stops the rebuild
           // here. The snapshot + earlier WALs are kept; later WALs are not
           // replayed. Do NOT bail to _index_new_empty — a torn tail or CRC
@@ -489,6 +500,27 @@ index_t* index_create(size_t bucket_size, char* location, uint64_t wait, uint64_
         index->max_wals = max_wals;
         uint64_t first_kept_id = _index_prune_old_snapshots(index);
         _index_prune_old_wals(index, first_kept_id);
+        if (rebuild_legacy) {
+          /* A replayed WAL used the legacy 78-byte entry framing, so the
+             live WAL cannot stay where index_create_from left it: that WAL
+             (wal/<last_id + 1>) is one of the files just replayed and may
+             itself be legacy-framed, and appending new-format records to a
+             legacy file misframes every record after the first on the next
+             replay. It also cannot be rolled over as-is: its stale next_id
+             (last_id + 2) names an already-replayed WAL file on disk, so
+             index_debounce would point the new live WAL at an existing —
+             possibly legacy — file. Re-point at current_id first (the fresh
+             id this branch already chose for the next snapshot, keeping the
+             live WAL id in lockstep with current_file as on every other
+             path), then roll over: index_debounce snapshots the recovered
+             state and moves all subsequent writes to wal/<current_id + 1>,
+             retiring the replayed legacy WALs for good. */
+          wal_t* stale_wal = index->wal;
+          index->wal = wal_create_next(index->parent_location, current_id, NULL);
+          wal_destroy(stale_wal);
+          log_info("index_create: legacy-framed WAL replayed during rebuild — rolling over to retire it");
+          index_debounce(index);
+        }
         destroy_files(files);
         free(index_location);
         free(parent_location);
@@ -498,7 +530,19 @@ index_t* index_create(size_t bucket_size, char* location, uint64_t wait, uint64_
         // (id == last_id + 1) to recover writes since the last snapshot.
         // Stop-and-keep-prefix: a torn tail or CRC error loses only the
         // bad record, not the whole index.
-        int replay_rc = _index_replay_wal(index, parent_location, last_id + 1);
+        uint8_t live_wal_legacy = 0;
+        /* Replay must run with is_rebuilding set, like the rebuilding branch
+           above: the live WAL IS the file being replayed here, and mirroring
+           each replayed record back into it (the WAL-write guards are all
+           keyed on is_rebuilding) rewrites new-format 86-byte records from
+           offset 0 over the not-yet-replayed tail. That rewrite is
+           byte-identical for a new-format WAL, but for a legacy-framed WAL
+           the wider records clobber the headers of the records that follow,
+           so replay would stop-and-keep-prefix after the first record and
+           silently drop the rest in the very session that loaded them. */
+        index->is_rebuilding = 1;
+        int replay_rc = _index_replay_wal(index, parent_location, last_id + 1, &live_wal_legacy);
+        index->is_rebuilding = 0;
         if (replay_rc != -3) {
           log_warn("index_create: live WAL replay stopped at code %d (stop-and-keep-prefix)", replay_rc);
         }
@@ -506,6 +550,26 @@ index_t* index_create(size_t bucket_size, char* location, uint64_t wait, uint64_
         index->max_wals = max_wals;
         uint64_t first_kept_id_b = _index_prune_old_snapshots(index);
         _index_prune_old_wals(index, first_kept_id_b);
+        if (live_wal_legacy) {
+          /* The live WAL was written by an older binary: its 'a'/'i'
+             records use the legacy 78-byte framing and wal_read's legacy
+             classification is sticky per file, so any new-format record
+             appended to this same file would misframe every record after
+             the first one on the next replay (silently dropping them via
+             stop-and-keep-prefix). Retire it eagerly: index_debounce
+             snapshots the replayed state and moves all subsequent writes
+             to a fresh new-format WAL. Every field index_debounce touches
+             (current_file/last_file/next_id/wal/location) is in its
+             post-load state here, exactly as on the block_cache INDEX_SAVE
+             path that calls it on a fully-constructed index. fsync_data is
+             still cleared (block_cache sets it after index_create returns),
+             so the rollover is not synced — a crash immediately after
+             falls back to the previous snapshot and replays this legacy
+             WAL again (still on disk), re-triggering the rollover. */
+          log_info("index_create: legacy-framed live WAL %lu — rolling over to retire it",
+                   (unsigned long)(last_id + 1));
+          index_debounce(index);
+        }
         free(index_location);
         free(parent_location);
         destroy_files(files);

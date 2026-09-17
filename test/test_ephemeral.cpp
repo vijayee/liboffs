@@ -8,6 +8,8 @@ extern "C" {
 #include "../src/Util/path_join.h"
 #include "../src/Util/mkdir_p.h"
 #include "../src/Util/rm_rf.h"
+#include "../src/Util/get_dir.h"
+#include "../src/Platform/platform_file.h"
 #include "../src/Configuration/config.h"
 #include "../src/Timer/timer_actor.h"
 #include "../src/Actor/actor.h"
@@ -332,4 +334,313 @@ TEST(TestEphemeralIndex, LegacySnapshotLoads) {
   free(location);
   rm_rf(scratch_location);
   free(scratch_location);
+}
+
+/* ---- eager rollover retires legacy-framed WALs ---- */
+
+/* Hand-write a legacy 78-byte 'a' record (5-element entry CBOR) into an
+   already-open WAL, exactly as an older binary would have. All records for
+   one file must go through the same wal_t: wal_write positions at the start
+   of the (freshly opened) file, so a second wal_t would overwrite the first
+   record instead of appending. */
+static void WriteLegacyAdditionRecord(wal_t* wal, buffer_t* hash) {
+  fibonacci_hit_counter_t counter = fibonacci_hit_counter_create();
+  cbor_item_t* legacy_entry = cbor_new_definite_array(5);
+  (void)cbor_array_push(legacy_entry, cbor_move(fibonacci_hit_counter_to_cbor(&counter)));
+  (void)cbor_array_push(legacy_entry, cbor_move(buffer_to_cbor(hash)));
+  (void)cbor_array_push(legacy_entry, cbor_move(cbor_build_uint64(0)));
+  (void)cbor_array_push(legacy_entry, cbor_move(cbor_build_uint64(0)));
+  (void)cbor_array_push(legacy_entry, cbor_move(cbor_build_uint64(0)));
+  uint8_t* legacy_data;
+  size_t legacy_size;
+  cbor_serialize_alloc(legacy_entry, &legacy_data, &legacy_size);
+  ASSERT_EQ(legacy_size, 78u) << "legacy entry payload must be exactly 78 bytes";
+  buffer_t* payload = buffer_create_from_existing_memory(legacy_data, legacy_size);
+  wal_write(wal, addition, payload);
+  buffer_destroy(payload);
+  cbor_decref(&legacy_entry);
+}
+
+/* Numeric id parsed from the live WAL's current file path ("…/wal/<id>"). */
+static uint64_t LiveWalFileId(index_t* index) {
+  const char* name = index->wal->current_file;
+  const char* slash = strrchr(name, '/');
+  const char* backslash = strrchr(name, '\\');
+  if (backslash != NULL && (slash == NULL || backslash > slash)) {
+    slash = backslash;
+  }
+  if (slash == NULL) {
+    return 0;
+  }
+  return strtoull(slash + 1, NULL, 10);
+}
+
+/* True when the index directory holds a snapshot file named "<id>-…". */
+static bool SnapshotIdExists(char* location, uint64_t snapshot_id) {
+  char* index_dir = path_join(location, "index");
+  vec_str_t* files = get_dir(index_dir);
+  free(index_dir);
+  if (files == NULL) {
+    return false;
+  }
+  char prefix[24];
+  snprintf(prefix, sizeof(prefix), "%llu-", (unsigned long long)snapshot_id);
+  bool found = false;
+  for (int i = 0; i < files->length; i++) {
+    if (strncmp(files->data[i], prefix, strlen(prefix)) == 0) {
+      found = true;
+      break;
+    }
+  }
+  destroy_files(files);
+  return found;
+}
+
+/* Tear the snapshot file named "<id>-…" down to a 4-byte stub so its CBOR
+   can never load — the invalid-newest-snapshot state the rebuilding branch
+   of index_create recovers from. (Tearing the content rather than just
+   renaming with a bogus CRC matters: a CRC-mismatched snapshot still parses
+   as CBOR, and index_create's reject path calls DESTROY on the loaded index,
+   whose index_destroy debounces it — writing the rejected content back out
+   as a fresh junk snapshot that collides with the rollover's ids.) Returns
+   false when no such file exists. */
+static bool TearSnapshot(char* location, uint64_t snapshot_id) {
+  char* index_dir = path_join(location, "index");
+  vec_str_t* files = get_dir(index_dir);
+  if (files == NULL) {
+    free(index_dir);
+    return false;
+  }
+  char prefix[24];
+  snprintf(prefix, sizeof(prefix), "%llu-", (unsigned long long)snapshot_id);
+  bool torn = false;
+  for (int i = 0; i < files->length && !torn; i++) {
+    if (strncmp(files->data[i], prefix, strlen(prefix)) == 0) {
+      char* snapshot_path = path_join(index_dir, files->data[i]);
+      platform_file_t* snapshot_file =
+          platform_file_open(snapshot_path, PLATFORM_O_WRONLY | PLATFORM_O_TRUNC, 0644);
+      if (snapshot_file != NULL) {
+        ssize_t written = platform_file_write(snapshot_file, "torn", 4);
+        platform_file_close(snapshot_file);
+        torn = (written == 4);
+      }
+      free(snapshot_path);
+    }
+  }
+  destroy_files(files);
+  free(index_dir);
+  return torn;
+}
+
+/* Happy path: when index_create replays a legacy-framed live WAL it becomes
+   the live WAL, and wal_read's legacy classification is sticky per file —
+   new-format records appended to it would misframe every record after the
+   first on the next replay. index_create must retire it eagerly: roll a
+   snapshot and move the live WAL to a fresh new-format file BEFORE
+   returning. The test also proves the whole legacy file replays (two
+   records — mirroring records back into the WAL during replay used to
+   clobber the second record's header) and that a metadata write + crash
+   (no snapshot) afterwards is recoverable from the fresh WAL alone. */
+TEST(TestEphemeralIndex, LegacyLiveWalRetiredByEagerRollover) {
+  char* location = path_join("/tmp", "ephemeral_legacy_live_rollover");
+  rm_rf(location);
+  mkdir_p(location);
+  int error_code = 0;
+
+  block_t* seed_block = block_create_random_block_by_type(standard);
+  buffer_t* seed_hash = (buffer_t*)refcounter_reference((refcounter_t*)seed_block->hash);
+  block_destroy(seed_block);
+  index_entry_t* seed_entry = index_entry_create(seed_hash);
+
+  block_t* first_block = block_create_random_block_by_type(standard);
+  buffer_t* first_hash = (buffer_t*)refcounter_reference((refcounter_t*)first_block->hash);
+  block_destroy(first_block);
+
+  block_t* second_block = block_create_random_block_by_type(standard);
+  buffer_t* second_hash = (buffer_t*)refcounter_reference((refcounter_t*)second_block->hash);
+  block_destroy(second_block);
+
+  /* Phase 1: snapshot with an unrelated seed entry so the reopen takes the
+     happy path with live WAL id 2. */
+  index_t* seed_index = index_create(25, location, 60000, 60000, 3, 3, &error_code);
+  ASSERT_NE(seed_index, nullptr);
+  EXPECT_EQ(error_code, 0);
+  index_add(seed_index, CONSUME(seed_entry, index_entry_t));
+  DESTROY(seed_index, index);
+
+  /* Phase 2: hand-write TWO legacy 'a' records into live WAL 2, as an older
+     binary that crashed before its snapshot would have left behind. Both go
+     through one wal_t — wal_write positions at the start of a freshly opened
+     file, so a second wal_t would clobber the first record. */
+  wal_t* legacy_wal = wal_create(location, 2);
+  ASSERT_NE(legacy_wal, nullptr);
+  WriteLegacyAdditionRecord(legacy_wal, first_hash);
+  WriteLegacyAdditionRecord(legacy_wal, second_hash);
+  EXPECT_EQ(wal_sync(legacy_wal), 0);
+  wal_destroy(legacy_wal);
+
+  /* Phase 3: reopen. The legacy WAL must fully replay AND be retired before
+     index_create returns. */
+  index_t* reloaded = index_create(25, location, 60000, 60000, 3, 3, &error_code);
+  ASSERT_NE(reloaded, nullptr);
+  EXPECT_EQ(error_code, 0);
+  index_entry_t* first_found = REFERENCE(index_find(reloaded, first_hash), index_entry_t);
+  ASSERT_NE(first_found, nullptr);
+  EXPECT_EQ(first_found->ephemeral_count, 0u);
+  EXPECT_EQ(first_found->pin_count, 0u);
+  DESTROY(first_found, index_entry);
+  index_entry_t* second_found = REFERENCE(index_find(reloaded, second_hash), index_entry_t);
+  ASSERT_NE(second_found, nullptr);
+  EXPECT_EQ(second_found->ephemeral_count, 0u);
+  EXPECT_EQ(second_found->pin_count, 0u);
+  DESTROY(second_found, index_entry);
+  index_entry_t* seed_found = REFERENCE(index_find(reloaded, seed_hash), index_entry_t);
+  ASSERT_NE(seed_found, nullptr);
+  DESTROY(seed_found, index_entry);
+  /* The live WAL is no longer the legacy file (id 2): the eager rollover
+     advanced it (to a fresh id — 3 with the current id arithmetic) and wrote
+     the rollover's snapshot (id 2) to disk inside index_create. */
+  EXPECT_GT(LiveWalFileId(reloaded), 2u);
+  EXPECT_TRUE(SnapshotIdExists(location, 2));
+
+  /* Phase 4: write metadata into the fresh live WAL, then simulate a crash —
+     deliberately no index_debounce/index_destroy, so the counts exist ONLY
+     as 'm' records in the live WAL (same pattern as
+     TestIndex.TestWalCrashRecovery). */
+  index_entry_t* held = REFERENCE(index_find(reloaded, first_hash), index_entry_t);
+  ASSERT_NE(held, nullptr);
+  held->ephemeral_count = 3;
+  index_write_entry_metadata(reloaded, held);
+  held->pin_count = 2;
+  index_write_entry_metadata(reloaded, held);
+  DESTROY(held, index_entry);
+  EXPECT_EQ(index_sync(reloaded), 0);
+
+  /* Phase 5: reload without a snapshot of the counts. The eager rollover's
+     snapshot carries zeroed counts, so recovering 3/2 here proves the 'm'
+     records are readable — i.e. they live in a new-format WAL. */
+  index_t* recovered = index_create(25, location, 60000, 60000, 3, 3, &error_code);
+  ASSERT_NE(recovered, nullptr);
+  index_entry_t* recovered_entry = REFERENCE(index_find(recovered, first_hash), index_entry_t);
+  ASSERT_NE(recovered_entry, nullptr);
+  EXPECT_EQ(recovered_entry->ephemeral_count, 3u);
+  EXPECT_EQ(recovered_entry->pin_count, 2u);
+  DESTROY(recovered_entry, index_entry);
+  index_entry_t* recovered_second = REFERENCE(index_find(recovered, second_hash), index_entry_t);
+  ASSERT_NE(recovered_second, nullptr);
+  DESTROY(recovered_second, index_entry);
+
+  DESTROY(recovered, index);
+  /* Cleanup of the deliberately-undestroyed handle: every assertion is done,
+     so debouncing now cannot mask anything. */
+  DESTROY(reloaded, index);
+
+  DESTROY(seed_hash, buffer);
+  DESTROY(first_hash, buffer);
+  DESTROY(second_hash, buffer);
+  rm_rf(location);
+  free(location);
+}
+
+/* Rebuild path: the newest snapshot is invalid, so index_create loads an
+   older one and replays the newer session's WAL through the rebuilding
+   branch. When that WAL is legacy-framed, the live WAL inherited from the
+   loaded snapshot is one of the replayed files and must not keep receiving
+   new-format appends — the rebuild path has to roll over too. */
+TEST(TestEphemeralIndex, LegacyRebuildWalRetiredByEagerRollover) {
+  char* location = path_join("/tmp", "ephemeral_legacy_rebuild_rollover");
+  rm_rf(location);
+  mkdir_p(location);
+  int error_code = 0;
+
+  block_t* seed_block = block_create_random_block_by_type(standard);
+  buffer_t* seed_hash = (buffer_t*)refcounter_reference((refcounter_t*)seed_block->hash);
+  block_destroy(seed_block);
+  index_entry_t* seed_entry = index_entry_create(seed_hash);
+
+  block_t* block = block_create_random_block_by_type(standard);
+  buffer_t* hash = (buffer_t*)refcounter_reference((refcounter_t*)block->hash);
+  block_destroy(block);
+
+  /* Phase 1: first session — snapshot 1 with the seed entry, clean destroy
+     (live WAL becomes 2, but the file is never written). */
+  index_t* first_index = index_create(25, location, 60000, 60000, 3, 3, &error_code);
+  ASSERT_NE(first_index, nullptr);
+  EXPECT_EQ(error_code, 0);
+  index_add(first_index, CONSUME(seed_entry, index_entry_t));
+  DESTROY(first_index, index);
+
+  /* Phase 2: second session — no index writes, clean destroy → snapshot 2,
+     live WAL 3. WAL 2 is left empty, so the legacy record below is the only
+     thing in it. */
+  index_t* second_index = index_create(25, location, 60000, 60000, 3, 3, &error_code);
+  ASSERT_NE(second_index, nullptr);
+  EXPECT_EQ(error_code, 0);
+  DESTROY(second_index, index);
+
+  /* Phase 3: hand-write a legacy 'a' record into WAL 2 — the WAL the
+     rebuilding branch replays for snapshot file id 2. */
+  wal_t* legacy_wal = wal_create(location, 2);
+  ASSERT_NE(legacy_wal, nullptr);
+  WriteLegacyAdditionRecord(legacy_wal, hash);
+  EXPECT_EQ(wal_sync(legacy_wal), 0);
+  wal_destroy(legacy_wal);
+
+  /* Phase 4: tear the newest snapshot's content so the next open falls into
+     the rebuilding branch. */
+  ASSERT_TRUE(TearSnapshot(location, 2));
+
+  /* Phase 5: reopen → rebuilding branch: snapshot 1 + replay of legacy WAL 2,
+     then the eager rollover retires it. error_code stays at the torn file's
+     CBOR-load failure (-4): the rebuild recovered successfully, but
+     index_create keeps the last file's error for the caller. */
+  index_t* reloaded = index_create(25, location, 60000, 60000, 3, 3, &error_code);
+  ASSERT_NE(reloaded, nullptr);
+  index_entry_t* found = REFERENCE(index_find(reloaded, hash), index_entry_t);
+  ASSERT_NE(found, nullptr);
+  EXPECT_EQ(found->ephemeral_count, 0u);
+  EXPECT_EQ(found->pin_count, 0u);
+  DESTROY(found, index_entry);
+  index_entry_t* seed_found = REFERENCE(index_find(reloaded, seed_hash), index_entry_t);
+  ASSERT_NE(seed_found, nullptr);
+  DESTROY(seed_found, index_entry);
+  /* Live WAL is neither the replayed legacy WAL 2 nor the stale WAL the
+     rebuild inherited — the rollover moved it past both (to a fresh id — 4
+     with the current id arithmetic), and the rollover's snapshot (id 3,
+     matching the rebuild's current_id) is on disk. */
+  EXPECT_GT(LiveWalFileId(reloaded), 3u);
+  EXPECT_TRUE(SnapshotIdExists(location, 3));
+
+  /* Phase 6: metadata write into the fresh live WAL + crash (no snapshot). */
+  index_entry_t* held = REFERENCE(index_find(reloaded, hash), index_entry_t);
+  ASSERT_NE(held, nullptr);
+  held->ephemeral_count = 3;
+  index_write_entry_metadata(reloaded, held);
+  held->pin_count = 2;
+  index_write_entry_metadata(reloaded, held);
+  DESTROY(held, index_entry);
+  EXPECT_EQ(index_sync(reloaded), 0);
+
+  /* Phase 7: reload — the eager rollover's snapshot (id 3) is the newest
+     valid one, so this is a happy-path open that replays only the fresh
+     live WAL; the counts must recover from its 'm' records. */
+  index_t* recovered = index_create(25, location, 60000, 60000, 3, 3, &error_code);
+  ASSERT_NE(recovered, nullptr);
+  index_entry_t* recovered_entry = REFERENCE(index_find(recovered, hash), index_entry_t);
+  ASSERT_NE(recovered_entry, nullptr);
+  EXPECT_EQ(recovered_entry->ephemeral_count, 3u);
+  EXPECT_EQ(recovered_entry->pin_count, 2u);
+  DESTROY(recovered_entry, index_entry);
+  index_entry_t* recovered_seed = REFERENCE(index_find(recovered, seed_hash), index_entry_t);
+  ASSERT_NE(recovered_seed, nullptr);
+  DESTROY(recovered_seed, index_entry);
+
+  DESTROY(recovered, index);
+  /* Cleanup of the deliberately-undestroyed handle. */
+  DESTROY(reloaded, index);
+
+  DESTROY(seed_hash, buffer);
+  DESTROY(hash, buffer);
+  rm_rf(location);
+  free(location);
 }
