@@ -13,6 +13,9 @@
  * @property {string[]} [recyclerUrls]
  * @property {boolean} [temporary=false]
  * @property {number} [tupleSize]
+ * @property {number} [recycleEphemeral] - recycle-mode override when a source
+ * is ephemeral: 0 = error (default), 1 = commit source blocks to permanent,
+ * 2 = propagate ephemerality to this representation
  */
 
 /**

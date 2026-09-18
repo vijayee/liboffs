@@ -92,6 +92,8 @@ export class HttpTransport {
     if (options.recyclerUrls?.length) headers['recycler'] = JSON.stringify(options.recyclerUrls);
     if (options.temporary) headers['temporary'] = 'true';
     if (options.tupleSize !== undefined) headers['tuple-size'] = String(options.tupleSize);
+    if (options.recycleEphemeral === 1) headers['recycle-ephemeral'] = 'commit';
+    if (options.recycleEphemeral === 2) headers['recycle-ephemeral'] = 'propagate';
 
     let requestBody = body;
     if (body && typeof body.getReader === 'function') {
@@ -465,5 +467,70 @@ export class HttpTransport {
       signal: this.abortController?.signal,
     });
     if (!response.ok) throw new Error(`Config reload failed: ${response.status}`);
+  }
+
+  /**
+   * Shared plumbing for the representation ephemeral/pin HTTP routes.
+   * @private
+   * @param {string} path
+   * @param {string} url - full OFF URL (request body)
+   * @returns {Promise<{status: number, blocks: number}>}
+   */
+  async _repOp(path, url) {
+    const response = await fetch(this.url(path), {
+      method: 'POST',
+      headers: { ...this.authHeaders(), 'Content-Type': 'text/plain' },
+      body: url,
+      signal: this.abortController?.signal,
+    });
+    if (!response.ok) throw new Error(`Representation op failed: ${response.status}`);
+    const body = await response.json();
+    return { status: body.result === 'ok' ? 0 : 1, blocks: body.blocks };
+  }
+
+  /**
+   * @param {string} url
+   * @returns {Promise<{status: number, blocks: number}>}
+   */
+  async markPermanent(url) {
+    return this._repOp('/offsystem/ephemeral/commit', url);
+  }
+
+  /**
+   * @param {string} url
+   * @returns {Promise<{status: number, blocks: number}>}
+   */
+  async deleteEphemeral(url) {
+    return this._repOp('/offsystem/ephemeral/delete', url);
+  }
+
+  /**
+   * @param {string} url
+   * @returns {Promise<{status: number, blocks: number}>}
+   */
+  async pinRepresentation(url) {
+    return this._repOp('/offsystem/pin', url);
+  }
+
+  /**
+   * @param {string} url
+   * @returns {Promise<{status: number, blocks: number}>}
+   */
+  async unpinRepresentation(url) {
+    return this._repOp('/offsystem/unpin', url);
+  }
+
+  /**
+   * @returns {Promise<{status: number, entries: Array<{hash: string, claims: number, pins: number}>}>}
+   */
+  async listEphemerals() {
+    const response = await fetch(this.url('/offsystem/ephemeral/list'), {
+      method: 'GET',
+      headers: this.authHeaders(),
+      signal: this.abortController?.signal,
+    });
+    if (!response.ok) throw new Error(`Ephemeral list failed: ${response.status}`);
+    const entries = await response.json();
+    return { status: 0, entries };
   }
 }

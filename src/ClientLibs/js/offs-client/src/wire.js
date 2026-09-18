@@ -42,7 +42,17 @@ export const MSG = {
   CONFIG_RELOAD_RESPONSE: 38,
   LOAD_REQUEST: 39,
   LOAD_PROGRESS: 40,
-  LOAD_END: 41
+  LOAD_END: 41,
+  REP_MARK_PERMANENT_REQUEST: 42,
+  REP_MARK_PERMANENT_RESPONSE: 43,
+  REP_DELETE_EPHEMERAL_REQUEST: 44,
+  REP_DELETE_EPHEMERAL_RESPONSE: 45,
+  REP_PIN_REQUEST: 46,
+  REP_PIN_RESPONSE: 47,
+  REP_UNPIN_REQUEST: 48,
+  REP_UNPIN_RESPONSE: 49,
+  EPHEMERAL_LIST_REQUEST: 50,
+  EPHEMERAL_LIST_RESPONSE: 51
 };
 
 /**
@@ -120,6 +130,14 @@ export function encodePutRequest(options, data = null) {
   ];
   if (options.tupleSize !== undefined) {
     payload.push(options.tupleSize);
+  }
+  // Wire layout: tuple_size at index 8 (or a null placeholder when absent),
+  // recycle_ephemeral at index 9. Mirrors client_api_wire.c.
+  if (options.recycleEphemeral !== undefined && options.recycleEphemeral !== 0) {
+    if (options.tupleSize === undefined) {
+      payload.push(null);
+    }
+    payload.push(options.recycleEphemeral);
   }
   return encoder.encode(payload);
 }
@@ -498,4 +516,49 @@ export function decodeConfigReloadResponse(bytes) {
   const arr = decode(bytes);
   if (arr[0] !== MSG.CONFIG_RELOAD_RESPONSE) throw new Error('Not a config reload response');
   return { status: arr[1], message: arr[2] };
+}
+
+// --- Representation ephemeral/pin operations ---
+
+/**
+ * Encode a representation-op request: [type, url].
+ * @param {number} opCode - one of the REP_*_REQUEST message types
+ * @param {string} url - full OFF URL
+ * @returns {Uint8Array}
+ */
+export function encodeRepRequest(opCode, url) {
+  return encoder.encode([opCode, url]);
+}
+
+/**
+ * Decode a representation-op response: [type, status, blocks_touched].
+ * @param {Uint8Array} bytes
+ * @returns {{status: number, blocks: number}}
+ */
+export function decodeRepResponse(bytes) {
+  const arr = decode(bytes);
+  return { status: arr[1], blocks: arr[2] };
+}
+
+/**
+ * @returns {Uint8Array}
+ */
+export function encodeEphemeralListRequest() {
+  return encoder.encode([MSG.EPHEMERAL_LIST_REQUEST]);
+}
+
+/**
+ * Decode an ephemeral-list response: [type, status, [[hash(32), claims, pins], ...]].
+ * Hashes are surfaced as hex strings.
+ * @param {Uint8Array} bytes
+ * @returns {{status: number, entries: Array<{hash: string, claims: number, pins: number}>}}
+ */
+export function decodeEphemeralListResponse(bytes) {
+  const arr = decode(bytes);
+  const entries = (arr[2] || []).map((entry) => ({
+    hash: Array.from(entry[0], (byte) => byte.toString(16).padStart(2, '0')).join(''),
+    claims: entry[1],
+    pins: entry[2]
+  }));
+  return { status: arr[1], entries };
 }

@@ -489,6 +489,85 @@ export class OffsClient {
   }
 
   /**
+   * Shared plumbing for the representation ephemeral/pin operations.
+   * @private
+   * @param {number} requestCode
+   * @param {number} responseCode
+   * @param {string} url
+   * @returns {Promise<{status: number, blocks: number}>}
+   */
+  async _repOp(requestCode, responseCode, url) {
+    const requestBytes = wire.encodeRepRequest(requestCode, url);
+    const responseBytes = await this._sendAndWait(requestBytes, responseCode);
+    return wire.decodeRepResponse(responseBytes);
+  }
+
+  /**
+   * Commit an ephemeral representation: clear every ephemeral claim its
+   * blocks hold, announce the newly-committed blocks to the network.
+   * @param {string} url - full OFF URL of the representation
+   * @returns {Promise<{status: number, blocks: number}>}
+   */
+  async markPermanent(url) {
+    if (this.transport instanceof HttpTransport) {
+      return this.transport.markPermanent(url);
+    }
+    return this._repOp(wire.MSG.REP_MARK_PERMANENT_REQUEST, wire.MSG.REP_MARK_PERMANENT_RESPONSE, url);
+  }
+
+  /**
+   * Abort an ephemeral representation: release its claims, deleting the
+   * blocks that are exclusively owned by it.
+   * @param {string} url
+   * @returns {Promise<{status: number, blocks: number}>}
+   */
+  async deleteEphemeral(url) {
+    if (this.transport instanceof HttpTransport) {
+      return this.transport.deleteEphemeral(url);
+    }
+    return this._repOp(wire.MSG.REP_DELETE_EPHEMERAL_REQUEST, wire.MSG.REP_DELETE_EPHEMERAL_RESPONSE, url);
+  }
+
+  /**
+   * Pin every block of a representation (+1 pin each; pinned permanent blocks
+   * resist respiration and explicit deletion).
+   * @param {string} url
+   * @returns {Promise<{status: number, blocks: number}>}
+   */
+  async pinRepresentation(url) {
+    if (this.transport instanceof HttpTransport) {
+      return this.transport.pinRepresentation(url);
+    }
+    return this._repOp(wire.MSG.REP_PIN_REQUEST, wire.MSG.REP_PIN_RESPONSE, url);
+  }
+
+  /**
+   * Unpin every block of a representation (clamped at 0).
+   * @param {string} url
+   * @returns {Promise<{status: number, blocks: number}>}
+   */
+  async unpinRepresentation(url) {
+    if (this.transport instanceof HttpTransport) {
+      return this.transport.unpinRepresentation(url);
+    }
+    return this._repOp(wire.MSG.REP_UNPIN_REQUEST, wire.MSG.REP_UNPIN_RESPONSE, url);
+  }
+
+  /**
+   * Enumerate every ephemeral block in the cache (maintenance surface).
+   * @returns {Promise<{status: number, entries: Array<{hash: string, claims: number, pins: number}>}>}
+   */
+  async listEphemerals() {
+    if (this.transport instanceof HttpTransport) {
+      return this.transport.listEphemerals();
+    }
+
+    const requestBytes = wire.encodeEphemeralListRequest();
+    const responseBytes = await this._sendAndWait(requestBytes, wire.MSG.EPHEMERAL_LIST_RESPONSE);
+    return wire.decodeEphemeralListResponse(responseBytes);
+  }
+
+  /**
    * @returns {Promise<any[]>}
    */
   async peerList() {
