@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <xxh3.h>
 #include <string.h>
+#include <blake3.h>
 
 
 void index_add_to_node(index_t* index, index_entry_t* entry, index_node_t* node, size_t current);
@@ -113,8 +114,14 @@ index_entry_t* cbor_to_index_entry(cbor_item_t* cbor) {
   cbor_item_t* item3 = cbor_array_get(cbor, 3);
   cbor_item_t* item4 = cbor_array_get(cbor, 4);
   /* item0 = fibonacci counter (array), item1 = hash (bytestring),
-     items 2/3/4 = uints (section_index, section_id, ejection_date). */
+     items 2/3/4 = uints (section_index, section_id, ejection_date).
+     The hash must be exactly a BLAKE3 digest (BLAKE3_OUT_LEN bytes): every
+     production entry — including every historical snapshot/WAL — carries a
+     BLAKE3-32 hash, so any other bytestring length is corrupt data. Reject
+     it here, at the decode boundary, before the hash reaches consumers that
+     assume 32-byte hashes. */
   if (!cbor_isa_array(item0) || !cbor_isa_bytestring(item1) ||
+      cbor_bytestring_length(item1) != BLAKE3_OUT_LEN ||
       !cbor_isa_uint(item2) || !cbor_isa_uint(item3) || !cbor_isa_uint(item4)) {
     cbor_decref(&item0);
     cbor_decref(&item1);

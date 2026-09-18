@@ -91,6 +91,28 @@ TEST(TestEphemeralIndex, EntryCborDecodeOldFiveElementArray) {
   index_entry_destroy(decoded);
   DESTROY(hash, buffer);
 }
+
+/* A hash bytestring that is not a BLAKE3 digest (32 bytes) is corrupt data
+   — reachable from a hand-edited or corrupted snapshot/WAL — and must be
+   rejected at the decode boundary, both above and below the real length. */
+TEST(TestEphemeralIndex, EntryCborDecodeRejectsWrongHashLength) {
+  const size_t bogus_sizes[] = {33, 16};
+  for (size_t idx = 0; idx < sizeof(bogus_sizes) / sizeof(bogus_sizes[0]); idx++) {
+    buffer_t* bogus_hash = buffer_create(bogus_sizes[idx]);
+    ASSERT_NE(bogus_hash, nullptr);
+    memset(bogus_hash->data, 0x5A, bogus_sizes[idx]);
+    fibonacci_hit_counter_t counter = fibonacci_hit_counter_create();
+    cbor_item_t* array = cbor_new_definite_array(5);
+    (void)cbor_array_push(array, cbor_move(fibonacci_hit_counter_to_cbor(&counter)));
+    (void)cbor_array_push(array, cbor_move(buffer_to_cbor(bogus_hash)));
+    (void)cbor_array_push(array, cbor_move(cbor_build_uint64(3)));
+    (void)cbor_array_push(array, cbor_move(cbor_build_uint64(7)));
+    (void)cbor_array_push(array, cbor_move(cbor_build_uint64(12345)));
+    EXPECT_EQ(cbor_to_index_entry(array), nullptr);
+    cbor_decref(&array);
+    DESTROY(bogus_hash, buffer);
+  }
+}
 /* ---- WAL 'm' metadata record ---- */
 
 /* Persist ephemeral/pin counts via index_write_entry_metadata ('m' WAL
@@ -2831,6 +2853,41 @@ TEST_F(TestEphemeralRoutes, RejectsMissingAndUnparseableBody) {
     ASSERT_NE(body, nullptr);
     EXPECT_STREQ(body, "[]");
   }
+}
+
+/* 500 path: a well-formed OFF URL whose descriptor block was never stored.
+   The representation walk fails on the first cache miss, and the completion
+   must propagate that as HTTP 500 with an "error" result body. */
+TEST_F(TestEphemeralRoutes, OpOnMissingDescriptorReturnsError) {
+  off_routes_register(server, pool, block_cache, ofd_cache, tuple_c, NULL, NULL, NULL, NULL);
+  http_server_listen(server);
+
+  /* Build a parseable URL around a 32-byte descriptor hash that no PUT ever
+     stored (fresh empty cache, so a fixed pattern cannot collide). */
+  uint8_t missing_bytes[32];
+  memset(missing_bytes, 0xA5, sizeof(missing_bytes));
+  off_url_t* url = off_url_create();
+  ASSERT_NE(url, nullptr);
+  url->stream_length = 600;
+  url->file_name = strdup("missing.txt");
+  url->file_hash = buffer_create_from_pointer_copy(missing_bytes, sizeof(missing_bytes));
+  url->descriptor_hash = buffer_create_from_pointer_copy(missing_bytes, sizeof(missing_bytes));
+  ASSERT_NE(url->file_hash, nullptr);
+  ASSERT_NE(url->descriptor_hash, nullptr);
+  char* url_string = off_url_to_string(url);
+  off_url_destroy(url);
+  ASSERT_NE(url_string, nullptr);
+
+  char response[8192];
+  ASSERT_EQ(_routes_post_op(port, "/offsystem/ephemeral/commit", url_string,
+                            response, sizeof(response)), 0);
+  EXPECT_NE(strstr(response, "500"), nullptr) << "missing descriptor must be a 500";
+  {
+    char* body = _routes_body(response);
+    ASSERT_NE(body, nullptr);
+    EXPECT_NE(strstr(body, "\"result\":\"error\""), nullptr) << "error body: " << body;
+  }
+  free(url_string);
 }
 
 } // namespace ephemeral_routes_test

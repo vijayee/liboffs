@@ -1692,12 +1692,15 @@ typedef struct {
 
 /* Drain-context safety of the internal wait: the drain runs either at the
    tail of scheduler_pool_wait_for_idle — where the idle predicate
-   (all workers idle, zero pending messages) already holds, so
-   representation_actor_destroy's internal wait returns immediately without
-   parking — or from scheduler_pool_destroy after scheduler_pool_stop, where
-   the pool's terminate flag makes the internal wait return 0 at once. Neither
-   can deadlock, so no wait-free destroy variant is needed; the public destroy
-   (external callers that may park) and this deferred path share it. */
+   (all workers idle, zero pending messages) held when the outer predicate
+   broke, though another thread may enqueue new pool work between that break
+   and the drain, in which case representation_actor_destroy's internal wait
+   parks until the queue clears — or from scheduler_pool_destroy after
+   scheduler_pool_stop, where the pool's terminate flag makes the internal
+   wait return 0 at once. Neither path can deadlock: the drain never runs on
+   a worker thread, so parking here cannot starve the very work it waits
+   for. No wait-free destroy variant is needed; the public destroy (external
+   callers that may park) and this deferred path share it. */
 static void _rep_route_deferred_destroy(rep_route_defer_t* defer) {
     representation_actor_t* rep = defer->rep;
     refcounter_destroy_lock(&defer->refcounter);
@@ -1874,8 +1877,8 @@ static void _off_list_ephemeral_dispatch(void* state, message_t* msg) {
     cache_ephemeral_list_payload_t* payload =
         (cache_ephemeral_list_payload_t*)msg->payload;
 
-    /* [{"hash":"<hex>","claims":N,"pins":M},...] — 64 hex chars plus the
-       number text per entry. */
+    /* [{"hash":"<hex>","claims":N,"pins":M},...] — two hex chars per hash
+       byte plus the fixed key text and number text per entry. */
     static const char hex_digits[] = "0123456789abcdef";
     buffer_t* json = buffer_create_with_capacity(0, 2 + payload->count * 100);
     json->data[json->size++] = '[';
@@ -1883,12 +1886,16 @@ static void _off_list_ephemeral_dispatch(void* state, message_t* msg) {
         if (idx > 0) {
             json->data[json->size++] = ',';
         }
-        /* Per-entry bound: 64 hex chars + the worst-case number text. */
-        buffer_ensure_capacity(json, json->size + 128);
+        buffer_t* hash = payload->hashes != NULL ? payload->hashes[idx] : NULL;
+        /* Per-entry bound sized from the actual hash: 2 hex chars per byte
+           plus the keys, quotes, and worst-case number text. Hashes come
+           from index entries, so they are BLAKE3-32 in practice, but the
+           bound must hold for whatever the payload carries. */
+        buffer_ensure_capacity(json, json->size +
+                               2 * (hash != NULL ? hash->size : 0) + 48);
         json->data[json->size++] = '{';
         memcpy(json->data + json->size, "\"hash\":\"", 8);
         json->size += 8;
-        buffer_t* hash = payload->hashes != NULL ? payload->hashes[idx] : NULL;
         if (hash != NULL) {
             for (size_t byte_index = 0; byte_index < hash->size; byte_index++) {
                 json->data[json->size++] =
