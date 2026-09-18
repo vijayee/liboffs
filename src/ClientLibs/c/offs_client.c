@@ -199,6 +199,13 @@ struct offs_client_t {
   void* config_set_cb_ctx;
   offs_json_cb_t update_status_cb;
   void* update_status_cb_ctx;
+  /* Shared by the four representation ops (mark_permanent / delete_ephemeral
+     / pin / unpin — serialized use by the caller; see the header's
+     concurrency note). */
+  offs_rep_op_cb_t rep_op_cb;
+  void* rep_op_cb_ctx;
+  offs_ephemeral_list_cb_t ephemeral_list_cb;
+  void* ephemeral_list_cb_ctx;
 };
 
 /* Forward declaration — needed for MsQuic callbacks that call _handle_frame */
@@ -616,6 +623,10 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
   void* config_set_cb_ctx = client->config_set_cb_ctx;
   offs_json_cb_t update_status_cb = client->update_status_cb;
   void* update_status_cb_ctx = client->update_status_cb_ctx;
+  offs_rep_op_cb_t rep_op_cb = client->rep_op_cb;
+  void* rep_op_cb_ctx = client->rep_op_cb_ctx;
+  offs_ephemeral_list_cb_t ephemeral_list_cb = client->ephemeral_list_cb;
+  void* ephemeral_list_cb_ctx = client->ephemeral_list_cb_ctx;
   platform_mutex_unlock(client->lock);
 
   switch (type) {
@@ -720,6 +731,13 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
         if (update_status_cb != NULL) {
           update_status_cb(update_status_cb_ctx, msg.status_code, NULL);
         }
+        if (rep_op_cb != NULL) {
+          rep_op_cb(rep_op_cb_ctx, (int)msg.status_code, 0);
+        }
+        if (ephemeral_list_cb != NULL) {
+          ephemeral_list_cb(ephemeral_list_cb_ctx, (int)msg.status_code, 0,
+                            NULL, NULL, NULL);
+        }
         /* Clear every completed slot so a late duplicate frame cannot fire
            it again (identity-guarded: a newer registration is never
            clobbered). Slots only registered for get() (get_data / get_end /
@@ -739,6 +757,8 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
         _clear_delivered_slot(client, config_show_cb);
         _clear_delivered_slot(client, config_set_cb);
         _clear_delivered_slot(client, update_status_cb);
+        _clear_delivered_slot(client, rep_op_cb);
+        _clear_delivered_slot(client, ephemeral_list_cb);
         /* Hand the ERROR message to the ownership model only when some
            callback received it; otherwise destroy frees it below. */
         if (payload != NULL && (error_cb != NULL || config_set_cb != NULL)) {
@@ -1049,6 +1069,54 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
           _clear_delivered_slot(client, update_status_cb);
         }
         client_api_update_status_response_destroy(&msg);
+      }
+      break;
+    }
+    case CLIENT_API_REP_MARK_PERMANENT_RESPONSE:
+    case CLIENT_API_REP_DELETE_EPHEMERAL_RESPONSE:
+    case CLIENT_API_REP_PIN_RESPONSE:
+    case CLIENT_API_REP_UNPIN_RESPONSE: {
+      client_api_rep_response_t msg;
+      memset(&msg, 0, sizeof(msg));
+      if (client_api_rep_response_decode(frame, &msg) == 0) {
+        if (rep_op_cb != NULL) {
+          rep_op_cb(rep_op_cb_ctx, msg.status, msg.blocks);
+          _clear_delivered_slot(client, rep_op_cb);
+        }
+        client_api_rep_response_destroy(&msg);
+      }
+      break;
+    }
+    case CLIENT_API_EPHEMERAL_LIST_RESPONSE: {
+      client_api_ephemeral_list_response_t msg;
+      memset(&msg, 0, sizeof(msg));
+      if (client_api_ephemeral_list_response_decode(frame, &msg) == 0) {
+        if (ephemeral_list_cb != NULL) {
+          /* Move the decoded arrays out of msg before the callback: the
+             response destroy below must not free them, because ownership
+             passes to the hold list (friend-list precedent — the consumer
+             releases each pointer via offs_client_release_payload; see the
+             offs_ephemeral_list_cb_t note in offs_client.h). */
+          size_t count = msg.count;
+          uint8_t** hashes = msg.hashes;
+          uint16_t* claims = msg.claims;
+          uint32_t* pins = msg.pins;
+          int status = msg.status;
+          msg.count = 0;
+          msg.hashes = NULL;
+          msg.claims = NULL;
+          msg.pins = NULL;
+          ephemeral_list_cb(ephemeral_list_cb_ctx, status, count,
+                            (const uint8_t* const*)hashes, claims, pins);
+          for (size_t index = 0; index < count; index++) {
+            _hold_payload(client, hashes[index]);
+          }
+          _hold_payload(client, hashes);
+          _hold_payload(client, claims);
+          _hold_payload(client, pins);
+          _clear_delivered_slot(client, ephemeral_list_cb);
+        }
+        client_api_ephemeral_list_response_destroy(&msg);
       }
       break;
     }
@@ -2146,6 +2214,7 @@ static void _fill_put_request(client_api_put_request_t* msg, const offs_put_opti
   msg->temporary = options->temporary;
   msg->tuple_size = (size_t)options->tuple_size;
   msg->has_tuple_size = options->has_tuple_size;
+  msg->recycle_ephemeral = options->recycle_ephemeral;
 }
 
 int offs_client_put_ex(offs_client_t* client,
@@ -2608,6 +2677,82 @@ int offs_client_load(offs_client_t* client, const char* ori_string,
   client->load_progress_cb_ctx = progress_ctx;
   client->load_end_cb = end_cb;
   client->load_end_cb_ctx = end_ctx;
+  platform_mutex_unlock(client->lock);
+
+  _send_frame(client, frame);
+  return 0;
+}
+
+/* Shared sender for the four representation ops: registers the (shared)
+   callback slot, then sends the [type, url] request frame the caller's
+   request_code selects (42/44/46/48). */
+static int _offs_client_rep_op(offs_client_t* client, int request_code,
+                               const char* url, offs_rep_op_cb_t callback,
+                               void* ctx) {
+  if (client == NULL || !client->connected || url == NULL) return -1;
+
+  /* Build the frame before registering so an encode failure does not leave
+     a dead callback in the shared slot (peer_info_ex precedent). */
+  client_api_rep_request_t msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.url = (char*)url;
+
+  cbor_item_t* frame = client_api_rep_request_encode(request_code, &msg);
+  if (frame == NULL) return -1;  /* invalid op code / cbor allocation failure */
+
+  platform_mutex_lock(client->lock);
+  client->rep_op_cb = callback;
+  client->rep_op_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
+  _send_frame(client, frame);
+  return 0;
+}
+
+int offs_client_mark_permanent(offs_client_t* client, const char* url,
+                               offs_rep_op_cb_t callback, void* ctx) {
+  return _offs_client_rep_op(client, CLIENT_API_REP_MARK_PERMANENT_REQUEST,
+                             url, callback, ctx);
+}
+
+int offs_client_delete_ephemeral(offs_client_t* client, const char* url,
+                                 offs_rep_op_cb_t callback, void* ctx) {
+  return _offs_client_rep_op(client, CLIENT_API_REP_DELETE_EPHEMERAL_REQUEST,
+                             url, callback, ctx);
+}
+
+int offs_client_pin_representation(offs_client_t* client, const char* url,
+                                    offs_rep_op_cb_t callback, void* ctx) {
+  return _offs_client_rep_op(client, CLIENT_API_REP_PIN_REQUEST,
+                             url, callback, ctx);
+}
+
+int offs_client_unpin_representation(offs_client_t* client, const char* url,
+                                     offs_rep_op_cb_t callback, void* ctx) {
+  return _offs_client_rep_op(client, CLIENT_API_REP_UNPIN_REQUEST,
+                             url, callback, ctx);
+}
+
+int offs_client_list_ephemerals(offs_client_t* client,
+                                offs_ephemeral_list_cb_t callback, void* ctx) {
+  if (client == NULL || !client->connected) return -1;
+
+  /* Build the frame before registering so an allocation failure does not
+     leave a dead callback in the slot (peer_info_ex precedent). */
+  cbor_item_t* frame = cbor_new_definite_array(1);
+  if (frame == NULL) return -1;  /* cbor allocation failure */
+  cbor_item_t* item = cbor_build_uint8(CLIENT_API_EPHEMERAL_LIST_REQUEST);
+  if (item == NULL || !cbor_array_push(frame, item)) {
+    /* cbor_decref derefs without a NULL check, so guard the item. */
+    if (item != NULL) cbor_decref(&item);
+    cbor_decref(&frame);
+    return -1;
+  }
+  cbor_decref(&item);
+
+  platform_mutex_lock(client->lock);
+  client->ephemeral_list_cb = callback;
+  client->ephemeral_list_cb_ctx = ctx;
   platform_mutex_unlock(client->lock);
 
   _send_frame(client, frame);

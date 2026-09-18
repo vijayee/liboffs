@@ -1047,6 +1047,142 @@ TEST_F(TestOffsClient, ErrorFrameCompletesConfigCallbacks) {
     offs_client_disconnect(client);
 }
 
+struct RepOpCallbackContext {
+    std::atomic<int> called;
+    int status;
+    size_t blocks_touched;
+    RepOpCallbackContext() : called(0), status(0), blocks_touched(0) {}
+};
+
+static void _rep_op_callback(void* ctx, int status, size_t blocks_touched) {
+    RepOpCallbackContext* rctx = (RepOpCallbackContext*)ctx;
+    rctx->status = status;
+    rctx->blocks_touched = blocks_touched;
+    rctx->called.store(1, std::memory_order_release);
+}
+
+struct EphemeralListCallbackContext {
+    std::atomic<int> called;
+    int status;
+    size_t count;
+    /* Borrowed payload pointers (valid until released); the test body
+       releases each of them via offs_client_release_payload. */
+    const uint8_t* const* hashes;
+    const uint16_t* claims;
+    const uint32_t* pins;
+    uint8_t first_hash[32];
+    EphemeralListCallbackContext()
+        : called(0), status(0), count(0), hashes(nullptr), claims(nullptr),
+          pins(nullptr) {
+        memset(first_hash, 0, sizeof(first_hash));
+    }
+};
+
+static void _ephemeral_list_callback(void* ctx, int status, size_t count,
+                                      const uint8_t* const* hashes,
+                                      const uint16_t* claims,
+                                      const uint32_t* pins) {
+    EphemeralListCallbackContext* lctx = (EphemeralListCallbackContext*)ctx;
+    lctx->status = status;
+    lctx->count = count;
+    lctx->hashes = hashes;
+    lctx->claims = claims;
+    lctx->pins = pins;
+    if (count > 0 && hashes != NULL && hashes[0] != NULL) {
+        memcpy(lctx->first_hash, hashes[0], sizeof(lctx->first_hash));
+    }
+    lctx->called.store(1, std::memory_order_release);
+}
+
+/* Releases every pointer the list callback handed out: each hash buffer, the
+   hashes array, claims, and pins (count + 3 offs_client_release_payload
+   calls; NULL/unknown pointers are safe no-ops). */
+static void _release_ephemeral_list_payloads(
+    offs_client_t* client, const EphemeralListCallbackContext& list_ctx) {
+    for (size_t index = 0; index < list_ctx.count; index++) {
+        offs_client_release_payload(client, (void*)list_ctx.hashes[index]);
+    }
+    offs_client_release_payload(client, (void*)list_ctx.hashes);
+    offs_client_release_payload(client, (void*)list_ctx.claims);
+    offs_client_release_payload(client, (void*)list_ctx.pins);
+}
+
+/* End-to-end for the C client representation ops (Task-13 API level; the
+   Task-12 wire-level twin lives in test_unix_transport.cpp): a temporary PUT
+   claims the new representation's blocks, so the ephemeral list is
+   non-empty; MARK_PERMANENT commits the walk with status 0 and a positive
+   blocks_touched; the list is then empty. The non-empty list delivery also
+   exercises the count + 3 payload-hold route. */
+TEST_F(TestOffsClient, RepMarkPermanentAndEphemeralList) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+
+    /* 1. Temporary PUT — claims one tuple (2 random + 1 off block) plus the
+          descriptor block as ephemeral. */
+    const uint8_t data[] = "temporary rep-op client api test data";
+    offs_put_options_t options;
+    memset(&options, 0, sizeof(options));
+    options.content_type = "application/octet-stream";
+    options.file_name = "rep_client.bin";
+    options.stream_length = sizeof(data) - 1;
+    options.temporary = 1;
+
+    PutCallbackContext put_ctx;
+    ASSERT_EQ(offs_client_put_ex(client, &options, data, sizeof(data) - 1,
+                                 _put_callback, &put_ctx), 0);
+    auto put_future = put_ctx.promise.get_future();
+    ASSERT_TRUE(_wait_future(put_future, 20000));
+    std::string ori_string = put_future.get();
+    ASSERT_FALSE(ori_string.empty());
+
+    /* 2. Ephemeral list before the commit: the fresh tuple is tracked. */
+    EphemeralListCallbackContext list_ctx;
+    ASSERT_EQ(offs_client_list_ephemerals(client, _ephemeral_list_callback,
+                                          &list_ctx), 0);
+    for (int attempts = 0; attempts < 200 &&
+         !list_ctx.called.load(std::memory_order_acquire); attempts++) {
+        platform_usleep(10000);
+    }
+    EXPECT_EQ(list_ctx.called.load(), 1);
+    EXPECT_EQ(list_ctx.status, 0);
+    EXPECT_GT(list_ctx.count, 0u);
+    ASSERT_NE(list_ctx.hashes, nullptr);
+    ASSERT_NE(list_ctx.claims, nullptr);
+    ASSERT_NE(list_ctx.pins, nullptr);
+    ASSERT_NE(list_ctx.hashes[0], nullptr);
+    /* Payloads stay valid after the callback returned: release them all. */
+    _release_ephemeral_list_payloads(client, list_ctx);
+
+    /* 3. MARK_PERMANENT: status 0, the walk visited the tuple + descriptor. */
+    RepOpCallbackContext mark_ctx;
+    ASSERT_EQ(offs_client_mark_permanent(client, ori_string.c_str(),
+                                          _rep_op_callback, &mark_ctx), 0);
+    for (int attempts = 0; attempts < 200 &&
+         !mark_ctx.called.load(std::memory_order_acquire); attempts++) {
+        platform_usleep(10000);
+    }
+    EXPECT_EQ(mark_ctx.called.load(), 1);
+    EXPECT_EQ(mark_ctx.status, 0);
+    EXPECT_GT(mark_ctx.blocks_touched, 0u);
+
+    /* 4. Ephemeral list after the commit: everything was made permanent. */
+    EphemeralListCallbackContext empty_ctx;
+    ASSERT_EQ(offs_client_list_ephemerals(client, _ephemeral_list_callback,
+                                          &empty_ctx), 0);
+    for (int attempts = 0; attempts < 200 &&
+         !empty_ctx.called.load(std::memory_order_acquire); attempts++) {
+        platform_usleep(10000);
+    }
+    EXPECT_EQ(empty_ctx.called.load(), 1);
+    EXPECT_EQ(empty_ctx.status, 0);
+    EXPECT_EQ(empty_ctx.count, 0u);
+    _release_ephemeral_list_payloads(client, empty_ctx);
+
+    free(put_ctx.ori_string);
+    offs_client_disconnect(client);
+    offs_client_destroy(client);
+}
+
 } // namespace offs_client_test
 
 namespace offs_ws_client_test {

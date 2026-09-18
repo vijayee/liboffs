@@ -45,6 +45,10 @@ typedef struct {
   uint8_t temporary;
   uint8_t has_tuple_size;  /* nonzero = send tuple_size, 0 = omit (daemon default) */
   uint8_t tuple_size;      /* accepted range: 2..daemon max_tuple_size; values < 2 are rejected client-side */
+  /* recycle_ephemeral_e value riding at wire index 9: 0 = none (ephemeral
+     source blocks error the put), 1 = commit them permanent, 2 = propagate
+     ephemeral. Sent only when nonzero (see client_api_put_request_encode). */
+  uint8_t recycle_ephemeral;
 } offs_put_options_t;
 
 /* Opaque client handle */
@@ -108,6 +112,23 @@ typedef void (*offs_config_set_cb_t)(void* ctx, uint8_t status,
    rule above it stays valid until released with offs_client_release_payload
    (or until offs_client_destroy). */
 typedef void (*offs_json_cb_t)(void* ctx, uint8_t status, const char* json);
+
+/* Representation-level ephemeral/pin operations (mark permanent, delete
+   ephemeral, pin, unpin). status is 0 on success; blocks_touched counts the
+   representation's blocks the daemon visited. */
+typedef void (*offs_rep_op_cb_t)(void* ctx, int status, size_t blocks_touched);
+
+/* Ephemeral block list. hashes holds count 32-byte block-hash buffers;
+   claims/pins hold count entries each (0 when the daemon has none). Per the
+   payload-ownership rule at the top of this header, EVERY pointer handed to
+   the callback stays valid until released with offs_client_release_payload:
+   each hashes[index] buffer, the hashes array itself, claims, and pins —
+   count + 3 calls (a count of 0 means only the three array pointers, which
+   may themselves be NULL no-op releases). */
+typedef void (*offs_ephemeral_list_cb_t)(void* ctx, int status, size_t count,
+                                         const uint8_t* const* hashes,
+                                         const uint16_t* claims,
+                                         const uint32_t* pins);
 
 /* Connection lifecycle */
 offs_client_t* offs_client_connect(const char* transport_url, const char* api_key);
@@ -302,6 +323,35 @@ int offs_client_load(offs_client_t* client, const char* ori_string,
                      uint8_t has_range, size_t range_start, size_t range_end,
                      offs_load_progress_cb_t progress_cb, void* progress_ctx,
                      offs_load_end_cb_t end_cb, void* end_ctx);
+
+/* Representation-level ephemeral/pin operations. url is the full OFF URL of
+   the representation to operate on (the ori_string a put callback returned).
+   mark_permanent commits every ephemeral block the representation walks;
+   delete_ephemeral removes them; pin/unpin adjust the per-block pin count.
+   Error delivery: daemon-side rejections (unauthorized, missing/cyclic
+   descriptor) arrive as ERROR frames and complete the callback with the
+   daemon's error status and blocks_touched 0 (see the generic ERROR-frame
+   completion note at offs_client_set_error_cb); walk failures arrive as the
+   op's own response frame with a nonzero status.
+   Concurrency: the four ops SHARE one callback slot — issuing a second
+   before the first result arrives delivers the first result to the second
+   callback (same one-op-per-slot rule as the config operations). */
+int offs_client_mark_permanent(offs_client_t* client, const char* url,
+                               offs_rep_op_cb_t callback, void* ctx);
+int offs_client_delete_ephemeral(offs_client_t* client, const char* url,
+                                 offs_rep_op_cb_t callback, void* ctx);
+int offs_client_pin_representation(offs_client_t* client, const char* url,
+                                   offs_rep_op_cb_t callback, void* ctx);
+int offs_client_unpin_representation(offs_client_t* client, const char* url,
+                                     offs_rep_op_cb_t callback, void* ctx);
+
+/* List every ephemeral block the daemon currently tracks, with its claim and
+   pin counts. Payload ownership follows the offs_ephemeral_list_cb_t note
+   above (count + 3 offs_client_release_payload calls). Error delivery and
+   the one-op-per-slot rule follow the representation operations above
+   (separate slot). */
+int offs_client_list_ephemerals(offs_client_t* client,
+                                offs_ephemeral_list_cb_t callback, void* ctx);
 
 /* Raw HTTP GET — opens a temporary TCP connection to fetch data from a URL.
    Returns a buffer_t* with the response body, or NULL on error.
