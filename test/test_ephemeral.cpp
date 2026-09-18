@@ -6,6 +6,8 @@ extern "C" {
 #include "../src/BlockCache/index.h"
 #include "../src/BlockCache/block_cache.h"
 #include "../src/BlockCache/ephemeral_registry.h"
+#include "../src/Bloom/elastic_bloom_filter.h"
+#include "../src/Bloom/attenuated_bloom_filter.h"
 #include "../src/BlockCache/sections.h"
 #include "../src/Util/path_join.h"
 #include "../src/Util/mkdir_p.h"
@@ -1351,11 +1353,16 @@ TEST(TestEphemeralRegistry, AddCheckRemovePersist) {
   EXPECT_EQ(present, 1u);
 
   /* Backup-fallback: corrupt the current file → load falls back to .last.
-     One more ADD first (the recycler's self-heal re-add is idempotent) so a
-     flush rotates the hash-containing current into the .last backup — the
-     remove-flush had left an empty filter there. */
-  ephemeral_registry_add(reloaded, descriptor_hash);
+     One more ADD first so a flush rotates the hash-containing current into
+     the .last backup — the remove-flush had left an empty filter there. The
+     ADD must be a real mutation: flushes fire only on actual change now
+     (a self-heal re-ADD of the already-registered hash is a no-op). */
+  block_t* mutation_block = block_create_random_block_by_type(standard);
+  buffer_t* mutation_hash = (buffer_t*)refcounter_reference((refcounter_t*)mutation_block->hash);
+  block_destroy(mutation_block);
+  ephemeral_registry_add(reloaded, mutation_hash);
   scheduler_pool_wait_for_idle(pool);
+  DESTROY(mutation_hash, buffer);
   ephemeral_registry_destroy(reloaded);
   char* corrupt_path = path_join(location, "ephemeral_registry.bf");
   FILE* corrupt = fopen(corrupt_path, "wb");
@@ -1375,4 +1382,124 @@ TEST(TestEphemeralRegistry, AddCheckRemovePersist) {
   DESTROY(descriptor_hash, buffer);
   rm_rf(location);
   free(location);
+}
+
+/* ---- decoded-filter validation (corrupt CBOR must never crash) ---- */
+
+/* Build a filter CBOR array shaped like elastic_bloom_filter_encode's
+   output: [size, hash_count, fp_bits, seed_a, seed_b, bitset, num_occupied].
+   bitset_len bytes are pushed from a zeroed buffer (the corrupt-parameter
+   tests never reach the bitset contents). */
+static cbor_item_t* BuildFilterCbor(uint64_t size, uint32_t hash_count,
+                                    uint32_t fp_bits, size_t bitset_len) {
+  static const uint8_t zero_bits[1] = {0};
+  cbor_item_t* filter = cbor_new_definite_array(7);
+  (void)cbor_array_push(filter, cbor_move(cbor_build_uint64(size)));
+  (void)cbor_array_push(filter, cbor_move(cbor_build_uint32(hash_count)));
+  (void)cbor_array_push(filter, cbor_move(cbor_build_uint32(fp_bits)));
+  (void)cbor_array_push(filter, cbor_move(cbor_build_uint64(1)));  /* seed_a */
+  (void)cbor_array_push(filter, cbor_move(cbor_build_uint64(2)));  /* seed_b */
+  (void)cbor_array_push(filter, cbor_move(cbor_build_bytestring(zero_bits, bitset_len)));
+  (void)cbor_array_push(filter, cbor_move(cbor_build_uint64(0)));  /* num_occupied */
+  return filter;
+}
+
+/* elastic_bloom_filter_decode is fed arbitrary bytes (filter files on disk,
+   network gossip): a corrupt size used to divide by zero on the first bucket
+   access, and an oversized one drove a giant aborting allocation. Every
+   variant below must return NULL without crashing. */
+TEST(TestEphemeralBloomDecode, RejectsCorruptParameters) {
+  /* size = 0 → division-by-zero risk. */
+  cbor_item_t* filter = BuildFilterCbor(0, 4, 8, 1);
+  EXPECT_EQ(elastic_bloom_filter_decode(filter), nullptr);
+  cbor_decref(&filter);
+
+  /* Absurd bucket count → would abort the process via the allocator. */
+  filter = BuildFilterCbor((uint64_t)1 << 40, 4, 8, 1);
+  EXPECT_EQ(elastic_bloom_filter_decode(filter), nullptr);
+  cbor_decref(&filter);
+
+  /* hash_count = 0 (contains() would vacuously return true) and oversized. */
+  filter = BuildFilterCbor(256, 0, 8, 32);
+  EXPECT_EQ(elastic_bloom_filter_decode(filter), nullptr);
+  cbor_decref(&filter);
+  filter = BuildFilterCbor(256, 65, 8, 32);
+  EXPECT_EQ(elastic_bloom_filter_decode(filter), nullptr);
+  cbor_decref(&filter);
+
+  /* fp_bits = 0 and oversized. */
+  filter = BuildFilterCbor(256, 4, 0, 32);
+  EXPECT_EQ(elastic_bloom_filter_decode(filter), nullptr);
+  cbor_decref(&filter);
+  filter = BuildFilterCbor(256, 4, 33, 32);
+  EXPECT_EQ(elastic_bloom_filter_decode(filter), nullptr);
+  cbor_decref(&filter);
+
+  /* Bitset byte length not matching (size + 7) / 8. */
+  filter = BuildFilterCbor(256, 4, 8, 5);
+  EXPECT_EQ(elastic_bloom_filter_decode(filter), nullptr);
+  cbor_decref(&filter);
+}
+
+/* Positive control: the bounds checks must not reject anything the encoder
+   actually produces. */
+TEST(TestEphemeralBloomDecode, ValidEncodeDecodeRoundTrip) {
+  elastic_bloom_filter_t* ebf = elastic_bloom_filter_create(256, 4, 0.75f, 8);
+  ASSERT_NE(ebf, nullptr);
+  const uint8_t data[] = "descriptor hash bytes";
+  EXPECT_TRUE(elastic_bloom_filter_add(ebf, data, sizeof(data)));
+
+  cbor_item_t* encoded = elastic_bloom_filter_encode(ebf);
+  ASSERT_NE(encoded, nullptr);
+  elastic_bloom_filter_t* decoded = elastic_bloom_filter_decode(encoded);
+  ASSERT_NE(decoded, nullptr);
+  EXPECT_TRUE(elastic_bloom_filter_contains(decoded, data, sizeof(data)));
+  const uint8_t other[] = "something else";
+  EXPECT_FALSE(elastic_bloom_filter_contains(decoded, other, sizeof(other)));
+
+  elastic_bloom_filter_destroy(decoded);
+  cbor_decref(&encoded);
+  elastic_bloom_filter_destroy(ebf);
+}
+
+/* attenuated_bloom_filter_decode has the same untrusted-input exposure: a
+   corrupt level count must be rejected instead of driving a giant levels
+   allocation (the allocator aborts on failure). */
+TEST(TestEphemeralBloomDecode, AttenuatedRejectsCorruptLevelCount) {
+  /* level_count = 0 — never produced by the encoder. */
+  cbor_item_t* root = cbor_new_definite_array(2);
+  (void)cbor_array_push(root, cbor_move(cbor_build_uint32(0)));
+  (void)cbor_array_push(root, cbor_move(cbor_new_definite_array(0)));
+  EXPECT_EQ(attenuated_bloom_filter_decode(root), nullptr);
+  cbor_decref(&root);
+
+  /* Absurd claimed level count clamped down to the actual (empty) array →
+     zero levels → still NULL. */
+  root = cbor_new_definite_array(2);
+  (void)cbor_array_push(root, cbor_move(cbor_build_uint32(0xFFFFFFFFu)));
+  (void)cbor_array_push(root, cbor_move(cbor_new_definite_array(0)));
+  EXPECT_EQ(attenuated_bloom_filter_decode(root), nullptr);
+  cbor_decref(&root);
+}
+
+/* Positive control for the attenuated path: a normal encode/decode round
+   trip of a two-level filter still decodes. */
+TEST(TestEphemeralBloomDecode, AttenuatedValidRoundTrip) {
+  attenuated_bloom_filter_t* abf = attenuated_bloom_filter_create(2, 256, 4, 0.75f, 8);
+  ASSERT_NE(abf, nullptr);
+  const uint8_t topic[] = "topic bytes";
+  EXPECT_TRUE(attenuated_bloom_filter_subscribe(abf, topic, sizeof(topic)));
+
+  cbor_item_t* encoded = attenuated_bloom_filter_encode(abf);
+  ASSERT_NE(encoded, nullptr);
+  attenuated_bloom_filter_t* decoded = attenuated_bloom_filter_decode(encoded);
+  ASSERT_NE(decoded, nullptr);
+  EXPECT_EQ(attenuated_bloom_filter_level_count(decoded), 2u);
+  uint32_t hops = 99;
+  EXPECT_TRUE(attenuated_bloom_filter_check(decoded, topic, sizeof(topic), &hops));
+  EXPECT_EQ(hops, 0u);
+
+  attenuated_bloom_filter_destroy(decoded);
+  cbor_decref(&encoded);
+  attenuated_bloom_filter_destroy(abf);
 }

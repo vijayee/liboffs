@@ -45,6 +45,9 @@ static void _registry_flush(ephemeral_registry_t* registry) {
     return;
   }
   ssize_t written = platform_file_write(file, data, data_size);
+  /* fsync is unconditional: the filter is advisory data, and index/sections
+     honor config.fsync_data — the registry always syncs, which is cheap
+     because the filter is small. */
   int synced = platform_file_sync(file);
   platform_file_close(file);
   free(data);
@@ -64,12 +67,14 @@ static void _registry_flush(ephemeral_registry_t* registry) {
     if (platform_file_rename(registry->current_file, registry->backup_file) != 0) {
       log_error("ephemeral registry: rotate %s → %s failed — flush abandoned",
                 registry->current_file, registry->backup_file);
+      platform_file_unlink(registry->temp_file);
       return;
     }
   }
   if (platform_file_rename(registry->temp_file, registry->current_file) != 0) {
     log_error("ephemeral registry: rotate %s → %s failed",
               registry->temp_file, registry->current_file);
+    platform_file_unlink(registry->temp_file);
   }
 }
 
@@ -143,8 +148,12 @@ void ephemeral_registry_dispatch(void* state, message_t* msg) {
       if (hash == NULL || hash->data == NULL) {
         break;
       }
-      elastic_bloom_filter_add(registry->filter, hash->data, hash->size);
-      _registry_flush(registry);
+      /* Flush only on actual change: elastic_bloom_filter_add returns false
+         when every fingerprint was already present (the recycler's self-heal
+         re-ADD), and a no-op must not pay serialize + write + fsync. */
+      if (elastic_bloom_filter_add(registry->filter, hash->data, hash->size)) {
+        _registry_flush(registry);
+      }
       break;
     }
     case EPHEMERAL_REGISTRY_REMOVE: {
@@ -152,8 +161,9 @@ void ephemeral_registry_dispatch(void* state, message_t* msg) {
       if (hash == NULL || hash->data == NULL) {
         break;
       }
-      elastic_bloom_filter_remove(registry->filter, hash->data, hash->size);
-      _registry_flush(registry);
+      if (elastic_bloom_filter_remove(registry->filter, hash->data, hash->size)) {
+        _registry_flush(registry);
+      }
       break;
     }
     case EPHEMERAL_REGISTRY_CHECK: {
@@ -208,6 +218,10 @@ static void _registry_check_request_destroy(void* ptr) {
 /* ---- async API — send message, actor injected by actor_send ---- */
 
 void ephemeral_registry_add(ephemeral_registry_t* registry, buffer_t* descriptor_hash) {
+  if (registry == NULL) {
+    log_error("ephemeral_registry_add: registry is NULL");
+    return;
+  }
   buffer_t* hash = (buffer_t*)refcounter_reference((refcounter_t*)descriptor_hash);
   message_t msg;
   msg.type = EPHEMERAL_REGISTRY_ADD;
@@ -217,6 +231,10 @@ void ephemeral_registry_add(ephemeral_registry_t* registry, buffer_t* descriptor
 }
 
 void ephemeral_registry_remove(ephemeral_registry_t* registry, buffer_t* descriptor_hash) {
+  if (registry == NULL) {
+    log_error("ephemeral_registry_remove: registry is NULL");
+    return;
+  }
   buffer_t* hash = (buffer_t*)refcounter_reference((refcounter_t*)descriptor_hash);
   message_t msg;
   msg.type = EPHEMERAL_REGISTRY_REMOVE;
@@ -226,6 +244,10 @@ void ephemeral_registry_remove(ephemeral_registry_t* registry, buffer_t* descrip
 }
 
 void ephemeral_registry_check(ephemeral_registry_t* registry, buffer_t* descriptor_hash, actor_t* reply_to) {
+  if (registry == NULL) {
+    log_error("ephemeral_registry_check: registry is NULL");
+    return;
+  }
   registry_check_request_payload_t* payload =
       get_clear_memory(sizeof(registry_check_request_payload_t));
   payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)descriptor_hash);

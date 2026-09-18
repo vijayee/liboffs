@@ -7,6 +7,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Sanity bound for a decoded level count. Levels are hop distances (the
+   network path uses EABF_LEVELS = 4); a corrupt value could otherwise
+   drive a giant levels allocation (get_clear_memory aborts on failure). */
+#define ABF_DECODE_MAX_LEVELS 256
+
 attenuated_bloom_filter_t* attenuated_bloom_filter_create(uint32_t levels, size_t size,
                                                            uint32_t hash_count,
                                                            float omega, uint32_t fp_bits) {
@@ -112,6 +117,15 @@ attenuated_bloom_filter_t* attenuated_bloom_filter_decode(cbor_item_t* item) {
 
   size_t actual_levels = cbor_array_size(levels_arr);
   if (actual_levels < level_count) level_count = (uint32_t)actual_levels;
+
+  /* Decoded CBOR is untrusted (network gossip) — reject corrupt level
+     counts after the clamp to the actual array: zero levels is never
+     produced by the encoder, and an oversized count would drive a giant
+     levels allocation. */
+  if (level_count == 0 || level_count > ABF_DECODE_MAX_LEVELS) {
+    cbor_decref(&levels_arr);
+    return NULL;
+  }
 
   attenuated_bloom_filter_t* abf = get_clear_memory(sizeof(attenuated_bloom_filter_t));
   if (abf == NULL) { cbor_decref(&levels_arr); return NULL; }

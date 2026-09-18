@@ -8,6 +8,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Sanity bounds for decoded filter parameters. Decoded CBOR is untrusted —
+   filter files on disk and network gossip both aim arbitrary bytes at
+   elastic_bloom_filter_decode — so every numeric field is bounds-checked
+   before any allocation: get_clear_memory aborts the process on failure,
+   and size == 0 would divide by zero on the first bucket access. */
+#define EBF_DECODE_MAX_BUCKETS ((size_t)1 << 27) /* 128 Mi buckets ≈ 1 GiB of bucket pointers — far above anything the doubling expansion produces */
+#define EBF_DECODE_MAX_HASH_COUNT 64
+#define EBF_DECODE_MAX_FP_BITS 32
+
 // --- Bucket linked list helpers ---
 
 static ebf_bucket_entry_t* bucket_insert(ebf_bucket_entry_t* head, uint32_t fingerprint) {
@@ -377,6 +386,18 @@ elastic_bloom_filter_t* elastic_bloom_filter_decode(cbor_item_t* item) {
   if (!cbor_isa_bytestring(bitset_item)) { cbor_decref(&bitset_item); return NULL; }
   size_t bitset_len = cbor_bytestring_length(bitset_item);
 
+  /* Validate before allocating anything: reject zero/oversized buckets,
+     zero/oversized hash counts, zero/oversized fingerprint bits, and a
+     bitset whose byte length doesn't match the bucket count it encodes
+     (the encoder always writes exactly (size + 7) / 8 bytes). */
+  if (size == 0 || size > EBF_DECODE_MAX_BUCKETS ||
+      hash_count == 0 || hash_count > EBF_DECODE_MAX_HASH_COUNT ||
+      fp_bits == 0 || fp_bits > EBF_DECODE_MAX_FP_BITS ||
+      bitset_len != (size + 7) / 8) {
+    cbor_decref(&bitset_item);
+    return NULL;
+  }
+
   // Create EBF with decoded parameters
   elastic_bloom_filter_t* ebf = get_clear_memory(sizeof(elastic_bloom_filter_t));
   if (ebf == NULL) { cbor_decref(&bitset_item); return NULL; }
@@ -385,7 +406,7 @@ elastic_bloom_filter_t* elastic_bloom_filter_decode(cbor_item_t* item) {
   ebf->hash_count = hash_count;
   ebf->seed_a = seed_a;
   ebf->seed_b = seed_b;
-  ebf->fp_bits = fp_bits == 0 ? EBF_DEFAULT_FP_BITS : fp_bits;
+  ebf->fp_bits = fp_bits;
   ebf->omega = 0.75f;
   ebf->count = 0;
   ebf->buckets = get_clear_memory(size * sizeof(ebf_bucket_entry_t*));

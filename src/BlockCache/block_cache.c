@@ -964,8 +964,14 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
     block_cache_update_capacity(block_cache);
   }
   /* Registry lives next to the index (same folder), so it must be created
-     before the folder path is freed below. */
+     before the folder path is freed below. A failed create degrades to
+     "no registry" (log, not abort) — the public wrappers are NULL-guarded,
+     so the cache keeps working without the advisory filter instead of
+     NULL-dereferencing later. */
   block_cache->registry = ephemeral_registry_create(folder, config, pool);
+  if (block_cache->registry == NULL) {
+    log_error("block_cache_create: ephemeral registry create failed — continuing without it");
+  }
   free(folder);
   return block_cache;
 }
