@@ -17,6 +17,7 @@
 #include "../../Actor/message.h"
 #include "../../Actor/message_queue.h"
 #include "../client_api_wire.h"
+#include "../representation_api.h"
 #include "../block_handlers.h"
 #include "../health_handler.h"
 #include "../../OFFStreams/off_url.h"
@@ -503,6 +504,16 @@ static void _wt_h3_block_send_frame(block_connection_t* conn, cbor_item_t* frame
   _wt_h3_send_frame((webtransport_h3_conn_t*)conn, frame);
 }
 
+/* Representation op adapters: the shared handler speaks void* — cast back
+   to the concrete connection type here. */
+static void _wt_h3_rep_send_frame(void* conn, cbor_item_t* frame) {
+  _wt_h3_send_frame((webtransport_h3_conn_t*)conn, frame);
+}
+
+static void _wt_h3_rep_send_error(void* conn, int status_code, const char* message) {
+  _wt_h3_send_error((webtransport_h3_conn_t*)conn, (uint8_t)status_code, message);
+}
+
 static void _wt_h3_block_send_error(block_connection_t* conn, uint8_t status, const char* msg) {
   _wt_h3_send_error((webtransport_h3_conn_t*)conn, status, msg);
 }
@@ -909,6 +920,22 @@ static void _wt_h3_dispatch_message(webtransport_h3_conn_t* conn, uint8_t type, 
     case CLIENT_API_PUT_REQUEST:
       _wt_h3_handle_put(conn, frame);
       break;
+    case CLIENT_API_REP_MARK_PERMANENT_REQUEST:
+    case CLIENT_API_REP_DELETE_EPHEMERAL_REQUEST:
+    case CLIENT_API_REP_PIN_REQUEST:
+    case CLIENT_API_REP_UNPIN_REQUEST:
+    case CLIENT_API_EPHEMERAL_LIST_REQUEST: {
+      if (!conn->is_authenticated) {
+        _wt_h3_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+        break;
+      }
+      /* Cache-only transport: h3 connections have no network actor access,
+         so MARK_PERMANENT's announce is skipped (local-only walk). */
+      client_api_representation_handle(conn->bc, conn->pool, NULL,
+                                       frame, type, _wt_h3_rep_send_frame, conn,
+                                       _wt_h3_rep_send_error);
+      break;
+    }
     case CLIENT_API_GET_REQUEST:
       _wt_h3_handle_get(conn, frame);
       break;

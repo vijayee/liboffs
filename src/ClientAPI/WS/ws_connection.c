@@ -4,6 +4,7 @@
 #include "ws_connection.h"
 #include "ws_transport.h"
 #include "../client_api_wire.h"
+#include "../representation_api.h"
 #include <cJSON.h>
 #include <stdlib.h>
 #include "../../OFFStreams/off_url.h"
@@ -238,6 +239,16 @@ static void _ws_connection_send_error(ws_connection_t* conn, uint8_t status_code
   error_msg.message = (char*)message;
   cbor_item_t* frame = client_api_error_encode(&error_msg);
   _ws_connection_send_frame(conn, frame);
+}
+
+/* Representation op adapters: the shared handler speaks void* — cast back
+   to the concrete connection type here. */
+static void _ws_rep_send_frame(void* conn, cbor_item_t* frame) {
+  _ws_connection_send_frame((ws_connection_t*)conn, frame);
+}
+
+static void _ws_rep_send_error(void* conn, int status_code, const char* message) {
+  _ws_connection_send_error((ws_connection_t*)conn, (uint8_t)status_code, message);
 }
 
 /* --- Watcher helpers (follow tcp_connection pattern) --- */
@@ -1113,6 +1124,22 @@ static void _ws_dispatch_frame(ws_connection_t* conn, uint8_t type, cbor_item_t*
     case CLIENT_API_PUT_END:
       _ws_handle_put_end(conn);
       break;
+    case CLIENT_API_REP_MARK_PERMANENT_REQUEST:
+    case CLIENT_API_REP_DELETE_EPHEMERAL_REQUEST:
+    case CLIENT_API_REP_PIN_REQUEST:
+    case CLIENT_API_REP_UNPIN_REQUEST:
+    case CLIENT_API_EPHEMERAL_LIST_REQUEST: {
+      if (!conn->is_authenticated) {
+        _ws_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+        break;
+      }
+      /* Cache-only transport: WS connections have no network actor access,
+         so MARK_PERMANENT's announce is skipped (local-only walk). */
+      client_api_representation_handle(conn->bc, conn->pool, NULL,
+                                       frame, type, _ws_rep_send_frame, conn,
+                                       _ws_rep_send_error);
+      break;
+    }
     case CLIENT_API_AUTH_REQUEST:
       _ws_handle_auth(conn, frame);
       break;

@@ -7,6 +7,7 @@
 #ifdef HAS_MSQUIC
 
 #include "../client_api_wire.h"
+#include "../representation_api.h"
 #include <cJSON.h>
 #include <stdlib.h>
 #include "../../OFFStreams/off_url.h"
@@ -109,6 +110,16 @@ void wt_connection_send_error(wt_connection_t* connection, uint8_t status_code, 
   error_msg.message = (char*)message;
   cbor_item_t* frame = client_api_error_encode(&error_msg);
   wt_connection_send_frame(connection, frame);
+}
+
+/* Representation op adapters: the shared handler speaks void* — cast back
+   to the concrete connection type here. */
+static void _wt_rep_send_frame(void* conn, cbor_item_t* frame) {
+  wt_connection_send_frame((wt_connection_t*)conn, frame);
+}
+
+static void _wt_rep_send_error(void* conn, int status_code, const char* message) {
+  wt_connection_send_error((wt_connection_t*)conn, (uint8_t)status_code, message);
 }
 
 /* --- GET pipeline callbacks --- */
@@ -557,6 +568,22 @@ static void _wt_dispatch_frame(wt_connection_t* conn, uint8_t type, cbor_item_t*
     case CLIENT_API_PUT_END:
       _wt_handle_put_end(conn);
       break;
+    case CLIENT_API_REP_MARK_PERMANENT_REQUEST:
+    case CLIENT_API_REP_DELETE_EPHEMERAL_REQUEST:
+    case CLIENT_API_REP_PIN_REQUEST:
+    case CLIENT_API_REP_UNPIN_REQUEST:
+    case CLIENT_API_EPHEMERAL_LIST_REQUEST: {
+      if (!conn->is_authenticated) {
+        wt_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+        break;
+      }
+      /* Cache-only transport: WT connections have no network actor access,
+         so MARK_PERMANENT's announce is skipped (local-only walk). */
+      client_api_representation_handle(conn->bc, conn->pool, NULL,
+                                       frame, type, _wt_rep_send_frame, conn,
+                                       _wt_rep_send_error);
+      break;
+    }
     case CLIENT_API_AUTH_REQUEST:
       _wt_handle_auth(conn, frame);
       break;

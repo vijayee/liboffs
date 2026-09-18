@@ -389,6 +389,86 @@ TEST_F(TestUnixTransport, PutAndGetRoundTrip) {
     platform_socket_destroy(sock);
 }
 
+/* End-to-end for the Task-12 wire ops: a temporary PUT claims the new
+   representation's blocks; MARK_PERMANENT over the wire reports the four
+   walked blocks with status 0; the ephemeral list is then empty. */
+TEST_F(TestUnixTransport, RepMarkPermanentAndEphemeralListOverWire) {
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
+
+    const uint8_t data[] = "temporary rep-op wire test data";
+
+    /* 1. Temporary PUT — claims one tuple (2 random + 1 off block) plus the
+          descriptor block. */
+    client_api_put_request_t put_req;
+    memset(&put_req, 0, sizeof(put_req));
+    put_req.content_type = (char*)"application/octet-stream";
+    put_req.file_name = (char*)"rep_wire.bin";
+    put_req.stream_length = sizeof(data) - 1;
+    put_req.server_address = NULL;
+    put_req.data = (uint8_t*)data;
+    put_req.data_size = sizeof(data) - 1;
+    put_req.temporary = 1;
+
+    cbor_item_t* frame = client_api_put_request_encode(&put_req);
+    ASSERT_NE(frame, nullptr);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
+
+    stream_framer_t* framer = stream_framer_create();
+    cbor_item_t* response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+    ASSERT_EQ(client_api_wire_get_type(response), CLIENT_API_PUT_RESPONSE);
+    client_api_put_response_t put_resp;
+    memset(&put_resp, 0, sizeof(put_resp));
+    ASSERT_EQ(client_api_put_response_decode(response, &put_resp), 0);
+    ASSERT_NE(put_resp.ori_string, nullptr);
+    char* ori_string = strdup(put_resp.ori_string);
+    client_api_put_response_destroy(&put_resp);
+    cbor_decref(&response);
+
+    /* 2. MARK_PERMANENT over the wire: status 0, all four blocks walked. */
+    client_api_rep_request_t rep_req;
+    memset(&rep_req, 0, sizeof(rep_req));
+    rep_req.url = ori_string;
+    frame = client_api_rep_request_encode(CLIENT_API_REP_MARK_PERMANENT_REQUEST, &rep_req);
+    ASSERT_NE(frame, nullptr);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
+
+    response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+    ASSERT_EQ(client_api_wire_get_type(response), CLIENT_API_REP_MARK_PERMANENT_RESPONSE);
+    client_api_rep_response_t rep_resp;
+    memset(&rep_resp, 0, sizeof(rep_resp));
+    ASSERT_EQ(client_api_rep_response_decode(response, &rep_resp), 0);
+    EXPECT_EQ(rep_resp.status, 0);
+    EXPECT_EQ(rep_resp.blocks, 4u);
+    client_api_rep_response_destroy(&rep_resp);
+    cbor_decref(&response);
+
+    /* 3. Ephemeral list over the wire: everything was committed, so the
+          response carries status 0 with zero entries. */
+    cbor_item_t* list_request = cbor_new_definite_array(1);
+    cbor_item_t* type_item = cbor_build_uint8(CLIENT_API_EPHEMERAL_LIST_REQUEST);
+    (void)cbor_array_push(list_request, type_item);
+    cbor_decref(&type_item);
+    ASSERT_EQ(_send_frame(sock, list_request), 0);
+
+    response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+    ASSERT_EQ(client_api_wire_get_type(response), CLIENT_API_EPHEMERAL_LIST_RESPONSE);
+    client_api_ephemeral_list_response_t list_resp;
+    memset(&list_resp, 0, sizeof(list_resp));
+    ASSERT_EQ(client_api_ephemeral_list_response_decode(response, &list_resp), 0);
+    EXPECT_EQ(list_resp.status, 0);
+    EXPECT_EQ(list_resp.count, 0u);
+    client_api_ephemeral_list_response_destroy(&list_resp);
+    cbor_decref(&response);
+
+    free(ori_string);
+    stream_framer_destroy(framer);
+    platform_socket_destroy(sock);
+}
+
 TEST_F(TestUnixTransport, LoadRoundTrip) {
     platform_socket_t* sock = _connect_with_retry(socket_path);
     ASSERT_NE(sock, (platform_socket_t*)NULL);

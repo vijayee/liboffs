@@ -49,6 +49,16 @@
 #define CLIENT_API_LOAD_REQUEST            39
 #define CLIENT_API_LOAD_PROGRESS           40
 #define CLIENT_API_LOAD_END                41
+#define CLIENT_API_REP_MARK_PERMANENT_REQUEST   42
+#define CLIENT_API_REP_MARK_PERMANENT_RESPONSE  43
+#define CLIENT_API_REP_DELETE_EPHEMERAL_REQUEST  44
+#define CLIENT_API_REP_DELETE_EPHEMERAL_RESPONSE 45
+#define CLIENT_API_REP_PIN_REQUEST               46
+#define CLIENT_API_REP_PIN_RESPONSE              47
+#define CLIENT_API_REP_UNPIN_REQUEST             48
+#define CLIENT_API_REP_UNPIN_RESPONSE            49
+#define CLIENT_API_EPHEMERAL_LIST_REQUEST        50
+#define CLIENT_API_EPHEMERAL_LIST_RESPONSE       51
 
 // Status codes for responses
 #define CLIENT_API_STATUS_OK                0
@@ -339,6 +349,36 @@ typedef struct {
   cbor_item_t* friends;  // owned by struct, freed by _destroy
 } client_api_friend_list_response_t;
 
+// --- Representation op request (mark permanent / delete ephemeral / pin / unpin) ---
+// [type, url] — url is the full OFF URL string of the representation to
+// operate on. The type byte selects the op (42/44/46/48); the layout is
+// shared. Decode validates the URL with validate_ori_string and rejects
+// empty or over-length strings (OFFS_MAX_ORI_STRING_LEN bound).
+typedef struct {
+  char* url;  // caller must free via client_api_rep_request_destroy
+} client_api_rep_request_t;
+
+// --- Representation op response ---
+// [type, status: uint, blocks_touched: uint]
+// status: 0 = ok, 1 = error (the walk failed: missing, malformed, or cyclic
+// descriptor). blocks_touched counts the blocks the op visited.
+typedef struct {
+  int status;
+  size_t blocks;
+} client_api_rep_response_t;
+
+// --- Ephemeral list response ---
+// [type, status: uint, [[hash: bstr(32), claims: uint, pins: uint], ...]]
+// One entry per ephemeral block. hashes holds count 32-byte buffers; decode
+// rejects entries whose hash bytestring is not exactly 32 bytes.
+typedef struct {
+  int status;
+  size_t count;
+  uint8_t** hashes;  // count × 32-byte buffers, caller-owned via _destroy
+  uint16_t* claims;  // count entries, caller-owned via _destroy
+  uint32_t* pins;    // count entries, caller-owned via _destroy
+} client_api_ephemeral_list_response_t;
+
 // Encode functions — return CBOR item (caller must cbor_decref)
 cbor_item_t* client_api_put_request_encode(const client_api_put_request_t* msg);
 cbor_item_t* client_api_put_data_encode(const client_api_put_data_t* msg);
@@ -463,6 +503,25 @@ void client_api_friend_list_response_destroy(client_api_friend_list_response_t* 
 
 // Helper: extract type byte from CBOR item
 uint8_t client_api_wire_get_type(cbor_item_t* item);
+
+// --- Representation ephemeral/pin wire ops ---
+// The four request ops share one struct/codec; op_code picks the type byte
+// (one of CLIENT_API_REP_*_REQUEST). Decode accepts any of the four request
+// type bytes. The response codecs likewise take the matching response type
+// byte (one of CLIENT_API_REP_*_RESPONSE) and accept any of the four.
+cbor_item_t* client_api_rep_request_encode(int op_code, const client_api_rep_request_t* msg);
+int client_api_rep_request_decode(cbor_item_t* item, client_api_rep_request_t* msg);
+void client_api_rep_request_destroy(client_api_rep_request_t* msg);
+
+cbor_item_t* client_api_rep_response_encode(int op_code, const client_api_rep_response_t* msg);
+int client_api_rep_response_decode(cbor_item_t* item, client_api_rep_response_t* msg);
+void client_api_rep_response_destroy(client_api_rep_response_t* msg);
+
+cbor_item_t* client_api_ephemeral_list_response_encode(
+    const client_api_ephemeral_list_response_t* msg);
+int client_api_ephemeral_list_response_decode(cbor_item_t* item,
+                                              client_api_ephemeral_list_response_t* msg);
+void client_api_ephemeral_list_response_destroy(client_api_ephemeral_list_response_t* msg);
 
 // Destroy helpers for types with nested allocations
 void client_api_put_request_destroy(client_api_put_request_t* msg);

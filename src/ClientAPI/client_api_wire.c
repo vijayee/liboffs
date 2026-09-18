@@ -2037,3 +2037,276 @@ void client_api_config_reload_response_destroy(client_api_config_reload_response
     msg->message = NULL;
   }
 }
+// --- Representation op request ---
+// [type, url] — shared by the four op request types (42/44/46/48)
+
+static int _rep_request_type_valid(uint8_t type) {
+  return type == CLIENT_API_REP_MARK_PERMANENT_REQUEST
+      || type == CLIENT_API_REP_DELETE_EPHEMERAL_REQUEST
+      || type == CLIENT_API_REP_PIN_REQUEST
+      || type == CLIENT_API_REP_UNPIN_REQUEST;
+}
+
+cbor_item_t* client_api_rep_request_encode(int op_code, const client_api_rep_request_t* msg) {
+  if (!_rep_request_type_valid((uint8_t)op_code)) {
+    return NULL;
+  }
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8((uint8_t)op_code);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _encode_string(msg->url);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_rep_request_decode(cbor_item_t* item, client_api_rep_request_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || !_rep_request_type_valid((uint8_t)cbor_get_uint8(type_item))) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* url_item = cbor_array_get(item, 1);
+  /* _decode_string rejects empty strings and strings over
+     OFFS_MAX_ORI_STRING_LEN; validate_ori_string checks the OFF URL shape
+     (same path the PUT recycler_urls decode takes). */
+  msg->url = _decode_string(url_item, OFFS_MAX_ORI_STRING_LEN);
+  cbor_decref(&url_item);
+
+  if (msg->url == NULL || validate_ori_string(msg->url) != 0) {
+    client_api_rep_request_destroy(msg);
+    return -1;
+  }
+
+  return 0;
+}
+
+void client_api_rep_request_destroy(client_api_rep_request_t* msg) {
+  if (msg == NULL) return;
+  free(msg->url);
+  msg->url = NULL;
+}
+
+// --- Representation op response ---
+// [type, status: uint, blocks_touched: uint] — shared by the four op response
+// types (43/45/47/49)
+
+static int _rep_response_type_valid(uint8_t type) {
+  return type == CLIENT_API_REP_MARK_PERMANENT_RESPONSE
+      || type == CLIENT_API_REP_DELETE_EPHEMERAL_RESPONSE
+      || type == CLIENT_API_REP_PIN_RESPONSE
+      || type == CLIENT_API_REP_UNPIN_RESPONSE;
+}
+
+cbor_item_t* client_api_rep_response_encode(int op_code, const client_api_rep_response_t* msg) {
+  if (!_rep_response_type_valid((uint8_t)op_code)) {
+    return NULL;
+  }
+  cbor_item_t* array = cbor_new_definite_array(3);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8((uint8_t)op_code);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8((uint8_t)(msg->status != 0 ? 1 : 0));
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->blocks);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_rep_response_decode(cbor_item_t* item, client_api_rep_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 3) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || !_rep_response_type_valid((uint8_t)cbor_get_uint8(type_item))) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* status_item = cbor_array_get(item, 1);
+  if (!cbor_isa_uint(status_item)) {
+    cbor_decref(&status_item);
+    return -1;
+  }
+  msg->status = (int)cbor_get_uint8(status_item);
+  cbor_decref(&status_item);
+
+  cbor_item_t* blocks_item = cbor_array_get(item, 2);
+  if (!cbor_isa_uint(blocks_item)) {
+    cbor_decref(&blocks_item);
+    return -1;
+  }
+  msg->blocks = _decode_size(blocks_item);
+  cbor_decref(&blocks_item);
+
+  return 0;
+}
+
+void client_api_rep_response_destroy(client_api_rep_response_t* msg) {
+  (void)msg;  // flat struct — nothing nested to free
+}
+
+// --- Ephemeral list response ---
+// [type, status: uint, [[hash: bstr(32), claims: uint, pins: uint], ...]]
+
+cbor_item_t* client_api_ephemeral_list_response_encode(
+    const client_api_ephemeral_list_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(3);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_EPHEMERAL_LIST_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8((uint8_t)(msg->status != 0 ? 1 : 0));
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  cbor_item_t* entries = cbor_new_definite_array(msg->count);
+  for (size_t entry_index = 0; entry_index < msg->count; entry_index++) {
+    cbor_item_t* entry = cbor_new_definite_array(3);
+    const uint8_t* hash = (msg->hashes != NULL && msg->hashes[entry_index] != NULL)
+                              ? msg->hashes[entry_index]
+                              : &_empty_byte_sentinel;
+    item = cbor_build_bytestring(hash, 32);
+    (void)cbor_array_push(entry, item);
+    cbor_decref(&item);
+
+    item = cbor_build_uint16(msg->claims != NULL ? msg->claims[entry_index] : 0);
+    (void)cbor_array_push(entry, item);
+    cbor_decref(&item);
+
+    item = cbor_build_uint32(msg->pins != NULL ? msg->pins[entry_index] : 0);
+    (void)cbor_array_push(entry, item);
+    cbor_decref(&item);
+
+    (void)cbor_array_push(entries, entry);
+    cbor_decref(&entry);
+  }
+  (void)cbor_array_push(array, entries);
+  cbor_decref(&entries);
+
+  return array;
+}
+
+int client_api_ephemeral_list_response_decode(cbor_item_t* item,
+                                              client_api_ephemeral_list_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 3) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item)
+      || cbor_get_uint8(type_item) != CLIENT_API_EPHEMERAL_LIST_RESPONSE) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* status_item = cbor_array_get(item, 1);
+  if (!cbor_isa_uint(status_item)) {
+    cbor_decref(&status_item);
+    return -1;
+  }
+  msg->status = (int)cbor_get_uint8(status_item);
+  cbor_decref(&status_item);
+
+  cbor_item_t* entries = cbor_array_get(item, 2);
+  if (!cbor_isa_array(entries)) {
+    cbor_decref(&entries);
+    return -1;
+  }
+  msg->count = cbor_array_size(entries);
+  if (msg->count == 0) {
+    cbor_decref(&entries);
+    return 0;
+  }
+
+  msg->hashes = get_clear_memory(sizeof(uint8_t*) * msg->count);
+  msg->claims = get_clear_memory(sizeof(uint16_t) * msg->count);
+  msg->pins = get_clear_memory(sizeof(uint32_t) * msg->count);
+  for (size_t entry_index = 0; entry_index < msg->count; entry_index++) {
+    cbor_item_t* entry = cbor_array_get(entries, entry_index);
+    if (entry == NULL || !cbor_isa_array(entry) || cbor_array_size(entry) < 3) {
+      cbor_decref(&entry);
+      client_api_ephemeral_list_response_destroy(msg);
+      cbor_decref(&entries);
+      return -1;
+    }
+
+    cbor_item_t* hash_item = cbor_array_get(entry, 0);
+    if (!cbor_isa_bytestring(hash_item)
+        || cbor_bytestring_length(hash_item) != 32) {
+      cbor_decref(&hash_item);
+      cbor_decref(&entry);
+      client_api_ephemeral_list_response_destroy(msg);
+      cbor_decref(&entries);
+      return -1;
+    }
+    msg->hashes[entry_index] = get_memory(32);
+    memcpy(msg->hashes[entry_index], cbor_bytestring_handle(hash_item), 32);
+    cbor_decref(&hash_item);
+
+    cbor_item_t* claims_item = cbor_array_get(entry, 1);
+    if (!cbor_isa_uint(claims_item)) {
+      cbor_decref(&claims_item);
+      cbor_decref(&entry);
+      client_api_ephemeral_list_response_destroy(msg);
+      cbor_decref(&entries);
+      return -1;
+    }
+    uint64_t claims_value = cbor_get_int(claims_item);
+    msg->claims[entry_index] = claims_value > UINT16_MAX ? UINT16_MAX : (uint16_t)claims_value;
+    cbor_decref(&claims_item);
+
+    cbor_item_t* pins_item = cbor_array_get(entry, 2);
+    if (!cbor_isa_uint(pins_item)) {
+      cbor_decref(&pins_item);
+      cbor_decref(&entry);
+      client_api_ephemeral_list_response_destroy(msg);
+      cbor_decref(&entries);
+      return -1;
+    }
+    uint64_t pins_value = cbor_get_int(pins_item);
+    msg->pins[entry_index] = pins_value > UINT32_MAX ? UINT32_MAX : (uint32_t)pins_value;
+    cbor_decref(&pins_item);
+
+    cbor_decref(&entry);
+  }
+  cbor_decref(&entries);
+
+  return 0;
+}
+
+void client_api_ephemeral_list_response_destroy(client_api_ephemeral_list_response_t* msg) {
+  if (msg == NULL) return;
+  if (msg->hashes != NULL) {
+    for (size_t entry_index = 0; entry_index < msg->count; entry_index++) {
+      free(msg->hashes[entry_index]);
+    }
+    free(msg->hashes);
+    msg->hashes = NULL;
+  }
+  free(msg->claims);
+  msg->claims = NULL;
+  free(msg->pins);
+  msg->pins = NULL;
+  msg->count = 0;
+}

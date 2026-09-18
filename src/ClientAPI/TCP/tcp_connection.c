@@ -4,6 +4,7 @@
 #include "tcp_connection.h"
 #include "tcp_transport.h"
 #include "../client_api_wire.h"
+#include "../representation_api.h"
 #include <cJSON.h>
 #include <stdlib.h>
 #include "../../OFFStreams/off_url.h"
@@ -102,6 +103,16 @@ static void _tcp_connection_send_error(tcp_connection_t* conn, uint8_t status_co
   error_msg.message = (char*)message;
   cbor_item_t* frame = client_api_error_encode(&error_msg);
   _tcp_connection_send_frame(conn, frame);
+}
+
+/* Representation op adapters: the shared handler speaks void* — cast back
+   to the concrete connection type here. */
+static void _tcp_rep_send_frame(void* conn, cbor_item_t* frame) {
+  _tcp_connection_send_frame((tcp_connection_t*)conn, frame);
+}
+
+static void _tcp_rep_send_error(void* conn, int status_code, const char* message) {
+  _tcp_connection_send_error((tcp_connection_t*)conn, (uint8_t)status_code, message);
 }
 
 /* --- Watcher helpers (follow http_connection pattern) --- */
@@ -832,6 +843,22 @@ static void _tcp_dispatch_frame(tcp_connection_t* conn, uint8_t type, cbor_item_
     case CLIENT_API_PUT_END:
       _tcp_handle_put_end(conn);
       break;
+    case CLIENT_API_REP_MARK_PERMANENT_REQUEST:
+    case CLIENT_API_REP_DELETE_EPHEMERAL_REQUEST:
+    case CLIENT_API_REP_PIN_REQUEST:
+    case CLIENT_API_REP_UNPIN_REQUEST:
+    case CLIENT_API_EPHEMERAL_LIST_REQUEST: {
+      if (!conn->is_authenticated) {
+        _tcp_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+        break;
+      }
+      /* Cache-only transport: TCP connections have no network actor access,
+         so MARK_PERMANENT's announce is skipped (local-only walk). */
+      client_api_representation_handle(conn->bc, conn->pool, NULL,
+                                       frame, type, _tcp_rep_send_frame, conn,
+                                       _tcp_rep_send_error);
+      break;
+    }
     case CLIENT_API_AUTH_REQUEST:
       _tcp_handle_auth(conn, frame);
       break;

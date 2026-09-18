@@ -27,9 +27,11 @@ extern "C" {
 #include "../src/Platform/platform_socket.h"
 #include "../src/ClientAPI/HTTP/off_routes.h"
 #include "../src/ClientAPI/HTTP/http_server.h"
+#include "../src/ClientAPI/client_api_wire.h"
 #include "../src/OFFStreams/ofd_cache.h"
 #include "../src/OFFStreams/off_url.h"
 #include "../src/Util/error.h"
+#include "../src/Util/validation.h"
 #include "../src/Streams/stream.h"
 #include "../src/OFFStreams/tuple.h"
 #include "../src/OFFStreams/tuple_cache.h"
@@ -2891,3 +2893,212 @@ TEST_F(TestEphemeralRoutes, OpOnMissingDescriptorReturnsError) {
 }
 
 } // namespace ephemeral_routes_test
+
+/* ---- Wire codecs for the representation ephemeral/pin ops (Task 12) ---- */
+
+/* Build one well-formed OFF URL string (caller frees) around fixed 32-byte
+   hashes — decode's validate_ori_string path must accept it. */
+static char* _wire_test_url(void) {
+  uint8_t hash_bytes[32];
+  memset(hash_bytes, 0x5A, sizeof(hash_bytes));
+  off_url_t* url = off_url_create();
+  if (url == NULL) return NULL;
+  url->stream_length = 600;
+  url->file_name = strdup("wire_test.txt");
+  url->file_hash = buffer_create_from_pointer_copy(hash_bytes, sizeof(hash_bytes));
+  url->descriptor_hash = buffer_create_from_pointer_copy(hash_bytes, sizeof(hash_bytes));
+  char* url_string = off_url_to_string(url);
+  off_url_destroy(url);
+  return url_string;
+}
+
+TEST(TestEphemeralWire, RepRequestRoundTripAllFourOps) {
+  char* url = _wire_test_url();
+  ASSERT_NE(url, nullptr);
+
+  const int request_codes[4] = {
+      CLIENT_API_REP_MARK_PERMANENT_REQUEST,
+      CLIENT_API_REP_DELETE_EPHEMERAL_REQUEST,
+      CLIENT_API_REP_PIN_REQUEST,
+      CLIENT_API_REP_UNPIN_REQUEST,
+  };
+  for (int code_index = 0; code_index < 4; code_index++) {
+    client_api_rep_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.url = url;
+    cbor_item_t* frame = client_api_rep_request_encode(request_codes[code_index], &request);
+    ASSERT_NE(frame, nullptr) << "encode rejected op code " << request_codes[code_index];
+    EXPECT_EQ(client_api_wire_get_type(frame), (uint8_t)request_codes[code_index]);
+
+    client_api_rep_request_t decoded;
+    memset(&decoded, 0, sizeof(decoded));
+    ASSERT_EQ(client_api_rep_request_decode(frame, &decoded), 0);
+    EXPECT_STREQ(decoded.url, url);
+    client_api_rep_request_destroy(&decoded);
+    cbor_decref(&frame);
+  }
+
+  /* An op code outside the four request types is rejected at encode. */
+  client_api_rep_request_t request;
+  memset(&request, 0, sizeof(request));
+  request.url = url;
+  EXPECT_EQ(client_api_rep_request_encode(CLIENT_API_EPHEMERAL_LIST_REQUEST, &request), nullptr);
+  free(url);
+}
+
+TEST(TestEphemeralWire, RepRequestRejectsEmptyOversizedAndMalformedUrls) {
+  /* Empty URL: _decode_string turns the empty text string into NULL. */
+  {
+    client_api_rep_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.url = (char*)"";
+    cbor_item_t* frame = client_api_rep_request_encode(CLIENT_API_REP_PIN_REQUEST, &request);
+    ASSERT_NE(frame, nullptr);
+    client_api_rep_request_t decoded;
+    memset(&decoded, 0, sizeof(decoded));
+    EXPECT_EQ(client_api_rep_request_decode(frame, &decoded), -1);
+    cbor_decref(&frame);
+  }
+
+  /* Oversized URL: over OFFS_MAX_ORI_STRING_LEN the decode rejects. */
+  {
+    char oversized[OFFS_MAX_ORI_STRING_LEN + 8];
+    memset(oversized, 'a', sizeof(oversized) - 1);
+    oversized[sizeof(oversized) - 1] = '\0';
+    client_api_rep_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.url = oversized;
+    cbor_item_t* frame = client_api_rep_request_encode(CLIENT_API_REP_PIN_REQUEST, &request);
+    ASSERT_NE(frame, nullptr);
+    client_api_rep_request_t decoded;
+    memset(&decoded, 0, sizeof(decoded));
+    EXPECT_EQ(client_api_rep_request_decode(frame, &decoded), -1);
+    cbor_decref(&frame);
+  }
+
+  /* Well-formed string that is not an OFF URL: validate_ori_string rejects. */
+  {
+    client_api_rep_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.url = (char*)"not-an-off-url";
+    cbor_item_t* frame = client_api_rep_request_encode(CLIENT_API_REP_PIN_REQUEST, &request);
+    ASSERT_NE(frame, nullptr);
+    client_api_rep_request_t decoded;
+    memset(&decoded, 0, sizeof(decoded));
+    EXPECT_EQ(client_api_rep_request_decode(frame, &decoded), -1);
+    cbor_decref(&frame);
+  }
+}
+
+TEST(TestEphemeralWire, RepResponseRoundTrip) {
+  const int response_codes[4] = {
+      CLIENT_API_REP_MARK_PERMANENT_RESPONSE,
+      CLIENT_API_REP_DELETE_EPHEMERAL_RESPONSE,
+      CLIENT_API_REP_PIN_RESPONSE,
+      CLIENT_API_REP_UNPIN_RESPONSE,
+  };
+  for (int code_index = 0; code_index < 4; code_index++) {
+    client_api_rep_response_t response;
+    memset(&response, 0, sizeof(response));
+    response.status = (code_index % 2 == 0) ? 0 : 1;
+    response.blocks = (size_t)(code_index + 1);
+    cbor_item_t* frame = client_api_rep_response_encode(response_codes[code_index], &response);
+    ASSERT_NE(frame, nullptr) << "encode rejected op code " << response_codes[code_index];
+    EXPECT_EQ(client_api_wire_get_type(frame), (uint8_t)response_codes[code_index]);
+
+    client_api_rep_response_t decoded;
+    memset(&decoded, 0, sizeof(decoded));
+    ASSERT_EQ(client_api_rep_response_decode(frame, &decoded), 0);
+    EXPECT_EQ(decoded.status, response.status);
+    EXPECT_EQ(decoded.blocks, response.blocks);
+    client_api_rep_response_destroy(&decoded);
+    cbor_decref(&frame);
+  }
+}
+
+TEST(TestEphemeralWire, EphemeralListResponseRoundTrip) {
+  client_api_ephemeral_list_response_t response;
+  memset(&response, 0, sizeof(response));
+  response.status = 0;
+  response.count = 2;
+  response.hashes = (uint8_t**)calloc(2, sizeof(uint8_t*));
+  response.claims = (uint16_t*)calloc(2, sizeof(uint16_t));
+  response.pins = (uint32_t*)calloc(2, sizeof(uint32_t));
+  for (size_t entry_index = 0; entry_index < 2; entry_index++) {
+    response.hashes[entry_index] = (uint8_t*)calloc(1, 32);
+    memset(response.hashes[entry_index], (int)(0x10 * (entry_index + 1)), 32);
+    response.claims[entry_index] = (uint16_t)(entry_index + 1);
+    response.pins[entry_index] = (uint32_t)(entry_index * 3);
+  }
+
+  cbor_item_t* frame = client_api_ephemeral_list_response_encode(&response);
+  ASSERT_NE(frame, nullptr);
+  EXPECT_EQ(client_api_wire_get_type(frame), (uint8_t)CLIENT_API_EPHEMERAL_LIST_RESPONSE);
+
+  client_api_ephemeral_list_response_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  ASSERT_EQ(client_api_ephemeral_list_response_decode(frame, &decoded), 0);
+  EXPECT_EQ(decoded.status, 0);
+  ASSERT_EQ(decoded.count, 2u);
+  for (size_t entry_index = 0; entry_index < 2; entry_index++) {
+    EXPECT_EQ(memcmp(decoded.hashes[entry_index], response.hashes[entry_index], 32), 0);
+    EXPECT_EQ(decoded.claims[entry_index], response.claims[entry_index]);
+    EXPECT_EQ(decoded.pins[entry_index], response.pins[entry_index]);
+  }
+  client_api_ephemeral_list_response_destroy(&decoded);
+  client_api_ephemeral_list_response_destroy(&response);
+  cbor_decref(&frame);
+}
+
+TEST(TestEphemeralWire, EphemeralListResponseEmptyAndBadHashRejected) {
+  /* Empty list: count 0 round-trips. */
+  {
+    client_api_ephemeral_list_response_t response;
+    memset(&response, 0, sizeof(response));
+    response.status = 0;
+    cbor_item_t* frame = client_api_ephemeral_list_response_encode(&response);
+    ASSERT_NE(frame, nullptr);
+    client_api_ephemeral_list_response_t decoded;
+    memset(&decoded, 0, sizeof(decoded));
+    ASSERT_EQ(client_api_ephemeral_list_response_decode(frame, &decoded), 0);
+    EXPECT_EQ(decoded.status, 0);
+    EXPECT_EQ(decoded.count, 0u);
+    EXPECT_EQ(decoded.hashes, nullptr);
+    client_api_ephemeral_list_response_destroy(&decoded);
+    cbor_decref(&frame);
+  }
+
+  /* A 31-byte hash bytestring in an entry must fail decode. */
+  {
+    cbor_item_t* array = cbor_new_definite_array(3);
+    cbor_item_t* item;
+    item = cbor_build_uint8(CLIENT_API_EPHEMERAL_LIST_RESPONSE);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+    item = cbor_build_uint8(0);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+    cbor_item_t* entries = cbor_new_definite_array(1);
+    cbor_item_t* entry = cbor_new_definite_array(3);
+    uint8_t short_hash[31];
+    memset(short_hash, 0x77, sizeof(short_hash));
+    item = cbor_build_bytestring(short_hash, sizeof(short_hash));
+    (void)cbor_array_push(entry, item);
+    cbor_decref(&item);
+    item = cbor_build_uint16(1);
+    (void)cbor_array_push(entry, item);
+    cbor_decref(&item);
+    item = cbor_build_uint32(2);
+    (void)cbor_array_push(entry, item);
+    cbor_decref(&item);
+    (void)cbor_array_push(entries, entry);
+    cbor_decref(&entry);
+    (void)cbor_array_push(array, entries);
+    cbor_decref(&entries);
+
+    client_api_ephemeral_list_response_t decoded;
+    memset(&decoded, 0, sizeof(decoded));
+    EXPECT_EQ(client_api_ephemeral_list_response_decode(array, &decoded), -1);
+    cbor_decref(&array);
+  }
+}
