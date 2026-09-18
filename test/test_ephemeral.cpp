@@ -946,10 +946,12 @@ public:
     mkdir_p(location);
     block_cache = NULL;
     config = config_default();
-    /* Long debounce window so the 5ms timer cannot fire mid-test. The
-       TearDown's explicit flush + sync handles persistence. */
-    config.index_wait = 60000;
-    config.index_max_wait = 60000;
+    /* Short debounce window: a mid-test snapshot fire is harmless (production
+       debounces constantly) and the TearDown still flushes + syncs explicitly.
+       Long windows (60s) armed a timer per mutation that made valgrind runs
+       take ~48 minutes waiting them out. */
+    config.index_wait = 100;
+    config.index_max_wait = 100;
     for (size_t i = 0; i < EPH_BLOCK_COUNT; i++) {
       blocks[i] = block_create_random_block_by_type(type);
     }
