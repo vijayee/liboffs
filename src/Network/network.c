@@ -1068,6 +1068,11 @@ static void network_handle_ping_block(network_t* network, message_t* msg) {
   if (hash_buf == NULL) return;
 
   index_entry_t* entry = index_peek(network->block_cache->index, hash_buf);
+  if (entry != NULL && !index_entry_is_servable(entry)) {
+    // Ephemeral blocks are local-only — ping must not leak their existence
+    // to peers, so treat the entry as not-found (mirrors find-block).
+    entry = NULL;
+  }
   if (entry != NULL) {
     // Block exists locally — respond immediately
     wire_ping_block_response_t response;

@@ -82,17 +82,19 @@ uint32_t attenuated_bloom_filter_level_count(const attenuated_bloom_filter_t* ab
 cbor_item_t* attenuated_bloom_filter_encode(const attenuated_bloom_filter_t* abf) {
   if (abf == NULL) return NULL;
   // [level_count, [level_0_ebf, level_1_ebf, ...]]
+  // cbor_array_push takes its own reference — cbor_move hands over the
+  // builder's reference so the tree is fully owned by the root.
   cbor_item_t* root = cbor_new_definite_array(2);
-  (void)cbor_array_push(root, cbor_build_uint32(abf->level_count));
+  (void)cbor_array_push(root, cbor_move(cbor_build_uint32(abf->level_count)));
 
   cbor_item_t* levels_arr = cbor_new_definite_array((int)abf->level_count);
   for (uint32_t index = 0; index < abf->level_count; index++) {
     cbor_item_t* level_encoded = elastic_bloom_filter_encode(abf->levels[index]);
     if (level_encoded != NULL) {
-      (void)cbor_array_push(levels_arr, level_encoded);
+      (void)cbor_array_push(levels_arr, cbor_move(level_encoded));
     }
   }
-  (void)cbor_array_push(root, levels_arr);
+  (void)cbor_array_push(root, cbor_move(levels_arr));
   return root;
 }
 

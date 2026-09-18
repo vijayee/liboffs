@@ -42,6 +42,13 @@ typedef struct {
   size_t relay_max_retries;
   uint32_t relay_retry_delay_ms;
 
+  /* Ephemeral registry — persistent elastic bloom filter of ephemeral
+     representation descriptor hashes (startup-only, not a mutable field). */
+  size_t ephemeral_registry_size;         // initial elastic filter capacity
+  uint32_t ephemeral_registry_hash_count;  // hashes per element
+  float ephemeral_registry_omega;          // load ratio before expansion
+  uint32_t ephemeral_registry_fp_bits;     // fingerprint bits per entry
+
   /* Client API enable flags and ports */
   bool     http_enabled;
   uint16_t http_port;

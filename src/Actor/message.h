@@ -247,6 +247,14 @@ typedef enum message_type_e {
   CACHE_PIN_RESULT,
   CACHE_UNPIN_RESULT,
   CACHE_EPHEMERAL_LIST_RESULT,
+  /* Ephemeral registry actor messages — advisory persistent filter of
+     ephemeral representation descriptor hashes. ADD/REMOVE mutate (and
+     flush) the filter; CHECK asks for an advisory contains probe whose
+     answer comes back as EPHEMERAL_REGISTRY_CHECK_RESULT. */
+  EPHEMERAL_REGISTRY_ADD,
+  EPHEMERAL_REGISTRY_CHECK,
+  EPHEMERAL_REGISTRY_CHECK_RESULT,
+  EPHEMERAL_REGISTRY_REMOVE,
 } message_type_e;
 
 /* Stream-to-network: request block from peers */
@@ -359,6 +367,18 @@ typedef struct {
   buffer_t* hash;
   ofd_t* ofd;  /* ownership transferred to cache */
 } ofd_cache_put_payload_t;
+
+/* Payload for EPHEMERAL_REGISTRY_CHECK — probe the advisory filter */
+typedef struct {
+  buffer_t* hash;
+  actor_t* reply_to;
+} registry_check_request_payload_t;
+
+/* Result payload for EPHEMERAL_REGISTRY_CHECK_RESULT */
+typedef struct {
+  uint8_t present;   /* 1 = filter contains the descriptor hash (advisory) */
+  actor_t* reply_to;
+} ephemeral_registry_check_result_payload_t;
 
 typedef struct message_t {
   uint32_t type;

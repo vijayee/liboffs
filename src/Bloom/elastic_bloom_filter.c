@@ -315,14 +315,16 @@ cbor_item_t* elastic_bloom_filter_encode(const elastic_bloom_filter_t* ebf) {
   }
 
   // [size, hash_count, fp_bits, seed_a, seed_b, bitset_bytes, num_occupied, bucket_entries...]
+  // cbor_array_push takes its own reference — cbor_move hands over the
+  // builder's reference so the tree is fully owned by the root.
   cbor_item_t* root = cbor_new_definite_array(8 + (int)num_occupied);
-  (void)cbor_array_push(root, cbor_build_uint64(ebf->size));
-  (void)cbor_array_push(root, cbor_build_uint32(ebf->hash_count));
-  (void)cbor_array_push(root, cbor_build_uint32(ebf->fp_bits));
-  (void)cbor_array_push(root, cbor_build_uint64(ebf->seed_a));
-  (void)cbor_array_push(root, cbor_build_uint64(ebf->seed_b));
-  (void)cbor_array_push(root, cbor_build_bytestring(ebf->bits->data, ebf->bits->size));
-  (void)cbor_array_push(root, cbor_build_uint64(num_occupied));
+  (void)cbor_array_push(root, cbor_move(cbor_build_uint64(ebf->size)));
+  (void)cbor_array_push(root, cbor_move(cbor_build_uint32(ebf->hash_count)));
+  (void)cbor_array_push(root, cbor_move(cbor_build_uint32(ebf->fp_bits)));
+  (void)cbor_array_push(root, cbor_move(cbor_build_uint64(ebf->seed_a)));
+  (void)cbor_array_push(root, cbor_move(cbor_build_uint64(ebf->seed_b)));
+  (void)cbor_array_push(root, cbor_move(cbor_build_bytestring(ebf->bits->data, ebf->bits->size)));
+  (void)cbor_array_push(root, cbor_move(cbor_build_uint64(num_occupied)));
 
   // Sparse bucket entries
   for (size_t index = 0; index < ebf->bucket_count; index++) {
@@ -333,14 +335,14 @@ cbor_item_t* elastic_bloom_filter_encode(const elastic_bloom_filter_t* ebf) {
     while (entry != NULL) { fp_count++; entry = entry->next; }
     // [bucket_index, fp_count, fp1, fp2, ...]
     cbor_item_t* bucket_item = cbor_new_definite_array(2 + (int)fp_count);
-    (void)cbor_array_push(bucket_item, cbor_build_uint64(index));
-    (void)cbor_array_push(bucket_item, cbor_build_uint32((uint32_t)fp_count));
+    (void)cbor_array_push(bucket_item, cbor_move(cbor_build_uint64(index)));
+    (void)cbor_array_push(bucket_item, cbor_move(cbor_build_uint32((uint32_t)fp_count)));
     entry = ebf->buckets[index];
     while (entry != NULL) {
-      (void)cbor_array_push(bucket_item, cbor_build_uint32(entry->fingerprint));
+      (void)cbor_array_push(bucket_item, cbor_move(cbor_build_uint32(entry->fingerprint)));
       entry = entry->next;
     }
-    (void)cbor_array_push(root, bucket_item);
+    (void)cbor_array_push(root, cbor_move(bucket_item));
   }
 
   return root;

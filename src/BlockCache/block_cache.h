@@ -5,6 +5,7 @@
 #ifndef OFFS_BLOCK_CACHE_H
 #define OFFS_BLOCK_CACHE_H
 #include "block.h"
+#include "ephemeral_registry.h"
 #include "index.h"
 #include "sections.h"
 #include "../RefCounter/refcounter.h"
@@ -168,6 +169,7 @@ typedef struct block_cache_t {
   size_t max_capacity_bytes;
   authority_t* authority;
   respiration_actor_t* respiration;
+  ephemeral_registry_t* registry;
 } block_cache_t;
 
 /* Result payload for CACHE_GET_RESULT */

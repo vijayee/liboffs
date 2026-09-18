@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
 #include <string.h>
 #include <cstdio>
+#include <sys/stat.h>
 extern "C" {
 #include "../src/BlockCache/index.h"
 #include "../src/BlockCache/block_cache.h"
+#include "../src/BlockCache/ephemeral_registry.h"
 #include "../src/BlockCache/sections.h"
 #include "../src/Util/path_join.h"
 #include "../src/Util/mkdir_p.h"
@@ -1259,4 +1261,118 @@ TEST_F(TestEphemeralCache, ListEphemeralMirrorsPayload) {
     DESTROY(cs.hashes[0], buffer);
     DESTROY(cs.hashes[1], buffer);
   }
+}
+
+/* ---- ephemeral registry actor ---- */
+
+/* Completion actor for the registry CHECK round-trip — records the advisory
+   present bit from the CHECK_RESULT reply. */
+typedef struct {
+  ATOMIC(uint8_t) done;
+  uint8_t present;
+} registry_completion_t;
+
+static void registry_completion_dispatch(void* state, message_t* msg) {
+  registry_completion_t* cs = (registry_completion_t*)state;
+  if (msg->type == EPHEMERAL_REGISTRY_CHECK_RESULT) {
+    ephemeral_registry_check_result_payload_t* result =
+        (ephemeral_registry_check_result_payload_t*)msg->payload;
+    cs->present = result->present;
+  }
+  ATOMIC_STORE(&cs->done, 1);
+}
+
+/* Synchronous advisory CHECK: send the request through a completion actor,
+   poll done, barrier on pool idle, destroy the completion actor. */
+static void _registry_check_sync(ephemeral_registry_t* registry, buffer_t* hash,
+                                 scheduler_pool_t* pool, uint8_t* present) {
+  registry_completion_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, registry_completion_dispatch, pool);
+  ephemeral_registry_check(registry, hash, &comp);
+  while (!ATOMIC_LOAD(&cs.done)) { platform_sleep_ms(1); }
+  scheduler_pool_wait_for_idle(pool);
+  actor_destroy(&comp);
+  *present = cs.present;
+}
+
+/* Add → present, native remove → absent (no rebuild), two-file rotation
+   persistence on disk, reload round-trip, and backup-fallback when the
+   current filter file is corrupt. */
+TEST(TestEphemeralRegistry, AddCheckRemovePersist) {
+  char* location = path_join("/tmp", "EphemeralRegistryTest");
+  rm_rf(location);
+  mkdir_p(location);
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  scheduler_pool_start(pool);
+  config_t config = config_default();
+  block_t* descriptor_block = block_create_random_block_by_type(standard);
+  buffer_t* descriptor_hash = (buffer_t*)refcounter_reference((refcounter_t*)descriptor_block->hash);
+  block_destroy(descriptor_block);
+
+  ephemeral_registry_t* registry = ephemeral_registry_create(location, config, pool);
+  ASSERT_NE(registry, nullptr);
+
+  uint8_t present = 2;
+  _registry_check_sync(registry, descriptor_hash, pool, &present);
+  EXPECT_EQ(present, 0u);
+
+  ephemeral_registry_add(registry, descriptor_hash);
+  scheduler_pool_wait_for_idle(pool);  /* flush happens in the actor's dispatch */
+  present = 2;
+  _registry_check_sync(registry, descriptor_hash, pool, &present);
+  EXPECT_EQ(present, 1u);
+
+  ephemeral_registry_remove(registry, descriptor_hash);
+  scheduler_pool_wait_for_idle(pool);
+  present = 2;
+  _registry_check_sync(registry, descriptor_hash, pool, &present);
+  EXPECT_EQ(present, 0u);  /* native elastic BF deletion — no rebuild needed */
+
+  /* Persistence round-trip + .last backup rotation on disk. */
+  ephemeral_registry_add(registry, descriptor_hash);
+  scheduler_pool_wait_for_idle(pool);
+  /* The current + backup files exist after two flushes (the remove-then-add
+     pair rotates the first current into the .last backup). */
+  char* current_path = path_join(location, "ephemeral_registry.bf");
+  char* backup_path = path_join(location, "ephemeral_registry.bf.last");
+  struct stat file_info;
+  EXPECT_EQ(stat(current_path, &file_info), 0);
+  EXPECT_EQ(stat(backup_path, &file_info), 0);
+  free(current_path);
+  free(backup_path);
+  ephemeral_registry_destroy(registry);
+
+  ephemeral_registry_t* reloaded = ephemeral_registry_create(location, config, pool);
+  ASSERT_NE(reloaded, nullptr);
+  present = 2;
+  _registry_check_sync(reloaded, descriptor_hash, pool, &present);
+  EXPECT_EQ(present, 1u);
+
+  /* Backup-fallback: corrupt the current file → load falls back to .last.
+     One more ADD first (the recycler's self-heal re-add is idempotent) so a
+     flush rotates the hash-containing current into the .last backup — the
+     remove-flush had left an empty filter there. */
+  ephemeral_registry_add(reloaded, descriptor_hash);
+  scheduler_pool_wait_for_idle(pool);
+  ephemeral_registry_destroy(reloaded);
+  char* corrupt_path = path_join(location, "ephemeral_registry.bf");
+  FILE* corrupt = fopen(corrupt_path, "wb");
+  ASSERT_NE(corrupt, nullptr);
+  fputs("garbage", corrupt);
+  fclose(corrupt);
+  free(corrupt_path);
+  ephemeral_registry_t* recovered = ephemeral_registry_create(location, config, pool);
+  ASSERT_NE(recovered, nullptr);
+  present = 2;
+  _registry_check_sync(recovered, descriptor_hash, pool, &present);
+  EXPECT_EQ(present, 1u);  /* served from the backup */
+
+  ephemeral_registry_destroy(recovered);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
+  DESTROY(descriptor_hash, buffer);
+  rm_rf(location);
+  free(location);
 }

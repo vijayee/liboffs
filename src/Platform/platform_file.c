@@ -80,6 +80,10 @@
     return unlink(path);
   }
 
+  int platform_file_rename(const char* old_path, const char* new_path) {
+    return rename(old_path, new_path);
+  }
+
   int platform_mkdir(const char* path) {
     return mkdir_p((char*)path);
   }
@@ -256,6 +260,25 @@
     MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wlen);
     int result = DeleteFileW(wpath) ? 0 : -1;
     free(wpath);
+    return result;
+  }
+
+  int platform_file_rename(const char* old_path, const char* new_path) {
+    int old_wlen = MultiByteToWideChar(CP_UTF8, 0, old_path, -1, NULL, 0);
+    int new_wlen = MultiByteToWideChar(CP_UTF8, 0, new_path, -1, NULL, 0);
+    if (old_wlen <= 0 || new_wlen <= 0) return -1;
+    WCHAR* wold = (WCHAR*)malloc(old_wlen * sizeof(WCHAR));
+    WCHAR* wnew = (WCHAR*)malloc(new_wlen * sizeof(WCHAR));
+    if (wold == NULL || wnew == NULL) {
+      free(wold);
+      free(wnew);
+      return -1;
+    }
+    MultiByteToWideChar(CP_UTF8, 0, old_path, -1, wold, old_wlen);
+    MultiByteToWideChar(CP_UTF8, 0, new_path, -1, wnew, new_wlen);
+    int result = MoveFileExW(wold, wnew, MOVEFILE_REPLACE_EXISTING) ? 0 : -1;
+    free(wold);
+    free(wnew);
     return result;
   }
 

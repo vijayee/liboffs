@@ -963,6 +963,9 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
     block_cache->current_bytes = index_count(block_cache->index) * (size_t)type;
     block_cache_update_capacity(block_cache);
   }
+  /* Registry lives next to the index (same folder), so it must be created
+     before the folder path is freed below. */
+  block_cache->registry = ephemeral_registry_create(folder, config, pool);
   free(folder);
   return block_cache;
 }
@@ -988,6 +991,9 @@ void block_cache_destroy(block_cache_t* block_cache) {
       scheduler_pool_wait_for_idle(block_cache->pool);
     }
     index_destroy(block_cache->index);
+    /* The registry actor must not be processing when destroyed — the
+       wait_for_idle above covers it (the registry's own destroy re-waits). */
+    ephemeral_registry_destroy(block_cache->registry);
     sections_destroy(block_cache->sections);
     block_lru_cache_destroy(block_cache->lru);
     actor_destroy(&block_cache->actor);

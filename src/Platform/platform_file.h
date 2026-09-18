@@ -35,6 +35,10 @@ int platform_file_truncate(platform_file_t* file, uint64_t length);
 
 int platform_file_exists(const char* path);
 int platform_file_unlink(const char* path);
+/* Rename/move old_path to new_path, replacing new_path when it already
+   exists (POSIX rename() / Win32 MoveFileExW MOVEFILE_REPLACE_EXISTING).
+   Returns 0 on success, -1 on failure. */
+int platform_file_rename(const char* old_path, const char* new_path);
 int platform_mkdir(const char* path);  /* recursive */
 
 // Write data to a uniquely-named temporary file. Returns a strdup'd path

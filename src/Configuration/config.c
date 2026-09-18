@@ -3,6 +3,7 @@
 //
 
 #include "config.h"
+#include "../Bloom/elastic_bloom_filter.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include <stdbool.h>
@@ -44,6 +45,10 @@ config_t config_default() {
   config.respiration_tau_max_ms = 300000;
   config.relay_max_retries = 5;
   config.relay_retry_delay_ms = 500;
+  config.ephemeral_registry_size = 1024;
+  config.ephemeral_registry_hash_count = 4;
+  config.ephemeral_registry_omega = 0.85f;
+  config.ephemeral_registry_fp_bits = EBF_DEFAULT_FP_BITS;
   config.http_enabled = false;
   config.http_port = 80;
   config.https_enabled = false;
