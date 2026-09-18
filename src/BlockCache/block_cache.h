@@ -111,6 +111,9 @@ typedef struct {
   int result;
   uint16_t previous_count;
   uint16_t new_count;
+  buffer_t* hash;  /* referenced copy of the request's hash — tells the
+                      consumer WHICH block the counts describe; NULL when the
+                      request carried no hash */
   actor_t* reply_to;
 } cache_ephemeral_result_payload_t;
 

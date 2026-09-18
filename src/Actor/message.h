@@ -255,6 +255,10 @@ typedef enum message_type_e {
   EPHEMERAL_REGISTRY_CHECK,
   EPHEMERAL_REGISTRY_CHECK_RESULT,
   EPHEMERAL_REGISTRY_REMOVE,
+  /* Representation actor: summary of a mark-permanent / delete-ephemeral /
+     pin / unpin walk over a representation's descriptor chain. Payload is
+     representation_op_result_payload_t (representation_actor.h). */
+  REPRESENTATION_OP_RESULT,
 } message_type_e;
 
 /* Stream-to-network: request block from peers */

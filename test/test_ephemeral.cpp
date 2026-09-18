@@ -29,6 +29,7 @@ extern "C" {
 #include "../src/OFFStreams/block_recipe.h"
 #include "../src/OFFStreams/writeable_off_stream.h"
 #include "../src/OFFStreams/writeable_descriptor.h"
+#include "../src/OFFStreams/representation_actor.h"
 #include <cbor.h>
 }
 
@@ -2154,4 +2155,203 @@ TEST_F(TestEphemeralCache, FailedEphemeralPutReleasesAcquiredRecyclerClaims) {
   block_cache_destroy(block_cache);
   block_cache = NULL;
   DESTROY(descriptor_hash, buffer);
+}
+
+/* ---- Task 10: representation actor ops (mark-permanent / delete / pin / unpin) ---- */
+
+/* Completion actor for the representation actor's summary reply. */
+typedef struct {
+  ATOMIC(uint8_t) done;
+  int result;
+  size_t blocks_touched;
+} rep_completion_t;
+
+static void rep_completion_dispatch(void* state, message_t* msg) {
+  rep_completion_t* cs = (rep_completion_t*)state;
+  if (msg->type == REPRESENTATION_OP_RESULT) {
+    representation_op_result_payload_t* result =
+        (representation_op_result_payload_t*)msg->payload;
+    cs->result = result->result;
+    cs->blocks_touched = result->blocks_touched;
+  }
+  ATOMIC_STORE(&cs->done, 1);
+}
+
+/* Run one representation op to completion and return the (still-live) actor so
+   the caller can destroy it once it has asserted on the cache state. */
+static representation_actor_t* _test_rep_op(block_cache_t* bc, scheduler_pool_t* pool,
+                                            buffer_t* descriptor_hash, representation_op_e op,
+                                            int* out_result, size_t* out_blocks) {
+  rep_completion_t cs;
+  memset(&cs, 0, sizeof(cs));
+  actor_t comp;
+  actor_init(&comp, &cs, rep_completion_dispatch, pool);
+  representation_actor_t* rep = representation_actor_create(bc, NULL, descriptor_hash, op, &comp);
+  while (!ATOMIC_LOAD(&cs.done)) { platform_sleep_ms(1); }
+  scheduler_pool_wait_for_idle(pool);
+  actor_destroy(&comp);
+  *out_result = cs.result;
+  *out_blocks = cs.blocks_touched;
+  return rep;
+}
+
+/* MARK_PERMANENT walks the whole chain, CLEARs every claim (commit), and keeps
+   every block — the blocks become ordinary permanent blocks. */
+TEST_F(TestEphemeralCache, MarkPermanentClearsClaimsAndKeepsBlocks) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  buffer_t* descriptor_hash = _test_put_ephemeral(block_cache, pool, standard);
+  ASSERT_NE(descriptor_hash, nullptr);
+  size_t entries_before = block_cache_count(block_cache);
+  EXPECT_GT(entries_before, 0u);
+
+  int result; size_t blocks;
+  representation_actor_t* rep = _test_rep_op(block_cache, pool, descriptor_hash,
+                                             REPRESENTATION_OP_MARK_PERMANENT, &result, &blocks);
+  EXPECT_EQ(result, 0);
+  EXPECT_GT(blocks, 0u);
+  EXPECT_EQ(block_cache_count(block_cache), entries_before);   /* all blocks survive */
+
+  index_entry_vec_t* entries = index_to_array(block_cache->index);
+  for (int idx = 0; idx < entries->length; idx++) {
+    EXPECT_EQ(entries->data[idx]->ephemeral_count, 0u) << "block " << idx;
+    index_entry_destroy(entries->data[idx]);
+  }
+  vec_deinit(entries);
+  free(entries);
+
+  representation_actor_destroy(rep);
+  block_cache_sync(block_cache);
+  block_cache_destroy(block_cache);
+  block_cache = NULL;
+  DESTROY(descriptor_hash, buffer);
+}
+
+/* DELETE_EPHEMERAL releases every claim of a wholly-owned representation —
+   each block's count drops to zero and the block is deleted. */
+TEST_F(TestEphemeralCache, DeleteEphemeralRemovesOnlyClaimedBlocks) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  buffer_t* descriptor_hash = _test_put_ephemeral(block_cache, pool, standard);
+  ASSERT_NE(descriptor_hash, nullptr);
+  int result; size_t blocks;
+  representation_actor_t* rep = _test_rep_op(block_cache, pool, descriptor_hash,
+                                             REPRESENTATION_OP_DELETE_EPHEMERAL, &result, &blocks);
+  EXPECT_EQ(result, 0);
+  EXPECT_EQ(block_cache_count(block_cache), 0u);   /* exclusive claims → all deleted */
+  representation_actor_destroy(rep);
+  block_cache_sync(block_cache);
+  block_cache_destroy(block_cache);
+  block_cache = NULL;
+  DESTROY(descriptor_hash, buffer);
+}
+
+/* Referential integrity: a block shared with another representation survives
+   a delete-ephemeral of this one. Route (the accepted alternative): the other
+   representation's claims are represented by a recycler's acquired propagated
+   claims (Task 8) over A's ori — after that recycle, A's blocks carry count 2.
+   delete-ephemeral(A) drops A's own claim: shared blocks go 2 → 1 and SURVIVE,
+   while A's exclusively-owned blocks (count 1) are deleted. Releasing the
+   surviving claims afterwards (the other representation's own delete) removes
+   those too. */
+TEST_F(TestEphemeralCache, DeleteEphemeralSparesBlocksSharedWithOtherRepresentation) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  buffer_t* descriptor_a = _test_put_ephemeral(block_cache, pool, standard);
+  ASSERT_NE(descriptor_a, nullptr);
+  ASSERT_EQ(block_cache_count(block_cache), 4u);
+
+  /* Recycle A into an ephemeral put: the recycler acquires a second claim on
+     each source block it serves (RecyclerPropagatesForEphemeralPut mechanics). */
+  vec_ori_t oris;
+  vec_init(&oris);
+  ori_t* source_ori = _test_ori_for(descriptor_a);
+  vec_push(&oris, source_ori);
+  recycler_recipe_t* recycler = recycler_recipe_create(pool, block_cache, standard, oris, NULL,
+                                                        /*put_is_ephemeral=*/1, RECYCLE_EPHEMERAL_NONE);
+  ASSERT_NE(recycler, nullptr);
+  /* recycler_recipe_create references every ori itself — drop the creation
+     reference held by the test. */
+  DESTROY(source_ori, ori);
+
+  recipe_watch_t watch;
+  memset(&watch, 0, sizeof(watch));
+  stream_subscribe((stream_t*)recycler, error_event, &watch, recipe_error_watch, NULL);
+  stream_once((stream_t*)recycler, close_event, &watch, recipe_close_watch, NULL);
+  recycler_recipe_pull(recycler);
+  recycler_recipe_pull(recycler);
+  recycler_recipe_pull(recycler);
+  while (!ATOMIC_LOAD(&watch.done)) { platform_sleep_ms(1); }
+  scheduler_pool_wait_for_idle(pool);
+  EXPECT_EQ(ATOMIC_LOAD(&watch.errored), 0);
+  stream_deferred_deref((stream_t*)recycler);
+  scheduler_pool_wait_for_idle(pool);
+
+  /* Classify A's blocks by claim count: shared (count 2, referenced by the
+     recycler's propagated claims) vs exclusively owned (count 1). */
+  std::vector<buffer_t*> shared_hashes;
+  std::vector<buffer_t*> exclusive_hashes;
+  index_entry_vec_t* entries = index_to_array(block_cache->index);
+  ASSERT_NE(entries, nullptr);
+  for (int idx = 0; idx < entries->length; idx++) {
+    buffer_t* hash = (buffer_t*)refcounter_reference((refcounter_t*)entries->data[idx]->hash);
+    if (entries->data[idx]->ephemeral_count >= 2) {
+      shared_hashes.push_back(hash);
+    } else {
+      exclusive_hashes.push_back(hash);
+    }
+    index_entry_destroy(entries->data[idx]);
+  }
+  vec_deinit(entries);
+  free(entries);
+  ASSERT_EQ(shared_hashes.size(), 2u) << "the recycler must share exactly two blocks";
+  ASSERT_EQ(exclusive_hashes.size(), 2u);
+
+  /* Delete A: its own claim goes away on every block in the walk. */
+  int result; size_t blocks;
+  representation_actor_t* rep = _test_rep_op(block_cache, pool, descriptor_a,
+                                             REPRESENTATION_OP_DELETE_EPHEMERAL, &result, &blocks);
+  EXPECT_EQ(result, 0);
+  EXPECT_EQ(blocks, 4u);   /* three data hashes + the descriptor block */
+
+  /* Exclusively-owned blocks are deleted; shared blocks drop 2 → 1 and stay. */
+  for (buffer_t* exclusive_hash : exclusive_hashes) {
+    EXPECT_EQ(index_peek(block_cache->index, exclusive_hash), nullptr);
+    DESTROY(exclusive_hash, buffer);
+  }
+  for (buffer_t* shared_hash : shared_hashes) {
+    index_entry_t* entry = index_peek(block_cache->index, shared_hash);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->ephemeral_count, 1u);
+    DESTROY(shared_hash, buffer);
+  }
+  EXPECT_EQ(block_cache_count(block_cache), 2u);
+
+  /* The other representation's own delete (its remaining claim on each shared
+     block) removes those blocks too. Re-snapshot the survivors, then release
+     each one's remaining claim. */
+  int release_result;
+  uint16_t release_previous;
+  uint16_t release_new;
+  index_entry_vec_t* survivors = index_to_array(block_cache->index);
+  ASSERT_NE(survivors, nullptr);
+  ASSERT_EQ(survivors->length, 2);
+  std::vector<buffer_t*> survivor_hashes;
+  for (int idx = 0; idx < survivors->length; idx++) {
+    survivor_hashes.push_back(
+        (buffer_t*)refcounter_reference((refcounter_t*)survivors->data[idx]->hash));
+    index_entry_destroy(survivors->data[idx]);
+  }
+  vec_deinit(survivors);
+  free(survivors);
+  for (buffer_t* survivor_hash : survivor_hashes) {
+    eph_ephemeral_sync(block_cache, survivor_hash, CACHE_EPHEMERAL_RELEASE,
+                       &release_result, &release_previous, &release_new, pool);
+    EXPECT_EQ(release_result, CACHE_EPHEMERAL_OK);
+    DESTROY(survivor_hash, buffer);
+  }
+  EXPECT_EQ(block_cache_count(block_cache), 0u);
+
+  representation_actor_destroy(rep);
+  block_cache_sync(block_cache);
+  block_cache_destroy(block_cache);
+  block_cache = NULL;
+  DESTROY(descriptor_a, buffer);
 }

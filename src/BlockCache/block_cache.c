@@ -97,6 +97,14 @@ static void cache_ephemeral_payload_destroy(void* ptr) {
   free(payload);
 }
 
+static void cache_ephemeral_result_payload_destroy(void* ptr) {
+  cache_ephemeral_result_payload_t* payload = (cache_ephemeral_result_payload_t*)ptr;
+  if (payload->hash != NULL) {
+    DESTROY(payload->hash, buffer);
+  }
+  free(payload);
+}
+
 static void cache_pin_payload_destroy(void* ptr) {
   cache_pin_payload_t* payload = (cache_pin_payload_t*)ptr;
   if (payload->hash != NULL) {
@@ -809,11 +817,12 @@ void block_cache_dispatch(void* state, message_t* msg) {
         result->result = p->result;
         result->previous_count = p->previous_count;
         result->new_count = p->new_count;
+        result->hash = p->hash != NULL ? (buffer_t*)refcounter_reference((refcounter_t*)p->hash) : NULL;
         result->reply_to = NULL;
         message_t reply;
         reply.type = CACHE_EPHEMERAL_RESULT;
         reply.payload = result;
-        reply.payload_destroy = free;
+        reply.payload_destroy = cache_ephemeral_result_payload_destroy;
         actor_send(p->reply_to, &reply);
       }
       break;
