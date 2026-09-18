@@ -25,6 +25,7 @@
 #include "../../OFFStreams/tuple.h"
 #include "../../OFFStreams/ofd.h"
 #include "../../BlockCache/block_cache.h"
+#include "../../BlockCache/ephemeral_registry.h"
 #include "../../Util/atomic_compat.h"
 #include "../../Util/log.h"
 #include "../../Util/validation.h"
@@ -1087,6 +1088,13 @@ static void _put_on_descriptor_close(void* ctx, void* unused) {
     url->file_hash = buffer_copy(put_ctx->file_hash);
     url->descriptor_hash = buffer_copy(put_ctx->descriptor_hash);
 
+    /* Temporary puts: register the completed representation so the ephemeral
+       registry tracks it for respiration exclusion and servability. */
+    if (put_ctx->temporary && put_ctx->descriptor_hash != NULL &&
+        put_ctx->bc != NULL && put_ctx->bc->registry != NULL) {
+        ephemeral_registry_add(put_ctx->bc->registry, put_ctx->descriptor_hash);
+    }
+
     /* Populate OFD cache on directory upload — decode from saved upload data.
        Cannot use block_cache because block hashes differ from file_hash
        (blocks are padded to block_size before hashing). */
@@ -1348,6 +1356,21 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
 
     vec_ori_t recycler_oris;
     _parse_recycler_header(recycler_header, &recycler_oris);
+    if (is_temporary && recycler_oris.length > 0) {
+        /* Temporary+recycler is unsupported until recycler enforcement lands:
+           recycled source blocks would take zero claims. */
+        http_response_set_status(response, 400);
+        http_response_write(response, "temporary puts do not support recycler sources yet", 50);
+        http_response_end(response);
+        for (int index = 0; index < recycler_oris.length; index++) {
+            ori_destroy(recycler_oris.data[index]);
+        }
+        vec_deinit(&recycler_oris);
+        if (upload_data != NULL) {
+            buffer_destroy(upload_data);
+        }
+        return;
+    }
     if (recycler_oris.length > 0) {
         recycler_recipe_t* recycler = recycler_recipe_create(ctx->pool, ctx->bc, standard,
                                                               recycler_oris, NULL);
@@ -1362,6 +1385,11 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
 
     writeable_descriptor_t* desc = writeable_descriptor_create(
         ctx->pool, ctx->bc, standard, 32, tuple_size, stream_length, NULL);
+
+    if (is_temporary) {
+        writeable_off_stream_set_ephemeral(ws, 1);
+        writeable_descriptor_set_ephemeral(desc, 1);
+    }
 
     put_context_t* put_ctx = get_clear_memory(sizeof(put_context_t));
     put_ctx->response = response;
@@ -1546,6 +1574,16 @@ static int _off_put_headers_complete(http_connection_t* connection,
 
     vec_ori_t recycler_oris;
     _parse_recycler_header(recycler_header, &recycler_oris);
+    if (is_temporary && recycler_oris.length > 0) {
+        /* Temporary+recycler is unsupported until recycler enforcement lands:
+           recycled source blocks would take zero claims. */
+        for (int index = 0; index < recycler_oris.length; index++) {
+            ori_destroy(recycler_oris.data[index]);
+        }
+        vec_deinit(&recycler_oris);
+        return _off_put_headers_complete_error(response, 400,
+            "temporary puts do not support recycler sources yet");
+    }
     if (recycler_oris.length > 0) {
         recycler_recipe_t* recycler = recycler_recipe_create(routes_ctx->pool, routes_ctx->bc, standard,
                                                               recycler_oris, NULL);
@@ -1560,6 +1598,11 @@ static int _off_put_headers_complete(http_connection_t* connection,
 
     writeable_descriptor_t* desc = writeable_descriptor_create(
         routes_ctx->pool, routes_ctx->bc, standard, 32, tuple_size, stream_length, NULL);
+
+    if (is_temporary) {
+        writeable_off_stream_set_ephemeral(ws, 1);
+        writeable_descriptor_set_ephemeral(desc, 1);
+    }
 
     put_context_t* put_ctx = get_clear_memory(sizeof(put_context_t));
     put_ctx->response = response;

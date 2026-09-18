@@ -144,6 +144,7 @@ struct webtransport_h3_conn_t {
   char* put_server_address;
   buffer_t* put_file_hash;
   buffer_t* put_descriptor_hash;
+  uint8_t put_temporary;
 };
 
 /* Pipeline context for GET requests */
@@ -652,6 +653,13 @@ static void _wt_h3_put_on_descriptor_close(void* ctx, void* unused) {
   url->file_hash = buffer_copy(conn->put_file_hash);
   url->descriptor_hash = buffer_copy(conn->put_descriptor_hash);
 
+  /* Temporary puts: register the completed representation with the ephemeral
+     registry for respiration exclusion and servability. */
+  if (conn->put_temporary && conn->put_descriptor_hash != NULL &&
+      conn->bc != NULL && conn->bc->registry != NULL) {
+    ephemeral_registry_add(conn->bc->registry, conn->put_descriptor_hash);
+  }
+
   char* ori_string = off_url_to_string(url);
   client_api_put_response_t response;
   response.ori_string = ori_string;
@@ -679,6 +687,7 @@ static void _wt_h3_put_on_descriptor_close(void* ctx, void* unused) {
   conn->put_server_address = NULL;
   conn->put_file_hash = NULL;
   conn->put_descriptor_hash = NULL;
+  conn->put_temporary = 0;
 }
 
 static void _wt_h3_handle_put(webtransport_h3_conn_t* conn, cbor_item_t* frame) {
@@ -712,6 +721,7 @@ static void _wt_h3_handle_put(webtransport_h3_conn_t* conn, cbor_item_t* frame) 
   conn->put_file_name = msg.file_name;
   conn->put_stream_length = msg.stream_length;
   conn->put_server_address = msg.server_address;
+  conn->put_temporary = msg.temporary;
   msg.content_type = NULL;
   msg.file_name = NULL;
   msg.server_address = NULL;
@@ -727,6 +737,11 @@ static void _wt_h3_handle_put(webtransport_h3_conn_t* conn, cbor_item_t* frame) 
       conn->pool, conn->bc, conn->tc, block_type, tuple_size, descriptor_pad, recipes, NULL);
   conn->put_desc = writeable_descriptor_create(
       conn->pool, conn->bc, block_type, descriptor_pad, tuple_size, msg.stream_length, NULL);
+
+  if (msg.temporary) {
+    writeable_off_stream_set_ephemeral(conn->put_ws, 1);
+    writeable_descriptor_set_ephemeral(conn->put_desc, 1);
+  }
 
   stream_subscribe((stream_t*)conn->put_ws, close_event, conn, _wt_h3_put_on_stream_close, NULL);
   stream_subscribe((stream_t*)conn->put_ws, data_event, conn, _wt_h3_put_on_stream_data, NULL);

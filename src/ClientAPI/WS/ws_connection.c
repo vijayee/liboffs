@@ -73,6 +73,7 @@ typedef struct {
   buffer_t* file_hash;
   buffer_t* descriptor_hash;
   size_t file_hash_offset;
+  uint8_t temporary;
 } ws_put_pipeline_t;
 
 static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
@@ -713,6 +714,14 @@ static void _ws_put_on_descriptor_close(void* ctx, void* unused) {
   url->file_hash = buffer_copy(pipeline->file_hash);
   url->descriptor_hash = buffer_copy(pipeline->descriptor_hash);
 
+  /* Temporary puts: register the completed representation with the ephemeral
+     registry for respiration exclusion and servability. */
+  if (pipeline->temporary && pipeline->descriptor_hash != NULL &&
+      pipeline->connection != NULL && pipeline->connection->bc != NULL &&
+      pipeline->connection->bc->registry != NULL) {
+    ephemeral_registry_add(pipeline->connection->bc->registry, pipeline->descriptor_hash);
+  }
+
   char* ori_string = off_url_to_string(url);
 
   client_api_put_response_t response;
@@ -951,6 +960,7 @@ static void _ws_handle_put(ws_connection_t* conn, cbor_item_t* frame) {
   pipeline->file_hash = NULL;
   pipeline->descriptor_hash = NULL;
   pipeline->file_hash_offset = 0;
+  pipeline->temporary = msg.temporary;
 
   /* Create writeable streams */
   block_size_e block_type = standard;
@@ -965,6 +975,11 @@ static void _ws_handle_put(ws_connection_t* conn, cbor_item_t* frame) {
     conn->pool, conn->bc, conn->tc, block_type, tuple_size, descriptor_pad, recipes, NULL);
   writeable_descriptor_t* desc = writeable_descriptor_create(
     conn->pool, conn->bc, block_type, descriptor_pad, tuple_size, msg.stream_length, NULL);
+
+  if (msg.temporary) {
+    writeable_off_stream_set_ephemeral(ws, 1);
+    writeable_descriptor_set_ephemeral(desc, 1);
+  }
 
   pipeline->ws = ws;
   pipeline->desc = desc;
