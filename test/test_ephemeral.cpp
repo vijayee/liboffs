@@ -21,6 +21,12 @@ extern "C" {
 #include "../src/Scheduler/scheduler.h"
 #include "../src/Util/atomic_compat.h"
 #include "../src/Platform/platform_time.h"
+#include "../src/Streams/stream.h"
+#include "../src/OFFStreams/tuple.h"
+#include "../src/OFFStreams/tuple_cache.h"
+#include "../src/OFFStreams/block_recipe.h"
+#include "../src/OFFStreams/writeable_off_stream.h"
+#include "../src/OFFStreams/writeable_descriptor.h"
 #include <cbor.h>
 }
 
@@ -1502,4 +1508,126 @@ TEST(TestEphemeralBloomDecode, AttenuatedValidRoundTrip) {
   attenuated_bloom_filter_destroy(decoded);
   cbor_decref(&encoded);
   attenuated_bloom_filter_destroy(abf);
+}
+
+/* ---- ephemeral put mode in writeable_off_stream / writeable_descriptor ---- */
+
+/* Wiring for a local put pipeline, mirroring the off_routes.c put flow:
+   tuples produced by the writeable off-stream feed the descriptor (the
+   32-byte finalize payload is the file hash, not a tuple), and the
+   off-stream's close_event closes the descriptor so it builds and stores
+   its descriptor blocks. */
+typedef struct {
+  writeable_descriptor_t* desc;
+} ephemeral_put_pipeline_t;
+
+static void ephemeral_put_on_stream_data(void* ctx, void* data) {
+  ephemeral_put_pipeline_t* pipeline = (ephemeral_put_pipeline_t*)ctx;
+  buffer_t* payload = (buffer_t*)data;
+  if (payload->size == 32) {
+    /* WRITEABLE_FINALIZE emits the 32-byte file hash on data_event — not a
+       tuple (tuple payloads reach here as a tuple_t whose cast "size" field
+       is the tuple hash count). */
+    return;
+  }
+  tuple_t* tuple = (tuple_t*)refcounter_reference((refcounter_t*)payload);
+  writeable_descriptor_write(pipeline->desc, tuple);
+  tuple_destroy(tuple);
+}
+
+static void ephemeral_put_on_stream_close(void* ctx, void* unused) {
+  (void)unused;
+  ephemeral_put_pipeline_t* pipeline = (ephemeral_put_pipeline_t*)ctx;
+  writeable_descriptor_close(pipeline->desc);
+}
+
+/* Completion for the descriptor stream's close_event — set from the handler
+   (invoked on the descriptor's actor thread), polled with platform_sleep_ms
+   like the bc_completion_t pattern above. */
+typedef struct {
+  ATOMIC(uint8_t) done;
+} ephemeral_put_completion_t;
+
+static void ephemeral_put_on_descriptor_close(void* ctx, void* unused) {
+  (void)unused;
+  ephemeral_put_completion_t* cs = (ephemeral_put_completion_t*)ctx;
+  ATOMIC_STORE(&cs->done, 1);
+}
+
+/* An ephemeral put marks every block it creates with exactly one ephemeral
+   claim: new_blocks_recipe claims the fresh random blocks it produces, the
+   stream claims the off blocks it creates, and the descriptor stream claims
+   the descriptor blocks it builds. No block is double-claimed (a random
+   block re-put by the stream goes through the plain path — the recipe
+   already holds its claim) and none is left unclaimed. */
+TEST_F(TestEphemeralCache, EphemeralPutMarksCreatedBlocks) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  ASSERT_NE(block_cache, nullptr);
+  tuple_cache_t* tc = tuple_cache_create(16, pool);
+  ASSERT_NE(tc, nullptr);
+
+  vec_block_recipe_t recipes;
+  vec_init(&recipes);
+  new_blocks_recipe_t* recipe = new_blocks_recipe_create(pool, block_cache, type);
+  ASSERT_NE(recipe, nullptr);
+  vec_push(&recipes, (block_recipe_t*)recipe);
+
+  writeable_off_stream_t* ws = writeable_off_stream_create(
+      pool, block_cache, tc, type, /*tuple_size=*/3, /*digest_size=*/32, recipes, NULL);
+  ASSERT_NE(ws, nullptr);
+  writeable_off_stream_set_ephemeral(ws, 1);
+
+  writeable_descriptor_t* desc = writeable_descriptor_create(
+      pool, block_cache, type, /*descriptor_pad=*/32, /*tuple_size=*/3,
+      /*data_length=*/type, NULL);
+  ASSERT_NE(desc, nullptr);
+  writeable_descriptor_set_ephemeral(desc, 1);
+
+  ephemeral_put_pipeline_t pipeline;
+  pipeline.desc = desc;
+  stream_subscribe((stream_t*)ws, data_event, &pipeline,
+                   ephemeral_put_on_stream_data, NULL);
+  stream_subscribe((stream_t*)ws, close_event, &pipeline,
+                   ephemeral_put_on_stream_close, NULL);
+
+  ephemeral_put_completion_t cs;
+  memset(&cs, 0, sizeof(cs));
+  stream_once((stream_t*)desc, close_event, &cs,
+              ephemeral_put_on_descriptor_close, NULL);
+
+  buffer_t* upload = buffer_create(type);
+  upload->size = type;
+  writeable_off_stream_write(ws, upload);
+  writeable_off_stream_finalize(ws);
+  buffer_destroy(upload);
+
+  while (!ATOMIC_LOAD(&cs.done)) { platform_sleep_ms(1); }
+  scheduler_pool_wait_for_idle(pool);
+
+  /* One 128000-byte upload = one tuple = two random blocks + one off block,
+     plus one descriptor block. Each carries exactly one claim. */
+  index_entry_vec_t* entries = index_to_array(block_cache->index);
+  ASSERT_NE(entries, nullptr);
+  EXPECT_EQ(entries->length, 4u);
+  for (int idx = 0; idx < entries->length; idx++) {
+    EXPECT_EQ(entries->data[idx]->ephemeral_count, 1u) << "block " << idx;
+  }
+  for (int idx = 0; idx < entries->length; idx++) {
+    index_entry_destroy(entries->data[idx]);
+  }
+  vec_deinit(entries);
+  free(entries);
+
+  /* Release the recipe's creation reference, deferring its destructor so it
+     runs LAST (the pending list is LIFO) — after the stream's destructor has
+     dropped its recipe refs. Mirrors the completion order in off_routes.c. */
+  refcounter_dereference((refcounter_t*)recipe);
+  scheduler_pool_defer_cleanup(pool, recipe, (void (*)(void*))new_blocks_recipe_destroy);
+  stream_deferred_deref((stream_t*)ws);
+  stream_deferred_deref((stream_t*)desc);
+  scheduler_pool_wait_for_idle(pool);
+  tuple_cache_destroy(tc);
+  block_cache_sync(block_cache);
+  block_cache_destroy(block_cache);
+  block_cache = NULL;  /* TearDown must not double-destroy */
 }

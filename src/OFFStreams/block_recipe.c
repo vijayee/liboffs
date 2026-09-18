@@ -37,7 +37,14 @@ void new_blocks_recipe_dispatch(void* state, message_t* msg) {
         recipe->recipe.stream.is_deactivated = 1;
         break;
       }
-      block_cache_put(recipe->recipe.bc, block, 0, NULL);
+      if (recipe->recipe.put_is_ephemeral) {
+        /* Ephemeral put: the recipe holds the one claim on its own output —
+           the consuming stream re-puts the block through the plain path so
+           the claim is never doubled. */
+        block_cache_put_ephemeral(recipe->recipe.bc, block, NULL);
+      } else {
+        block_cache_put(recipe->recipe.bc, block, 0, NULL);
+      }
       stream_notify((stream_t*)recipe, data_event,
                     CONSUME(block, block_t), (void (*)(void*))block_destroy);
       break;
@@ -475,6 +482,7 @@ recycler_recipe_t* recycler_recipe_create(
   recycler_recipe_t* recipe = get_clear_memory(sizeof(recycler_recipe_t));
   recipe->recipe.bc = bc;
   recipe->recipe.block_type = block_type;
+  recipe->recipe.is_recycler = 1;
   recipe->network = network;
   recipe->pending_fetch_hash = NULL;
   recipe->state = RECIPE_FETCHING_BLOCK;

@@ -113,12 +113,20 @@ static void _create_tuple(writeable_off_stream_t* stream, off_stream_tuple_entry
   }
   tuple_push(tuple, off_block->hash);
 
-  /* Store blocks in cache — announce to network if this is a new block */
+  /* Store blocks in cache — announce to network if this is a new block.
+     random_blocks were already claimed by their recipe when the put is
+     ephemeral (new_blocks_recipe claims fresh blocks; the recycler claims
+     recycled source blocks) — so only the off_block gets its claim here.
+     One claim per block, one owner per claim. */
   actor_t* reply_to = &stream->stream.actor;
-  for (int i = 0; i < entry->random_blocks.length; i++) {
-    block_cache_put(stream->bc, entry->random_blocks.data[i], 0, reply_to);
+  for (int random_idx = 0; random_idx < entry->random_blocks.length; random_idx++) {
+    block_cache_put(stream->bc, entry->random_blocks.data[random_idx], 0, reply_to);
   }
-  block_cache_put(stream->bc, off_block, 0, reply_to);
+  if (stream->is_ephemeral) {
+    block_cache_put_ephemeral(stream->bc, off_block, reply_to);
+  } else {
+    block_cache_put(stream->bc, off_block, 0, reply_to);
+  }
 
   tuple_cache_put(stream->tc, tuple, origin_data);
 
@@ -358,7 +366,7 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
         }
         break;
       }
-      if (result->result == CACHE_PUT_NEW && stream->network != NULL) {
+      if (result->result == CACHE_PUT_NEW && stream->network != NULL && !stream->is_ephemeral) {
         /* New block stored — announce to network */
         network_local_store_block_payload_t* net_payload = get_clear_memory(sizeof(network_local_store_block_payload_t));
         net_payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)result->hash);
@@ -461,6 +469,15 @@ void writeable_off_stream_destroy(writeable_off_stream_t* stream) {
 
     stream_deinit((stream_t*)stream);
     free(stream);
+  }
+}
+
+void writeable_off_stream_set_ephemeral(writeable_off_stream_t* stream, uint8_t is_ephemeral) {
+  stream->is_ephemeral = is_ephemeral;
+  /* Recipes must know too: new_blocks_recipe claims its own random blocks
+     when the consuming put is ephemeral (one claim per block). */
+  for (int recipe_idx = 0; recipe_idx < stream->recipes.length; recipe_idx++) {
+    stream->recipes.data[recipe_idx]->put_is_ephemeral = is_ephemeral;
   }
 }
 

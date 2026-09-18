@@ -24,6 +24,7 @@ typedef struct {
   size_t block_count;
   size_t descriptor_pad;
   uint8_t sent_descriptor;
+  uint8_t is_ephemeral;             /* ephemeral put — descriptor blocks acquire claims, no network announcement */
   block_size_e block_type;
 } writeable_descriptor_t;
 
@@ -33,6 +34,7 @@ writeable_descriptor_t* writeable_descriptor_create(
     network_t* network);
 void writeable_descriptor_destroy(writeable_descriptor_t* desc);
 void writeable_descriptor_dispatch(void* state, message_t* msg);
+void writeable_descriptor_set_ephemeral(writeable_descriptor_t* desc, uint8_t is_ephemeral);
 void writeable_descriptor_write(writeable_descriptor_t* desc, tuple_t* tuple);
 void writeable_descriptor_close(writeable_descriptor_t* desc);
 

@@ -38,6 +38,7 @@ typedef struct {
   block_recipe_t* current_recipe;
   uint8_t has_pulled;
   uint8_t pending_finalize;
+  uint8_t is_ephemeral;             /* ephemeral put — created blocks acquire claims, no network announcement */
   size_t recipe_data_sub_id;
   size_t recipe_close_sub_id;
   size_t recipe_error_sub_id;
@@ -49,6 +50,7 @@ writeable_off_stream_t* writeable_off_stream_create(
     vec_block_recipe_t recipes, network_t* network);
 void writeable_off_stream_destroy(writeable_off_stream_t* stream);
 void writeable_off_stream_dispatch(void* state, message_t* msg);
+void writeable_off_stream_set_ephemeral(writeable_off_stream_t* stream, uint8_t is_ephemeral);
 void writeable_off_stream_write(writeable_off_stream_t* stream, buffer_t* data);
 void writeable_off_stream_finalize(writeable_off_stream_t* stream);
 

@@ -97,9 +97,15 @@ static void _build_descriptor_blocks(writeable_descriptor_t* desc) {
       return;
     }
 
-    /* Store block in cache — announce to network if this is a new block */
+    /* Store block in cache — announce to network if this is a new block.
+       Descriptor blocks are created by this put, so an ephemeral put
+       acquires their one claim here. */
     actor_t* reply_to = &desc->stream.actor;
-    block_cache_put(desc->bc, block, 0, reply_to);
+    if (desc->is_ephemeral) {
+      block_cache_put_ephemeral(desc->bc, block, reply_to);
+    } else {
+      block_cache_put(desc->bc, block, 0, reply_to);
+    }
     if (prior_hash != NULL) {
       DESTROY(prior_hash, buffer);
     }
@@ -189,7 +195,7 @@ void writeable_descriptor_dispatch(void* state, message_t* msg) {
         }
         break;
       }
-      if (result->result == CACHE_PUT_NEW && desc->network != NULL) {
+      if (result->result == CACHE_PUT_NEW && desc->network != NULL && !desc->is_ephemeral) {
         /* New block stored — announce to network */
         network_local_store_block_payload_t* net_payload = get_clear_memory(sizeof(network_local_store_block_payload_t));
         net_payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)result->hash);
@@ -255,6 +261,10 @@ void writeable_descriptor_destroy(writeable_descriptor_t* desc) {
     stream_deinit((stream_t*)desc);
     free(desc);
   }
+}
+
+void writeable_descriptor_set_ephemeral(writeable_descriptor_t* desc, uint8_t is_ephemeral) {
+  desc->is_ephemeral = is_ephemeral;
 }
 
 void writeable_descriptor_write(writeable_descriptor_t* desc, tuple_t* tuple) {

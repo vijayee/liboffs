@@ -26,6 +26,8 @@ typedef struct {
   stream_t stream;
   block_cache_t* bc;
   block_size_e block_type;
+  uint8_t put_is_ephemeral;  /* consuming put is ephemeral — recipe claims its own outputs */
+  uint8_t is_recycler;       /* set by recycler_recipe_create; stream cleanup skips these blocks */
 } block_recipe_t;
 
 typedef vec_t(block_recipe_t*) vec_block_recipe_t;
