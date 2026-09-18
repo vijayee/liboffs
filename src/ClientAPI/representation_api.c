@@ -207,7 +207,9 @@ void client_api_representation_handle(block_cache_t* bc, scheduler_pool_t* pool,
   client_api_rep_request_t request;
   memset(&request, 0, sizeof(request));
   if (client_api_rep_request_decode(frame, &request) != 0) {
-    send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Invalid representation op request");
+    if (send_error != NULL) {
+      send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Invalid representation op request");
+    }
     return;
   }
 
@@ -217,7 +219,9 @@ void client_api_representation_handle(block_cache_t* bc, scheduler_pool_t* pool,
     if (url != NULL) {
       off_url_destroy(url);
     }
-    send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Invalid OFF URL");
+    if (send_error != NULL) {
+      send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Invalid OFF URL");
+    }
     return;
   }
 
@@ -237,7 +241,9 @@ void client_api_representation_handle(block_cache_t* bc, scheduler_pool_t* pool,
       break;
     default:
       off_url_destroy(url);
-      send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Unknown representation op");
+      if (send_error != NULL) {
+        send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Unknown representation op");
+      }
       return;
   }
 

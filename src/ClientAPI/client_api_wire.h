@@ -60,6 +60,20 @@
 #define CLIENT_API_EPHEMERAL_LIST_REQUEST        50
 #define CLIENT_API_EPHEMERAL_LIST_RESPONSE       51
 
+/* Representation-op responses are the adjacent pair (request + 1); the
+ * transport handler derives the response code arithmetically, so a renumbering
+ * that breaks the pairing must fail at compile time. */
+_Static_assert(CLIENT_API_REP_MARK_PERMANENT_RESPONSE == CLIENT_API_REP_MARK_PERMANENT_REQUEST + 1,
+               "rep op response codes must be request + 1");
+_Static_assert(CLIENT_API_REP_DELETE_EPHEMERAL_RESPONSE == CLIENT_API_REP_DELETE_EPHEMERAL_REQUEST + 1,
+               "rep op response codes must be request + 1");
+_Static_assert(CLIENT_API_REP_PIN_RESPONSE == CLIENT_API_REP_PIN_REQUEST + 1,
+               "rep op response codes must be request + 1");
+_Static_assert(CLIENT_API_REP_UNPIN_RESPONSE == CLIENT_API_REP_UNPIN_REQUEST + 1,
+               "rep op response codes must be request + 1");
+_Static_assert(CLIENT_API_EPHEMERAL_LIST_RESPONSE == CLIENT_API_EPHEMERAL_LIST_REQUEST + 1,
+               "rep op response codes must be request + 1");
+
 // Status codes for responses
 #define CLIENT_API_STATUS_OK                0
 #define CLIENT_API_STATUS_BAD_REQUEST       1
