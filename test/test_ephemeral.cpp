@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <string.h>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 #include <sys/stat.h>
 extern "C" {
@@ -22,6 +23,12 @@ extern "C" {
 #include "../src/Scheduler/scheduler.h"
 #include "../src/Util/atomic_compat.h"
 #include "../src/Platform/platform_time.h"
+#include "../src/Platform/platform_process.h"
+#include "../src/Platform/platform_socket.h"
+#include "../src/ClientAPI/HTTP/off_routes.h"
+#include "../src/ClientAPI/HTTP/http_server.h"
+#include "../src/OFFStreams/ofd_cache.h"
+#include "../src/OFFStreams/off_url.h"
 #include "../src/Util/error.h"
 #include "../src/Streams/stream.h"
 #include "../src/OFFStreams/tuple.h"
@@ -2410,3 +2417,420 @@ TEST_F(TestEphemeralCache, PinAndUnpinWholeRepresentation) {
   block_cache = NULL;
   DESTROY(descriptor_hash, buffer);
 }
+
+/* ---- Task 11: HTTP routes for representation ops + ephemeral list ---- */
+
+/* Live end-to-end coverage: a real HTTP server with the off routes registered
+   over a real block cache, driven by raw sockets (the test_off_routes.cpp
+   fixture pattern). The helpers below are local copies of that file's static
+   helpers — each test binary TU keeps its own. */
+namespace ephemeral_routes_test {
+
+static uint16_t _routes_next_port = 19980;
+
+static platform_socket_t* _routes_connect(uint16_t port) {
+  platform_socket_t* sock = platform_socket_create(PLATFORM_AF_INET, 1);
+  if (sock == NULL) return NULL;
+
+  platform_address_t addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.family = PLATFORM_AF_INET;
+  addr.inet.addr = 0x0100007f; /* 127.0.0.1 in network byte order */
+  addr.inet.port = port;
+
+  if (platform_socket_connect(sock, &addr) != 0) {
+    platform_socket_destroy(sock);
+    return NULL;
+  }
+  platform_socket_set_nonblocking(sock);
+  return sock;
+}
+
+static int _routes_send_all(platform_socket_t* sock, const char* buf, size_t len) {
+  size_t sent_total = 0;
+  for (int attempts = 0; attempts < 1000 && sent_total < len; attempts++) {
+    ssize_t sent = platform_socket_send(sock, buf + sent_total, len - sent_total);
+    if (sent > 0) {
+      sent_total += (size_t)sent;
+    } else if (sent == 0) {
+      return -1;
+    } else {
+      /* Nonblocking socket: EWOULDBLOCK means try again shortly. */
+      platform_sleep_ms(10);
+    }
+  }
+  return (sent_total == len) ? 0 : -1;
+}
+
+static int _routes_request(uint16_t port, const char* request, size_t req_len,
+                           char* response, size_t response_size, int timeout_ms) {
+  platform_socket_t* sock = NULL;
+  for (int attempts = 0; attempts < 100; attempts++) {
+    sock = _routes_connect(port);
+    if (sock != NULL) break;
+    platform_sleep_ms(10);
+  }
+  if (sock == NULL) return -1;
+
+  int result = -1;
+  if (_routes_send_all(sock, request, req_len) == 0) {
+    size_t total_received = 0;
+    for (int attempts = 0; attempts < timeout_ms / 10; attempts++) {
+      if (total_received + 1 >= response_size) break;
+      ssize_t received = platform_socket_recv(sock, response + total_received,
+                                              response_size - total_received - 1);
+      if (received > 0) {
+        total_received += (size_t)received;
+        response[total_received] = '\0';
+        char* header_end = strstr(response, "\r\n\r\n");
+        if (header_end != NULL) {
+          size_t header_len = (size_t)(header_end - response) + 4;
+          char* content_length_str = strstr(response, "Content-Length: ");
+          if (content_length_str != NULL && content_length_str < header_end) {
+            size_t content_length = (size_t)atol(content_length_str + 16);
+            if (total_received >= header_len + content_length) {
+              result = 0;
+              break;
+            }
+          }
+        }
+      } else if (received == 0) {
+        response[total_received] = '\0';
+        result = total_received > 0 ? 0 : -1;
+        break;
+      } else {
+        platform_sleep_ms(10);
+      }
+    }
+    if (result == -1) {
+      response[total_received] = '\0';
+      result = total_received > 0 ? 0 : -1;
+    }
+  }
+
+  platform_socket_destroy(sock);
+  return result;
+}
+
+/* Response body as a trimmed, in-place C string (NULL when no header end). */
+static char* _routes_body(char* response) {
+  char* header_end = strstr(response, "\r\n\r\n");
+  if (header_end == NULL) return NULL;
+  char* body = header_end + 4;
+  size_t body_len = strlen(body);
+  while (body_len > 0 && (body[body_len - 1] == '\r' || body[body_len - 1] == '\n' ||
+                          body[body_len - 1] == ' ')) {
+    body[--body_len] = '\0';
+  }
+  return body;
+}
+
+static int _routes_count(const char* haystack, const char* needle) {
+  int count = 0;
+  const char* cursor = haystack;
+  while ((cursor = strstr(cursor, needle)) != NULL) {
+    count++;
+    cursor += strlen(needle);
+  }
+  return count;
+}
+
+/* PUT one temporary file and return the OFF URL from the response body
+   (caller frees; NULL on transport or non-200 failure). */
+static char* _routes_put_temporary(uint16_t port, const char* file_name,
+                                   const char* data, size_t data_len) {
+  char header[1024];
+  int header_len = snprintf(header, sizeof(header),
+      "PUT /offsystem HTTP/1.1\r\n"
+      "Host: localhost\r\n"
+      "Connection: close\r\n"
+      "type: application/octet-stream\r\n"
+      "file-name: %s\r\n"
+      "stream-length: %zu\r\n"
+      "temporary: true\r\n"
+      "Content-Length: %zu\r\n"
+      "\r\n",
+      file_name, data_len, data_len);
+  if (header_len <= 0) return NULL;
+
+  char* request = (char*)malloc((size_t)header_len + data_len);
+  memcpy(request, header, (size_t)header_len);
+  memcpy(request + header_len, data, data_len);
+
+  char response[8192];
+  memset(response, 0, sizeof(response));
+  int result = _routes_request(port, request, (size_t)header_len + data_len,
+                               response, sizeof(response), 10000);
+  free(request);
+  if (result != 0 || strstr(response, "200") == NULL) {
+    return NULL;
+  }
+  char* body = _routes_body(response);
+  if (body == NULL || strstr(body, "/offsystem/v3/") == NULL) {
+    return NULL;
+  }
+  return strdup(body);
+}
+
+/* POST one representation op (pattern = route path, url = body). */
+static int _routes_post_op(uint16_t port, const char* pattern, const char* url,
+                           char* response, size_t response_size) {
+  char request[8192];
+  int req_len = snprintf(request, sizeof(request),
+      "POST %s HTTP/1.1\r\n"
+      "Host: localhost\r\n"
+      "Connection: close\r\n"
+      "Content-Type: text/plain\r\n"
+      "Content-Length: %zu\r\n"
+      "\r\n"
+      "%s",
+      pattern, strlen(url), url);
+  if (req_len <= 0) return -1;
+  return _routes_request(port, request, (size_t)req_len, response, response_size, 10000);
+}
+
+/* GET /offsystem/ephemeral/list. */
+static int _routes_get_list(uint16_t port, char* response, size_t response_size) {
+  const char* request =
+      "GET /offsystem/ephemeral/list HTTP/1.1\r\n"
+      "Host: localhost\r\n"
+      "Connection: close\r\n"
+      "\r\n";
+  return _routes_request(port, request, strlen(request), response, response_size, 10000);
+}
+
+/* Lowercase hex for a 32-byte hash (out needs 65 bytes). */
+static void _routes_hash_hex(buffer_t* hash, char* out) {
+  static const char digits[] = "0123456789abcdef";
+  size_t out_index = 0;
+  for (size_t byte_index = 0; byte_index < hash->size; byte_index++) {
+    out[out_index++] = digits[(hash->data[byte_index] >> 4) & 0x0F];
+    out[out_index++] = digits[hash->data[byte_index] & 0x0F];
+  }
+  out[out_index] = '\0';
+}
+
+class TestEphemeralRoutes : public testing::Test {
+protected:
+  scheduler_pool_t* pool;
+  http_server_t* server;
+  block_cache_t* block_cache;
+  ofd_cache_t* ofd_cache;
+  tuple_cache_t* tuple_c;
+  timer_actor_t* timer;
+  uint16_t port;
+  char* location;
+
+  void SetUp() override {
+    port = _routes_next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
+    location = path_join("/tmp", "EphemeralRoutesTest");
+    rm_rf(location);
+    mkdir_p(location);
+    pool = scheduler_pool_create(4);
+    scheduler_pool_start(pool);
+    timer = timer_actor_create(pool);
+    config_t config = config_default();
+    /* Short debounce window: a mid-test snapshot fire is harmless (production
+       debounces constantly) and the teardown flushes + syncs explicitly. */
+    config.index_wait = 100;
+    config.index_max_wait = 100;
+    block_cache = block_cache_create(config, location, standard, timer, pool, NULL, 0);
+    ASSERT_NE(block_cache, nullptr);
+    ofd_cache = ofd_cache_create(pool, block_cache, 300000);
+    ASSERT_NE(ofd_cache, nullptr);
+    tuple_c = tuple_cache_create(100, pool);
+    ASSERT_NE(tuple_c, nullptr);
+    server = http_server_create(pool, "127.0.0.1", port);
+    ASSERT_NE(server, nullptr);
+  }
+
+  void TearDown() override {
+    if (server != NULL) {
+      http_server_stop(server);
+    }
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    if (server != NULL) {
+      http_server_destroy(server);
+    }
+    ofd_cache_destroy(ofd_cache);
+    tuple_cache_destroy(tuple_c);
+    block_cache_sync(block_cache);
+    block_cache_destroy(block_cache);
+    timer_actor_destroy(timer);
+    scheduler_pool_destroy(pool);
+    rm_rf(location);
+    free(location);
+  }
+};
+
+/* End-to-end over live HTTP: a temporary PUT leaves claimed blocks in the
+   ephemeral list; commit clears every claim (blocks stay, list empties);
+   pin/unpin adjust pin counts in the list; delete-ephemeral releases the
+   claims so the wholly-owned representation's blocks are removed. */
+TEST_F(TestEphemeralRoutes, CommitDeletePinUnpinAndListOverHttp) {
+  off_routes_register(server, pool, block_cache, ofd_cache, tuple_c, NULL, NULL, NULL, NULL);
+  http_server_listen(server);
+
+  char response[8192];
+
+  /* 1. Temporary PUT of file A — sub-block-size upload: one tuple (two random
+        blocks + one off block) plus one descriptor block, all claimed. */
+  char data_a[600];
+  memset(data_a, 'A', sizeof(data_a));
+  char* url_a = _routes_put_temporary(port, "routes_a.txt", data_a, sizeof(data_a));
+  ASSERT_NE(url_a, nullptr) << "temporary PUT of file A failed";
+
+  /* 2. Commit A: 200 with the ok summary naming all four walked blocks. */
+  ASSERT_EQ(_routes_post_op(port, "/offsystem/ephemeral/commit", url_a,
+                            response, sizeof(response)), 0);
+  EXPECT_NE(strstr(response, "200"), nullptr);
+  {
+    char* body = _routes_body(response);
+    ASSERT_NE(body, nullptr);
+    EXPECT_STREQ(body, "{\"result\":\"ok\",\"blocks\":4}") << "commit body: " << body;
+  }
+
+  /* 3. Everything committed → the ephemeral list is empty. */
+  ASSERT_EQ(_routes_get_list(port, response, sizeof(response)), 0);
+  EXPECT_NE(strstr(response, "200"), nullptr);
+  {
+    char* body = _routes_body(response);
+    ASSERT_NE(body, nullptr);
+    EXPECT_STREQ(body, "[]");
+  }
+
+  /* 4. A second temporary PUT shows up in the list: four entries, each with
+        exactly one claim, including B's descriptor block. */
+  char data_b[600];
+  memset(data_b, 'B', sizeof(data_b));
+  char* url_b = _routes_put_temporary(port, "routes_b.txt", data_b, sizeof(data_b));
+  ASSERT_NE(url_b, nullptr) << "temporary PUT of file B failed";
+
+  off_url_t* parsed_b = off_url_parse(url_b);
+  ASSERT_NE(parsed_b, nullptr);
+  ASSERT_NE(parsed_b->descriptor_hash, nullptr);
+  char descriptor_hex[65];
+  _routes_hash_hex(parsed_b->descriptor_hash, descriptor_hex);
+  off_url_destroy(parsed_b);
+
+  ASSERT_EQ(_routes_get_list(port, response, sizeof(response)), 0);
+  {
+    char* list_body = _routes_body(response);
+    ASSERT_NE(list_body, nullptr);
+    EXPECT_EQ(_routes_count(list_body, "\"hash\""), 4)
+        << "list must show B's four claimed blocks: " << list_body;
+    char entry_needle[128];
+    snprintf(entry_needle, sizeof(entry_needle), "%s\",\"claims\":1,\"pins\":0}",
+             descriptor_hex);
+    EXPECT_NE(strstr(list_body, entry_needle), nullptr)
+        << "B's descriptor block entry (claims 1, pins 0) missing: " << list_body;
+  }
+
+  /* 5. PIN the whole representation: the list reports the pin. */
+  ASSERT_EQ(_routes_post_op(port, "/offsystem/pin", url_b, response, sizeof(response)), 0);
+  EXPECT_NE(strstr(response, "200"), nullptr);
+  {
+    char* body = _routes_body(response);
+    ASSERT_NE(body, nullptr);
+    EXPECT_STREQ(body, "{\"result\":\"ok\",\"blocks\":4}") << "pin body: " << body;
+  }
+
+  ASSERT_EQ(_routes_get_list(port, response, sizeof(response)), 0);
+  {
+    char* list_body = _routes_body(response);
+    ASSERT_NE(list_body, nullptr);
+    char entry_needle[128];
+    snprintf(entry_needle, sizeof(entry_needle), "%s\",\"claims\":1,\"pins\":1}",
+             descriptor_hex);
+    EXPECT_NE(strstr(list_body, entry_needle), nullptr)
+        << "B's descriptor block entry must carry the pin: " << list_body;
+  }
+
+  /* 6. UNPIN takes the pin back. */
+  ASSERT_EQ(_routes_post_op(port, "/offsystem/unpin", url_b, response, sizeof(response)), 0);
+  EXPECT_NE(strstr(response, "200"), nullptr);
+  {
+    char* body = _routes_body(response);
+    ASSERT_NE(body, nullptr);
+    EXPECT_STREQ(body, "{\"result\":\"ok\",\"blocks\":4}") << "unpin body: " << body;
+  }
+
+  ASSERT_EQ(_routes_get_list(port, response, sizeof(response)), 0);
+  {
+    char* list_body = _routes_body(response);
+    ASSERT_NE(list_body, nullptr);
+    char entry_needle[128];
+    snprintf(entry_needle, sizeof(entry_needle), "%s\",\"claims\":1,\"pins\":0}",
+             descriptor_hex);
+    EXPECT_NE(strstr(list_body, entry_needle), nullptr)
+        << "B's descriptor block entry must be unpinned: " << list_body;
+  }
+
+  /* 7. DELETE-EPHEMERAL releases every claim — all four blocks drop to zero
+        and are deleted, so the list is empty again. */
+  ASSERT_EQ(_routes_post_op(port, "/offsystem/ephemeral/delete", url_b,
+                            response, sizeof(response)), 0);
+  EXPECT_NE(strstr(response, "200"), nullptr);
+  {
+    char* body = _routes_body(response);
+    ASSERT_NE(body, nullptr);
+    EXPECT_STREQ(body, "{\"result\":\"ok\",\"blocks\":4}") << "delete body: " << body;
+  }
+
+  ASSERT_EQ(_routes_get_list(port, response, sizeof(response)), 0);
+  {
+    char* body = _routes_body(response);
+    ASSERT_NE(body, nullptr);
+    EXPECT_STREQ(body, "[]");
+  }
+
+  /* 8. Cache state: A's four committed (permanent) blocks survive; B's four
+        exclusively-claimed blocks were deleted with the representation. */
+  scheduler_pool_wait_for_idle(pool);
+  EXPECT_EQ(block_cache_count(block_cache), 4u);
+
+  free(url_a);
+  free(url_b);
+}
+
+/* 400 paths: a missing body and an unparseable URL body are both rejected
+   without touching the cache. */
+TEST_F(TestEphemeralRoutes, RejectsMissingAndUnparseableBody) {
+  off_routes_register(server, pool, block_cache, ofd_cache, tuple_c, NULL, NULL, NULL, NULL);
+  http_server_listen(server);
+
+  char response[4096];
+
+  const char* empty_request =
+      "POST /offsystem/ephemeral/commit HTTP/1.1\r\n"
+      "Host: localhost\r\n"
+      "Connection: close\r\n"
+      "Content-Length: 0\r\n"
+      "\r\n";
+  ASSERT_EQ(_routes_request(port, empty_request, strlen(empty_request),
+                            response, sizeof(response), 5000), 0);
+  EXPECT_NE(strstr(response, "400"), nullptr);
+
+  const char* garbage_request =
+      "POST /offsystem/ephemeral/delete HTTP/1.1\r\n"
+      "Host: localhost\r\n"
+      "Connection: close\r\n"
+      "Content-Length: 7\r\n"
+      "\r\n"
+      "garbage";
+  ASSERT_EQ(_routes_request(port, garbage_request, strlen(garbage_request),
+                            response, sizeof(response), 5000), 0);
+  EXPECT_NE(strstr(response, "400"), nullptr);
+
+  /* The empty-cache list route serves [] without any ops. */
+  ASSERT_EQ(_routes_get_list(port, response, sizeof(response)), 0);
+  EXPECT_NE(strstr(response, "200"), nullptr);
+  {
+    char* body = _routes_body(response);
+    ASSERT_NE(body, nullptr);
+    EXPECT_STREQ(body, "[]");
+  }
+}
+
+} // namespace ephemeral_routes_test

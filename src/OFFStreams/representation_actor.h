@@ -15,6 +15,10 @@
 
 typedef struct network_t network_t;
 
+/* Forward declaration — the result payload names the actor that produced it
+   so a consumer can queue the actor's deferred destruction. */
+typedef struct representation_actor_t representation_actor_t;
+
 /* Operation a representation actor applies to EVERY block in a
    representation's descriptor chain (data hashes + the descriptor blocks
    themselves). */
@@ -33,6 +37,17 @@ typedef struct {
   int result;
   size_t blocks_touched;
   actor_t* reply_to;
+  /* The representation actor that produced this summary, set on every reply.
+     The consumer needs the pointer to destroy the actor, but cannot hold it
+     itself: representation_actor_create returns only after it has kicked the
+     walk, so the whole walk (and this reply) can already have completed
+     before create returns — any pointer the ROUTE stashed after create would
+     race a completion dispatch that ran first. Carrying the pointer inside
+     the reply removes that race entirely. The actor stays alive until the
+     consumer destroys it; a consumer running on a pool worker must destroy it
+     via scheduler_pool_defer_cleanup, never inline (see
+     representation_actor_destroy). */
+  representation_actor_t* source;
 } representation_op_result_payload_t;
 
 /* Walks a representation's descriptor chain (descriptor blocks chained by the
@@ -51,7 +66,8 @@ typedef struct {
    Destroy is for EXTERNAL callers only (routes/tests teardown): it parks the
    scheduler pool and then tears the actor down. Never destroy it from inside
    its own dispatch. */
-typedef struct representation_actor_t {
+typedef struct representation_actor_t representation_actor_t;
+struct representation_actor_t {
   actor_t actor;
   block_cache_t* bc;
   network_t* network;          /* NULL = local-only; announce skipped */
@@ -67,7 +83,7 @@ typedef struct representation_actor_t {
                                    vec_buffer_t typedef here would collide with
                                    block_recipe.h's in any TU including both */
   uint8_t walk_done;
-} representation_actor_t;
+};
 
 representation_actor_t* representation_actor_create(block_cache_t* bc, network_t* network,
                                                     buffer_t* descriptor_hash,

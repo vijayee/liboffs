@@ -19,6 +19,7 @@
 #include "../../OFFStreams/writeable_off_stream.h"
 #include "../../OFFStreams/writeable_descriptor.h"
 #include "../../OFFStreams/block_recipe.h"
+#include "../../OFFStreams/representation_actor.h"
 #include "../../Scheduler/scheduler.h"
 #include "../../OFFStreams/ori.h"
 #include "../../OFFStreams/tuple_cache.h"
@@ -1665,6 +1666,298 @@ static int _off_put_headers_complete(http_connection_t* connection,
     return 1;
 }
 
+/* ---- representation op routes: ephemeral commit / delete, pin / unpin ---- */
+
+/* Deferred-destruction wrapper for a representation actor. The completion
+   dispatch runs on a pool worker, so it can NEVER call
+   representation_actor_destroy inline: that destroy parks the pool via
+   scheduler_pool_wait_for_idle, and a worker waiting for its own pool's
+   idleness (itself included) would never return. Instead the completion
+   queues this wrapper through scheduler_pool_defer_cleanup and the drain —
+   which only ever runs when every worker is already idle — performs the
+   destroy.
+
+   The wrapper's leading refcounter_t satisfies defer_cleanup's
+   hold-a-reference contract: defer_cleanup refcounter_references the object
+   it is handed, so handing it a bare representation_actor_t (whose first
+   member is a live actor mailbox, not a refcounter) would corrupt the
+   mailbox's head pointer. The reference is never released — the drain's
+   destructor frees the wrapper unconditionally, matching how every other
+   defer_cleanup consumer in this directory treats the reference as a
+   formality. */
+typedef struct {
+    refcounter_t refcounter;
+    representation_actor_t* rep;
+} rep_route_defer_t;
+
+/* Drain-context safety of the internal wait: the drain runs either at the
+   tail of scheduler_pool_wait_for_idle — where the idle predicate
+   (all workers idle, zero pending messages) already holds, so
+   representation_actor_destroy's internal wait returns immediately without
+   parking — or from scheduler_pool_destroy after scheduler_pool_stop, where
+   the pool's terminate flag makes the internal wait return 0 at once. Neither
+   can deadlock, so no wait-free destroy variant is needed; the public destroy
+   (external callers that may park) and this deferred path share it. */
+static void _rep_route_deferred_destroy(rep_route_defer_t* defer) {
+    representation_actor_t* rep = defer->rep;
+    refcounter_destroy_lock(&defer->refcounter);
+    free(defer);
+    representation_actor_destroy(rep);
+}
+
+/* Route context for the four representation-op routes. actor stays the FIRST
+   member: _rep_route_context_destroy runs actor_destroy (tearing the mailbox
+   down) before deferring the struct to the pool's cleanup drain, and
+   defer_cleanup's hold-a-reference then lands on the mailbox's dead head
+   field — memory nothing reads again before free. This mirrors the
+   off_get_state_t / block_http_state_t lifecycle exactly. */
+typedef struct {
+    actor_t actor;
+    http_response_t* response;
+    http_connection_t* connection;
+    scheduler_pool_t* pool;
+} rep_route_context_t;
+
+static void _rep_route_context_destroy(rep_route_context_t* route_ctx) {
+    http_connection_t* conn = route_ctx->connection;
+    http_response_destroy(route_ctx->response);
+    if (conn != NULL) {
+        http_connection_destroy(conn);
+    }
+    atomic_fetch_or(&route_ctx->actor.flags, ACTOR_FLAG_DESTROY);
+    actor_destroy(&route_ctx->actor);
+    scheduler_pool_defer_cleanup(route_ctx->pool, route_ctx, free);
+}
+
+static void _rep_route_dispatch(void* state, message_t* msg) {
+    rep_route_context_t* route_ctx = (rep_route_context_t*)state;
+    if (msg->type != REPRESENTATION_OP_RESULT) {
+        return;
+    }
+    representation_op_result_payload_t* result =
+        (representation_op_result_payload_t*)msg->payload;
+
+    char body[96];
+    int body_len = snprintf(body, sizeof(body), "{\"result\":\"%s\",\"blocks\":%zu}",
+                            result->result == 0 ? "ok" : "error",
+                            result->blocks_touched);
+    http_response_set_header(route_ctx->response, "Content-Type", "application/json");
+    http_response_set_status(route_ctx->response, result->result == 0 ?
+                             HTTP_STATUS_OK : HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_write(route_ctx->response, body, (size_t)body_len);
+    http_response_end(route_ctx->response);
+
+    /* Queue the representation actor's deferred destruction. The pointer
+       comes from the result payload itself (payload->source), so this works
+       even when the whole walk completed before representation_actor_create
+       returned. */
+    if (result->source != NULL) {
+        rep_route_defer_t* defer = get_clear_memory(sizeof(rep_route_defer_t));
+        refcounter_init(&defer->refcounter);
+        defer->rep = result->source;
+        scheduler_pool_defer_cleanup(route_ctx->pool, defer,
+                                     (void (*)(void*))_rep_route_deferred_destroy);
+    }
+
+    _rep_route_context_destroy(route_ctx);
+}
+
+/* Shared entry for the four op handlers. The request body is the OFF URL of
+   the representation to operate on; the response completes asynchronously
+   once the representation actor's walk finishes (piped pattern, mirroring
+   _put_on_descriptor_close's reference lifecycle). */
+static void _rep_route_start(http_request_t* request, http_response_t* response,
+                             off_routes_context_t* ctx, representation_op_e op) {
+    if (request->body == NULL || request->body->data == NULL || request->body->size == 0) {
+        http_response_set_status(response, HTTP_STATUS_BAD_REQUEST);
+        http_response_set_header(response, "Content-Type", "text/plain");
+        http_response_write(response, "missing OFF URL body", 20);
+        http_response_end(response);
+        return;
+    }
+
+    /* The body buffer is not NUL-terminated — copy it into a string for
+       off_url_parse. */
+    size_t url_len = request->body->size;
+    char* url_str = get_memory(url_len + 1);
+    memcpy(url_str, request->body->data, url_len);
+    url_str[url_len] = '\0';
+    off_url_t* url = off_url_parse(url_str);
+    free(url_str);
+    if (url == NULL || url->descriptor_hash == NULL) {
+        if (url != NULL) {
+            off_url_destroy(url);
+        }
+        http_response_set_status(response, HTTP_STATUS_BAD_REQUEST);
+        http_response_set_header(response, "Content-Type", "text/plain");
+        http_response_write(response, "unparseable OFF URL", 19);
+        http_response_end(response);
+        return;
+    }
+
+    rep_route_context_t* route_ctx = get_clear_memory(sizeof(rep_route_context_t));
+    route_ctx->response = response;
+    route_ctx->connection = response->connection;
+    route_ctx->pool = ctx->pool;
+    response->is_piped = 1;
+    response->connection->piped_pending = 1;
+    refcounter_reference((refcounter_t*)response);
+    refcounter_reference((refcounter_t*)response->connection);
+    actor_init(&route_ctx->actor, route_ctx, _rep_route_dispatch, ctx->pool);
+
+    /* representation_actor_create references the descriptor hash itself; it
+       kicks the walk before returning, and the completion can fire before
+       create returns — the reply carries the actor pointer (payload->source),
+       so nothing here needs the create's return value. */
+    representation_actor_create(ctx->bc, ctx->network, url->descriptor_hash, op,
+                                &route_ctx->actor);
+    off_url_destroy(url);
+}
+
+static void _off_mark_permanent_handler(http_request_t* request, http_response_t* response,
+                                        void* user_data) {
+    _rep_route_start(request, response, (off_routes_context_t*)user_data,
+                     REPRESENTATION_OP_MARK_PERMANENT);
+}
+
+static void _off_delete_ephemeral_handler(http_request_t* request, http_response_t* response,
+                                           void* user_data) {
+    _rep_route_start(request, response, (off_routes_context_t*)user_data,
+                     REPRESENTATION_OP_DELETE_EPHEMERAL);
+}
+
+static void _off_pin_handler(http_request_t* request, http_response_t* response,
+                             void* user_data) {
+    _rep_route_start(request, response, (off_routes_context_t*)user_data,
+                     REPRESENTATION_OP_PIN);
+}
+
+static void _off_unpin_handler(http_request_t* request, http_response_t* response,
+                               void* user_data) {
+    _rep_route_start(request, response, (off_routes_context_t*)user_data,
+                     REPRESENTATION_OP_UNPIN);
+}
+
+/* ---- ephemeral list route ---- */
+
+typedef struct {
+    actor_t actor;  /* first member — same deferred-cleanup rationale as above */
+    http_response_t* response;
+    http_connection_t* connection;
+    scheduler_pool_t* pool;
+} list_route_context_t;
+
+static void _list_route_context_destroy(list_route_context_t* route_ctx) {
+    http_connection_t* conn = route_ctx->connection;
+    http_response_destroy(route_ctx->response);
+    if (conn != NULL) {
+        http_connection_destroy(conn);
+    }
+    atomic_fetch_or(&route_ctx->actor.flags, ACTOR_FLAG_DESTROY);
+    actor_destroy(&route_ctx->actor);
+    scheduler_pool_defer_cleanup(route_ctx->pool, route_ctx, free);
+}
+
+static void _off_list_ephemeral_dispatch(void* state, message_t* msg) {
+    list_route_context_t* route_ctx = (list_route_context_t*)state;
+    if (msg->type != CACHE_EPHEMERAL_LIST) {
+        return;
+    }
+    if (msg->payload == NULL) {
+        /* The mirror always carries the payload; NULL means something is
+           deeply wrong upstream — fail the request rather than crash. */
+        http_response_set_status(route_ctx->response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+        http_response_end(route_ctx->response);
+        _list_route_context_destroy(route_ctx);
+        return;
+    }
+    cache_ephemeral_list_payload_t* payload =
+        (cache_ephemeral_list_payload_t*)msg->payload;
+
+    /* [{"hash":"<hex>","claims":N,"pins":M},...] — 64 hex chars plus the
+       number text per entry. */
+    static const char hex_digits[] = "0123456789abcdef";
+    buffer_t* json = buffer_create_with_capacity(0, 2 + payload->count * 100);
+    json->data[json->size++] = '[';
+    for (size_t idx = 0; idx < payload->count; idx++) {
+        if (idx > 0) {
+            json->data[json->size++] = ',';
+        }
+        /* Per-entry bound: 64 hex chars + the worst-case number text. */
+        buffer_ensure_capacity(json, json->size + 128);
+        json->data[json->size++] = '{';
+        memcpy(json->data + json->size, "\"hash\":\"", 8);
+        json->size += 8;
+        buffer_t* hash = payload->hashes != NULL ? payload->hashes[idx] : NULL;
+        if (hash != NULL) {
+            for (size_t byte_index = 0; byte_index < hash->size; byte_index++) {
+                json->data[json->size++] =
+                    hex_digits[(hash->data[byte_index] >> 4) & 0x0F];
+                json->data[json->size++] = hex_digits[hash->data[byte_index] & 0x0F];
+            }
+        }
+        int number_len = snprintf((char*)json->data + json->size,
+                                  json->capacity - json->size,
+                                  "\",\"claims\":%u,\"pins\":%u}",
+                                  payload->ephemeral_counts != NULL ?
+                                      (unsigned)payload->ephemeral_counts[idx] : 0u,
+                                  payload->pin_counts != NULL ?
+                                      (unsigned)payload->pin_counts[idx] : 0u);
+        if (number_len > 0) {
+            json->size += (size_t)number_len;
+        }
+    }
+    buffer_ensure_capacity(json, json->size + 2);
+    json->data[json->size++] = ']';
+
+    http_response_set_status(route_ctx->response, HTTP_STATUS_OK);
+    http_response_set_header(route_ctx->response, "Content-Type", "application/json");
+    http_response_write(route_ctx->response, (const char*)json->data, json->size);
+    http_response_end(route_ctx->response);
+    buffer_destroy(json);
+
+    /* Consumer contract (block_cache.h): steal the arrays — destroy each
+       referenced hash, free the three arrays — then empty the shell (NULL the
+       pointers, zero the count) and leave msg->payload for actor_run's
+       payload_destroy, which frees the emptied shell exactly once. */
+    if (payload->hashes != NULL) {
+        for (size_t idx = 0; idx < payload->count; idx++) {
+            if (payload->hashes[idx] != NULL) {
+                DESTROY(payload->hashes[idx], buffer);
+            }
+        }
+        free(payload->hashes);
+        payload->hashes = NULL;
+    }
+    if (payload->ephemeral_counts != NULL) {
+        free(payload->ephemeral_counts);
+        payload->ephemeral_counts = NULL;
+    }
+    if (payload->pin_counts != NULL) {
+        free(payload->pin_counts);
+        payload->pin_counts = NULL;
+    }
+    payload->count = 0;
+
+    _list_route_context_destroy(route_ctx);
+}
+
+static void _off_list_ephemeral_handler(http_request_t* request, http_response_t* response,
+                                       void* user_data) {
+    (void)request;
+    off_routes_context_t* ctx = (off_routes_context_t*)user_data;
+    list_route_context_t* route_ctx = get_clear_memory(sizeof(list_route_context_t));
+    route_ctx->response = response;
+    route_ctx->connection = response->connection;
+    route_ctx->pool = ctx->pool;
+    response->is_piped = 1;
+    response->connection->piped_pending = 1;
+    refcounter_reference((refcounter_t*)response);
+    refcounter_reference((refcounter_t*)response->connection);
+    actor_init(&route_ctx->actor, route_ctx, _off_list_ephemeral_dispatch, ctx->pool);
+    block_cache_list_ephemeral(ctx->bc, &route_ctx->actor);
+}
+
 void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
                          block_cache_t* bc, ofd_cache_t* ofd_cache, tuple_cache_t* tc,
                          network_t* network,
@@ -1706,4 +1999,20 @@ void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
                                _off_put_handler, ctx, NULL);
     http_route_t* put_route = &server->routes.data[server->routes.length - 1];
     put_route->headers_complete_handler = _off_put_headers_complete;
+
+    /* Representation-level ephemeral/pin operations and the ephemeral list.
+       The four op routes take the OFF URL (of the representation to operate
+       on) as the request body; the list route reports every block still
+       carrying an ephemeral claim. All share ctx — the first registration
+       above owns the context's destroy callback, these pass NULL (the server
+       destroys routes in registration order, so freeing once at GET-data
+       destroy time covers them all). */
+    http_server_post_with_data(server, "/offsystem/ephemeral/commit",
+                               _off_mark_permanent_handler, ctx, NULL);
+    http_server_post_with_data(server, "/offsystem/ephemeral/delete",
+                               _off_delete_ephemeral_handler, ctx, NULL);
+    http_server_post_with_data(server, "/offsystem/pin", _off_pin_handler, ctx, NULL);
+    http_server_post_with_data(server, "/offsystem/unpin", _off_unpin_handler, ctx, NULL);
+    http_server_get_with_data(server, "/offsystem/ephemeral/list",
+                              _off_list_ephemeral_handler, ctx, NULL);
 }

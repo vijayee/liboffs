@@ -39,6 +39,11 @@ static void _rep_reply(representation_actor_t* rep) {
   payload->result = rep->result;
   payload->blocks_touched = rep->blocks_touched;
   payload->reply_to = NULL;
+  /* Tell the consumer WHICH actor produced this summary so it can queue the
+     actor's deferred destruction without racing representation_actor_create's
+     return (the walk can complete — and this reply can be dispatched — before
+     create returns; see the payload's field comment in the header). */
+  payload->source = rep;
   message_t reply;
   reply.type = REPRESENTATION_OP_RESULT;
   reply.payload = payload;
