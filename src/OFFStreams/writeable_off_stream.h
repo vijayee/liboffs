@@ -39,6 +39,11 @@ typedef struct {
   uint8_t has_pulled;
   uint8_t pending_finalize;
   uint8_t is_ephemeral;             /* ephemeral put — created blocks acquire claims, no network announcement */
+  uint8_t completed;                /* 1 once the stream fired its completion (finished_event path) */
+  vec_buffer_t created_hashes;      /* blocks this put created (ephemeral mode): random blocks
+                                        from non-recycler recipes + off_blocks. Recycler-delivered
+                                        blocks are EXCLUDED — the recycler rolls back its own
+                                        acquired claims. */
   size_t recipe_data_sub_id;
   size_t recipe_close_sub_id;
   size_t recipe_error_sub_id;

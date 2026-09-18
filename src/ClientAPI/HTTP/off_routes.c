@@ -1385,7 +1385,7 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
            propagate (the recipe claims its source blocks at fetch time),
            regardless of the explicit recycle mode. */
         recycler_recipe_t* recycler = recycler_recipe_create(ctx->pool, ctx->bc, standard,
-                                                              recycler_oris, NULL,
+                                                              recycler_oris, ctx->network,
                                                               is_temporary, recycle_mode);
         vec_push(&recipes, (block_recipe_t*)recycler);
     }
@@ -1599,7 +1599,7 @@ static int _off_put_headers_complete(http_connection_t* connection,
            propagate (the recipe claims its source blocks at fetch time),
            regardless of the explicit recycle mode. */
         recycler_recipe_t* recycler = recycler_recipe_create(routes_ctx->pool, routes_ctx->bc, standard,
-                                                              recycler_oris, NULL,
+                                                              recycler_oris, routes_ctx->network,
                                                               is_temporary, recycle_mode);
         vec_push(&recipes, (block_recipe_t*)recycler);
     }

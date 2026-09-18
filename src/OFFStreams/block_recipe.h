@@ -67,7 +67,6 @@ typedef struct {
   size_t cut_point;
   recipe_state_e state;             /* stream state */
   recycle_ephemeral_e override_mode; /* explicit recycle-ephemeral mode from the put */
-  uint8_t source_flagged;            /* registry CHECK said source may be ephemeral (advisory) */
   vec_buffer_t acquired_hashes;     /* claims this recipe acquired (propagate) — released only via recycler_recipe_release_acquired (failure rollback) */
 } recycler_recipe_t;
 

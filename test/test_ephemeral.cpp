@@ -1952,3 +1952,203 @@ TEST_F(TestEphemeralCache, RecyclerReleaseAcquiredRollsBackClaims) {
   block_cache = NULL;
   DESTROY(descriptor_hash, buffer);
 }
+
+/* ---- Task 9: failure cleanup of created blocks + acquired claims ---- */
+
+/* Poll the index until it holds expected_entries entries of which exactly
+ * expected_double_claimed carry an ephemeral_count >= 2. Returns false on
+ * timeout (30s) instead of hanging forever. */
+static bool WaitForClaimState(block_cache_t* bc, size_t expected_entries,
+                              size_t expected_double_claimed) {
+  for (int attempt = 0; attempt < 15000; attempt++) {
+    index_entry_vec_t* entries = index_to_array(bc->index);
+    if (entries != NULL) {
+      size_t length = (size_t)entries->length;
+      size_t double_claimed = 0;
+      for (int idx = 0; idx < entries->length; idx++) {
+        if (entries->data[idx]->ephemeral_count >= 2) {
+          double_claimed++;
+        }
+      }
+      for (int idx = 0; idx < entries->length; idx++) {
+        index_entry_destroy(entries->data[idx]);
+      }
+      vec_deinit(entries);
+      free(entries);
+      if (length == expected_entries && double_claimed == expected_double_claimed) {
+        return true;
+      }
+      if (length == expected_entries && double_claimed == expected_double_claimed) {
+        return true;
+      }
+    }
+    platform_sleep_ms(2);
+  }
+  return false;
+}
+
+/* A failed ephemeral put must release the claim on every block it created.
+ * Capacity is capped at two blocks (2 x standard): the new_blocks_recipe
+ * claims and stores the first tuple's two random blocks (both fit — the
+ * second lands exactly at the cap), and the off block's put — the first
+ * tuple's third NEW block — fails with CACHE_PUT_FULL. The error branch must
+ * release both random-block claims (each block deleted at count 0) and skip
+ * the off block's never-applied claim harmlessly. No finalize is sent: the
+ * put dies mid-stream (the client-disconnect failure mode). A finalize could
+ * otherwise complete the single-tuple stream via _maybe_finalize before the
+ * async FULL result arrives, after which the deactivate guard would drop the
+ * error — so omitting it keeps the failure deterministic. */
+TEST_F(TestEphemeralCache, FailedEphemeralPutCleansUpCreatedBlocks) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL,
+                                   /*max_capacity_bytes=*/ 2 * (size_t)standard);
+  ASSERT_NE(block_cache, nullptr);
+  tuple_cache_t* tc = tuple_cache_create(16, pool);
+  ASSERT_NE(tc, nullptr);
+
+  vec_block_recipe_t recipes;
+  vec_init(&recipes);
+  new_blocks_recipe_t* recipe = new_blocks_recipe_create(pool, block_cache, type);
+  ASSERT_NE(recipe, nullptr);
+  vec_push(&recipes, (block_recipe_t*)recipe);
+
+  writeable_off_stream_t* ws = writeable_off_stream_create(
+      pool, block_cache, tc, type, /*tuple_size=*/3, /*digest_size=*/32, recipes, NULL);
+  ASSERT_NE(ws, nullptr);
+  writeable_off_stream_set_ephemeral(ws, 1);
+
+  recipe_watch_t watch;
+  memset(&watch, 0, sizeof(watch));
+  stream_subscribe((stream_t*)ws, error_event, &watch, recipe_error_watch, NULL);
+
+  buffer_t* upload = buffer_create(type);
+  upload->size = type;
+  writeable_off_stream_write(ws, upload);
+  buffer_destroy(upload);
+
+  /* The off block's put is the third NEW block against a two-block cap —
+   * a real CACHE_PUT_FULL must fire and reach the error subscriber. */
+  bool errored = false;
+  for (int attempt = 0; attempt < 15000 && !errored; attempt++) {
+    errored = ATOMIC_LOAD(&watch.errored) != 0;
+    if (!errored) {
+      platform_sleep_ms(2);
+    }
+  }
+  ASSERT_TRUE(errored) << "expected CACHE_PUT_FULL to error the stream";
+  scheduler_pool_wait_for_idle(pool);
+  EXPECT_STREQ(watch.error_message, "cache full during put: configure larger max_capacity_bytes");
+
+  /* Destroy the pipeline; the destroy-path cleanup backstop must be a no-op
+   * after the error branch already released everything (idempotence). */
+  refcounter_dereference((refcounter_t*)recipe);
+  scheduler_pool_defer_cleanup(pool, recipe, (void (*)(void*))new_blocks_recipe_destroy);
+  stream_deferred_deref((stream_t*)ws);
+  scheduler_pool_wait_for_idle(pool);
+  tuple_cache_destroy(tc);
+
+  /* Both created random blocks were claimed then released — deleted at
+   * count 0. The off block never claimed (its put was the FULL one), so its
+   * release is a benign no-op. Nothing remains. */
+  EXPECT_EQ(block_cache_count(block_cache), 0u);
+
+  block_cache_sync(block_cache);
+  block_cache_destroy(block_cache);
+  block_cache = NULL;
+}
+
+/* Failure cleanup must roll back the claims a recycler recipe acquired on
+ * recycled source blocks. Route: drive B's recycled put to its stable
+ * mid-stream state — the recycler has delivered both of A's random blocks
+ * (acquiring the propagated claim on each: ephemeral_count 1 -> 2) and the
+ * stream has created and claimed B's own off block — then destroy B's stream
+ * WITHOUT finalize/completion (the client-disconnect abort). The
+ * destroy-path cleanup must release B's off block (deleted at count 0 — its
+ * only claim was this put's) and call recycler_recipe_release_acquired (A's
+ * random blocks back to count 1). The mid-stream state is directly observed
+ * before the abort, so both the acquisition and the rollback are pinned
+ * deterministically — a capacity-FULL failure would run the rollback inside
+ * the error branch before any observation window could see count 2. */
+TEST_F(TestEphemeralCache, FailedEphemeralPutReleasesAcquiredRecyclerClaims) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  ASSERT_NE(block_cache, nullptr);
+  buffer_t* descriptor_hash = _test_put_ephemeral(block_cache, pool, standard);
+  ASSERT_NE(descriptor_hash, nullptr);
+
+  /* A's full footprint: two random blocks + off block + descriptor block,
+   * each carrying A's own single claim. */
+  ASSERT_EQ(block_cache_count(block_cache), 4u);
+  index_entry_vec_t* a_entries = index_to_array(block_cache->index);
+  ASSERT_NE(a_entries, nullptr);
+  std::vector<buffer_t*> a_hashes;
+  for (int idx = 0; idx < a_entries->length; idx++) {
+    EXPECT_EQ(a_entries->data[idx]->ephemeral_count, 1u);
+    a_hashes.push_back(
+        (buffer_t*)refcounter_reference((refcounter_t*)a_entries->data[idx]->hash));
+    index_entry_destroy(a_entries->data[idx]);
+  }
+  vec_deinit(a_entries);
+  free(a_entries);
+  ASSERT_EQ(a_hashes.size(), 4u);
+
+  tuple_cache_t* tc = tuple_cache_create(16, pool);
+  ASSERT_NE(tc, nullptr);
+
+  vec_ori_t oris;
+  vec_init(&oris);
+  ori_t* source_ori = _test_ori_for(descriptor_hash);
+  vec_push(&oris, source_ori);
+  vec_block_recipe_t recipes;
+  vec_init(&recipes);
+  recycler_recipe_t* recycler = recycler_recipe_create(pool, block_cache, standard, oris, NULL,
+                                                        /*put_is_ephemeral=*/1, RECYCLE_EPHEMERAL_NONE);
+  ASSERT_NE(recycler, nullptr);
+  vec_push(&recipes, (block_recipe_t*)recycler);
+  /* recycler_recipe_create references every ori itself — drop the creation
+     reference held by the test. */
+  DESTROY(source_ori, ori);
+
+  writeable_off_stream_t* ws = writeable_off_stream_create(
+      pool, block_cache, tc, standard, /*tuple_size=*/3, /*digest_size=*/32, recipes, NULL);
+  ASSERT_NE(ws, nullptr);
+  writeable_off_stream_set_ephemeral(ws, 1);
+
+  buffer_t* upload = buffer_create(standard);
+  upload->size = standard;
+  /* Distinct content: A's upload was a zeroed buffer, and B recycles A's
+   * random blocks — with identical origin bytes B's off block would hash
+   * equal to A's, land as CACHE_PUT_EXISTS, and claim A's off block instead
+   * of creating a fifth entry. */
+  memset(upload->data, 0x5A, standard);
+  writeable_off_stream_write(ws, upload);
+  buffer_destroy(upload);
+
+  /* Terminal mid-stream state: the recycler acquired the propagated claim on
+   * both recycled source blocks and the stream claimed B's off block — five
+   * entries, exactly two of them double-claimed. No finalize is ever sent,
+   * so the stream cannot complete on its own. */
+  ASSERT_TRUE(WaitForClaimState(block_cache, /*expected_entries=*/5,
+                                /*expected_double_claimed=*/2))
+      << "recycled put never reached its double-claimed mid-stream state";
+
+  /* Abort without completion: the destroy-path cleanup releases B's off
+   * block and rolls the recycler's acquired claims back. */
+  refcounter_dereference((refcounter_t*)recycler);
+  stream_deferred_deref((stream_t*)ws);
+  scheduler_pool_wait_for_idle(pool);
+  tuple_cache_destroy(tc);
+
+  /* B's off block is gone (released at count 0); every one of A's blocks is
+   * still present, restored to A's own single claim. */
+  EXPECT_EQ(block_cache_count(block_cache), 4u);
+  for (buffer_t* a_hash : a_hashes) {
+    index_entry_t* entry = index_peek(block_cache->index, a_hash);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->ephemeral_count, 1u);
+    DESTROY(a_hash, buffer);
+  }
+
+  block_cache_sync(block_cache);
+  block_cache_destroy(block_cache);
+  block_cache = NULL;
+  DESTROY(descriptor_hash, buffer);
+}

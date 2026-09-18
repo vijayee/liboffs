@@ -72,10 +72,37 @@ static void _entry_destroy(off_stream_tuple_entry_t* entry) {
 
 static void _get_random_blocks(writeable_off_stream_t* stream);
 
+/* Failure cleanup for an ephemeral put: release the ephemeral claim on every
+ * block this put created (its only claim is the failed put's, so each block
+ * is deleted at count 0) and roll back the acquired claims on every recycler
+ * recipe (restoring the recycled source blocks to their producers' counts).
+ * Idempotent — the created-hash vec is emptied on the first call, so the
+ * destroy-path backstop after an error-path release is a no-op. Never call
+ * this on a completed put: its claims are the stored representation's only
+ * reference protection. */
+static void _release_ephemeral_claims(writeable_off_stream_t* stream) {
+  if (!stream->is_ephemeral) {
+    return;
+  }
+  for (size_t idx = 0; idx < stream->created_hashes.length; idx++) {
+    block_cache_ephemeral(stream->bc, stream->created_hashes.data[idx],
+                          CACHE_EPHEMERAL_RELEASE, NULL);
+    DESTROY(stream->created_hashes.data[idx], buffer);
+  }
+  stream->created_hashes.length = 0;
+  for (int recipe_idx = 0; recipe_idx < stream->recipes.length; recipe_idx++) {
+    block_recipe_t* recipe = stream->recipes.data[recipe_idx];
+    if (recipe->is_recycler) {
+      recycler_recipe_release_acquired((recycler_recipe_t*)recipe);
+    }
+  }
+}
+
 static void _maybe_finalize(writeable_off_stream_t* stream) {
   if (stream->pending_finalize && stream->entries.length == 0 && !stream->has_pulled) {
     stream->pending_finalize = 0;
     stream->stream.is_deactivated = 1;
+    stream->completed = 1;
     stream_notify((stream_t*)stream, finished_event, NULL, NULL);
     stream_notify((stream_t*)stream, complete_event, NULL, NULL);
     stream_notify((stream_t*)stream, close_event, NULL, NULL);
@@ -105,6 +132,13 @@ static void _create_tuple(writeable_off_stream_t* stream, off_stream_tuple_entry
   if (off_block == NULL) {
     _entry_destroy(entry);
     return;
+  }
+
+  if (stream->is_ephemeral) {
+    /* Failure cleanup tracks this off_block as one the put created — its
+       single claim is the stream's (block_cache_put_ephemeral below). */
+    vec_push(&stream->created_hashes,
+             (buffer_t*)refcounter_reference((refcounter_t*)off_block->hash));
   }
 
   tuple_t* tuple = tuple_create(stream->tuple_size);
@@ -148,6 +182,7 @@ static void _create_tuple(writeable_off_stream_t* stream, off_stream_tuple_entry
     block_destroy(stream->final_block);
     stream->final_block = NULL;
     stream->stream.is_deactivated = 1;
+    stream->completed = 1;
     stream_notify((stream_t*)stream, finished_event, NULL, NULL);
     stream_notify((stream_t*)stream, complete_event, NULL, NULL);
     stream_notify((stream_t*)stream, close_event, NULL, NULL);
@@ -286,6 +321,7 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
 
       if (stream->entries.length == 0 && !stream->has_pulled) {
         stream->stream.is_deactivated = 1;
+        stream->completed = 1;
         stream_notify((stream_t*)stream, finished_event, NULL, NULL);
         stream_notify((stream_t*)stream, complete_event, NULL, NULL);
         stream_notify((stream_t*)stream, close_event, NULL, NULL);
@@ -306,6 +342,16 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
 
       off_stream_tuple_entry_t* entry = stream->entries.data[0];
       vec_push(&entry->random_blocks, block);
+
+      if (stream->is_ephemeral && stream->current_recipe != NULL &&
+          !stream->current_recipe->is_recycler) {
+        /* Failure cleanup tracks random blocks the put created via a
+           non-recycler recipe (new_blocks_recipe claims each one itself).
+           Recycler-delivered blocks are EXCLUDED — their rollback is the
+           recycler's acquired_hashes. */
+        vec_push(&stream->created_hashes,
+                 (buffer_t*)refcounter_reference((refcounter_t*)block->hash));
+      }
 
       if (entry->random_blocks.length >= entry->random_capacity) {
         vec_splice(&stream->entries, 0, 1);
@@ -356,6 +402,11 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
           break;
         }
         stream->stream.is_deactivated = 1;
+        /* The put failed mid-stream: release every claim this ephemeral put
+         * acquired (created blocks die at count 0; the recycler's acquired
+         * claims roll back) before the error reaches the client. Fires once
+         * — the guard above drops every subsequent failure. */
+        _release_ephemeral_claims(stream);
         if (result->result == CACHE_PUT_FULL) {
           stream_notify((stream_t*)stream, error_event,
                         OFFS_ERROR_TRANSFER("cache full during put: configure larger max_capacity_bytes"),
@@ -414,6 +465,7 @@ writeable_off_stream_t* writeable_off_stream_create(
   stream->pending_finalize = 0;
 
   vec_init(&stream->entries);
+  vec_init(&stream->created_hashes);
 
   stream->accumulator = buffer_create(stream->block_size);
   stream->accumulator->size = 0;
@@ -449,6 +501,14 @@ writeable_off_stream_t* writeable_off_stream_create(
 
 void writeable_off_stream_destroy(writeable_off_stream_t* stream) {
   if (refcounter_dereference_is_zero((refcounter_t*)stream)) {
+    /* Backstop for every non-completion destroy path (error events, client
+     * disconnect, deactivation before completion): an ephemeral put that
+     * never completed releases its claims so no created block leaks. Runs
+     * before the recipes are destroyed — recycler rollback needs them
+     * alive. Idempotent with the CACHE_PUT_RESULT error branch. */
+    if (stream->is_ephemeral && !stream->completed) {
+      _release_ephemeral_claims(stream);
+    }
     for (int i = 0; i < stream->entries.length; i++) {
       _entry_destroy(stream->entries.data[i]);
     }
@@ -458,6 +518,11 @@ void writeable_off_stream_destroy(writeable_off_stream_t* stream) {
     }
     DESTROY(stream->accumulator, buffer);
     free(stream->hash_state);
+
+    for (size_t idx = 0; idx < stream->created_hashes.length; idx++) {
+      DESTROY(stream->created_hashes.data[idx], buffer);
+    }
+    vec_deinit(&stream->created_hashes);
 
     _unregister_recipe(stream);
     if (stream->current_recipe != NULL) {

@@ -550,7 +550,6 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
       ephemeral_registry_check_result_payload_t* result =
           (ephemeral_registry_check_result_payload_t*)msg->payload;
       if (result->present) {
-        recipe->source_flagged = 1;
         log_warn("recycler: source flagged ephemeral by registry — enforcing at fetch time");
       }
       break;
@@ -580,7 +579,6 @@ recycler_recipe_t* recycler_recipe_create(
   recipe->recipe.is_recycler = 1;
   recipe->recipe.put_is_ephemeral = put_is_ephemeral;
   recipe->override_mode = override_mode;
-  recipe->source_flagged = 0;
   recipe->network = network;
   recipe->pending_fetch_hash = NULL;
   recipe->state = RECIPE_FETCHING_BLOCK;
