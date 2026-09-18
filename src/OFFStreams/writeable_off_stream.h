@@ -50,6 +50,12 @@ writeable_off_stream_t* writeable_off_stream_create(
     vec_block_recipe_t recipes, network_t* network);
 void writeable_off_stream_destroy(writeable_off_stream_t* stream);
 void writeable_off_stream_dispatch(void* state, message_t* msg);
+/* Mark this put ephemeral: created blocks acquire one ephemeral claim each
+ * (claimed by their producers — recipes claim their outputs, the stream claims
+ * off_blocks) and network announcements are suppressed. Must be called after
+ * create and BEFORE the first writeable_off_stream_write/finalize — it writes
+ * recipe flags from the caller thread, which is only safe before the pipeline
+ * has started dispatching. */
 void writeable_off_stream_set_ephemeral(writeable_off_stream_t* stream, uint8_t is_ephemeral);
 void writeable_off_stream_write(writeable_off_stream_t* stream, buffer_t* data);
 void writeable_off_stream_finalize(writeable_off_stream_t* stream);

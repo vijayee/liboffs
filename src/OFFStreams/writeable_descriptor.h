@@ -34,6 +34,9 @@ writeable_descriptor_t* writeable_descriptor_create(
     network_t* network);
 void writeable_descriptor_destroy(writeable_descriptor_t* desc);
 void writeable_descriptor_dispatch(void* state, message_t* msg);
+/* Mark this descriptor's blocks ephemeral (one claim per created block, no
+ * network announcement). Call after create and BEFORE the first
+ * writeable_descriptor_write — the flag is read on the pool's dispatch thread. */
 void writeable_descriptor_set_ephemeral(writeable_descriptor_t* desc, uint8_t is_ephemeral);
 void writeable_descriptor_write(writeable_descriptor_t* desc, tuple_t* tuple);
 void writeable_descriptor_close(writeable_descriptor_t* desc);

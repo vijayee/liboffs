@@ -115,9 +115,10 @@ static void _create_tuple(writeable_off_stream_t* stream, off_stream_tuple_entry
 
   /* Store blocks in cache — announce to network if this is a new block.
      random_blocks were already claimed by their recipe when the put is
-     ephemeral (new_blocks_recipe claims fresh blocks; the recycler claims
-     recycled source blocks) — so only the off_block gets its claim here.
-     One claim per block, one owner per claim. */
+     ephemeral (new_blocks_recipe claims fresh blocks; recycler-fetched
+     blocks arrive pre-existing and take no claim here) — so only the
+     off_block gets its claim in this path. One claim per block, one
+     owner per claim. */
   actor_t* reply_to = &stream->stream.actor;
   for (int random_idx = 0; random_idx < entry->random_blocks.length; random_idx++) {
     block_cache_put(stream->bc, entry->random_blocks.data[random_idx], 0, reply_to);
