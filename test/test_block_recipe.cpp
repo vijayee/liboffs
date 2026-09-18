@@ -170,7 +170,8 @@ TEST(RecyclerRecipe, CreateDestroy) {
   vec_ori_t oris;
   vec_init(&oris);
 
-  recycler_recipe_t* recipe = recycler_recipe_create(pool, NULL, standard, oris, NULL);
+  recycler_recipe_t* recipe = recycler_recipe_create(pool, NULL, standard, oris, NULL,
+                                                      /*put_is_ephemeral=*/0, RECYCLE_EPHEMERAL_NONE);
   ASSERT_NE(recipe, nullptr);
   EXPECT_EQ(recipe->recipe.block_type, standard);
   EXPECT_EQ(recipe->oris.length, 0);
@@ -242,7 +243,8 @@ TEST(RecyclerRecipe, PullFromDescriptor) {
   vec_init(&oris);
   vec_push(&oris, ori);
 
-  recycler_recipe_t* recipe = recycler_recipe_create(pool, bc, standard, oris, NULL);
+  recycler_recipe_t* recipe = recycler_recipe_create(pool, bc, standard, oris, NULL,
+                                                      /*put_is_ephemeral=*/0, RECYCLE_EPHEMERAL_NONE);
 
   // Use DataAwaiter to wait for 2 blocks (async — can't use CLOSE_STREAM immediately)
   DataAwaiter awaiter(2);

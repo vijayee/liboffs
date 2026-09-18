@@ -59,10 +59,14 @@
 #define CLIENT_API_STATUS_UNAUTHORIZED      5
 
 // --- PUT Request ---
-// [type, content_type, file_name, stream_length, server_address, data, recycler_urls, temporary, tuple_size?]
+// [type, content_type, file_name, stream_length, server_address, data, recycler_urls, temporary, tuple_size?, recycle_ephemeral?]
 // data is NULL/empty for streaming uploads; subsequent PUT_DATA frames carry the body
-// tuple_size is optional: present (9-element array) when has_tuple_size != 0,
-// absent (8-element array) otherwise for backward compatibility.
+// tuple_size is optional at index 8: present when has_tuple_size != 0,
+// absent otherwise for backward compatibility (8- or 9-element arrays decode
+// as before). recycle_ephemeral is optional at index 9 and carries the
+// recycle_ephemeral_e value (0 = none, 1 = commit, 2 = propagate); when it is
+// present without tuple_size, index 8 holds a null placeholder so the value
+// still lands at index 9 — decoders read it whenever the array has 10 elements.
 typedef struct {
   char* content_type;
   char* file_name;
@@ -75,6 +79,7 @@ typedef struct {
   uint8_t temporary;      // 0 or 1
   uint8_t has_tuple_size; // 0 if tuple_size field absent on the wire
   size_t tuple_size;      // requested erasure-coding width (when has_tuple_size)
+  uint8_t recycle_ephemeral; // recycle_ephemeral_e value: 0 = none, 1 = commit, 2 = propagate
 } client_api_put_request_t;
 
 // --- PUT Data (streaming upload chunk) ---

@@ -9,6 +9,7 @@
 #include "../Actor/message.h"
 #include "../Scheduler/scheduler.h"
 #include "../Network/network.h"
+#include "../Util/log.h"
 #include <string.h>
 
 // --- Generic recipe pull ---
@@ -130,6 +131,14 @@ static void _start_descriptor_load(recycler_recipe_t* recipe) {
   vec_init(&recipe->front_hashes);
   vec_init(&recipe->back_hashes);
 
+  /* Advisory registry probe: a positive flags the source as possibly
+     ephemeral, but the exact enforcement happens at data-block fetch time
+     (bloom false positives resolve there; false negatives self-heal). */
+  if (recipe->recipe.bc != NULL && recipe->recipe.bc->registry != NULL) {
+    ephemeral_registry_check(recipe->recipe.bc->registry, current_ori->descriptor_hash,
+                            &recipe->recipe.stream.actor);
+  }
+
   block_cache_get(recipe->recipe.bc, current_ori->descriptor_hash,
                         &recipe->recipe.stream.actor);
 }
@@ -218,6 +227,60 @@ static void _finish_descriptor_load(recycler_recipe_t* recipe) {
   recipe->descriptor_index = 0;
   recipe->descriptor_loaded = 1;
   recipe->loading_descriptor = 0;
+}
+
+/* Fetch-time ephemeral enforcement for a recycled data block. The exact
+   check walks the block's index entry: the registry CHECK is advisory only
+   (bloom false positives resolve here, false negatives self-heal via ADD).
+   Returns 1 when the block may be delivered downstream (permanent source,
+   or a claim acquired/committed per the mode), 0 when the recipe has been
+   deactivated and the caller must destroy the block and stop. */
+static uint8_t _recycler_enforce_ephemeral(recycler_recipe_t* recipe, block_t* block) {
+  if (recipe->recipe.bc == NULL) {
+    return 1;
+  }
+  index_entry_t* entry = index_peek(recipe->recipe.bc->index, block->hash);
+  if (entry == NULL || entry->ephemeral_count == 0) {
+    return 1;
+  }
+
+  /* Discovered an ephemeral block — self-heal the registry for this source. */
+  if (recipe->recipe.bc->registry != NULL) {
+    ori_t* source_ori = recipe->oris.data[recipe->ori_index];
+    if (source_ori->descriptor_hash != NULL) {
+      ephemeral_registry_add(recipe->recipe.bc->registry, source_ori->descriptor_hash);
+    }
+  }
+
+  if (recipe->recipe.put_is_ephemeral || recipe->override_mode == RECYCLE_EPHEMERAL_PROPAGATE) {
+    /* Propagate: acquire the consuming representation's claim. The recipe
+       releases every acquired claim in recycler_recipe_destroy. */
+    block_cache_ephemeral(recipe->recipe.bc, block->hash, CACHE_EPHEMERAL_ACQUIRE, NULL);
+    vec_push(&recipe->acquired_hashes,
+             (buffer_t*)refcounter_reference((refcounter_t*)block->hash));
+    return 1;
+  }
+
+  if (recipe->override_mode == RECYCLE_EPHEMERAL_COMMIT) {
+    /* Commit: clear the source block to permanent and announce it like a
+       put would. */
+    block_cache_ephemeral(recipe->recipe.bc, block->hash, CACHE_EPHEMERAL_CLEAR, NULL);
+    if (recipe->network != NULL) {
+      network_local_store_block_payload_t* store_payload =
+          get_clear_memory(sizeof(network_local_store_block_payload_t));
+      store_payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)block->hash);
+      store_payload->fib = entry->counter.fib > 0 ? entry->counter.fib : 1;
+      store_payload->reply_to = NULL;
+      message_t store_msg;
+      store_msg.type = NETWORK_LOCAL_STORE_BLOCK;
+      store_msg.payload = store_payload;
+      store_msg.payload_destroy = network_local_store_block_payload_destroy;
+      actor_send(&recipe->network->actor, &store_msg);
+    }
+    return 1;
+  }
+
+  return 0;
 }
 
 /* Fetch the next data block from the descriptor. */
@@ -354,8 +417,20 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
         break;
       }
 
-      /* Data block result — transfer ownership of result->block to stream_notify */
+      /* Data block result — enforce the ephemeral exclusion rule, then
+         transfer ownership of result->block to stream_notify */
       if (result->block != NULL) {
+        if (!_recycler_enforce_ephemeral(recipe, result->block)) {
+          /* Default mode: hard error — unverified data must not enter a
+             permanent representation. */
+          DESTROY(result->block, block);
+          if (result->hash != NULL) {
+            DESTROY(result->hash, buffer);
+          }
+          stream_deactivate((stream_t*)recipe, OFFS_ERROR("recycle source is ephemeral/unverified"));
+          recipe->recipe.stream.is_deactivated = 1;
+          break;
+        }
         stream_notify((stream_t*)recipe, data_event,
                       CONSUME(result->block, block_t), (void (*)(void*))block_destroy);
         recipe->pending_pull--;
@@ -419,11 +494,19 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
               }
             }
           } else {
-            /* Data block: transfer ownership to stream_notify (mirror CACHE_GET_RESULT lines 350-354) */
-            stream_notify((stream_t*)recipe, data_event,
-                          CONSUME(result->block, block_t), (void (*)(void*))block_destroy);
-            recipe->pending_pull--;
-            result->block = NULL;  /* ownership transferred via CONSUME; null to prevent destroy double-free */
+            /* Data block: enforce the ephemeral exclusion rule (mirror
+               CACHE_GET_RESULT's data branch), then transfer ownership to
+               stream_notify. */
+            if (!_recycler_enforce_ephemeral(recipe, result->block)) {
+              DESTROY(result->block, block);
+              stream_deactivate((stream_t*)recipe, OFFS_ERROR("recycle source is ephemeral/unverified"));
+              recipe->recipe.stream.is_deactivated = 1;
+            } else {
+              stream_notify((stream_t*)recipe, data_event,
+                            CONSUME(result->block, block_t), (void (*)(void*))block_destroy);
+              recipe->pending_pull--;
+              result->block = NULL;  /* ownership transferred via CONSUME; null to prevent destroy double-free */
+            }
           }
         } else {
           /* Local path: block is in the cache. Re-fetch as before. */
@@ -461,6 +544,15 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
       }
       break;
     }
+    case EPHEMERAL_REGISTRY_CHECK_RESULT: {
+      ephemeral_registry_check_result_payload_t* result =
+          (ephemeral_registry_check_result_payload_t*)msg->payload;
+      if (result->present) {
+        recipe->source_flagged = 1;
+        log_warn("recycler: source flagged ephemeral by registry — enforcing at fetch time");
+      }
+      break;
+    }
     case CLOSE_STREAM: {
       if (recipe->pending_fetch_hash != NULL) {
         DESTROY(recipe->pending_fetch_hash, buffer);
@@ -478,11 +570,15 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
 
 recycler_recipe_t* recycler_recipe_create(
     scheduler_pool_t* pool, block_cache_t* bc, block_size_e block_type,
-    vec_ori_t oris, network_t* network) {
+    vec_ori_t oris, network_t* network, uint8_t put_is_ephemeral,
+    recycle_ephemeral_e override_mode) {
   recycler_recipe_t* recipe = get_clear_memory(sizeof(recycler_recipe_t));
   recipe->recipe.bc = bc;
   recipe->recipe.block_type = block_type;
   recipe->recipe.is_recycler = 1;
+  recipe->recipe.put_is_ephemeral = put_is_ephemeral;
+  recipe->override_mode = override_mode;
+  recipe->source_flagged = 0;
   recipe->network = network;
   recipe->pending_fetch_hash = NULL;
   recipe->state = RECIPE_FETCHING_BLOCK;
@@ -493,6 +589,7 @@ recycler_recipe_t* recycler_recipe_create(
   }
   recipe->ori_index = 0;
 
+  vec_init(&recipe->acquired_hashes);
   vec_init(&recipe->descriptor);
   recipe->descriptor_index = 0;
   recipe->endcap = NULL;
@@ -510,6 +607,20 @@ recycler_recipe_t* recycler_recipe_create(
 
 void recycler_recipe_destroy(recycler_recipe_t* recipe) {
   if (refcounter_dereference_is_zero((refcounter_t*)recipe)) {
+    /* Release every ephemeral claim this recipe acquired (propagate mode):
+       dropping the last claim deletes the source block, matching the
+       consuming representation's lifetime. */
+    if (recipe->recipe.bc != NULL) {
+      for (int i = 0; i < recipe->acquired_hashes.length; i++) {
+        block_cache_ephemeral(recipe->recipe.bc, recipe->acquired_hashes.data[i],
+                              CACHE_EPHEMERAL_RELEASE, NULL);
+      }
+    }
+    for (int i = 0; i < recipe->acquired_hashes.length; i++) {
+      DESTROY(recipe->acquired_hashes.data[i], buffer);
+    }
+    vec_deinit(&recipe->acquired_hashes);
+
     for (int i = 0; i < recipe->oris.length; i++) {
       DESTROY(recipe->oris.data[i], ori);
     }

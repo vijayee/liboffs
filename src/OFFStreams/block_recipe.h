@@ -22,6 +22,16 @@ typedef enum {
   RECIPE_PROCESSING,           /* processing descriptor or data */
 } recipe_state_e;
 
+/* How a recycler recipe handles an ephemeral source block discovered at
+   fetch time. The default errors out — unverified data must never enter a
+   permanent representation. An ephemeral put behaves as PROPAGATE regardless
+   of the configured mode (no contamination is possible). */
+typedef enum {
+  RECYCLE_EPHEMERAL_NONE = 0,      /* default: error on ephemeral source */
+  RECYCLE_EPHEMERAL_COMMIT = 1,    /* clear source blocks to permanent + announce */
+  RECYCLE_EPHEMERAL_PROPAGATE = 2  /* acquire the consuming representation's claim */
+} recycle_ephemeral_e;
+
 typedef struct {
   stream_t stream;
   block_cache_t* bc;
@@ -56,6 +66,9 @@ typedef struct {
   size_t descriptor_pad;
   size_t cut_point;
   recipe_state_e state;             /* stream state */
+  recycle_ephemeral_e override_mode; /* explicit recycle-ephemeral mode from the put */
+  uint8_t source_flagged;            /* registry CHECK said source may be ephemeral (advisory) */
+  vec_buffer_t acquired_hashes;     /* claims this recipe acquired (propagate) — released on destroy */
 } recycler_recipe_t;
 
 new_blocks_recipe_t* new_blocks_recipe_create(
@@ -66,7 +79,8 @@ void new_blocks_recipe_pull(new_blocks_recipe_t* recipe);
 
 recycler_recipe_t* recycler_recipe_create(
     scheduler_pool_t* pool, block_cache_t* bc, block_size_e block_type,
-    vec_ori_t oris, network_t* network);
+    vec_ori_t oris, network_t* network, uint8_t put_is_ephemeral,
+    recycle_ephemeral_e override_mode);
 void recycler_recipe_destroy(recycler_recipe_t* recipe);
 void recycler_recipe_dispatch(void* state, message_t* msg);
 void recycler_recipe_pull(recycler_recipe_t* recipe);

@@ -1235,6 +1235,18 @@ static buffer_t* _extract_multipart_file(buffer_t* body, const char* content_typ
     return result;
 }
 
+/* Parse the optional `recycle-ephemeral` header: `commit` clears source
+   blocks to permanent (and announces them), `propagate` acquires the
+   consuming representation's claim. Absent or unknown values mean the
+   default mode — a fetch-time hard error on an ephemeral source. */
+static recycle_ephemeral_e _parse_recycle_ephemeral_header(http_request_t* request) {
+    const char* header = http_request_header(request, "recycle-ephemeral");
+    if (header == NULL) return RECYCLE_EPHEMERAL_NONE;
+    if (strcmp(header, "commit") == 0) return RECYCLE_EPHEMERAL_COMMIT;
+    if (strcmp(header, "propagate") == 0) return RECYCLE_EPHEMERAL_PROPAGATE;
+    return RECYCLE_EPHEMERAL_NONE;
+}
+
 static void _parse_recycler_header(const char* recycler_header, vec_ori_t* oris) {
     vec_init(oris);
     if (recycler_header == NULL || recycler_header[0] == '\0') return;
@@ -1354,17 +1366,14 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
     vec_block_recipe_t recipes;
     vec_init(&recipes);
 
+    recycle_ephemeral_e recycle_mode = _parse_recycle_ephemeral_header(request);
     vec_ori_t recycler_oris;
     _parse_recycler_header(recycler_header, &recycler_oris);
-    if (is_temporary && recycler_oris.length > 0) {
-        /* Temporary+recycler is unsupported until recycler enforcement lands:
-           recycled source blocks would take zero claims. */
+    if (recycle_mode != RECYCLE_EPHEMERAL_NONE && recycler_oris.length == 0) {
+        /* An explicit recycle mode without a recycler makes no sense. */
         http_response_set_status(response, 400);
-        http_response_write(response, "temporary puts do not support recycler sources yet", 50);
+        http_response_write(response, "recycle-ephemeral requires a recycler", 37);
         http_response_end(response);
-        for (int index = 0; index < recycler_oris.length; index++) {
-            ori_destroy(recycler_oris.data[index]);
-        }
         vec_deinit(&recycler_oris);
         if (upload_data != NULL) {
             buffer_destroy(upload_data);
@@ -1372,8 +1381,12 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
         return;
     }
     if (recycler_oris.length > 0) {
+        /* Temporary+recycler is legal now: an ephemeral put behaves as
+           propagate (the recipe claims its source blocks at fetch time),
+           regardless of the explicit recycle mode. */
         recycler_recipe_t* recycler = recycler_recipe_create(ctx->pool, ctx->bc, standard,
-                                                              recycler_oris, NULL);
+                                                              recycler_oris, NULL,
+                                                              is_temporary, recycle_mode);
         vec_push(&recipes, (block_recipe_t*)recycler);
     }
 
@@ -1572,21 +1585,22 @@ static int _off_put_headers_complete(http_connection_t* connection,
     vec_block_recipe_t recipes;
     vec_init(&recipes);
 
+    recycle_ephemeral_e recycle_mode = _parse_recycle_ephemeral_header(request);
     vec_ori_t recycler_oris;
     _parse_recycler_header(recycler_header, &recycler_oris);
-    if (is_temporary && recycler_oris.length > 0) {
-        /* Temporary+recycler is unsupported until recycler enforcement lands:
-           recycled source blocks would take zero claims. */
-        for (int index = 0; index < recycler_oris.length; index++) {
-            ori_destroy(recycler_oris.data[index]);
-        }
+    if (recycle_mode != RECYCLE_EPHEMERAL_NONE && recycler_oris.length == 0) {
+        /* An explicit recycle mode without a recycler makes no sense. */
         vec_deinit(&recycler_oris);
         return _off_put_headers_complete_error(response, 400,
-            "temporary puts do not support recycler sources yet");
+            "recycle-ephemeral requires a recycler");
     }
     if (recycler_oris.length > 0) {
+        /* Temporary+recycler is legal now: an ephemeral put behaves as
+           propagate (the recipe claims its source blocks at fetch time),
+           regardless of the explicit recycle mode. */
         recycler_recipe_t* recycler = recycler_recipe_create(routes_ctx->pool, routes_ctx->bc, standard,
-                                                              recycler_oris, NULL);
+                                                              recycler_oris, NULL,
+                                                              is_temporary, recycle_mode);
         vec_push(&recipes, (block_recipe_t*)recycler);
     }
 

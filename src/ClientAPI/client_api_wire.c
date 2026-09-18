@@ -73,10 +73,11 @@ uint8_t client_api_wire_get_type(cbor_item_t* item) {
 }
 
 // --- PUT Request ---
-// [type, content_type, file_name, stream_length, server_address, data, recycler_urls, temporary, tuple_size?]
+// [type, content_type, file_name, stream_length, server_address, data, recycler_urls, temporary, tuple_size?, recycle_ephemeral?]
 
 cbor_item_t* client_api_put_request_encode(const client_api_put_request_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(msg->has_tuple_size ? 9 : 8);
+  size_t element_count = 8 + (msg->has_tuple_size ? 1 : 0) + (msg->recycle_ephemeral ? 1 : 0);
+  cbor_item_t* array = cbor_new_definite_array(element_count);
   cbor_item_t* item;
 
   item = cbor_build_uint8(CLIENT_API_PUT_REQUEST);
@@ -125,11 +126,25 @@ cbor_item_t* client_api_put_request_encode(const client_api_put_request_t* msg) 
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
-  /* Index 8: tuple_size (optional, present only when has_tuple_size != 0) */
+  /* Index 8: tuple_size (optional, present only when has_tuple_size != 0).
+     When recycle_ephemeral rides along without a tuple_size, this slot
+     carries a null placeholder so the recycle value still lands at index 9. */
   if (msg->has_tuple_size) {
     cbor_item_t* tuple_size_item = cbor_build_uint64(msg->tuple_size);
     (void)cbor_array_push(array, tuple_size_item);
     cbor_decref(&tuple_size_item);
+  } else if (msg->recycle_ephemeral) {
+    item = cbor_new_null();
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+  }
+
+  /* Index 9: recycle_ephemeral (optional, present only when non-zero —
+     1 = commit, 2 = propagate) */
+  if (msg->recycle_ephemeral) {
+    item = cbor_build_uint8(msg->recycle_ephemeral);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
   }
 
   return array;
@@ -235,8 +250,9 @@ int client_api_put_request_decode(cbor_item_t* item, client_api_put_request_t* m
     cbor_decref(&temp_item);
   }
 
-  /* Index 8: tuple_size (optional uint). has_tuple_size stays 0 when absent
-   * because memset above zeroed the struct. */
+  /* Index 8: tuple_size (optional uint; a null placeholder occupies the slot
+   * when only recycle_ephemeral is present). has_tuple_size stays 0 when
+   * absent or null because memset above zeroed the struct. */
   if (cbor_array_size(item) >= 9) {
     cbor_item_t* tuple_size_item = cbor_array_get(item, 8);
     if (tuple_size_item != NULL && !cbor_is_null(tuple_size_item)
@@ -245,6 +261,17 @@ int client_api_put_request_decode(cbor_item_t* item, client_api_put_request_t* m
       msg->tuple_size = _decode_size(tuple_size_item);
     }
     cbor_decref(&tuple_size_item);
+  }
+
+  /* Index 9: recycle_ephemeral (optional uint — 1 = commit, 2 = propagate).
+   * Stays 0 when absent because memset above zeroed the struct. */
+  if (cbor_array_size(item) >= 10) {
+    cbor_item_t* recycle_item = cbor_array_get(item, 9);
+    if (recycle_item != NULL && !cbor_is_null(recycle_item)
+        && cbor_isa_uint(recycle_item)) {
+      msg->recycle_ephemeral = cbor_get_uint8(recycle_item);
+    }
+    cbor_decref(&recycle_item);
   }
 
   return 0;

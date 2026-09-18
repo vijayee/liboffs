@@ -21,6 +21,7 @@ extern "C" {
 #include "../src/Scheduler/scheduler.h"
 #include "../src/Util/atomic_compat.h"
 #include "../src/Platform/platform_time.h"
+#include "../src/Util/error.h"
 #include "../src/Streams/stream.h"
 #include "../src/OFFStreams/tuple.h"
 #include "../src/OFFStreams/tuple_cache.h"
@@ -1634,4 +1635,243 @@ TEST_F(TestEphemeralCache, EphemeralPutMarksCreatedBlocks) {
   block_cache_sync(block_cache);
   block_cache_destroy(block_cache);
   block_cache = NULL;  /* TearDown must not double-destroy */
+}
+
+/* ---- recycler enforcement (fetch-time exact check, modes, self-heal) ---- */
+
+/* Shared helper context for a representation put pipeline: captures the
+   descriptor hash of the completed put (used again by Task 10's tests). */
+typedef struct {
+  buffer_t* descriptor_hash;
+  void* desc_handle;
+  ATOMIC(uint8_t) done;
+} rep_put_context_t;
+
+static void _test_capture_descriptor_hash(void* ctx, void* data) {
+  rep_put_context_t* put_ctx = (rep_put_context_t*)ctx;
+  buffer_t* payload = (buffer_t*)data;
+  if (put_ctx->descriptor_hash != NULL) buffer_destroy(put_ctx->descriptor_hash);
+  put_ctx->descriptor_hash = (buffer_t*)refcounter_reference((refcounter_t*)payload);
+}
+
+static void _test_capture_tuple(void* ctx, void* data) {
+  rep_put_context_t* put_ctx = (rep_put_context_t*)ctx;
+  buffer_t* payload = (buffer_t*)data;
+  if (payload->size == 32) {
+    /* WRITEABLE_FINALIZE emits the 32-byte file hash on data_event — not a
+       tuple (tuple payloads reach here as a tuple_t whose cast "size" field
+       is the tuple hash count). */
+    return;
+  }
+  tuple_t* tuple = (tuple_t*)refcounter_reference((refcounter_t*)data);
+  writeable_descriptor_write((writeable_descriptor_t*)put_ctx->desc_handle, tuple);
+  tuple_destroy(tuple);
+}
+
+static void _test_rep_put_ws_close(void* ctx, void* unused) {
+  (void)unused;
+  rep_put_context_t* put_ctx = (rep_put_context_t*)ctx;
+  writeable_descriptor_close((writeable_descriptor_t*)put_ctx->desc_handle);
+}
+
+static void _test_rep_put_close(void* ctx, void* unused) {
+  (void)unused;
+  ATOMIC_STORE(&((rep_put_context_t*)ctx)->done, 1);
+}
+
+/* Run one complete ephemeral put of data_size bytes and return a referenced
+   descriptor hash of the finished representation (NULL when the pipeline
+   failed). Mirrors the off_routes.c put flow: tuples feed the descriptor,
+   the off-stream's close_event closes it, and the descriptor's close_event
+   marks completion. */
+static buffer_t* _test_put_ephemeral(block_cache_t* bc, scheduler_pool_t* pool, size_t data_size) {
+  rep_put_context_t put_ctx;
+  memset(&put_ctx, 0, sizeof(put_ctx));
+  tuple_cache_t* tc = tuple_cache_create(16, pool);
+  if (tc == NULL) {
+    return NULL;
+  }
+  writeable_descriptor_t* desc = writeable_descriptor_create(pool, bc, standard, 32, 3, data_size, NULL);
+  if (desc == NULL) {
+    tuple_cache_destroy(tc);
+    return NULL;
+  }
+  writeable_descriptor_set_ephemeral(desc, 1);
+  put_ctx.desc_handle = desc;
+  vec_block_recipe_t recipes;
+  vec_init(&recipes);
+  new_blocks_recipe_t* recipe = new_blocks_recipe_create(pool, bc, standard);
+  if (recipe == NULL) {
+    stream_deferred_deref((stream_t*)desc);
+    scheduler_pool_wait_for_idle(pool);
+    tuple_cache_destroy(tc);
+    return NULL;
+  }
+  vec_push(&recipes, (block_recipe_t*)recipe);
+  writeable_off_stream_t* ws = writeable_off_stream_create(pool, bc, tc, standard, 3, 32, recipes, NULL);
+  if (ws == NULL) {
+    refcounter_dereference((refcounter_t*)recipe);
+    scheduler_pool_defer_cleanup(pool, recipe, (void (*)(void*))new_blocks_recipe_destroy);
+    stream_deferred_deref((stream_t*)desc);
+    scheduler_pool_wait_for_idle(pool);
+    tuple_cache_destroy(tc);
+    return NULL;
+  }
+  writeable_off_stream_set_ephemeral(ws, 1);
+  stream_subscribe((stream_t*)ws, data_event, &put_ctx, _test_capture_tuple, NULL);
+  stream_subscribe((stream_t*)ws, close_event, &put_ctx, _test_rep_put_ws_close, NULL);
+  stream_subscribe((stream_t*)desc, data_event, &put_ctx, _test_capture_descriptor_hash, NULL);
+  stream_once((stream_t*)desc, close_event, &put_ctx, _test_rep_put_close, NULL);
+  buffer_t* upload = buffer_create(data_size);
+  upload->size = data_size;
+  writeable_off_stream_write(ws, upload);
+  writeable_off_stream_finalize(ws);
+  buffer_destroy(upload);
+  while (!ATOMIC_LOAD(&put_ctx.done)) { platform_sleep_ms(1); }
+  scheduler_pool_wait_for_idle(pool);
+  /* Release the recipe's creation reference, deferring its destructor so it
+     runs LAST (the pending list is LIFO). Mirrors off_routes.c's order. */
+  refcounter_dereference((refcounter_t*)recipe);
+  scheduler_pool_defer_cleanup(pool, recipe, (void (*)(void*))new_blocks_recipe_destroy);
+  stream_deferred_deref((stream_t*)ws);
+  stream_deferred_deref((stream_t*)desc);
+  scheduler_pool_wait_for_idle(pool);
+  tuple_cache_destroy(tc);
+  return put_ctx.descriptor_hash;
+}
+
+typedef struct {
+  ATOMIC(uint8_t) done;
+  ATOMIC(uint8_t) errored;
+  char error_message[128];
+} recipe_watch_t;
+
+static void recipe_error_watch(void* ctx, void* error) {
+  recipe_watch_t* watch = (recipe_watch_t*)ctx;
+  if (error != NULL) {
+    async_error_t* async_error = (async_error_t*)error;
+    if (async_error->message != NULL) {
+      snprintf(watch->error_message, sizeof(watch->error_message), "%s",
+               async_error->message);
+    }
+  }
+  ATOMIC_STORE(&watch->errored, 1);
+  ATOMIC_STORE(&watch->done, 1);
+}
+
+static void recipe_close_watch(void* ctx, void* unused) {
+  (void)unused;
+  ATOMIC_STORE(&((recipe_watch_t*)ctx)->done, 1);
+}
+
+static ori_t* _test_ori_for(buffer_t* descriptor_hash) {
+  ori_t* source_ori = ori_create(standard);
+  source_ori->descriptor_hash = buffer_copy(descriptor_hash);
+  source_ori->block_type = standard;
+  source_ori->tuple_size = 3;
+  return source_ori;
+}
+
+TEST(TestRecyclerModes, ModeEnumDefaults) {
+  EXPECT_EQ((int)RECYCLE_EPHEMERAL_NONE, 0);
+  EXPECT_EQ((int)RECYCLE_EPHEMERAL_COMMIT, 1);
+  EXPECT_EQ((int)RECYCLE_EPHEMERAL_PROPAGATE, 2);
+}
+
+/* Default mode: a permanent put recycling an ephemeral source must hard-error
+   at data-block fetch time (the exact index walk), not deliver the block. */
+TEST_F(TestEphemeralCache, RecyclerRejectsEphemeralSourceOnPermanentPut) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  ASSERT_NE(block_cache, nullptr);
+  buffer_t* descriptor_hash = _test_put_ephemeral(block_cache, pool, standard);
+  ASSERT_NE(descriptor_hash, nullptr);
+
+  vec_ori_t oris;
+  vec_init(&oris);
+  ori_t* source_ori = _test_ori_for(descriptor_hash);
+  vec_push(&oris, source_ori);
+  recycler_recipe_t* recycler = recycler_recipe_create(pool, block_cache, standard, oris, NULL,
+                                                        /*put_is_ephemeral=*/0, RECYCLE_EPHEMERAL_NONE);
+  ASSERT_NE(recycler, nullptr);
+  /* recycler_recipe_create references every ori itself — drop the creation
+     reference held by the test. */
+  DESTROY(source_ori, ori);
+
+  recipe_watch_t watch;
+  memset(&watch, 0, sizeof(watch));
+  stream_subscribe((stream_t*)recycler, error_event, &watch, recipe_error_watch, NULL);
+  stream_once((stream_t*)recycler, close_event, &watch, recipe_close_watch, NULL);
+  recycler_recipe_pull(recycler);
+  while (!ATOMIC_LOAD(&watch.done)) { platform_sleep_ms(1); }
+  scheduler_pool_wait_for_idle(pool);
+  EXPECT_EQ(ATOMIC_LOAD(&watch.errored), 1);
+  /* The error must be the fetch-time enforcement rejection, not a fetch
+     failure — the propagate test proves the same blocks are readable. */
+  EXPECT_STREQ(watch.error_message, "recycle source is ephemeral/unverified");
+
+  stream_deferred_deref((stream_t*)recycler);
+  scheduler_pool_wait_for_idle(pool);
+  block_cache_sync(block_cache);
+  block_cache_destroy(block_cache);
+  block_cache = NULL;
+  DESTROY(descriptor_hash, buffer);
+}
+
+/* An ephemeral put (put_is_ephemeral) behaves as propagate regardless of the
+   configured mode: no error, and every recycled source block gains the
+   consuming representation's claim (ephemeral_count goes 1 -> 2). */
+TEST_F(TestEphemeralCache, RecyclerPropagatesForEphemeralPut) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  ASSERT_NE(block_cache, nullptr);
+  buffer_t* descriptor_hash = _test_put_ephemeral(block_cache, pool, standard);
+  ASSERT_NE(descriptor_hash, nullptr);
+
+  vec_ori_t oris;
+  vec_init(&oris);
+  ori_t* source_ori = _test_ori_for(descriptor_hash);
+  vec_push(&oris, source_ori);
+  recycler_recipe_t* recycler = recycler_recipe_create(pool, block_cache, standard, oris, NULL,
+                                                        /*put_is_ephemeral=*/1, RECYCLE_EPHEMERAL_NONE);
+  ASSERT_NE(recycler, nullptr);
+  /* recycler_recipe_create references every ori itself — drop the creation
+     reference held by the test. */
+  DESTROY(source_ori, ori);
+
+  recipe_watch_t watch;
+  memset(&watch, 0, sizeof(watch));
+  stream_subscribe((stream_t*)recycler, error_event, &watch, recipe_error_watch, NULL);
+  stream_once((stream_t*)recycler, close_event, &watch, recipe_close_watch, NULL);
+  /* Three pulls: two serve the descriptor's data blocks (acquiring the
+     propagated claims), the third exhausts the ori and closes the recipe. */
+  recycler_recipe_pull(recycler);
+  recycler_recipe_pull(recycler);
+  recycler_recipe_pull(recycler);
+  while (!ATOMIC_LOAD(&watch.done)) { platform_sleep_ms(1); }
+  scheduler_pool_wait_for_idle(pool);
+  EXPECT_EQ(ATOMIC_LOAD(&watch.errored), 0);
+
+  /* Both recycled source blocks carry the propagated claim on top of the
+     source put's own claim — check BEFORE destroying the recycler, which
+     releases the acquired claims in its destructor. */
+  index_entry_vec_t* entries = index_to_array(block_cache->index);
+  ASSERT_NE(entries, nullptr);
+  size_t propagated = 0;
+  for (int idx = 0; idx < entries->length; idx++) {
+    if (entries->data[idx]->ephemeral_count >= 2) {
+      propagated++;
+    }
+  }
+  for (int idx = 0; idx < entries->length; idx++) {
+    index_entry_destroy(entries->data[idx]);
+  }
+  vec_deinit(entries);
+  free(entries);
+  EXPECT_GE(propagated, 2u);
+
+  stream_deferred_deref((stream_t*)recycler);
+  scheduler_pool_wait_for_idle(pool);
+  block_cache_sync(block_cache);
+  block_cache_destroy(block_cache);
+  block_cache = NULL;
+  DESTROY(descriptor_hash, buffer);
 }
