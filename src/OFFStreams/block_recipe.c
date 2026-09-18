@@ -253,8 +253,10 @@ static uint8_t _recycler_enforce_ephemeral(recycler_recipe_t* recipe, block_t* b
   }
 
   if (recipe->recipe.put_is_ephemeral || recipe->override_mode == RECYCLE_EPHEMERAL_PROPAGATE) {
-    /* Propagate: acquire the consuming representation's claim. The recipe
-       releases every acquired claim in recycler_recipe_destroy. */
+    /* Propagate: acquire the consuming representation's claim. After a
+       successful put these claims are the consuming representation's ONLY
+       reference protection on the shared source blocks — they are released
+       solely by recycler_recipe_release_acquired (failure rollback). */
     block_cache_ephemeral(recipe->recipe.bc, block->hash, CACHE_EPHEMERAL_ACQUIRE, NULL);
     vec_push(&recipe->acquired_hashes,
              (buffer_t*)refcounter_reference((refcounter_t*)block->hash));
@@ -605,17 +607,29 @@ recycler_recipe_t* recycler_recipe_create(
   return recipe;
 }
 
+void recycler_recipe_release_acquired(recycler_recipe_t* recipe) {
+  /* Failure rollback only: the consuming put aborted, so no representation
+     will ever release these claims itself. After a successful put these
+     claims are the consuming representation's only reference protection on
+     the shared source blocks — never call this then. */
+  if (recipe->recipe.bc != NULL) {
+    for (int i = 0; i < recipe->acquired_hashes.length; i++) {
+      block_cache_ephemeral(recipe->recipe.bc, recipe->acquired_hashes.data[i],
+                            CACHE_EPHEMERAL_RELEASE, NULL);
+    }
+  }
+  for (int i = 0; i < recipe->acquired_hashes.length; i++) {
+    DESTROY(recipe->acquired_hashes.data[i], buffer);
+  }
+  recipe->acquired_hashes.length = 0;
+}
+
 void recycler_recipe_destroy(recycler_recipe_t* recipe) {
   if (refcounter_dereference_is_zero((refcounter_t*)recipe)) {
-    /* Release every ephemeral claim this recipe acquired (propagate mode):
-       dropping the last claim deletes the source block, matching the
-       consuming representation's lifetime. */
-    if (recipe->recipe.bc != NULL) {
-      for (int i = 0; i < recipe->acquired_hashes.length; i++) {
-        block_cache_ephemeral(recipe->recipe.bc, recipe->acquired_hashes.data[i],
-                              CACHE_EPHEMERAL_RELEASE, NULL);
-      }
-    }
+    /* NO claim release here: after a successful put the acquired claims are
+       the consuming representation's only reference protection on the
+       recycled source blocks. Failure rollback is the caller's job, via
+       recycler_recipe_release_acquired. */
     for (int i = 0; i < recipe->acquired_hashes.length; i++) {
       DESTROY(recipe->acquired_hashes.data[i], buffer);
     }

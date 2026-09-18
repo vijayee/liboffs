@@ -68,7 +68,7 @@ typedef struct {
   recipe_state_e state;             /* stream state */
   recycle_ephemeral_e override_mode; /* explicit recycle-ephemeral mode from the put */
   uint8_t source_flagged;            /* registry CHECK said source may be ephemeral (advisory) */
-  vec_buffer_t acquired_hashes;     /* claims this recipe acquired (propagate) — released on destroy */
+  vec_buffer_t acquired_hashes;     /* claims this recipe acquired (propagate) — released only via recycler_recipe_release_acquired (failure rollback) */
 } recycler_recipe_t;
 
 new_blocks_recipe_t* new_blocks_recipe_create(
@@ -82,6 +82,14 @@ recycler_recipe_t* recycler_recipe_create(
     vec_ori_t oris, network_t* network, uint8_t put_is_ephemeral,
     recycle_ephemeral_e override_mode);
 void recycler_recipe_destroy(recycler_recipe_t* recipe);
+
+/* Failure rollback: release every claim this recipe acquired on recycled
+   source blocks (the consuming put aborted — no representation will release
+   these claims itself). MUST NOT be called after a successful put: the
+   claims are then the consuming representation's only reference protection
+   on the shared source blocks. Destroys the recorded hash references. */
+void recycler_recipe_release_acquired(recycler_recipe_t* recipe);
+
 void recycler_recipe_dispatch(void* state, message_t* msg);
 void recycler_recipe_pull(recycler_recipe_t* recipe);
 

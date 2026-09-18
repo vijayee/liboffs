@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <string.h>
 #include <cstdio>
+#include <vector>
 #include <sys/stat.h>
 extern "C" {
 #include "../src/BlockCache/index.h"
@@ -1850,9 +1851,13 @@ TEST_F(TestEphemeralCache, RecyclerPropagatesForEphemeralPut) {
   scheduler_pool_wait_for_idle(pool);
   EXPECT_EQ(ATOMIC_LOAD(&watch.errored), 0);
 
+  stream_deferred_deref((stream_t*)recycler);
+  scheduler_pool_wait_for_idle(pool);
+
   /* Both recycled source blocks carry the propagated claim on top of the
-     source put's own claim — check BEFORE destroying the recycler, which
-     releases the acquired claims in its destructor. */
+     source put's own claim — and the claims must SURVIVE the recycler's
+     destroy: after a successful put they are the consuming representation's
+     only reference protection on the shared source blocks. */
   index_entry_vec_t* entries = index_to_array(block_cache->index);
   ASSERT_NE(entries, nullptr);
   size_t propagated = 0;
@@ -1867,6 +1872,78 @@ TEST_F(TestEphemeralCache, RecyclerPropagatesForEphemeralPut) {
   vec_deinit(entries);
   free(entries);
   EXPECT_GE(propagated, 2u);
+
+  block_cache_sync(block_cache);
+  block_cache_destroy(block_cache);
+  block_cache = NULL;
+  DESTROY(descriptor_hash, buffer);
+}
+
+/* Failure rollback: recycler_recipe_release_acquired drops every propagated
+   claim the recipe acquired, restoring each recycled source block to the
+   source put's own single claim. This is the consuming put's abort path —
+   after a successful put the claims must instead be kept. */
+TEST_F(TestEphemeralCache, RecyclerReleaseAcquiredRollsBackClaims) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  ASSERT_NE(block_cache, nullptr);
+  buffer_t* descriptor_hash = _test_put_ephemeral(block_cache, pool, standard);
+  ASSERT_NE(descriptor_hash, nullptr);
+
+  vec_ori_t oris;
+  vec_init(&oris);
+  ori_t* source_ori = _test_ori_for(descriptor_hash);
+  vec_push(&oris, source_ori);
+  recycler_recipe_t* recycler = recycler_recipe_create(pool, block_cache, standard, oris, NULL,
+                                                        /*put_is_ephemeral=*/1, RECYCLE_EPHEMERAL_NONE);
+  ASSERT_NE(recycler, nullptr);
+  /* recycler_recipe_create references every ori itself — drop the creation
+     reference held by the test. */
+  DESTROY(source_ori, ori);
+
+  recipe_watch_t watch;
+  memset(&watch, 0, sizeof(watch));
+  stream_subscribe((stream_t*)recycler, error_event, &watch, recipe_error_watch, NULL);
+  stream_once((stream_t*)recycler, close_event, &watch, recipe_close_watch, NULL);
+  /* Three pulls: two serve the descriptor's data blocks (acquiring the
+     propagated claims), the third exhausts the ori and closes the recipe. */
+  recycler_recipe_pull(recycler);
+  recycler_recipe_pull(recycler);
+  recycler_recipe_pull(recycler);
+  while (!ATOMIC_LOAD(&watch.done)) { platform_sleep_ms(1); }
+  scheduler_pool_wait_for_idle(pool);
+  EXPECT_EQ(ATOMIC_LOAD(&watch.errored), 0);
+
+  /* The propagated claims are in place (ephemeral_count == 2 on the recycled
+     source blocks). Record which entries carry them. */
+  index_entry_vec_t* entries = index_to_array(block_cache->index);
+  ASSERT_NE(entries, nullptr);
+  std::vector<buffer_t*> claimed_hashes;
+  for (int idx = 0; idx < entries->length; idx++) {
+    if (entries->data[idx]->ephemeral_count >= 2) {
+      claimed_hashes.push_back(
+          (buffer_t*)refcounter_reference((refcounter_t*)entries->data[idx]->hash));
+    }
+  }
+  for (int idx = 0; idx < entries->length; idx++) {
+    index_entry_destroy(entries->data[idx]);
+  }
+  vec_deinit(entries);
+  free(entries);
+  ASSERT_GE(claimed_hashes.size(), 2u) << "recycled source blocks must be claimed first";
+
+  /* Rollback: the consuming put aborted, so the recipe releases its claims. */
+  recycler_recipe_release_acquired(recycler);
+  scheduler_pool_wait_for_idle(pool);
+
+  /* Every previously-double-claimed block is back to the source put's own
+     single claim — the rollback must neither delete the block (source A's
+     claim remains) nor leave the propagated claim behind. */
+  for (buffer_t* claimed_hash : claimed_hashes) {
+    index_entry_t* entry = index_peek(block_cache->index, claimed_hash);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->ephemeral_count, 1u);
+    DESTROY(claimed_hash, buffer);
+  }
 
   stream_deferred_deref((stream_t*)recycler);
   scheduler_pool_wait_for_idle(pool);
