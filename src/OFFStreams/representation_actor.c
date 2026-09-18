@@ -54,14 +54,38 @@ static void _rep_maybe_finish(representation_actor_t* rep) {
   _rep_reply(rep);
 }
 
+/* TRUE when the hash was already applied to during this walk. Every fetched
+   descriptor block's own hash is pushed here, so a next-descriptor pointer
+   hitting this set means the chain is cyclic (or trivially self-referential). */
+static int _rep_hash_seen(representation_actor_t* rep, buffer_t* hash) {
+  for (int idx = 0; idx < rep->seen_hashes.length; idx++) {
+    if (buffer_compare(rep->seen_hashes.data[idx], hash) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* End the walk: no more descriptor fetches will be issued. A MARK_PERMANENT /
+   DELETE_EPHEMERAL walk that ends — completed, missing, corrupt, or cyclic —
+   drops the descriptor hash from the advisory registry so a failed op never
+   leaves a stale entry behind. PIN/UNPIN leave the ephemeral status alone. */
+static void _rep_end_walk(representation_actor_t* rep) {
+  rep->walk_done = 1;
+  if ((rep->op == REPRESENTATION_OP_MARK_PERMANENT ||
+       rep->op == REPRESENTATION_OP_DELETE_EPHEMERAL) &&
+      rep->bc->registry != NULL) {
+    ephemeral_registry_remove(rep->bc->registry, rep->descriptor_hash);
+  }
+  _rep_maybe_finish(rep);
+}
+
 /* Dedup within one walk (a descriptor may list the same hash twice — a
    double-op would double-claim/double-release), then issue the block-level
    op and count it until its result comes back. */
 static void _rep_apply_to_hash(representation_actor_t* rep, buffer_t* hash) {
-  for (int idx = 0; idx < rep->seen_hashes.length; idx++) {
-    if (buffer_compare(rep->seen_hashes.data[idx], hash) == 0) {
-      return;
-    }
+  if (_rep_hash_seen(rep, hash)) {
+    return;
   }
   vec_push(&rep->seen_hashes, REFERENCE(hash, buffer_t));
   rep->blocks_touched++;
@@ -149,8 +173,7 @@ void representation_actor_dispatch(void* state, message_t* msg) {
           DESTROY(result->hash, buffer);
         }
         rep->result = -1;
-        rep->walk_done = 1;
-        _rep_maybe_finish(rep);
+        _rep_end_walk(rep);
         break;
       }
       _rep_process_descriptor_block(rep, result->block->data, result->hash);
@@ -159,19 +182,19 @@ void representation_actor_dispatch(void* state, message_t* msg) {
       if (rep->next_descriptor_hash != NULL) {
         buffer_t* next_hash = rep->next_descriptor_hash;
         rep->next_descriptor_hash = NULL;
-        block_cache_get(rep->bc, next_hash, &rep->actor);
-        DESTROY(next_hash, buffer);
-      } else {
-        rep->walk_done = 1;
-        /* The representation is no longer ephemeral (committed or gone) —
-           drop its descriptor hash from the advisory registry. PIN/UNPIN
-           leave the representation's ephemeral status alone. */
-        if ((rep->op == REPRESENTATION_OP_MARK_PERMANENT ||
-             rep->op == REPRESENTATION_OP_DELETE_EPHEMERAL) &&
-            rep->bc->registry != NULL) {
-          ephemeral_registry_remove(rep->bc->registry, rep->descriptor_hash);
+        if (_rep_hash_seen(rep, next_hash)) {
+          /* Cycle: the chain points back at a descriptor block this walk
+             already visited (or at itself). Never re-fetch it — end the walk
+             here with the cycle result; the reply still fires normally. */
+          rep->result = -3;
+          DESTROY(next_hash, buffer);
+          _rep_end_walk(rep);
+        } else {
+          block_cache_get(rep->bc, next_hash, &rep->actor);
+          DESTROY(next_hash, buffer);
         }
-        _rep_maybe_finish(rep);
+      } else {
+        _rep_end_walk(rep);
       }
       break;
     }

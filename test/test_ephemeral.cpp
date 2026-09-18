@@ -2355,3 +2355,58 @@ TEST_F(TestEphemeralCache, DeleteEphemeralSparesBlocksSharedWithOtherRepresentat
   block_cache = NULL;
   DESTROY(descriptor_a, buffer);
 }
+
+/* PIN walks the whole chain and pins every block; UNPIN walks it again and
+   takes every pin back. Pins coexist with ephemeral claims: the blocks stay
+   ephemeral (ephemeral_count 1) while pinned, and unpinning an ephemeral
+   representation is legal — pin_count merely returns to 0. */
+TEST_F(TestEphemeralCache, PinAndUnpinWholeRepresentation) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  buffer_t* descriptor_hash = _test_put_ephemeral(block_cache, pool, standard);
+  ASSERT_NE(descriptor_hash, nullptr);
+  size_t entries_before = block_cache_count(block_cache);
+  EXPECT_GT(entries_before, 0u);
+
+  int result; size_t blocks;
+  representation_actor_t* pin_rep = _test_rep_op(block_cache, pool, descriptor_hash,
+                                                  REPRESENTATION_OP_PIN, &result, &blocks);
+  EXPECT_EQ(result, 0);
+  EXPECT_GT(blocks, 0u);
+
+  /* Every block is pinned and still carries its single ephemeral claim. */
+  index_entry_vec_t* entries = index_to_array(block_cache->index);
+  ASSERT_NE(entries, nullptr);
+  for (int idx = 0; idx < entries->length; idx++) {
+    EXPECT_GE(entries->data[idx]->pin_count, 1u) << "block " << idx;
+    EXPECT_EQ(entries->data[idx]->ephemeral_count, 1u) << "block " << idx;
+    index_entry_destroy(entries->data[idx]);
+  }
+  vec_deinit(entries);
+  free(entries);
+  EXPECT_EQ(block_cache_count(block_cache), entries_before);
+
+  size_t pin_blocks = blocks;
+  representation_actor_t* unpin_rep = _test_rep_op(block_cache, pool, descriptor_hash,
+                                                    REPRESENTATION_OP_UNPIN, &result, &blocks);
+  EXPECT_EQ(result, 0);
+  EXPECT_EQ(blocks, pin_blocks);   /* the second walk sees the same chain */
+
+  /* Every pin is gone; the blocks remain ephemeral (never committed). */
+  entries = index_to_array(block_cache->index);
+  ASSERT_NE(entries, nullptr);
+  for (int idx = 0; idx < entries->length; idx++) {
+    EXPECT_EQ(entries->data[idx]->pin_count, 0u) << "block " << idx;
+    EXPECT_EQ(entries->data[idx]->ephemeral_count, 1u) << "block " << idx;
+    index_entry_destroy(entries->data[idx]);
+  }
+  vec_deinit(entries);
+  free(entries);
+  EXPECT_EQ(block_cache_count(block_cache), entries_before);
+
+  representation_actor_destroy(pin_rep);
+  representation_actor_destroy(unpin_rep);
+  block_cache_sync(block_cache);
+  block_cache_destroy(block_cache);
+  block_cache = NULL;
+  DESTROY(descriptor_hash, buffer);
+}

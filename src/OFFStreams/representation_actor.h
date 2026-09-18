@@ -25,9 +25,12 @@ typedef enum {
   REPRESENTATION_OP_UNPIN = 3
 } representation_op_e;
 
-/* Payload for REPRESENTATION_OP_RESULT */
+/* Payload for REPRESENTATION_OP_RESULT. Result codes: 0 = ok,
+   -1 = descriptor block missing, -2 = malformed descriptor block,
+   -3 = cycle detected (the chain pointed back at an already-visited
+   descriptor block); the walk stops and the summary reply still fires. */
 typedef struct {
-  int result;             /* 0 = ok, -1 = descriptor missing, -2 = walk error */
+  int result;
   size_t blocks_touched;
   actor_t* reply_to;
 } representation_op_result_payload_t;
@@ -35,12 +38,15 @@ typedef struct {
 /* Walks a representation's descriptor chain (descriptor blocks chained by the
    trailing 32-byte next-descriptor hash), issues one block-level op per block
    hash it sees — deduplicated within the walk — then replies to reply_to with
-   a summary. MARK_PERMANENT additionally announces every newly-committed
-   block (previous_count > 0) to the network and removes the representation's
-   descriptor hash from the ephemeral registry; DELETE_EPHEMERAL also removes
-   the descriptor hash from the registry. Blocks released to 0 are deleted
-   regardless of pins; blocks shared with another representation (count > 1)
-   survive a delete and merely drop one claim.
+   a summary. A next-descriptor pointer naming an already-visited descriptor
+   block is a cycle: the walk stops there with result -3 instead of re-fetching
+   forever. MARK_PERMANENT additionally announces every newly-committed
+   block (previous_count > 0) to the network; MARK_PERMANENT and
+   DELETE_EPHEMERAL remove the descriptor hash from the ephemeral registry on
+   every walk end — success, missing (-1), malformed (-2), or cycle (-3) — so
+   a failed op never leaves a stale advisory entry. Blocks released to 0 are
+   deleted regardless of pins; blocks shared with another representation
+   (count > 1) survive a delete and merely drop one claim.
 
    Destroy is for EXTERNAL callers only (routes/tests teardown): it parks the
    scheduler pool and then tears the actor down. Never destroy it from inside
