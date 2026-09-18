@@ -1398,7 +1398,9 @@ TEST(TestEphemeralRegistry, AddCheckRemovePersist) {
    tests never reach the bitset contents). */
 static cbor_item_t* BuildFilterCbor(uint64_t size, uint32_t hash_count,
                                     uint32_t fp_bits, size_t bitset_len) {
-  static const uint8_t zero_bits[1] = {0};
+  /* Largest bitset_len any caller passes is 32; cbor_build_bytestring reads
+     bitset_len bytes from this buffer, so it must be at least that large. */
+  static const uint8_t zero_bits[32] = {0};
   cbor_item_t* filter = cbor_new_definite_array(7);
   (void)cbor_array_push(filter, cbor_move(cbor_build_uint64(size)));
   (void)cbor_array_push(filter, cbor_move(cbor_build_uint32(hash_count)));
