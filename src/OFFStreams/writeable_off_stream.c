@@ -76,10 +76,14 @@ static void _get_random_blocks(writeable_off_stream_t* stream);
  * block this put created (its only claim is the failed put's, so each block
  * is deleted at count 0) and roll back the acquired claims on every recycler
  * recipe (restoring the recycled source blocks to their producers' counts).
- * Idempotent — the created-hash vec is emptied on the first call, so the
- * destroy-path backstop after an error-path release is a no-op. Never call
- * this on a completed put: its claims are the stored representation's only
- * reference protection. */
+ * Idempotent for created hashes — the vec is emptied on the first call, so
+ * the destroy-path backstop's created-hash pass after an error-path release
+ * is a no-op. The recycler pass is NOT redundant, however: it deliberately
+ * re-runs so the backstop releases recycler claims acquired AFTER the
+ * error-path release (a recycler can deliver and claim a source block while
+ * the error is still propagating) — do not remove it. Never call this on a
+ * completed put: its claims are the stored representation's only reference
+ * protection. */
 static void _release_ephemeral_claims(writeable_off_stream_t* stream) {
   if (!stream->is_ephemeral) {
     return;
@@ -335,6 +339,19 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
       stream->has_pulled = 0;
 
       if (stream->entries.length == 0 || stream->stream.is_deactivated) {
+        /* A delivery that was in flight when an error branch ran (or a
+           surplus delivery after finalize) arrives past the attach path —
+           but the new_blocks_recipe already claimed this block at creation,
+           so dropping it without recording the hash would leak that claim
+           as a never-released ephemeral block. Record it into created_hashes
+           so the destroy backstop releases it. Recycler-delivered blocks are
+           EXCLUDED, as in the attach path: their rollback is the recycler's
+           acquired_hashes. */
+        if (stream->is_ephemeral && stream->current_recipe != NULL &&
+            !stream->current_recipe->is_recycler) {
+          vec_push(&stream->created_hashes,
+                   (buffer_t*)refcounter_reference((refcounter_t*)block->hash));
+        }
         block_destroy(block);
         msg->payload = NULL;
         break;
@@ -505,7 +522,11 @@ void writeable_off_stream_destroy(writeable_off_stream_t* stream) {
      * disconnect, deactivation before completion): an ephemeral put that
      * never completed releases its claims so no created block leaks. Runs
      * before the recipes are destroyed — recycler rollback needs them
-     * alive. Idempotent with the CACHE_PUT_RESULT error branch. */
+     * alive. Idempotent with the CACHE_PUT_RESULT error branch for created
+     * hashes only: the recycler pass intentionally re-runs to release claims
+     * acquired after an error-path release (in-flight recycler deliveries
+     * that claimed their source blocks while the error was propagating), so
+     * it must stay even alongside the error branch. */
     if (stream->is_ephemeral && !stream->completed) {
       _release_ephemeral_claims(stream);
     }

@@ -1978,9 +1978,6 @@ static bool WaitForClaimState(block_cache_t* bc, size_t expected_entries,
       if (length == expected_entries && double_claimed == expected_double_claimed) {
         return true;
       }
-      if (length == expected_entries && double_claimed == expected_double_claimed) {
-        return true;
-      }
     }
     platform_sleep_ms(2);
   }
@@ -2134,6 +2131,12 @@ TEST_F(TestEphemeralCache, FailedEphemeralPutReleasesAcquiredRecyclerClaims) {
    * block and rolls the recycler's acquired claims back. */
   refcounter_dereference((refcounter_t*)recycler);
   stream_deferred_deref((stream_t*)ws);
+  scheduler_pool_wait_for_idle(pool);
+  /* The destroy-path cleanup above runs during the first wait's final
+     pending-deref drain — AFTER that wait's idle predicate — so the
+     CACHE_EPHEMERAL_RELEASE messages it enqueues are still in the cache
+     actor's mailbox here. A second wait drains them before the assertions
+     below observe the cache. */
   scheduler_pool_wait_for_idle(pool);
   tuple_cache_destroy(tc);
 
