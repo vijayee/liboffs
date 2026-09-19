@@ -161,6 +161,17 @@ void off_routes_context_destroy(off_routes_context_t* ctx) {
     free(ctx);
 }
 
+/* ?pin=1 on a GET / ?load=1 read: once the read pipeline's readable stream
+   closes, spin a representation PIN actor for the URL's descriptor hash. The
+   read pipeline already owns the HTTP response, so this walk is
+   fire-and-forget — the completion context only queues the representation
+   actor's deferred destruction and tears itself down. Defined below the
+   rep-route machinery it reuses (rep_route_defer_t /
+   _rep_route_deferred_destroy); declared here so the pipeline close handlers
+   above it can call it. */
+static void _pin_after_read(block_cache_t* bc, network_t* network,
+                            scheduler_pool_t* pool, buffer_t* descriptor_hash);
+
 typedef struct {
     refcounter_t refcounter;
     readable_descriptor_t* desc;
@@ -168,6 +179,13 @@ typedef struct {
     tuple_cache_t* tc;
     http_response_t* response;
     ori_t* ori;
+    /* ?pin=1 bookkeeping: the close handler spins the pin actor against these
+       once the read finishes (bc/network/pool snapshot, not the route context
+       whose lifetime ends with the response). */
+    block_cache_t* bc;
+    network_t* network;
+    scheduler_pool_t* pool;
+    uint8_t pin;
     /* desc_done ensures desc contributes exactly one pipeline deref,
        whether close or error fires first. stream_deactivate emits both
        close_event and error_event, so without this flag the pipeline
@@ -220,6 +238,16 @@ static void _pipeline_on_rs_close(void* ctx, void* unused) {
     (void)unused;
     get_pipeline_t* pipeline = (get_pipeline_t*)ctx;
     readable_off_stream_t* rs = pipeline->rs;
+    /* ?pin=1: the read finished — pin every block the walk reaches. This
+       fires on close_event only, so an errored read still pins whatever
+       blocks it fetched (a pin is protection, never a deletion); a walk
+       over a missing descriptor simply fails silently inside the actor.
+       Spin BEFORE the pipeline frees its ori: the actor references the
+       descriptor hash itself, so the ori destroy below cannot race it. */
+    if (pipeline->pin && pipeline->ori->descriptor_hash != NULL) {
+        _pin_after_read(pipeline->bc, pipeline->network, pipeline->pool,
+                        pipeline->ori->descriptor_hash);
+    }
     int is_zero = refcounter_dereference_is_zero((refcounter_t*)pipeline);
     stream_deferred_deref((stream_t*)rs);
     if (is_zero) {
@@ -230,7 +258,8 @@ static void _pipeline_on_rs_close(void* ctx, void* unused) {
 
 static void _setup_stream_pipeline(http_response_t* response, scheduler_pool_t* pool,
                                    block_cache_t* bc, tuple_cache_t* tc, ori_t* stream_ori,
-                                   size_t descriptor_pad, network_t* network) {
+                                   size_t descriptor_pad, network_t* network,
+                                   uint8_t pin) {
     readable_off_stream_t* rs = readable_off_stream_create(pool, bc, tc, stream_ori, descriptor_pad, network);
     readable_descriptor_t* desc = readable_descriptor_create(pool, bc, stream_ori, descriptor_pad, network);
 
@@ -240,6 +269,10 @@ static void _setup_stream_pipeline(http_response_t* response, scheduler_pool_t* 
     pipeline->tc = tc;
     pipeline->response = response;
     pipeline->ori = stream_ori;
+    pipeline->bc = bc;
+    pipeline->network = network;
+    pipeline->pool = pool;
+    pipeline->pin = pin;
     /* Two derefs total: one for desc-done (close or error, whichever
        fires first — guarded by desc_done), one for rs-done. */
     refcounter_init((refcounter_t*)pipeline);
@@ -302,6 +335,11 @@ typedef struct {
     readable_off_stream_t* rs;
     readable_descriptor_t* desc;
     ori_t* ori;
+    /* ?pin=1 bookkeeping — same rationale as get_pipeline_t. */
+    block_cache_t* bc;
+    network_t* network;
+    scheduler_pool_t* pool;
+    uint8_t pin;
     size_t tuples_total;   /* ceil(final_byte / block_size) - offset tuples */
     size_t tuples_loaded;  /* maintained from load_tuple_event payloads */
     size_t tuples_skipped; /* maintained from load_tuple_event payloads */
@@ -401,6 +439,13 @@ static void _load_pipeline_on_rs_close(void* ctx, void* unused) {
     /* Tally-before-close ordering (Task 2) guarantees the tuple counters
        were updated before this terminal line is written. */
     _load_pipeline_terminal(pipeline);
+    /* ?pin=1: the load finished — pin the blocks the load pulled in (a
+       failed/partial load still pins whatever arrived; see the data
+       pipeline's close handler for the rationale). */
+    if (pipeline->pin && pipeline->ori->descriptor_hash != NULL) {
+        _pin_after_read(pipeline->bc, pipeline->network, pipeline->pool,
+                        pipeline->ori->descriptor_hash);
+    }
     int is_zero = refcounter_dereference_is_zero((refcounter_t*)pipeline);
     stream_deferred_deref((stream_t*)rs);
     if (is_zero) {
@@ -462,7 +507,8 @@ static void _load_pipeline_on_desc_error(void* ctx, void* error) {
 
 static void _setup_load_pipeline(http_response_t* response, scheduler_pool_t* pool,
                                  block_cache_t* bc, tuple_cache_t* tc, ori_t* stream_ori,
-                                 size_t descriptor_pad, network_t* network) {
+                                 size_t descriptor_pad, network_t* network,
+                                 uint8_t pin) {
     readable_off_stream_t* rs = readable_off_stream_create_ex(pool, bc, tc, stream_ori,
                                                               descriptor_pad, network, 1);
     readable_descriptor_t* desc = readable_descriptor_create(pool, bc, stream_ori,
@@ -474,6 +520,10 @@ static void _setup_load_pipeline(http_response_t* response, scheduler_pool_t* po
     pipeline->response = response;
     pipeline->connection = response->connection;
     pipeline->ori = stream_ori;
+    pipeline->bc = bc;
+    pipeline->network = network;
+    pipeline->pool = pool;
+    pipeline->pin = pin;
     size_t block_size = off_block_size_for_type(stream_ori->block_type);
     pipeline->tuples_total = (stream_ori->final_byte / block_size) +
                              ((stream_ori->final_byte % block_size) > 0 ? 1 : 0) -
@@ -552,7 +602,8 @@ static void _off_load_stream(http_request_t* request, http_response_t* response,
         stream_ori->final_byte = range.end + 1;
     }
 
-    _setup_load_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32, ctx->network);
+    _setup_load_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32, ctx->network,
+                         _query_has_param(request->query_string, "pin") ? 1 : 0);
 }
 
 /* ---- Async GET handler state ---- */
@@ -760,8 +811,10 @@ static void _send_stream_response(http_response_t* response, off_routes_context_
                                    ori_t* file_ori, const char* content_type) {
     size_t file_size = file_ori->final_byte;
     const char* range_header = NULL;
+    const char* query_string = NULL;
     if (response->connection != NULL) {
       range_header = http_request_header(response->connection->request, "Range");
+      query_string = response->connection->request->query_string;
     }
     range_request_t range = parse_range_header(range_header, file_size);
     http_response_set_header(response, "Content-Type", content_type);
@@ -804,7 +857,8 @@ static void _send_stream_response(http_response_t* response, off_routes_context_
         http_response_set_header(response, "Content-Length", len_str);
     }
 
-    _setup_stream_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32, ctx->network);
+    _setup_stream_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32, ctx->network,
+                           _query_has_param(query_string, "pin") ? 1 : 0);
 }
 
 static void _off_get_dispatch(void* state, message_t* msg);
@@ -963,7 +1017,8 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
         http_response_set_header(response, "Content-Length", content_length_str);
     }
 
-    _setup_stream_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32, ctx->network);
+    _setup_stream_pipeline(response, ctx->pool, ctx->bc, ctx->tc, stream_ori, 32, ctx->network,
+                           _query_has_param(request->query_string, "pin") ? 1 : 0);
     off_url_destroy(url);
 }
 
@@ -1815,6 +1870,53 @@ static void _rep_route_start(http_request_t* request, http_response_t* response,
     representation_actor_create(ctx->bc, ctx->network, url->descriptor_hash, op,
                                 &route_ctx->actor);
     off_url_destroy(url);
+}
+
+/* ---- pin-after-read (?pin=1 on GET / ?load=1) ---- */
+
+/* Completion context for the fire-and-forget pin walk. Same shape and
+   lifecycle as rep_route_context_t minus the response/connection the read
+   pipeline already owns: actor stays the FIRST member so the inline
+   actor_destroy before defer_cleanup lands on the dead mailbox's head field
+   (mirroring _rep_route_context_destroy). The dispatch queues the
+   representation actor's deferred destruction through the same drain wrapper
+   the rep routes use — it can NEVER call representation_actor_destroy inline
+   because the dispatch runs on a pool worker (see _rep_route_deferred_destroy). */
+typedef struct {
+    actor_t actor;
+    scheduler_pool_t* pool;
+} pin_after_read_context_t;
+
+static void _pin_after_read_dispatch(void* state, message_t* msg) {
+    pin_after_read_context_t* pin_ctx = (pin_after_read_context_t*)state;
+    if (msg->type != REPRESENTATION_OP_RESULT) {
+        return;
+    }
+    representation_op_result_payload_t* result =
+        (representation_op_result_payload_t*)msg->payload;
+    if (result->source != NULL) {
+        rep_route_defer_t* defer = get_clear_memory(sizeof(rep_route_defer_t));
+        refcounter_init(&defer->refcounter);
+        defer->rep = result->source;
+        scheduler_pool_defer_cleanup(pin_ctx->pool, defer,
+                                     (void (*)(void*))_rep_route_deferred_destroy);
+    }
+    atomic_fetch_or(&pin_ctx->actor.flags, ACTOR_FLAG_DESTROY);
+    actor_destroy(&pin_ctx->actor);
+    scheduler_pool_defer_cleanup(pin_ctx->pool, pin_ctx, free);
+}
+
+static void _pin_after_read(block_cache_t* bc, network_t* network,
+                            scheduler_pool_t* pool, buffer_t* descriptor_hash) {
+    pin_after_read_context_t* pin_ctx = get_clear_memory(sizeof(pin_after_read_context_t));
+    pin_ctx->pool = pool;
+    actor_init(&pin_ctx->actor, pin_ctx, _pin_after_read_dispatch, pool);
+    /* representation_actor_create references descriptor_hash itself and can
+       complete (and dispatch this summary) before returning — the reply
+       carries the actor pointer, so the context needs nothing from the
+       return value, exactly like _rep_route_start. */
+    representation_actor_create(bc, network, descriptor_hash, REPRESENTATION_OP_PIN,
+                                &pin_ctx->actor);
 }
 
 static void _off_mark_permanent_handler(http_request_t* request, http_response_t* response,

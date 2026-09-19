@@ -2892,6 +2892,139 @@ TEST_F(TestEphemeralRoutes, OpOnMissingDescriptorReturnsError) {
   free(url_string);
 }
 
+/* ?pin=1 on a data GET: once the read completes, a fire-and-forget pin walk
+   marks every block of the representation pinned (visible both on the
+   descriptor block via index_peek and across the whole fresh cache); unpin
+   takes the pins back. */
+TEST_F(TestEphemeralRoutes, GetWithPinQueryPinsRepresentation) {
+  off_routes_register(server, pool, block_cache, ofd_cache, tuple_c, NULL, NULL, NULL, NULL);
+  http_server_listen(server);
+
+  /* Fresh cache per fixture: the only blocks in it are this file's. */
+  char data[600];
+  memset(data, 'G', sizeof(data));
+  char* url = _routes_put_temporary(port, "pin_get.txt", data, sizeof(data));
+  ASSERT_NE(url, nullptr) << "temporary PUT failed";
+
+  /* Read the file fully with ?pin=1. */
+  char get_request[4096];
+  int get_len = snprintf(get_request, sizeof(get_request),
+      "GET %s?pin=1 HTTP/1.1\r\n"
+      "Host: localhost\r\n"
+      "Connection: close\r\n"
+      "\r\n", url);
+  ASSERT_GT(get_len, 0);
+  char response[8192];
+  ASSERT_EQ(_routes_request(port, get_request, (size_t)get_len,
+                            response, sizeof(response), 10000), 0);
+  EXPECT_NE(strstr(response, "200"), nullptr) << "GET ?pin=1 response: " << response;
+  {
+    char* body = _routes_body(response);
+    ASSERT_NE(body, nullptr);
+    EXPECT_EQ(strlen(body), sizeof(data)) << "GET ?pin=1 must still serve the file";
+  }
+
+  off_url_t* parsed = off_url_parse(url);
+  ASSERT_NE(parsed, nullptr);
+  ASSERT_NE(parsed->descriptor_hash, nullptr);
+
+  /* The pin walk is asynchronous — poll until every cached block carries a
+     pin. All four blocks (two random + one off + descriptor) get pinned. */
+  int all_pinned = 0;
+  for (int attempts = 0; attempts < 200 && !all_pinned; attempts++) {
+    platform_sleep_ms(10);
+    scheduler_pool_wait_for_idle(pool);
+    all_pinned = 1;
+    index_entry_vec_t* entries = index_to_array(block_cache->index);
+    ASSERT_NE(entries, nullptr);
+    EXPECT_EQ(entries->length, 4) << "expected exactly the file's four blocks";
+    for (int idx = 0; idx < entries->length; idx++) {
+      if (entries->data[idx]->pin_count < 1) all_pinned = 0;
+      index_entry_destroy(entries->data[idx]);
+    }
+    vec_deinit(entries);
+    free(entries);
+  }
+  EXPECT_TRUE(all_pinned) << "blocks not pinned after GET ?pin=1";
+
+  /* The descriptor block specifically (index_peek path). */
+  index_entry_t* descriptor_entry = index_peek(block_cache->index, parsed->descriptor_hash);
+  ASSERT_NE(descriptor_entry, nullptr);
+  EXPECT_GE(descriptor_entry->pin_count, 1u);
+
+  /* UNPIN the whole representation — pins drop back to zero. */
+  ASSERT_EQ(_routes_post_op(port, "/offsystem/unpin", url, response, sizeof(response)), 0);
+  EXPECT_NE(strstr(response, "200"), nullptr);
+
+  int all_unpinned = 0;
+  for (int attempts = 0; attempts < 200 && !all_unpinned; attempts++) {
+    platform_sleep_ms(10);
+    scheduler_pool_wait_for_idle(pool);
+    all_unpinned = 1;
+    index_entry_vec_t* entries = index_to_array(block_cache->index);
+    ASSERT_NE(entries, nullptr);
+    for (int idx = 0; idx < entries->length; idx++) {
+      if (entries->data[idx]->pin_count != 0) all_unpinned = 0;
+      index_entry_destroy(entries->data[idx]);
+    }
+    vec_deinit(entries);
+    free(entries);
+  }
+  EXPECT_TRUE(all_unpinned) << "pins survived unpin after GET ?pin=1";
+
+  off_url_destroy(parsed);
+  free(url);
+}
+
+/* ?pin=1 on a ?load=1 cache-load: the same pin walk runs after the load
+   finishes, so the pulled-in blocks end up pinned even though no file data
+   was served. */
+TEST_F(TestEphemeralRoutes, LoadWithPinQueryPinsRepresentation) {
+  off_routes_register(server, pool, block_cache, ofd_cache, tuple_c, NULL, NULL, NULL, NULL);
+  http_server_listen(server);
+
+  char data[600];
+  memset(data, 'L', sizeof(data));
+  char* url = _routes_put_temporary(port, "pin_load.txt", data, sizeof(data));
+  ASSERT_NE(url, nullptr) << "temporary PUT failed";
+
+  char load_request[4096];
+  int load_len = snprintf(load_request, sizeof(load_request),
+      "GET %s?load=1&pin=1 HTTP/1.1\r\n"
+      "Host: localhost\r\n"
+      "Connection: close\r\n"
+      "\r\n", url);
+  ASSERT_GT(load_len, 0);
+  char response[8192];
+  ASSERT_EQ(_routes_request(port, load_request, (size_t)load_len,
+                            response, sizeof(response), 10000), 0);
+  EXPECT_NE(strstr(response, "200"), nullptr) << "load ?pin=1 response: " << response;
+  {
+    char* body = _routes_body(response);
+    ASSERT_NE(body, nullptr);
+    EXPECT_NE(strstr(body, "\"status\":\"loaded\""), nullptr)
+        << "load body must report loaded: " << body;
+  }
+
+  int all_pinned = 0;
+  for (int attempts = 0; attempts < 200 && !all_pinned; attempts++) {
+    platform_sleep_ms(10);
+    scheduler_pool_wait_for_idle(pool);
+    all_pinned = 1;
+    index_entry_vec_t* entries = index_to_array(block_cache->index);
+    ASSERT_NE(entries, nullptr);
+    for (int idx = 0; idx < entries->length; idx++) {
+      if (entries->data[idx]->pin_count < 1) all_pinned = 0;
+      index_entry_destroy(entries->data[idx]);
+    }
+    vec_deinit(entries);
+    free(entries);
+  }
+  EXPECT_TRUE(all_pinned) << "blocks not pinned after load ?pin=1";
+
+  free(url);
+}
+
 } // namespace ephemeral_routes_test
 
 /* ---- Wire codecs for the representation ephemeral/pin ops (Task 12) ---- */
