@@ -97,6 +97,7 @@ typedef enum message_type_e {
   OFD_CACHE_GET_RESULT,
   OFD_CACHE_RESOLVE,
   OFD_CACHE_RESOLVE_RESULT,
+  OFD_CACHE_DIR_FETCHED,
   /* Stream actor messages */
   STREAM_SUBSCRIBE,
   STREAM_UNSUBSCRIBE,
@@ -242,11 +243,13 @@ typedef enum message_type_e {
   CACHE_EPHEMERAL,
   CACHE_PIN,
   CACHE_UNPIN,
+  /* CACHE_EPHEMERAL_LIST's reply mirrors the LIST message itself (the
+     consumer steals the arrays and empties the shell) — no separate
+     result type. */
   CACHE_EPHEMERAL_LIST,
   CACHE_EPHEMERAL_RESULT,
   CACHE_PIN_RESULT,
   CACHE_UNPIN_RESULT,
-  CACHE_EPHEMERAL_LIST_RESULT,
   /* Ephemeral registry actor messages — advisory persistent filter of
      ephemeral representation descriptor hashes. ADD/REMOVE mutate (and
      flush) the filter; CHECK asks for an advisory contains probe whose
@@ -381,7 +384,6 @@ typedef struct {
 /* Result payload for EPHEMERAL_REGISTRY_CHECK_RESULT */
 typedef struct {
   uint8_t present;   /* 1 = filter contains the descriptor hash (advisory) */
-  actor_t* reply_to;
 } ephemeral_registry_check_result_payload_t;
 
 typedef struct message_t {

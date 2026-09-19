@@ -179,7 +179,6 @@ void ephemeral_registry_dispatch(void* state, message_t* msg) {
         ephemeral_registry_check_result_payload_t* result =
             get_clear_memory(sizeof(ephemeral_registry_check_result_payload_t));
         result->present = present;
-        result->reply_to = NULL;
         message_t reply;
         reply.type = EPHEMERAL_REGISTRY_CHECK_RESULT;
         reply.payload = result;
