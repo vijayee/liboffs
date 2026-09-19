@@ -86,7 +86,7 @@ New actor in `src/BlockCache/` (`ephemeral_registry.c` / `ephemeral_registry.h`)
 - *False negatives:* when the new representation is non-ephemeral, the recycler also checks each fetched recipe block's `ephemeral_count` at fetch time. Discovering a claimed block — even when the filter missed the source — errors exactly as a `CHECK` hit would (subject to the same override modes).
 - *Self-healing:* upon discovering at fetch time that a recycled source's blocks are ephemeral, the recycler sends `EPHEMERAL_REGISTRY_ADD` for the source's descriptor hash, repairing the stale filter so future checks hit. (In `commit` mode the source's blocks are cleared to permanent, so no add is performed; in default and `propagate` modes, and in the ephemeral-put case, the source remains ephemeral and is added.)
 
-**Persistence (backup copy, no WAL):** filter file alongside the index (`<location>/ephemeral_registry.bf`), flushed on mutation (debounced, following the index's debounce pattern). Each flush uses **two-file rotation, mirroring the index's `current_file`/`last_file` pattern**: write to a temp file, fsync, rotate the previous file to `ephemeral_registry.bf.last`, and move the new file into place — the previous flush is retained as a backup copy. On load: prefer the current file; if missing or corrupt, fall back to `ephemeral_registry.bf.last`; if both are unusable, reconstruct once from the index (entries with `ephemeral_count > 0`). A stale backup is always safe: extra keys only produce false positives, which the confirm-walk resolves, and genuine misses are caught by the fetch-time exact check and self-heal the filter.
+**Persistence (backup copy, no WAL):** filter file alongside the index (`<location>/ephemeral_registry.bf`), flushed on mutation (only when the filter actually changed — no-op self-heal re-ADDs cost nothing). Each flush uses **two-file rotation, mirroring the index's `current_file`/`last_file` pattern**: write to a temp file, fsync, rotate the previous file to `ephemeral_registry.bf.last`, and move the new file into place — the previous flush is retained as a backup copy. On load: prefer the current file; if missing or corrupt, fall back to `ephemeral_registry.bf.last`; if both are unusable, start from an empty filter (amended post-implementation: the registry is advisory — the exact fetch-time check plus self-heal make an empty filter recoverable, so reconstruction-from-index is unnecessary complexity). A stale backup is always safe: extra keys only produce false positives, which the confirm-walk resolves, and genuine misses are caught by the fetch-time exact check and self-heal the filter.
 
 ## 3. Block cache semantics
 
@@ -162,10 +162,11 @@ A `pin` argument on get/load walks the representation after the read completes a
 
 ### Configuration
 
-New fields in `config.h` (documented in `docs/CONFIG_FIELDS.md`):
-- `ephemeral_registry_capacity` — initial elastic filter capacity
-- `ephemeral_registry_error_ratio` — target false-positive ratio
-- `ephemeral_registry_growth` — filter growth factor
+New fields in `config.h` (documented in `docs/CONFIG_FIELDS.md`) — final names map directly onto the existing `elastic_bloom_filter_create` parameters:
+- `ephemeral_registry_size` — initial elastic filter capacity (default 1024)
+- `ephemeral_registry_hash_count` — hashes per element (default 4)
+- `ephemeral_registry_omega` — load ratio before expansion (default 0.85)
+- `ephemeral_registry_fp_bits` — fingerprint bits per entry (default 8)
 
 `recycle_ephemeral_mode` is **not** a config field — it is chosen explicitly per call.
 
@@ -176,20 +177,20 @@ New fields in `config.h` (documented in `docs/CONFIG_FIELDS.md`):
 | Recycle an ephemeral source (default) | Hard error + warning |
 | Recycle an ephemeral source with override `commit` | Source ephemeral blocks become permanent + announced; new put normal |
 | Recycle an ephemeral source with override `propagate` | New put's new blocks acquire claims; referenced source blocks +1 claim |
-| `ACQUIRE` at `UINT16_MAX` claims | Error — the acquiring put fails; no silent saturation |
+| `ACQUIRE` at `UINT16_MAX` claims | Block-level ACQUIRE returns `CACHE_EPHEMERAL_OVERFLOW` (no silent saturation). On the fire-and-forget put/recycle paths the claim is dropped with a logged error and the put proceeds (amended post-implementation: failing a whole put over a practically unreachable 65,535th claim costs more than it protects) |
 | Delete a pinned **permanent** block (default) | `CACHE_REMOVE_PINNED` result + warning; block kept |
 | Delete a pinned **permanent** block with force | Warning logged; pin reset; block deleted |
 | Delete a **claimed ephemeral** block via `CACHE_REMOVE` (default) | `CACHE_REMOVE_EPHEMERAL_CLAIMED` result + warning; block kept (release/clear are the proper paths) |
 | Delete a claimed ephemeral block with force | Warning logged; block deleted regardless of remaining claims |
 | `RELEASE` bringing an ephemeral block to 0 | Block deleted regardless of pin status |
 | Ephemeral put fails mid-stream | Cleanup RELEASEs the put's created blocks (deleted at 0) and its acquired claims; crash-orphans findable via list-ephemerals |
-| Bloom filter file missing/corrupt | Load falls back to `ephemeral_registry.bf.last`; if also unusable, one-time reconstruction from index; log notice |
+| Bloom filter file missing/corrupt | Load falls back to `ephemeral_registry.bf.last`; if also unusable, starts empty (advisory — self-heal repopulates on discovery); log notice |
 | Recycler fetches a claimed block despite a filter miss | If the new put is non-ephemeral: fetch-time check errors exactly as a `CHECK` hit; source descriptor hash self-heals into the filter via `ADD`. If the new put is ephemeral: no error — treated as propagate (claims acquired, source heal-added) |
 
 ## 6. Testing
 
 - Index: CBOR round-trip with old 5-element arrays (defaults applied) and new 7-element arrays; WAL `'m'` record replay incl. partial-write recovery; ephemeral count increment/decrement/clear; acquire-overflow rejection; pin saturation and clamp.
-- Registry actor: add/check/remove lifecycle (native elastic deletion, no rebuild); false-positive resolution via descriptor walk and false-negative enforcement via fetch-time check (non-ephemeral puts); self-healing `ADD` on fetch-time discovery; persistence reload incl. `.last` backup fallback and rotation on flush; one-time reconstruction from index when both files are unusable.
+- Registry actor: add/check/remove lifecycle (native elastic deletion, no rebuild); false-positive resolution via descriptor walk and false-negative enforcement via fetch-time check (non-ephemeral puts); self-healing `ADD` on fetch-time discovery; persistence reload incl. `.last` backup fallback and rotation on flush; empty-filter start when both files are unusable (self-heal repopulates).
 - Block cache: `CACHE_EPHEMERAL` ACQUIRE/RELEASE/CLEAR; `CACHE_EPHEMERAL_LIST` enumeration; `CACHE_REMOVE_PINNED`, `CACHE_REMOVE_EPHEMERAL_CLAIMED` and their force paths; respiration victim selection excluding pinned permanent and ephemeral entries.
 - **Referential integrity (integration):** ephemeral A → recycle into ephemeral B (no override needed — accepted as propagate) → `delete-ephemeral(A)` leaves B's referenced blocks alive and B readable; `delete-ephemeral(B)` then removes them; ephemeral A → recycle into B → commit A leaves referenced blocks permanent, `delete-ephemeral(B)` removes only B's own blocks; ephemeral put recycling an ephemeral source does not error even when the registry misses the source.
 - **Transitive commit:** ephemeral B (having recycled ephemeral A) → mark-permanent(B) commits A's shared blocks too; A's later `delete-ephemeral` touches only its descriptor/own blocks; B remains fully readable and permanent.
