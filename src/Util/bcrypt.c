@@ -37,7 +37,19 @@ int bcrypt_check(const char* key, const char* hash) {
   }
   char out[OFFS_BCRYPT_HASHSIZE];
   if (_crypt_blowfish_rn(key, hash, out, (int)sizeof(out)) == NULL) return -1;
-  return (strcmp(out, hash) == 0) ? 0 : -1;
+  /* Constant-time compare. strcmp short-circuits on the first differing byte,
+     leaking how much of the recomputed hash matches the stored one. bcrypt
+     hashes are fixed-length ($2b$ + cost + 22 salt + 31 digest = 60 chars),
+     so compare the full recomputed length without early exit. Reject a
+     stored hash whose length differs from the recomputed one first so a
+     truncated buffer can't match a prefix and so we never over-read hash. */
+  size_t out_len = strlen(out);
+  if (strlen(hash) != out_len) return -1;
+  int diff = 0;
+  for (size_t i = 0; i < out_len; i++) {
+    diff |= (unsigned char)out[i] ^ (unsigned char)hash[i];
+  }
+  return (diff == 0) ? 0 : -1;
 }
 
 int bcrypt_generate(const char* key, int cost, char* out, size_t out_size) {

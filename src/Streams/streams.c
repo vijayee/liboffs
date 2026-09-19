@@ -577,7 +577,7 @@ void stream_unsubscribe_pipe_notifiers(stream_t* stream) {
 void writeable_stream_data_handler(stream_t* stream, void (*on_data)(stream_t*, void*)) {
   if (stream->type == readable_stream) {
     log_error("Only Writeable Stream can set data handlers");
-    abort();
+    return;
   }
   stream->on_data = on_data;
 }
@@ -585,7 +585,7 @@ void writeable_stream_data_handler(stream_t* stream, void (*on_data)(stream_t*, 
 void readable_stream_push_handler(stream_t* stream, void (*on_push)(stream_t*)) {
   if (stream->type == writeable_stream || stream->force == pull) {
     log_error("Only Readable Stream can set data handlers");
-    abort();
+    return;
   }
   stream->on_push = on_push;
 }
@@ -593,7 +593,7 @@ void readable_stream_push_handler(stream_t* stream, void (*on_push)(stream_t*)) 
 void readable_stream_pull_handler(stream_t* stream, void (*on_pull)(stream_t*)) {
   if (stream->type == writeable_stream || stream->force == push) {
     log_error("Only Readable Stream can set data handlers");
-    abort();
+    return;
   }
   stream->on_pull = on_pull;
 }
@@ -849,7 +849,7 @@ void _readable_push_stream_close_notify(stream_t* stream, void* payload) {
 void _writeable_push_stream_on_piped(stream_t* ws, stream_t* rs) {
   if (ws->type == readable_stream) {
     log_error("Invalid writeable push stream being piped");
-    abort();
+    return;
   }
   if (ws->is_deactivated == 1) {
     stream_notify(ws, error_event, OFFS_ERROR_TRANSFER("Stream has been destroyed"), (void (*)(void*))error_destroy);
@@ -944,7 +944,7 @@ void writeable_pull_stream_pipe(stream_t* ws, stream_t* rs) {
 void _writeable_pull_stream_on_pipe(stream_t* ws, stream_t* rs) {
   if (ws->type == readable_stream || ws->force == push) {
     log_error("Invalid readable pull stream being piped");
-    abort();
+    return;
   }
   if (ws->is_deactivated == 1) {
     stream_notify(ws, error_event, OFFS_ERROR_TRANSFER("Stream has been destroyed"), (void (*)(void*))error_destroy);
@@ -995,7 +995,7 @@ void _writeable_pull_stream_on_pipe(stream_t* ws, stream_t* rs) {
 void _readable_pull_stream_on_piped(stream_t* rs, stream_t* ws) {
   if (rs->type == writeable_stream) {
     log_error("Invalid writeable push stream being piped");
-    abort();
+    return;
   }
   if (rs->is_deactivated == 1) {
     stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Stream has been destroyed"), (void (*)(void*))error_destroy);

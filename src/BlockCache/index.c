@@ -208,7 +208,7 @@ index_t* _index_new_empty(size_t bucket_size, char* location, uint64_t wait, uin
   mkdir_p(index->location);
   uint64_t current_id = most_recent_id + 1;
   char id[20];
-  sprintf(id,"%lu", current_id);
+  snprintf(id, sizeof(id), "%lu", current_id);
   /* INTENTIONAL off-by-one: index->next_id is bumped to most_recent_id + 2
      while the freshly opened WAL is named after most_recent_id + 1. This
      one-id gap is preserved on purpose (the project owner confirmed this
@@ -492,7 +492,7 @@ index_t* index_create(size_t bucket_size, char* location, uint64_t wait, uint64_
         index->is_rebuilding = 0;
         uint64_t current_id = (files->length - i) + last_id;
         char id[20];
-        sprintf(id,"%lu", current_id);
+        snprintf(id, sizeof(id), "%lu", current_id);
         /* INTENTIONAL off-by-one: see _index_new_empty for the rationale.
            The first assignment below is overwritten by the second on the
            next line; the second uses current_id + 1 so the freshly
@@ -507,7 +507,7 @@ index_t* index_create(size_t bucket_size, char* location, uint64_t wait, uint64_
         free(index->last_file);
         index->current_file = path_join(index->location, id);
         index->next_id = current_id + 1;
-        sprintf(id,"%lu", current_id - 1 );
+        snprintf(id, sizeof(id), "%lu", current_id - 1 );
         index->last_file = path_join(index->location, id);
         index->max_snapshots = max_snapshots;
         index->max_wals = max_wals;
@@ -617,12 +617,12 @@ index_t* index_create_from(size_t bucket_size, index_node_t* root, char* locatio
     /* INTENTIONAL off-by-one: see _index_new_empty for the rationale. The
        next_id is one ahead of the freshly opened WAL's id. */
     index->next_id = last_id + 2;
-    sprintf(id,"%lu", last_id + 1);
+    snprintf(id, sizeof(id), "%lu", last_id + 1);
     index->current_file = path_join(index->location, id);
     index->last_file = path_join(index->location, last);
   } else {
     char id[20];
-    sprintf(id,"%lu", last_id + 1);
+    snprintf(id, sizeof(id), "%lu", last_id + 1);
     index->next_id = 2;
     index->current_file = path_join(index->location, id);
     index->last_file = NULL;
@@ -1290,10 +1290,10 @@ void index_debounce(index_t* index) {
     return;
   }
   if (result == 0) {
-    sprintf(file, "%s-%llu", index->current_file, (unsigned long long)crc);
+    snprintf(file, strlen(index->current_file) + 22, "%s-%llu", index->current_file, (unsigned long long)crc);
   } else {
     log_error("Could not store index with correct crc");
-    sprintf(file, "%s-crc_error", index->current_file);
+    snprintf(file, strlen(index->current_file) + 22, "%s-crc_error", index->current_file);
   }
 
   if (index->last_file != NULL) {
@@ -1302,7 +1302,7 @@ void index_debounce(index_t* index) {
   index->last_file = index->current_file;
 
   char id[20];
-  sprintf(id, "%lu", index->next_id);
+  snprintf(id, sizeof(id), "%lu", index->next_id);
   index->current_file = path_join(index->location, id);
   index->next_id++;
   wal_t* wal = index->wal;

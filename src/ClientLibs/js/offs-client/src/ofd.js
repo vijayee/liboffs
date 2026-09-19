@@ -1,4 +1,11 @@
-import { encode, decode } from 'cbor-x';
+import { Encoder, Decoder } from 'cbor-x';
+
+/**
+ * Encoder that produces plain CBOR maps and raw bytestrings, matching the Dart
+ * example client and the C OFD decoder (no typed-array tags, no record extension).
+ */
+const ofdEncoder = new Encoder({ tagUint8Array: false, useRecords: false });
+const ofdDecoder = new Decoder({ useRecords: false });
 
 /**
  * @typedef {Object} OfdFileEntry
@@ -64,10 +71,12 @@ export function ofdFile({
  * @param {Object} params
  * @param {string} params.name
  * @param {Uint8Array} params.dirHash
+ * @param {Uint8Array} [params.descriptorHash]
+ * @param {number} [params.dirSize]
  * @returns {OfdEntry}
  */
-export function ofdDirectory({ name, dirHash }) {
-  return { name, isDirectory: true, dirHash };
+export function ofdDirectory({ name, dirHash, descriptorHash, dirSize }) {
+  return { name, isDirectory: true, dirHash, descriptorHash, dirSize };
 }
 
 /**
@@ -84,6 +93,12 @@ export function buildOfdCbor(entries) {
     };
     if (entry.isDirectory) {
       map.d = entry.dirHash;
+      if (entry.descriptorHash) {
+        map.D = entry.descriptorHash;
+      }
+      if (entry.dirSize !== undefined) {
+        map.s = entry.dirSize;
+      }
     } else {
       map.f = entry.fileHash;
       map.D = entry.descriptorHash;
@@ -95,7 +110,7 @@ export function buildOfdCbor(entries) {
     return map;
   });
 
-  return encode({ v: 1, entries: entryMaps });
+  return ofdEncoder.encode({ v: 1, entries: entryMaps });
 }
 
 /**
@@ -104,7 +119,7 @@ export function buildOfdCbor(entries) {
  * @returns {OfdEntry[]}
  */
 export function parseOfdCbor(data) {
-  const decoded = decode(data);
+  const decoded = ofdDecoder.decode(data);
   if (!decoded || typeof decoded !== 'object') return [];
 
   const entries = decoded.entries;
@@ -115,7 +130,9 @@ export function parseOfdCbor(data) {
     if (isDirectory) {
       return ofdDirectory({
         name: String(entry.n),
-        dirHash: asUint8Array(entry.d)
+        dirHash: asUint8Array(entry.d),
+        descriptorHash: asUint8Array(entry.D),
+        dirSize: safeInt(entry.s)
       });
     }
     return ofdFile({
@@ -145,7 +162,6 @@ function safeInt(value) {
  * @returns {Uint8Array}
  */
 function asUint8Array(value) {
-  if (value instanceof Uint8Array) return value;
   if (Array.isArray(value)) return new Uint8Array(value);
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
   if (value && typeof value === 'object' && ArrayBuffer.isView(value)) {

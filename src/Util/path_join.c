@@ -10,6 +10,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #ifdef _WIN32
 #define PATH_JOIN_SEPERATOR   "\\"
@@ -24,30 +25,29 @@ int str_ends_with(const char *str, const char *end);
 int str_starts_with(const char *str, const char *start);
 
 char* path_join(const char *dir, const char *file) {
-  int size = strlen(dir) + strlen(file) + 2;
-  char *buf = malloc(size * sizeof(char));
+  if (dir == NULL || file == NULL) return NULL;
+  size_t dir_len = strlen(dir);
+  size_t file_len = strlen(file);
+  /* Skip a leading separator in file if present so we don't double up when
+     dir already ends with one. */
+  const char* file_part = file;
+  if (str_starts_with(file, PATH_JOIN_SEPERATOR)) {
+    file_part = file + strlen(PATH_JOIN_SEPERATOR);
+    file_len = strlen(file_part);
+  }
+  int need_sep = !str_ends_with(dir, PATH_JOIN_SEPERATOR);
+  size_t size = dir_len + (need_sep ? strlen(PATH_JOIN_SEPERATOR) : 0) + file_len + 1;
+  char *buf = malloc(size);
   if (NULL == buf) return NULL;
 
-  strcpy(buf, dir);
-
-  // add the sep if necessary
-  if (!str_ends_with(dir, PATH_JOIN_SEPERATOR)) {
-    strcat(buf, PATH_JOIN_SEPERATOR);
-  }
-
-  // remove the sep if necessary
-  if (str_starts_with(file, PATH_JOIN_SEPERATOR)) {
-    char *filecopy = strdup(file);
-    if (NULL == filecopy) {
-      free(buf);
-      return NULL;
-    }
-    strcat(buf, ++filecopy);
-    free(--filecopy);
+  /* Build with snprintf so the copy is bounded by the allocated size even if
+     the length computation above is wrong. The original used strcpy/strcat
+     with no overflow check. */
+  if (need_sep) {
+    snprintf(buf, size, "%s%s%s", dir, PATH_JOIN_SEPERATOR, file_part);
   } else {
-    strcat(buf, file);
+    snprintf(buf, size, "%s%s", dir, file_part);
   }
-
   return buf;
 }
 

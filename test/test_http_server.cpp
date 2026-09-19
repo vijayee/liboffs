@@ -27,6 +27,8 @@ extern "C" {
 #define platform_usleep(us) platform_sleep_ms((us) / 1000)
 }
 
+#include <string>
+
 namespace http_test {
 
 static void _test_get_handler(http_request_t* request, http_response_t* response, void* user_data) {
@@ -292,6 +294,53 @@ TEST_F(TestHttpServer, TestGetRequest) {
 
   EXPECT_NE(strstr(response, "200"), nullptr);
   EXPECT_NE(strstr(response, "Hello, World!"), nullptr);
+
+  platform_socket_destroy(sock);
+}
+
+/* A request with a header value larger than OFFS_MAX_HEADER_VALUE_LEN must be
+   rejected: the parser aborts and the connection closes without serving the
+   route. This is the regression test for the unbounded-header-allocation
+   finding (http_connection.c _accumulate_*). */
+TEST_F(TestHttpServer, RejectsOversizedHeader) {
+  server = http_server_create(pool, "127.0.0.1", port);
+  ASSERT_TRUE(server != NULL);
+
+  http_server_get(server, "^/hello$", _test_get_handler, NULL);
+  http_server_listen(server);
+
+  platform_socket_t* sock = NULL;
+  for (int attempts = 0; attempts < 50; attempts++) {
+    platform_usleep(10000);
+    sock = _connect_to_server(port);
+    if (sock != NULL) break;
+  }
+  ASSERT_NE(sock, nullptr);
+
+  /* Build "GET /hello HTTP/1.1\r\nX-Huge: <20KB of 'a'>\r\nHost: x\r\n\r\n".
+     OFFS_MAX_HEADER_VALUE_LEN is 16KB, so a 20KB value exceeds the cap. */
+  std::string huge_value(20 * 1024, 'a');
+  std::string request =
+      "GET /hello HTTP/1.1\r\n"
+      "X-Huge: " + huge_value + "\r\n"
+      "Host: localhost\r\n\r\n";
+
+  char response[4096];
+  response[0] = '\0';
+  /* _send_and_recv returns 0 even on peer-close-with-some-bytes; the key
+     assertion is that the route was never served: no "200" and no
+     "Hello, World!" in the response. */
+  _send_all(sock, request.c_str(), request.size());
+  /* Drain whatever (if anything) the server sent before closing. */
+  size_t total = 0;
+  for (int attempts = 0; attempts < 50; attempts++) {
+    ssize_t received = platform_socket_recv(sock, response + total,
+                                            sizeof(response) - total - 1);
+    if (received > 0) { total += (size_t)received; response[total] = '\0'; }
+    else break;
+  }
+  EXPECT_EQ(strstr(response, "200"), nullptr);
+  EXPECT_EQ(strstr(response, "Hello, World!"), nullptr);
 
   platform_socket_destroy(sock);
 }

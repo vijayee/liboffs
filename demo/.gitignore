@@ -1,2 +1,6 @@
 node_modules/
 package-lock.json
+
+# Generated client bundle copied here by the demo build
+offs-client.umd.js
+offs-client.umd.js.map

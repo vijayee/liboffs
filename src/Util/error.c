@@ -10,12 +10,15 @@ async_error_t* error_create(char* message, char* file, char* function, int line)
     return NULL;
   }
   async_error_t* error = get_clear_memory(sizeof(async_error_t));
-  error->message = get_memory(strlen(message) + 1);
-  strcpy(error->message, message);
-  error->file = get_memory(strlen(file) + 1);
-  strcpy(error->file, file);
-  error->function = get_memory(strlen(function) +1);
-  strcpy(error->function, function);
+  size_t message_len = strlen(message) + 1;
+  error->message = get_memory(message_len);
+  memcpy(error->message, message, message_len);
+  size_t file_len = strlen(file) + 1;
+  error->file = get_memory(file_len);
+  memcpy(error->file, file, file_len);
+  size_t function_len = strlen(function) + 1;
+  error->function = get_memory(function_len);
+  memcpy(error->function, function, function_len);
   error->line = line;
   refcounter_init((refcounter_t*) error);
   return error;

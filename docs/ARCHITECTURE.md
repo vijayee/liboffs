@@ -314,12 +314,22 @@ Platform abstraction via `threadding.h`:
 - Barriers (`barrier_t`)
 - Read-Write Locks (`rwlock_t`)
 
-### Lock Ordering
-To prevent deadlocks, locks are acquired in order:
-1. Block Cache lock
-2. Index lock
-3. Section lock
-4. LRU cache lock
+### Concurrency Model
+The dominant concurrency model is **actor-based, not lock-based**. Most
+modules do not take locks on the hot path — work is serialized by dispatching
+`message_t`s to actors that run on the scheduler pool, and cross-actor
+handoffs use reference counting plus the lock-free backpressure machinery in
+`src/Actor` and `src/Scheduler`. `docs/concurrency-pass.md` is the accurate
+per-finding log of the actor/deque/queue_state invariants; the invariants
+themselves are documented in scattered code comments (`actor.h`,
+`scheduler.c`, `streams.c`).
+
+> **Note:** an earlier version of this document listed a fixed "Lock Ordering"
+> (Block Cache → Index → Section → LRU) as if it described the runtime. It did
+> not — `concurrency-pass.md:10` calls that lock order "fiction — BlockCache
+> uses zero locks." That section has been removed. When a module *does* use a
+> mutex (e.g. `Metrics` registry, `Configuration` reload), the lock is
+> confined to that module and not part of a global order.
 
 ## Storage Format
 

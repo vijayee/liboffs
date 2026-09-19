@@ -4,6 +4,7 @@
 
 #include "ring_set.h"
 #include "../Util/allocator.h"
+#include "../Platform/platform_random.h"
 #include <math.h>
 #include <string.h>
 
@@ -178,7 +179,7 @@ size_t ring_set_get_random_nodes(const ring_set_t* set,
     const ring_t* ring = &set->rings[ring_index];
     if (ring->primary.length == 0) continue;
     // Select a random node from this ring's primary list
-    int node_index = rand() % ring->primary.length;
+    size_t node_index = platform_random_uniform_index(ring->primary.length);
     net_node_t* candidate = ring->primary.data[node_index];
     if (candidate == NULL) continue;
     // Skip if excluded

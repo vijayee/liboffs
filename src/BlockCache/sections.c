@@ -22,6 +22,8 @@ void sections_full(sections_t* sections, size_t section_id);
 void sections_free(sections_t* sections, size_t section_id);
 void sections_dispatch(void* state, message_t* msg);
 static void section_on_dirty(void* context, section_t* section);
+static section_t* _sections_create_fresh(sections_t* sections);
+static int _sections_grow(sections_t* sections);
 
 sections_lru_cache_t* sections_lru_cache_create(size_t size) {
   sections_lru_cache_t* lru = get_clear_memory(sizeof(sections_lru_cache_t));
@@ -196,7 +198,13 @@ void sections_dispatch(void* state, message_t* msg) {
       p->result = -1;
       p->section_id = 0;
       p->section_index = 0;
-      for (size_t attempt = 0; attempt < sections->max_tuple_size; attempt++) {
+      /* Keep trying until we either write the block or exhaust all robin
+         sections plus any newly created ones. max_tuple_size is a minimum
+         number of sections to keep in the robin, not a hard limit on how
+         many sections we may try. */
+      size_t attempts = 0;
+      size_t max_attempts = sections->robin->size + sections->max_tuple_size;
+      for (; attempts < max_attempts; attempts++) {
         if (!round_robin_next(sections->robin, &p->section_id)) {
           break;
         }
@@ -205,6 +213,10 @@ void sections_dispatch(void* state, message_t* msg) {
           section = section_create(sections->data_path, sections->meta_path,
                                    sections->size, p->section_id, sections->type, sections->pool,
                                    sections->fsync_data);
+          if (section == NULL) {
+            p->result = -1;
+            break;
+          }
           section->on_dirty = section_on_dirty;
           section->on_dirty_context = sections;
           refcounter_yield((refcounter_t*) section);
@@ -229,6 +241,13 @@ void sections_dispatch(void* state, message_t* msg) {
         p->section_index = write_payload.index;
         if ((p->result == 2) || write_payload.full) {
           sections_full(sections, p->section_id);
+          /* If we still couldn't place the block and robin is back to the
+             minimum size, grow it by adding a fresh section rather than
+             giving up. */
+          if (p->result == 2 && sections->robin->size <= sections->max_tuple_size &&
+              attempts + 1 < max_attempts) {
+            _sections_grow(sections);
+          }
         }
         if (p->result != 2) {
           break;
@@ -858,16 +877,42 @@ void sections_destroy(sections_t* sections) {
   free(sections);
 }
 
+static section_t* _sections_create_fresh(sections_t* sections) {
+  section_t* section = section_create(sections->data_path, sections->meta_path,
+                                        sections->size, sections->next_id++,
+                                        sections->type, sections->pool,
+                                        sections->fsync_data);
+  if (section == NULL) {
+    return NULL;
+  }
+  section->on_dirty = section_on_dirty;
+  section->on_dirty_context = sections;
+  refcounter_yield((refcounter_t*) section);
+  sections_lru_cache_put(sections->lru, section);
+  return section;
+}
+
 void sections_full(sections_t* sections, size_t section_id) {
   round_robin_remove(sections->robin, section_id);
+  /* Always maintain at least max_tuple_size sections in the robin. */
   while (sections->robin->size < sections->max_tuple_size) {
-    section_t* section = section_create(sections->data_path, sections->meta_path, sections->size, sections->next_id++, sections->type, sections->pool, sections->fsync_data);
-    section->on_dirty = section_on_dirty;
-    section->on_dirty_context = sections;
-    refcounter_yield((refcounter_t*) section);
-    sections_lru_cache_put(sections->lru, section);
+    section_t* section = _sections_create_fresh(sections);
+    if (section == NULL) {
+      break;
+    }
     round_robin_unshift(sections->robin, section->id);
   }
+}
+
+/* Grow the robin by one fresh section. Used when all current robin sections
+   are full but more capacity is available. Returns 0 on success. */
+static int _sections_grow(sections_t* sections) {
+  section_t* section = _sections_create_fresh(sections);
+  if (section == NULL) {
+    return -1;
+  }
+  round_robin_add(sections->robin, section->id);
+  return 0;
 }
 
 void sections_free(sections_t* sections, size_t section_id) {

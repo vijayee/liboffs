@@ -127,6 +127,19 @@ void actor_destroy(actor_t* actor) {
       platform_sleep_ms(0);
     }
   }
+  /* Final pressured_senders drain. The two earlier drains (lines 71 and 90)
+     run before the RUNNING/queue_state waits; a concurrent sender in
+     actor_send's CAS loop can complete its append DURING those waits — its
+     in-loop DESTROY re-check read DESTROY=false before destroy set it, then
+     destroy's first two drains ran (finding nothing), then the sender's CAS
+     landed. Without this final drain that node is orphaned and the sender
+     stays ACTOR_FLAG_MUTED forever (F10 livelock). Draining again here closes
+     the common case; a per-actor lock would be needed to close the truly
+     concurrent TOCTOU where the CAS lands after this drain too, but that
+     window is sub-microsecond and requires a sender racing destroy while the
+     actor is already PRESSURED. backpressure_release is a no-op when the list
+     is empty. */
+  backpressure_release(actor);
   message_queue_destroy(&actor->queue);
 }
 
@@ -162,9 +175,11 @@ bool actor_send(actor_t* actor, message_t* msg) {
            in actor_destroy has already (or is about to) drain pressured_senders,
            and a late append here would orphan the muted_sender_node and leave
            this sender muted forever. The message above was already pushed and
-           is drained with the queue, so skipping the mute is safe. (A narrow
-           append-in-flight window remains during destroy that would need a
-           per-actor lock to close fully — see actor_destroy.) */
+           is drained with the queue, so skipping the mute is safe. A residual
+           TOCTOU remains (re-check reads DESTROY=false, destroy completes its
+           drains, then this CAS lands) that would need a per-actor lock to
+           close fully; actor_destroy's final drain after the queue wait
+           catches the common case. See concurrency-pass.md F10. */
         if (!(atomic_load(&actor->flags) & ACTOR_FLAG_DESTROY)) {
           muted_sender_node_t* msn = get_clear_memory(sizeof(muted_sender_node_t));
           msn->sender = sender;

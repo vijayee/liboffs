@@ -9,6 +9,7 @@
 #include "find_block.h"
 #include "connection_manager.h"
 #include "peer_connection.h"
+#include "../Platform/platform_random.h"
 #include <string.h>
 #include <stdlib.h>
 #include <limits.h>
@@ -60,7 +61,7 @@ bool store_block_should_accept(float local_capacity, node_phase_e local_phase,
   if (accept_probability < 0.0f) accept_probability = 0.0f;
   if (accept_probability > 1.0f) accept_probability = 1.0f;
 
-  float roll = (float)rand() / (float)RAND_MAX;
+  float roll = platform_random_uniform_float();
   return roll < accept_probability;
 }
 

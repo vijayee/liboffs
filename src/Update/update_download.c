@@ -9,21 +9,27 @@
 #include "update_extract.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
+#include "../Platform/platform_file.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <errno.h>
 
 #ifdef _WIN32
   #include <winsock2.h>
   #include <ws2tcpip.h>
   #pragma comment(lib, "ws2_32.lib")
   #define CLOSE_SOCKET(fd) closesocket(fd)
+  #define OFFS_PATH_MAX 4096
 #else
   #include <sys/socket.h>
   #include <netdb.h>
   #include <unistd.h>
+  #include <sys/wait.h>
+  #include <limits.h>
+  #define OFFS_PATH_MAX 4096
   #define CLOSE_SOCKET(fd) close(fd)
 #endif
 
@@ -340,16 +346,12 @@ bool update_download(const update_info_t* info,
     return false;
   }
 
-  /* Create staging directory */
-  char mkdir_command[1024];
-#ifdef _WIN32
-  snprintf(mkdir_command, sizeof(mkdir_command), "mkdir \"%s\" 2>nul",
-           staging_dir);
-#else
-  snprintf(mkdir_command, sizeof(mkdir_command), "mkdir -p \"%s\"",
-           staging_dir);
-#endif
-  system(mkdir_command);
+  /* Create staging directory in-process (no shell). platform_mkdir is
+     recursive and a no-op if the directory already exists. */
+  if (platform_mkdir(staging_dir) != 0 && !platform_file_exists(staging_dir)) {
+    log_error("update_download: cannot create staging dir %s", staging_dir);
+    return false;
+  }
 
   /* Build output path */
   char output_path[1024];

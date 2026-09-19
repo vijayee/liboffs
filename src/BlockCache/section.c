@@ -681,7 +681,7 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id, b
   refcounter_init((refcounter_t*) section);
   actor_init(&section->actor, section, section_dispatch, pool);
   char section_id[20];
-  sprintf(section_id, "%lu", id);
+  snprintf(section_id, sizeof(section_id), "%lu", id);
   section->file = NULL;
   section->path = path_join(path, section_id);
   section->meta_path = path_join(meta_path, section_id);

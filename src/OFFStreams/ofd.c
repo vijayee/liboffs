@@ -29,8 +29,9 @@ void ofd_destroy(ofd_t* ofd) {
         free(entry->name);
         if (entry->type == OFD_ENTRY_FILE && entry->file_ori) {
             ori_destroy(entry->file_ori);
-        } else if (entry->type == OFD_ENTRY_DIRECTORY && entry->dir_hash) {
-            buffer_destroy(entry->dir_hash);
+        } else if (entry->type == OFD_ENTRY_DIRECTORY) {
+            if (entry->dir_hash) buffer_destroy(entry->dir_hash);
+            if (entry->dir_descriptor_hash) buffer_destroy(entry->dir_descriptor_hash);
         }
     }
     vec_deinit(&ofd->entries);
@@ -48,12 +49,17 @@ void ofd_add_file(ofd_t* ofd, const char* name, ori_t* file_ori) {
     vec_push(&ofd->entries, entry);
 }
 
-void ofd_add_directory(ofd_t* ofd, const char* name, buffer_t* dir_hash) {
+void ofd_add_directory(ofd_t* ofd, const char* name, buffer_t* dir_hash,
+                       buffer_t* dir_descriptor_hash, size_t dir_size) {
     if (!ofd || !name || !dir_hash) return;
     ofd_entry_t entry;
     entry.name = strdup(name);
     entry.type = OFD_ENTRY_DIRECTORY;
     entry.dir_hash = (buffer_t*)refcounter_reference((refcounter_t*)dir_hash);
+    entry.dir_descriptor_hash = dir_descriptor_hash
+        ? (buffer_t*)refcounter_reference((refcounter_t*)dir_descriptor_hash)
+        : NULL;
+    entry.dir_size = dir_size;
     vec_push(&ofd->entries, entry);
 }
 
@@ -155,6 +161,20 @@ buffer_t* ofd_encode(ofd_t* ofd) {
             (void)cbor_map_add(entry_map, (struct cbor_pair){.key = dir_key, .value = dir_val});
             cbor_decref(&dir_key);
             cbor_decref(&dir_val);
+
+            if (entry->dir_descriptor_hash != NULL) {
+                cbor_item_t* desc_key = cbor_build_string("D");
+                cbor_item_t* desc_val = buffer_to_cbor(entry->dir_descriptor_hash);
+                (void)cbor_map_add(entry_map, (struct cbor_pair){.key = desc_key, .value = desc_val});
+                cbor_decref(&desc_key);
+                cbor_decref(&desc_val);
+            }
+
+            cbor_item_t* size_key = cbor_build_string("s");
+            cbor_item_t* size_val = cbor_build_uint64(entry->dir_size);
+            (void)cbor_map_add(entry_map, (struct cbor_pair){.key = size_key, .value = size_val});
+            cbor_decref(&size_key);
+            cbor_decref(&size_val);
         }
 
         (void)cbor_array_push(entries_arr, entry_map);
@@ -296,11 +316,11 @@ ofd_t* ofd_decode(buffer_t* data) {
                 ofd_add_file(ofd, name, file_ori);
                 DESTROY(file_ori, ori);
             } else {
+                ofd_add_directory(ofd, name, hash, descriptor_hash, (size_t)final_byte);
+                DESTROY(hash, buffer);
                 if (descriptor_hash) {
                     DESTROY(descriptor_hash, buffer);
                 }
-                ofd_add_directory(ofd, name, hash);
-                DESTROY(hash, buffer);
             }
         } else {
             if (hash) {

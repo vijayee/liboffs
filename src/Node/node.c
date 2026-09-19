@@ -53,6 +53,19 @@ int offs_node_start(offs_node_t* node) {
     return -1;
   }
 
+  /* Prominent insecure-mode warning. allow_secure=false (the default) means
+     the QUIC/WebTransport/relay paths set NO_CERTIFICATE_VALIDATION: traffic
+     is encrypted but NOT authenticated, so a network MITM can impersonate any
+     peer. Acceptable for a trusted LAN; not for public-internet exposure.
+     Logged at WARN on every start so it surfaces in operator logs alongside
+     the startup banner rather than only inside the per-transport info lines. */
+  if (!node->config->allow_secure) {
+    log_warn("offs_node_start: allow_secure=false — TLS peer verification is "
+             "DISABLED. Connections are encrypted but unauthenticated. Do NOT "
+             "expose this node to the public internet in this mode. Set "
+             "allow_secure=true and provision a CA (offs-ca) for production.");
+  }
+
   scheduler_pool_start(node->scheduler);
 
   node->block_cache = block_cache_create(

@@ -28,6 +28,8 @@ typedef struct {
     ori_t* file_ori;
     buffer_t* dir_hash;
   };
+    buffer_t* dir_descriptor_hash; /* Directory entries only: descriptor hash for streaming */
+    size_t dir_size;               /* Directory entries only: raw CBOR byte length */
 } ofd_entry_t;
 
 typedef vec_t(ofd_entry_t) vec_ofd_entry_t;
@@ -43,7 +45,8 @@ ofd_t* ofd_create(void);
 void ofd_destroy(ofd_t* ofd);
 
 void ofd_add_file(ofd_t* ofd, const char* name, ori_t* file_ori);
-void ofd_add_directory(ofd_t* ofd, const char* name, buffer_t* dir_hash);
+void ofd_add_directory(ofd_t* ofd, const char* name, buffer_t* dir_hash,
+                       buffer_t* dir_descriptor_hash, size_t dir_size);
 ofd_entry_t* ofd_find(ofd_t* ofd, const char* name);
 
 buffer_t* ofd_encode(ofd_t* ofd);

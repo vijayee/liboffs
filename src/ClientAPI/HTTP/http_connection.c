@@ -70,7 +70,10 @@ static void _reset_header_accumulator(http_connection_t* connection) {
   }
 }
 
-static void _accumulate_field(http_connection_t* connection, const char* at, size_t length) {
+static int _accumulate_field(http_connection_t* connection, const char* at, size_t length) {
+  if (connection->header_field_len + length > OFFS_MAX_HEADER_FIELD_LEN) {
+    return -1;
+  }
   if (connection->header_field == NULL) {
     connection->header_field_cap = length * 2 + 1;
     connection->header_field = get_memory(connection->header_field_cap);
@@ -81,9 +84,13 @@ static void _accumulate_field(http_connection_t* connection, const char* at, siz
   memcpy(connection->header_field + connection->header_field_len, at, length);
   connection->header_field_len += length;
   connection->header_field[connection->header_field_len] = '\0';
+  return 0;
 }
 
-static void _accumulate_value(http_connection_t* connection, const char* at, size_t length) {
+static int _accumulate_value(http_connection_t* connection, const char* at, size_t length) {
+  if (connection->header_value_len + length > OFFS_MAX_HEADER_VALUE_LEN) {
+    return -1;
+  }
   if (connection->header_value == NULL) {
     connection->header_value_cap = length * 2 + 1;
     connection->header_value = get_memory(connection->header_value_cap);
@@ -94,6 +101,7 @@ static void _accumulate_value(http_connection_t* connection, const char* at, siz
   memcpy(connection->header_value + connection->header_value_len, at, length);
   connection->header_value_len += length;
   connection->header_value[connection->header_value_len] = '\0';
+  return 0;
 }
 
 static char* _url_decode(const char* src, size_t length) {
@@ -118,6 +126,7 @@ static void _flush_header(http_connection_t* connection) {
   if (connection->header_field != NULL && connection->header_field_len > 0 &&
       connection->header_value != NULL && connection->header_value_len > 0) {
     http_headers_set(&connection->request->headers, connection->header_field, connection->header_value);
+    connection->header_count++;
   }
   _reset_header_accumulator(connection);
 }
@@ -129,17 +138,21 @@ static int _on_message_begin(http_parser* parser) {
   }
   connection->request = http_request_create(connection->server->pool);
   _reset_header_accumulator(connection);
+  connection->header_count = 0;
   return 0;
 }
 
 static int _on_url(http_parser* parser, const char* at, size_t length) {
   http_connection_t* connection = (http_connection_t*)parser->data;
+  size_t current_len = connection->request->url != NULL ? strlen(connection->request->url) : 0;
+  if (current_len + length > OFFS_MAX_URL_LEN) {
+    return -1;
+  }
   if (connection->request->url == NULL) {
     connection->request->url = get_memory(length + 1);
     memcpy(connection->request->url, at, length);
     connection->request->url[length] = '\0';
   } else {
-    size_t current_len = strlen(connection->request->url);
     connection->request->url = realloc(connection->request->url, current_len + length + 1);
     memcpy(connection->request->url + current_len, at, length);
     connection->request->url[current_len + length] = '\0';
@@ -152,13 +165,23 @@ static int _on_header_field(http_parser* parser, const char* at, size_t length) 
   if (connection->header_field_len > 0 && connection->header_value_len > 0) {
     _flush_header(connection);
   }
-  _accumulate_field(connection, at, length);
+  /* Reject once the per-request header count is exceeded. header_count is
+     bumped in _flush_header, so this checks the count of already-accepted
+     headers before starting a new one. */
+  if (connection->header_count >= OFFS_MAX_HEADER_COUNT) {
+    return -1;
+  }
+  if (_accumulate_field(connection, at, length) != 0) {
+    return -1;
+  }
   return 0;
 }
 
 static int _on_header_value(http_parser* parser, const char* at, size_t length) {
   http_connection_t* connection = (http_connection_t*)parser->data;
-  _accumulate_value(connection, at, length);
+  if (_accumulate_value(connection, at, length) != 0) {
+    return -1;
+  }
   return 0;
 }
 

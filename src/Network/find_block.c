@@ -9,6 +9,7 @@
 #include "connection_manager.h"
 #include "peer_connection.h"
 #include "../Util/allocator.h"
+#include "../Platform/platform_random.h"
 #include <xxh3.h>
 #include <string.h>
 #include <stdlib.h>
@@ -108,7 +109,7 @@ size_t find_block_roulette_wheel_select(net_node_t** candidates, float* weights,
 
   for (size_t selection = 0; selection < max_candidates && remaining_weight > 0.0f; selection++) {
     // Spin the wheel
-    float spin = (float)rand() / (float)RAND_MAX * remaining_weight;
+    float spin = platform_random_uniform_float() * remaining_weight;
     float cumulative = 0.0f;
 
     for (size_t index = 0; index < candidate_count; index++) {

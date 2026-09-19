@@ -29,6 +29,30 @@ TEST(TestBcrypt, WrongKeyWith2xPrefixReturnsNegative) {
   EXPECT_EQ(-1, bcrypt_check("key", "$2x$10$GjIW4.eOZECm4QY1KQjI4.6FfN8CqT5uJdLzMxX3bG1yRaVnPw0Su"));
 }
 
+/* A truncated stored hash must not match a prefix of the recomputed hash.
+   The old strcmp-based compare also rejected this (strcmp returns non-zero
+   when lengths differ), but a naive constant-time loop that only compared
+   strlen(out) bytes would accept a truncated stored hash. */
+TEST(TestBcrypt, TruncatedHashRejected) {
+  char truncated[40];
+  strncpy(truncated, test_hash, sizeof(truncated) - 1);
+  truncated[sizeof(truncated) - 1] = '\0';
+  EXPECT_EQ(-1, bcrypt_check(test_key, truncated));
+}
+
+/* A hash that differs only in the last byte must still be rejected — guards
+   against an off-by-one in the constant-time loop that compares the full
+   recomputed length. */
+TEST(TestBcrypt, LastByteDifferenceRejected) {
+  char modified[64];
+  strncpy(modified, test_hash, sizeof(modified));
+  modified[sizeof(modified) - 1] = '\0';
+  size_t len = strlen(modified);
+  ASSERT_GT(len, (size_t)0);
+  modified[len - 1] = (modified[len - 1] == 'a' ? 'b' : 'a');
+  EXPECT_EQ(-1, bcrypt_check(test_key, modified));
+}
+
 TEST(TestBcryptGenerate, Produces2bPrefixedHashThatVerifies) {
   char out[64];
   ASSERT_EQ(0, bcrypt_generate(test_key, 4, out, sizeof(out)));

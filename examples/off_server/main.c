@@ -23,6 +23,7 @@
 #include "Scheduler/scheduler.h"
 #include "Timer/timer_actor.h"
 #include "Configuration/config.h"
+#include "Configuration/config_pending.h"
 #include "Platform/platform.h"
 #include "Network/peer_verify.h"
 #include "Util/path_join.h"
@@ -139,7 +140,12 @@ int main(int argc, char** argv) {
   timer_actor_t* timer = timer_actor_create(pool);
 
   config_t config = config_default();
-  block_cache_t* bc = block_cache_create(config, (char*)cache_dir, standard, timer, pool, NULL, 0);
+  config_t* pending = config_pending_load(cache_dir);
+  if (pending != NULL) {
+    config = *pending;
+    free(pending);
+  }
+  block_cache_t* bc = block_cache_create(config, (char*)cache_dir, standard, timer, pool, NULL, config.max_capacity_bytes);
 
   ofd_cache_t* ofd_cache = ofd_cache_create(pool, bc, 300000);
   tuple_cache_t* tc = tuple_cache_create(100, pool);

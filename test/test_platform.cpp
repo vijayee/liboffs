@@ -57,6 +57,52 @@ TEST(TestPlatformRandom, TwoCallsDiffer) {
   EXPECT_EQ(same, 0);
 }
 
+/* Regression: getentropy(2) caps a single request at 256 bytes. The old
+   platform_random_bytes forwarded directly to getentropy and returned -1
+   for any buffer larger than 256. Block-sized draws (up to 2 MB) must work. */
+TEST(TestPlatformRandom, LargeBufferSucceeds) {
+  const size_t large = 128 * 1024;
+  uint8_t* buf = (uint8_t*)malloc(large);
+  ASSERT_NE(buf, nullptr);
+  int result = platform_random_bytes(buf, large);
+  EXPECT_EQ(result, 0);
+  /* Spot-check that the chunked fill actually wrote past byte 256 (the old
+     code left the buffer untouched on failure; a success with all-zero tail
+     would mean the loop didn't run). */
+  int tail_nonzero = 0;
+  for (size_t i = 256; i < large; i++) {
+    if (buf[i] != 0) { tail_nonzero = 1; break; }
+  }
+  EXPECT_EQ(tail_nonzero, 1);
+  free(buf);
+}
+
+TEST(TestPlatformRandom, Uint32IsNonZeroAndVaries) {
+  uint32_t a = platform_random_uint32();
+  uint32_t b = platform_random_uint32();
+  /* Probability both are 0 is 1/2^64; probability both equal is 1/2^32. */
+  EXPECT_NE(a, (uint32_t)0);
+  EXPECT_NE(b, (uint32_t)0);
+  EXPECT_NE(a, b);
+}
+
+TEST(TestPlatformRandom, UniformFloatInRange) {
+  for (int i = 0; i < 100; i++) {
+    float f = platform_random_uniform_float();
+    EXPECT_GE(f, 0.0f);
+    EXPECT_LT(f, 1.0f);
+  }
+}
+
+TEST(TestPlatformRandom, UniformIndexStaysInBounds) {
+  for (int i = 0; i < 1000; i++) {
+    size_t idx = platform_random_uniform_index(7);
+    EXPECT_LT(idx, (size_t)7);
+  }
+  /* bound==0 must not crash or divide by zero. */
+  EXPECT_EQ(platform_random_uniform_index(0), (size_t)0);
+}
+
 /* ================================================================
  * platform_thread tests
  * ================================================================ */

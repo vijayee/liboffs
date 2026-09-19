@@ -720,12 +720,15 @@ export class OffsClient {
           throw new Error(`Failed to parse subdirectory URL: ${subUrl}`);
         }
         const dirHash = base58Decode(parsed.fileHashB58);
-        if (!dirHash) {
+        const descriptorHash = base58Decode(parsed.descriptorHashB58);
+        if (!dirHash || !descriptorHash) {
           throw new Error(`Invalid directory hash in URL: ${subUrl}`);
         }
         ofdEntries.push(ofdDirectory({
           name: basename(subdir),
-          dirHash
+          dirHash,
+          descriptorHash,
+          dirSize: parsed.streamLength
         }));
       }
 

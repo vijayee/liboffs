@@ -1,8 +1,18 @@
 /cmake-build-debug
 /cmake-build-msvc
+/cmake-build-*
 /.idea
 /build*
 .env
+
+# Core dumps and crash artifacts
+core.*
+vgcore.*
+*.dump
+
+# Vestigial root-level npm artifacts (the JS client lives under src/ClientLibs/js/)
+/package-lock.json
+/node_modules/
 
 # CMake build artifacts
 CMakeCache.txt
@@ -33,7 +43,12 @@ test/testliboffs
 # Test data directories (generated at runtime, not source code)
 /BlockCache*/
 block_index/
+/offs_cache/
 certs/
+
+# Stray root-level artifacts
+/EOF
+/demo-hosted*.png
 
 # Test outputs
 browser_video_*.png
@@ -64,5 +79,4 @@ examples/off_client/pubspec.lock
 examples/off_client/test/
 examples/off_client/.metadata
 Testing/
-vgcore.*
 OFFS

@@ -397,12 +397,12 @@ static void _block_cache_resolve_pending_gets(block_cache_t* block_cache,
 void block_cache_dispatch(void* state, message_t* msg) {
   block_cache_t* block_cache = (block_cache_t*)state;
   if (block_cache == NULL) {
-    log_error("block_cache_dispatch: block_cache is NULL");
-    abort();
+    log_error("block_cache_dispatch: block_cache is NULL — dropping msg type %d", msg->type);
+    return;
   }
   if (block_cache->index == NULL) {
-    log_error("block_cache_dispatch: index is NULL for msg type %d", msg->type);
-    abort();
+    log_error("block_cache_dispatch: index is NULL for msg type %d — dropping", msg->type);
+    return;
   }
   switch (msg->type) {
     case CACHE_PUT: {
