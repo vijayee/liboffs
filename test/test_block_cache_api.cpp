@@ -207,20 +207,94 @@ TEST(BlockCacheAPIWire, DeleteRequestEncodeDecode) {
   memset(hash, 0xFF, 32);
 
   client_api_block_delete_request_t msg;
+  memset(&msg, 0, sizeof(msg));
   msg.hash_data = hash;
   msg.hash_len = 32;
+  msg.force = 0;
 
   cbor_item_t* encoded = client_api_block_delete_request_encode(&msg);
   ASSERT_NE(encoded, nullptr);
   EXPECT_EQ(client_api_wire_get_type(encoded), CLIENT_API_BLOCK_DELETE_REQUEST);
+  /* force=0 keeps the legacy 2-element frame. */
+  ASSERT_TRUE(cbor_isa_array(encoded));
+  EXPECT_EQ(cbor_array_size(encoded), 2u);
 
   client_api_block_delete_request_t decoded;
   int ret = client_api_block_delete_request_decode(encoded, &decoded);
   ASSERT_EQ(ret, 0);
   EXPECT_EQ(decoded.hash_len, 32u);
+  EXPECT_EQ(decoded.force, 0u);
 
   client_api_block_delete_request_destroy(&decoded);
   cbor_decref(&encoded);
+}
+
+/* force=1 rides as an optional third element and round-trips. */
+TEST(BlockCacheAPIWire, DeleteRequestForceEncodeDecode) {
+  uint8_t hash[32];
+  memset(hash, 0x42, 32);
+
+  client_api_block_delete_request_t msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.hash_data = hash;
+  msg.hash_len = 32;
+  msg.force = 1;
+
+  cbor_item_t* encoded = client_api_block_delete_request_encode(&msg);
+  ASSERT_NE(encoded, nullptr);
+  ASSERT_TRUE(cbor_isa_array(encoded));
+  EXPECT_EQ(cbor_array_size(encoded), 3u);
+
+  client_api_block_delete_request_t decoded;
+  int ret = client_api_block_delete_request_decode(encoded, &decoded);
+  ASSERT_EQ(ret, 0);
+  EXPECT_EQ(decoded.hash_len, 32u);
+  EXPECT_EQ(decoded.force, 1u);
+
+  client_api_block_delete_request_destroy(&decoded);
+  cbor_decref(&encoded);
+}
+
+/* Legacy 2-element frames decode with force=0, and an explicit third element
+   of zero decodes as no force. */
+TEST(BlockCacheAPIWire, DeleteRequestForceOptionalDecode) {
+  uint8_t hash[32];
+  memset(hash, 0x37, 32);
+
+  /* Hand-built legacy frame: [type, hash]. */
+  cbor_item_t* legacy = cbor_new_definite_array(2);
+  cbor_item_t* type_item = cbor_build_uint8(CLIENT_API_BLOCK_DELETE_REQUEST);
+  cbor_array_push(legacy, type_item); cbor_decref(&type_item);
+  cbor_item_t* hash_item = cbor_build_bytestring(hash, 32);
+  cbor_array_push(legacy, hash_item); cbor_decref(&hash_item);
+
+  client_api_block_delete_request_t decoded;
+  ASSERT_EQ(client_api_block_delete_request_decode(legacy, &decoded), 0);
+  EXPECT_EQ(decoded.force, 0u);
+  client_api_block_delete_request_destroy(&decoded);
+  cbor_decref(&legacy);
+
+  /* [type, hash, 0] — the element is present but zero, so no force. */
+  cbor_item_t* zero_force = cbor_new_definite_array(3);
+  type_item = cbor_build_uint8(CLIENT_API_BLOCK_DELETE_REQUEST);
+  cbor_array_push(zero_force, type_item); cbor_decref(&type_item);
+  hash_item = cbor_build_bytestring(hash, 32);
+  cbor_array_push(zero_force, hash_item); cbor_decref(&hash_item);
+  cbor_item_t* force_item = cbor_build_uint8(0);
+  cbor_array_push(zero_force, force_item); cbor_decref(&force_item);
+
+  ASSERT_EQ(client_api_block_delete_request_decode(zero_force, &decoded), 0);
+  EXPECT_EQ(decoded.force, 0u);
+  client_api_block_delete_request_destroy(&decoded);
+  cbor_decref(&zero_force);
+}
+
+/* The conflict status is a distinct value so pinned/claimed rejections can
+   never be mistaken for NOT_FOUND. */
+TEST(BlockCacheAPIWire, DeleteStatusConflictDistinct) {
+  EXPECT_EQ(CLIENT_API_STATUS_CONFLICT, 6);
+  EXPECT_NE(CLIENT_API_STATUS_CONFLICT, CLIENT_API_STATUS_NOT_FOUND);
+  EXPECT_NE(CLIENT_API_STATUS_CONFLICT, CLIENT_API_STATUS_UNAUTHORIZED);
 }
 
 /* --- Block DELETE Response --- */

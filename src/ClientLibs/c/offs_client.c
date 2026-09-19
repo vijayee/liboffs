@@ -2396,6 +2396,12 @@ int offs_client_block_get(offs_client_t* client,
 int offs_client_block_delete(offs_client_t* client,
     const uint8_t* hash_data, size_t hash_len,
     offs_block_delete_cb_t callback, void* ctx) {
+  return offs_client_block_delete_ex(client, hash_data, hash_len, 0, callback, ctx);
+}
+
+int offs_client_block_delete_ex(offs_client_t* client,
+    const uint8_t* hash_data, size_t hash_len, uint8_t force,
+    offs_block_delete_cb_t callback, void* ctx) {
   if (client == NULL || !client->connected) return -1;
 
   platform_mutex_lock(client->lock);
@@ -2404,8 +2410,10 @@ int offs_client_block_delete(offs_client_t* client,
   platform_mutex_unlock(client->lock);
 
   client_api_block_delete_request_t msg;
+  memset(&msg, 0, sizeof(msg));
   msg.hash_data = (uint8_t*)hash_data;
   msg.hash_len = hash_len;
+  msg.force = force ? 1 : 0;
 
   cbor_item_t* frame = client_api_block_delete_request_encode(&msg);
   _send_frame(client, frame);

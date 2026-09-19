@@ -7,6 +7,7 @@
 #include "http_request.h"
 #include "http_connection.h"
 #include "../../BlockCache/block.h"
+#include "../../BlockCache/block_cache.h"
 #include "../../Buffer/buffer.h"
 #include "../../Util/base58.h"
 #include "../../Util/allocator.h"
@@ -19,6 +20,31 @@ typedef struct {
   block_cache_t* bc;
   scheduler_pool_t* pool;
 } block_routes_context_t;
+
+/* True when the request's query string enables the given parameter: either a
+   bare token ("?force") or "force=1". Any other value ("?force=0") is treated
+   as NOT enabled. Parameters are '&'-separated, so a block BASE58 HASH that
+   happens to contain "force" can never match (the hash lives in the path,
+   not the query string). Mirrors off_routes.c's _query_has_param. */
+static int _query_has_param(const char* query_string, const char* name) {
+  if (query_string == NULL) return 0;
+  size_t name_len = strlen(name);
+  const char* cursor = query_string;
+  while (*cursor != '\0') {
+    const char* separator = strchr(cursor, '&');
+    size_t token_len = separator != NULL ? (size_t)(separator - cursor) : strlen(cursor);
+    if (token_len == name_len && strncmp(cursor, name, name_len) == 0) {
+      return 1;
+    }
+    if (token_len > name_len && strncmp(cursor, name, name_len) == 0 &&
+        cursor[name_len] == '=') {
+      return token_len == name_len + 2 && cursor[name_len + 1] == '1';
+    }
+    if (separator == NULL) break;
+    cursor = separator + 1;
+  }
+  return 0;
+}
 
 /* Regex pattern for GET and DELETE: /blocks/<base58-hash> */
 #define BLOCK_HASH_PATTERN "/blocks/([123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+)"
@@ -111,6 +137,22 @@ static void _block_http_dispatch(void* vstate, message_t* msg) {
     case CACHE_REMOVE_RESULT: {
       if (state->op != BLOCK_HTTP_DELETE) break;
       cache_remove_result_payload_t* result = (cache_remove_result_payload_t*)msg->payload;
+
+      /* Pinned / ephemeral-claimed blocks are a 409 Conflict with a body
+         naming the reason — NOT a 404 (the block exists, the delete was
+         refused) — so a client can tell the difference and retry with
+         ?force=1. */
+      if (result->result == CACHE_REMOVE_PINNED ||
+          result->result == CACHE_REMOVE_EPHEMERAL_CLAIMED) {
+        const char* reason = result->result == CACHE_REMOVE_PINNED
+                                 ? "block is pinned" : "block has ephemeral claims";
+        http_response_set_status(state->response, HTTP_STATUS_CONFLICT);
+        http_response_set_header(state->response, "Content-Type", "text/plain");
+        http_response_write(state->response, reason, strlen(reason));
+        http_response_end(state->response);
+        _block_http_state_destroy(state);
+        return;
+      }
 
       if (result->result != 0) {
         http_response_set_status(state->response, HTTP_STATUS_NOT_FOUND);
@@ -257,6 +299,10 @@ static void _block_delete_handler(http_request_t* request, http_response_t* resp
   memcpy(hash_copy, hash_bytes, 32);
   buffer_t* hash = buffer_create_from_existing_memory(hash_copy, 32);
 
+  /* ?force=1 (or bare ?force) removes even pinned / ephemeral-claimed
+     blocks; without it those deletes come back 409. */
+  uint8_t force = _query_has_param(request->query_string, "force") ? 1 : 0;
+
   block_http_state_t* state = get_clear_memory(sizeof(block_http_state_t));
   state->ctx = ctx;
   state->response = response;
@@ -266,7 +312,11 @@ static void _block_delete_handler(http_request_t* request, http_response_t* resp
   refcounter_reference((refcounter_t*)state->response);
 
   actor_init(&state->actor, state, _block_http_dispatch, ctx->pool);
-  block_cache_remove(ctx->bc, hash, &state->actor);
+  block_cache_remove_ex(ctx->bc, hash, force, &state->actor);
+  /* remove_ex references the hash for its payload (the cache actor's dispatch
+     drops that one), so the ownership we created above is ours to release —
+     dropping it here is what keeps the delete route leak-free. */
+  buffer_destroy(hash);
 }
 
 /* --- DEFRAGMENT handler --- */

@@ -316,14 +316,17 @@ export class HttpTransport {
 
   /**
    * @param {string} base58Hash
+   * @param {number} [force] 1 removes pinned / ephemeral-claimed blocks too
    * @returns {Promise<{status: number}>}
    */
-  async blockDelete(base58Hash) {
-    const response = await fetch(this.url(`/blocks/${base58Hash}`), {
+  async blockDelete(base58Hash, force = 0) {
+    const query = force ? '?force=1' : '';
+    const response = await fetch(this.url(`/blocks/${base58Hash}${query}`), {
       method: 'DELETE',
       headers: this.authHeaders(),
       signal: this.abortController?.signal,
     });
+    if (response.status === 409) return { status: 6 }; // STATUS.CONFLICT
     return { status: response.ok ? 0 : 2 };
   }
 

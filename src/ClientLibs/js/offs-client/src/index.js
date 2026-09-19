@@ -403,16 +403,21 @@ export class OffsClient {
 
   /**
    * @param {string|Uint8Array} hash
+   * @param {{force?: boolean}} [options] force=true removes pinned /
+   *   ephemeral-claimed blocks too; otherwise those deletes resolve with
+   *   status CONFLICT (wire.STATUS.CONFLICT).
    * @returns {Promise<{status: number}>}
    */
-  async blockDelete(hash) {
-    if (typeof hash === 'string') return this.transport.blockDelete(hash);
+  async blockDelete(hash, options = {}) {
+    const forceFlag = options.force ? 1 : 0;
+
+    if (typeof hash === 'string') return this.transport.blockDelete(hash, forceFlag);
 
     if (this.transport instanceof HttpTransport) {
-      return this.transport.blockDelete(base58Encode(hash));
+      return this.transport.blockDelete(base58Encode(hash), forceFlag);
     }
 
-    const requestBytes = wire.encodeBlockDeleteRequest(hash);
+    const requestBytes = wire.encodeBlockDeleteRequest(hash, forceFlag);
     const responseBytes = await this._sendAndWait(requestBytes, wire.MSG.BLOCK_DELETE_RESPONSE);
     return wire.decodeBlockDeleteResponse(responseBytes);
   }

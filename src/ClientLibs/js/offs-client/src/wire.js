@@ -86,7 +86,8 @@ export const STATUS = {
   NOT_FOUND: 2,
   INTERNAL_ERROR: 3,
   RANGE_NOT_SATISFIABLE: 4,
-  UNAUTHORIZED: 5
+  UNAUTHORIZED: 5,
+  CONFLICT: 6
 };
 
 /**
@@ -332,11 +333,17 @@ export function decodeBlockGetResponse(bytes) {
 }
 
 /**
+ * Optional trailing force flag: nonzero removes pinned / ephemeral-claimed
+ * blocks too; absent keeps the legacy 2-element frame.
+ *
  * @param {Uint8Array} hash
+ * @param {number} [force] 0 or 1
  * @returns {Uint8Array}
  */
-export function encodeBlockDeleteRequest(hash) {
-  return encoder.encode([MSG.BLOCK_DELETE_REQUEST, hash]);
+export function encodeBlockDeleteRequest(hash, force = 0) {
+  return force
+    ? encoder.encode([MSG.BLOCK_DELETE_REQUEST, hash, 1])
+    : encoder.encode([MSG.BLOCK_DELETE_REQUEST, hash]);
 }
 
 /**

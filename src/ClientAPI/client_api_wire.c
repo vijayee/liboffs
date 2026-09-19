@@ -1108,10 +1108,10 @@ void client_api_block_get_response_destroy(client_api_block_get_response_t* msg)
 }
 
 // --- Block DELETE Request ---
-// [type, hash: bstr]
+// [type, hash: bstr, force?: uint]
 
 cbor_item_t* client_api_block_delete_request_encode(const client_api_block_delete_request_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* array = cbor_new_definite_array(msg->force != 0 ? 3 : 2);
   cbor_item_t* item;
 
   item = cbor_build_uint8(CLIENT_API_BLOCK_DELETE_REQUEST);
@@ -1121,6 +1121,12 @@ cbor_item_t* client_api_block_delete_request_encode(const client_api_block_delet
   item = cbor_build_bytestring(msg->hash_data, msg->hash_len);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
+
+  if (msg->force != 0) {
+    item = cbor_build_uint8(1);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+  }
 
   return array;
 }
@@ -1137,6 +1143,20 @@ int client_api_block_delete_request_decode(cbor_item_t* item, client_api_block_d
     free(msg->hash_data);
     msg->hash_data = NULL;
     return -1;
+  }
+
+  /* Optional trailing force flag: absent → 0 (legacy frames decode
+     unchanged), present → any nonzero value forces past pins/claims.
+     cbor_get_int (NOT cbor_get_uint64) — the width-generic extractor; a
+     1-byte uint8 force item would make the uint64 read stride past its
+     allocation. */
+  if (cbor_array_size(item) >= 3) {
+    cbor_item_t* force_item = cbor_array_get(item, 2);
+    if (force_item != NULL && cbor_isa_uint(force_item) &&
+        cbor_get_int(force_item) != 0) {
+      msg->force = 1;
+    }
+    cbor_decref(&force_item);
   }
   return 0;
 }

@@ -878,6 +878,95 @@ TEST_F(TestOffsClient, BlockDelete) {
     offs_client_disconnect(client);
 }
 
+/* Delete of a pinned block is refused with CONFLICT (6) unless force=1 is
+   sent, in which case the pin is cleared and the block is removed (a
+   follow-up GET confirms it is gone). */
+TEST_F(TestOffsClient, BlockDeleteConflictThenForce) {
+  offs_client_t* client = offs_client_connect(url, NULL);
+  ASSERT_NE(client, nullptr);
+
+  const uint8_t data[] = "conflict delete data";
+  BlockPutCallbackContext put_ctx;
+  memset(&put_ctx, 0, sizeof(put_ctx));
+
+  int result = offs_client_block_put(client, data, sizeof(data) - 1, 0,
+                                     _block_put_callback, &put_ctx);
+  EXPECT_EQ(result, 0);
+  for (int attempts = 0; attempts < 200
+       && put_ctx.called.load(std::memory_order_acquire) == 0;
+       attempts++) {
+    platform_usleep(10000);
+  }
+  EXPECT_EQ(put_ctx.called, 1);
+  ASSERT_NE(put_ctx.hash_data, nullptr);
+
+  /* Pin the block straight through the block cache (the pin routes operate
+     on whole representations; a raw block pin is exactly what the block-level
+     delete must respect). */
+  uint8_t* hash_copy = (uint8_t*)malloc(put_ctx.hash_len);
+  ASSERT_NE(hash_copy, nullptr);
+  memcpy(hash_copy, put_ctx.hash_data, put_ctx.hash_len);
+  buffer_t* hash_buf = buffer_create_from_existing_memory(hash_copy, put_ctx.hash_len);
+  ASSERT_NE(hash_buf, nullptr);
+  block_cache_pin(bc, hash_buf, NULL);
+  scheduler_pool_wait_for_idle(pool);
+
+  /* Delete without force: refused with CONFLICT. */
+  BlockDeleteCallbackContext del_ctx;
+  memset(&del_ctx, 0, sizeof(del_ctx));
+  result = offs_client_block_delete(client, put_ctx.hash_data, put_ctx.hash_len,
+                                    _block_delete_callback, &del_ctx);
+  EXPECT_EQ(result, 0);
+  for (int attempts = 0; attempts < 200 && !del_ctx.called; attempts++) {
+    platform_usleep(10000);
+  }
+  ASSERT_EQ(del_ctx.called, 1);
+  EXPECT_EQ(del_ctx.status, CLIENT_API_STATUS_CONFLICT)
+      << "pinned delete must report CONFLICT, got status " << (int)del_ctx.status;
+
+  /* The pin still holds: a second non-forced delete conflicts again. */
+  memset(&del_ctx, 0, sizeof(del_ctx));
+  result = offs_client_block_delete(client, put_ctx.hash_data, put_ctx.hash_len,
+                                    _block_delete_callback, &del_ctx);
+  EXPECT_EQ(result, 0);
+  for (int attempts = 0; attempts < 200 && !del_ctx.called; attempts++) {
+    platform_usleep(10000);
+  }
+  ASSERT_EQ(del_ctx.called, 1);
+  EXPECT_EQ(del_ctx.status, CLIENT_API_STATUS_CONFLICT);
+
+  /* Delete with force: the pin is cleared and the block goes away. */
+  memset(&del_ctx, 0, sizeof(del_ctx));
+  result = offs_client_block_delete_ex(client, put_ctx.hash_data, put_ctx.hash_len,
+                                       1, _block_delete_callback, &del_ctx);
+  EXPECT_EQ(result, 0);
+  for (int attempts = 0; attempts < 200 && !del_ctx.called; attempts++) {
+    platform_usleep(10000);
+  }
+  ASSERT_EQ(del_ctx.called, 1);
+  EXPECT_EQ(del_ctx.status, CLIENT_API_STATUS_OK)
+      << "forced delete must succeed, got status " << (int)del_ctx.status;
+
+  /* Gone: a block GET now reports NOT_FOUND. */
+  BlockGetCallbackContext get_ctx;
+  memset(&get_ctx, 0, sizeof(get_ctx));
+  result = offs_client_block_get(client, put_ctx.hash_data, put_ctx.hash_len,
+                                 _block_get_callback, &get_ctx);
+  EXPECT_EQ(result, 0);
+  for (int attempts = 0; attempts < 200
+       && get_ctx.called.load(std::memory_order_acquire) == 0;
+       attempts++) {
+    platform_usleep(10000);
+  }
+  ASSERT_EQ(get_ctx.called, 1);
+  EXPECT_EQ(get_ctx.status, CLIENT_API_STATUS_NOT_FOUND);
+
+  free(put_ctx.hash_data);
+  buffer_destroy(hash_buf);
+  free(get_ctx.data);
+  offs_client_disconnect(client);
+}
+
 TEST_F(TestOffsClient, Health) {
     offs_client_t* client = offs_client_connect(url, NULL);
     ASSERT_NE(client, nullptr);

@@ -207,6 +207,14 @@ int offs_client_block_delete(offs_client_t* client,
     const uint8_t* hash_data, size_t hash_len,
     offs_block_delete_cb_t callback, void* ctx);
 
+/* Same delete with an explicit force flag: force=1 removes the block even
+   when it is pinned or carries ephemeral claims (the optional third wire
+   element); force=0 leaves those deletes rejected with
+   CLIENT_API_STATUS_CONFLICT (6) in the callback. */
+int offs_client_block_delete_ex(offs_client_t* client,
+    const uint8_t* hash_data, size_t hash_len, uint8_t force,
+    offs_block_delete_cb_t callback, void* ctx);
+
 /* Health check */
 int offs_client_health(offs_client_t* client,
     offs_health_cb_t callback, void* ctx);

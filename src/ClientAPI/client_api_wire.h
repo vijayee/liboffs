@@ -81,6 +81,7 @@ _Static_assert(CLIENT_API_EPHEMERAL_LIST_RESPONSE == CLIENT_API_EPHEMERAL_LIST_R
 #define CLIENT_API_STATUS_INTERNAL_ERROR    3
 #define CLIENT_API_STATUS_RANGE_NOT_SATISFIABLE 4
 #define CLIENT_API_STATUS_UNAUTHORIZED      5
+#define CLIENT_API_STATUS_CONFLICT           6
 
 // --- PUT Request ---
 // [type, content_type, file_name, stream_length, server_address, data, recycler_urls, temporary, tuple_size?, recycle_ephemeral?]
@@ -228,10 +229,14 @@ typedef struct {
 } client_api_block_get_response_t;
 
 // --- Block DELETE Request ---
-// [type, hash: bstr]
+// [type, hash: bstr, force?: uint]
+// force is optional at index 2: present-and-nonzero means remove even when
+// the block is pinned or carries ephemeral claims; absent (or zero) keeps the
+// old behavior, so 2-element legacy frames decode unchanged.
 typedef struct {
   uint8_t* hash_data;
   size_t hash_len;
+  uint8_t force;  // 0 = respect pins/claims, 1 = remove regardless
 } client_api_block_delete_request_t;
 
 // --- Block DELETE Response ---

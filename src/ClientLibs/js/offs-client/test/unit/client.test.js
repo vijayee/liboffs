@@ -137,3 +137,43 @@ describe('OffsClient putFolder', () => {
     await expect(client.putFolder({})).rejects.toThrow('No files to upload');
   });
 });
+
+// --- block delete wire: optional force flag + conflict status ---
+
+describe('blockDelete wire and client options', () => {
+  it('omits the force element when zero and includes it when nonzero', async () => {
+    const { encodeBlockDeleteRequest, MSG } = await import('../../src/wire.js');
+    const { decode } = await import('cbor-x');
+    const hash = new Uint8Array(32).fill(0xab);
+
+    const plain = decode(encodeBlockDeleteRequest(hash));
+    expect(plain[0]).toBe(MSG.BLOCK_DELETE_REQUEST);
+    expect(plain).toHaveLength(2);
+
+    const forced = decode(encodeBlockDeleteRequest(hash, 1));
+    expect(forced).toHaveLength(3);
+    expect(forced[2]).toBe(1);
+  });
+
+  it('exposes STATUS.CONFLICT and passes force through to the transport', async () => {
+    const { STATUS } = await import('../../src/wire.js');
+    expect(STATUS.CONFLICT).toBe(6);
+    expect(STATUS.CONFLICT).not.toBe(STATUS.NOT_FOUND);
+
+    const transport = createMockTransport();
+    transport.blockDelete = vi.fn(async (hashB58, forceFlag) => {
+      return { status: forceFlag ? STATUS.OK : STATUS.CONFLICT };
+    });
+    const client = new OffsClient('http://localhost:23402', undefined, { transport });
+
+    // A plain delete is refused with CONFLICT.
+    const refused = await client.blockDelete('somebase58hash');
+    expect(transport.blockDelete).toHaveBeenCalledWith('somebase58hash', 0);
+    expect(refused.status).toBe(STATUS.CONFLICT);
+
+    // force: true reaches the transport as 1.
+    const forced = await client.blockDelete('somebase58hash', { force: true });
+    expect(transport.blockDelete).toHaveBeenCalledWith('somebase58hash', 1);
+    expect(forced.status).toBe(STATUS.OK);
+  });
+});

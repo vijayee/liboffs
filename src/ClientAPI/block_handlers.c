@@ -4,6 +4,7 @@
 
 #include "block_handlers.h"
 #include "../BlockCache/block.h"
+#include "../BlockCache/block_cache.h"
 #include "../Buffer/buffer.h"
 #include "../Util/base58.h"
 #include "../Util/allocator.h"
@@ -82,11 +83,18 @@ void block_handle_delete_request(block_handler_ctx_t* ctx, cbor_item_t* frame) {
 
   buffer_t* hash = buffer_create_from_existing_memory(msg.hash_data, msg.hash_len);
   msg.hash_data = NULL; /* ownership transferred */
+  uint8_t force = msg.force;
 
   ctx->pending_op = BLOCK_OP_DELETE;
   client_api_block_delete_request_destroy(&msg);
 
-  block_cache_remove(ctx->bc, hash, ctx->actor);
+  /* force=1 lets the delete win over pins and ephemeral claims; force=0
+     leaves those blocks in place and reports CONFLICT back. */
+  block_cache_remove_ex(ctx->bc, hash, force, ctx->actor);
+  /* remove_ex references the hash for its payload (the cache actor's dispatch
+     drops that one), so the ownership we created above is ours to release —
+     dropping it here is what keeps the delete path leak-free. */
+  buffer_destroy(hash);
 }
 
 int block_handle_cache_result(block_handler_ctx_t* ctx, message_t* msg) {
@@ -162,6 +170,20 @@ int block_handle_cache_result(block_handler_ctx_t* ctx, message_t* msg) {
       ctx->pending_op = BLOCK_OP_NONE;
 
       cache_remove_result_payload_t* result = (cache_remove_result_payload_t*)msg->payload;
+
+      /* Pinned / ephemeral-claimed blocks report CONFLICT with a message
+         naming the reason (the delete response frame carries status only,
+         so the reason rides the error frame, whose status still reaches the
+         client's delete callback). */
+      if (result->result == CACHE_REMOVE_PINNED) {
+        ctx->send_error(ctx->conn, CLIENT_API_STATUS_CONFLICT, "block is pinned");
+        return 1;
+      }
+      if (result->result == CACHE_REMOVE_EPHEMERAL_CLAIMED) {
+        ctx->send_error(ctx->conn, CLIENT_API_STATUS_CONFLICT, "block has ephemeral claims");
+        return 1;
+      }
+
       client_api_block_delete_response_t response;
       memset(&response, 0, sizeof(response));
       response.status = (result->result == 0) ? CLIENT_API_STATUS_OK : CLIENT_API_STATUS_NOT_FOUND;

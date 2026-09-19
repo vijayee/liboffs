@@ -26,7 +26,9 @@ extern "C" {
 #include "../src/Platform/platform_process.h"
 #include "../src/Platform/platform_socket.h"
 #include "../src/ClientAPI/HTTP/off_routes.h"
+#include "../src/ClientAPI/HTTP/block_routes.h"
 #include "../src/ClientAPI/HTTP/http_server.h"
+#include "../src/Util/base58.h"
 #include "../src/ClientAPI/client_api_wire.h"
 #include "../src/OFFStreams/ofd_cache.h"
 #include "../src/OFFStreams/off_url.h"
@@ -3021,6 +3023,258 @@ TEST_F(TestEphemeralRoutes, LoadWithPinQueryPinsRepresentation) {
     free(entries);
   }
   EXPECT_TRUE(all_pinned) << "blocks not pinned after load ?pin=1";
+
+  free(url);
+}
+
+/* ---- Task B: HTTP block delete force flag + conflict statuses ---- */
+
+/* Known bcrypt (cost 4) hash of "test-key" — same constant test_http_server's
+   LocalBindingAuth uses, so the block routes' auth gate is exercised without
+   paying a fresh-keygen cost in every run. */
+static const char* k_block_routes_auth_hash =
+    "$2b$04$MTIzNDU2Nzg5MDEyMzQ1NePheb5yq4/5.giE2KzFrDwx2yMnwVtpW";
+static const char* k_block_routes_auth_key = "test-key";
+
+/* Block routes only register when auth is configured; off_routes_register
+   installs the bearer middleware from the same config. */
+class TestEphemeralBlockRoutes : public testing::Test {
+protected:
+  scheduler_pool_t* pool;
+  http_server_t* server;
+  block_cache_t* block_cache;
+  ofd_cache_t* ofd_cache;
+  tuple_cache_t* tuple_c;
+  timer_actor_t* timer;
+  uint16_t port;
+  char* location;
+  config_t config;
+
+  void SetUp() override {
+    port = _routes_next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
+    location = path_join("/tmp", "EphemeralBlockRoutesTest");
+    rm_rf(location);
+    mkdir_p(location);
+    pool = scheduler_pool_create(4);
+    scheduler_pool_start(pool);
+    timer = timer_actor_create(pool);
+    config = config_default();
+    config.index_wait = 100;
+    config.index_max_wait = 100;
+    config.api_key_hash = strdup(k_block_routes_auth_hash);
+    block_cache = block_cache_create(config, location, standard, timer, pool, NULL, 0);
+    ASSERT_NE(block_cache, nullptr);
+    ofd_cache = ofd_cache_create(pool, block_cache, 300000);
+    ASSERT_NE(ofd_cache, nullptr);
+    tuple_c = tuple_cache_create(100, pool);
+    ASSERT_NE(tuple_c, nullptr);
+    server = http_server_create(pool, "127.0.0.1", port);
+    ASSERT_NE(server, nullptr);
+  }
+
+  void TearDown() override {
+    if (server != NULL) {
+      http_server_stop(server);
+    }
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    if (server != NULL) {
+      http_server_destroy(server);
+    }
+    ofd_cache_destroy(ofd_cache);
+    tuple_cache_destroy(tuple_c);
+    block_cache_sync(block_cache);
+    block_cache_destroy(block_cache);
+    timer_actor_destroy(timer);
+    scheduler_pool_destroy(pool);
+    rm_rf(location);
+    free(location);
+    free(config.api_key_hash);
+    config.api_key_hash = NULL;
+  }
+};
+
+/* The status line leads the response, so a base58 hash that happens to embed
+   the digits cannot fool the check. */
+static int _routes_status_is(const char* response, int status) {
+  char status_line[16];
+  snprintf(status_line, sizeof(status_line), "HTTP/1.1 %d", status);
+  return strncmp(response, status_line, strlen(status_line)) == 0;
+}
+
+/* PUT one raw block through /blocks?encoding=base58; returns the base58 hash
+   from the response body (caller frees). */
+static char* _routes_block_put(uint16_t port, const char* data) {
+  char request[1024];
+  int req_len = snprintf(request, sizeof(request),
+      "PUT /blocks?encoding=base58 HTTP/1.1\r\n"
+      "Host: localhost\r\n"
+      "Authorization: Bearer %s\r\n"
+      "Connection: close\r\n"
+      "Content-Length: %zu\r\n"
+      "\r\n"
+      "%s",
+      k_block_routes_auth_key, strlen(data), data);
+  if (req_len <= 0) return NULL;
+  char response[8192];
+  memset(response, 0, sizeof(response));
+  if (_routes_request(port, request, (size_t)req_len, response, sizeof(response), 10000) != 0
+      || !_routes_status_is(response, 201)) {
+    return NULL;
+  }
+  char* body = _routes_body(response);
+  if (body == NULL || body[0] == '\0') return NULL;
+  return strdup(body);
+}
+
+/* DELETE /blocks/<hash>, optionally with ?force=1; returns the raw response
+   in `response` (0 on transport success). */
+static int _routes_block_delete(uint16_t port, const char* hash_b58, int force,
+                                char* response, size_t response_size) {
+  char request[1024];
+  int req_len = snprintf(request, sizeof(request),
+      "DELETE /blocks/%s%s HTTP/1.1\r\n"
+      "Host: localhost\r\n"
+      "Authorization: Bearer %s\r\n"
+      "Connection: close\r\n"
+      "\r\n",
+      hash_b58, force ? "?force=1" : "", k_block_routes_auth_key);
+  if (req_len <= 0) return -1;
+  memset(response, 0, response_size);
+  return _routes_request(port, request, (size_t)req_len, response, response_size, 10000);
+}
+
+/* GET /blocks/<hash> — returns 0 on transport success. */
+static int _routes_block_get(uint16_t port, const char* hash_b58,
+                             char* response, size_t response_size) {
+  char request[1024];
+  int req_len = snprintf(request, sizeof(request),
+      "GET /blocks/%s HTTP/1.1\r\n"
+      "Host: localhost\r\n"
+      "Authorization: Bearer %s\r\n"
+      "Connection: close\r\n"
+      "\r\n",
+      hash_b58, k_block_routes_auth_key);
+  if (req_len <= 0) return -1;
+  memset(response, 0, response_size);
+  return _routes_request(port, request, (size_t)req_len, response, response_size, 10000);
+}
+
+/* Pinned block: plain DELETE is a 409 naming the pin (and leaves the block in
+   place); ?force=1 clears the pin and removes the block. */
+TEST_F(TestEphemeralBlockRoutes, DeletePinnedBlockConflictsThenForce) {
+  off_routes_register(server, pool, block_cache, ofd_cache, tuple_c, NULL, &config,
+                      k_block_routes_auth_key, NULL);
+  block_routes_register(server, pool, block_cache, &config, k_block_routes_auth_key);
+  http_server_listen(server);
+
+  const char* data = "block route delete data";
+  char* hash_b58 = _routes_block_put(port, data);
+  ASSERT_NE(hash_b58, nullptr) << "block PUT failed";
+
+  /* Pin the block straight through the cache (the pin HTTP routes operate on
+     whole representations; a raw block pin is exactly what the block-level
+     delete must respect). */
+  uint8_t hash_bytes[32];
+  size_t hash_len = 0;
+  ASSERT_EQ(base58_decode(hash_b58, hash_bytes, sizeof(hash_bytes), &hash_len), 0);
+  ASSERT_EQ(hash_len, 32u);
+  uint8_t* hash_copy = (uint8_t*)malloc(32);
+  ASSERT_NE(hash_copy, nullptr);
+  memcpy(hash_copy, hash_bytes, 32);
+  buffer_t* hash_buf = buffer_create_from_existing_memory(hash_copy, 32);
+  block_cache_pin(block_cache, hash_buf, NULL);
+  scheduler_pool_wait_for_idle(pool);
+
+  char response[8192];
+
+  /* No force: 409 + "block is pinned". */
+  ASSERT_EQ(_routes_block_delete(port, hash_b58, 0, response, sizeof(response)), 0);
+  EXPECT_TRUE(_routes_status_is(response, 409)) << "pinned delete must 409: " << response;
+  {
+    char* body = _routes_body(response);
+    ASSERT_NE(body, nullptr);
+    EXPECT_STREQ(body, "block is pinned");
+  }
+
+  /* The refusal left the block intact. */
+  ASSERT_EQ(_routes_block_get(port, hash_b58, response, sizeof(response)), 0);
+  EXPECT_TRUE(_routes_status_is(response, 200)) << "block must survive a refused delete";
+
+  /* force=1: 204 and the block is gone (follow-up GET is 404). */
+  ASSERT_EQ(_routes_block_delete(port, hash_b58, 1, response, sizeof(response)), 0);
+  EXPECT_TRUE(_routes_status_is(response, 204)) << "forced delete must succeed: " << response;
+
+  ASSERT_EQ(_routes_block_get(port, hash_b58, response, sizeof(response)), 0);
+  EXPECT_TRUE(_routes_status_is(response, 404)) << "forced delete must remove the block";
+
+  buffer_destroy(hash_buf);
+  free(hash_b58);
+}
+
+/* Ephemeral-claimed block (a temporary off-route PUT claims every block it
+   creates, descriptor included): deleting one over the block route without
+   force reports the claim reason; force removes it. */
+TEST_F(TestEphemeralBlockRoutes, DeleteClaimedBlockConflictsThenForce) {
+  off_routes_register(server, pool, block_cache, ofd_cache, tuple_c, NULL, &config,
+                      k_block_routes_auth_key, NULL);
+  block_routes_register(server, pool, block_cache, &config, k_block_routes_auth_key);
+  http_server_listen(server);
+
+  /* Temporary PUT through the off routes (bearer included — this fixture
+   * runs with auth on): one claim on each of the four blocks it creates,
+   * descriptor included. */
+  char data[600];
+  memset(data, 'C', sizeof(data));
+  char put_request[4096];
+  int put_len = snprintf(put_request, sizeof(put_request),
+      "PUT /offsystem HTTP/1.1\r\n"
+      "Host: localhost\r\n"
+      "Authorization: Bearer %s\r\n"
+      "Connection: close\r\n"
+      "type: application/octet-stream\r\n"
+      "file-name: claimed_block.txt\r\n"
+      "stream-length: %zu\r\n"
+      "temporary: true\r\n"
+      "Content-Length: %zu\r\n"
+      "\r\n",
+      k_block_routes_auth_key, sizeof(data), sizeof(data));
+  ASSERT_GT(put_len, 0);
+  char put_response[8192];
+  char full_put[8192];
+  ASSERT_LT((size_t)put_len + sizeof(data), sizeof(full_put));
+  memcpy(full_put, put_request, (size_t)put_len);
+  memcpy(full_put + put_len, data, sizeof(data));
+  ASSERT_EQ(_routes_request(port, full_put, (size_t)put_len + sizeof(data),
+                            put_response, sizeof(put_response), 10000), 0);
+  ASSERT_TRUE(_routes_status_is(put_response, 200)) << "temporary PUT failed: " << put_response;
+  char* put_body = _routes_body(put_response);
+  ASSERT_NE(put_body, nullptr);
+  ASSERT_NE(strstr(put_body, "/offsystem/v3/"), nullptr);
+  char* url = strdup(put_body);
+
+  off_url_t* parsed = off_url_parse(url);
+  ASSERT_NE(parsed, nullptr);
+  ASSERT_NE(parsed->descriptor_hash, nullptr);
+  char descriptor_b58[64];
+  int encoded = base58_encode(parsed->descriptor_hash->data,
+                              parsed->descriptor_hash->size,
+                              descriptor_b58, sizeof(descriptor_b58));
+  ASSERT_GT(encoded, 0);
+  descriptor_b58[encoded] = '\0';
+  off_url_destroy(parsed);
+
+  char response[8192];
+  ASSERT_EQ(_routes_block_delete(port, descriptor_b58, 0, response, sizeof(response)), 0);
+  EXPECT_TRUE(_routes_status_is(response, 409)) << "claimed delete must 409: " << response;
+  {
+    char* body = _routes_body(response);
+    ASSERT_NE(body, nullptr);
+    EXPECT_STREQ(body, "block has ephemeral claims");
+  }
+
+  ASSERT_EQ(_routes_block_delete(port, descriptor_b58, 1, response, sizeof(response)), 0);
+  EXPECT_TRUE(_routes_status_is(response, 204)) << "forced delete must succeed: " << response;
 
   free(url);
 }
