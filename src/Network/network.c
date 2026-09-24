@@ -1179,7 +1179,8 @@ static void network_handle_ping_capacity_tick(network_t* network, message_t* msg
 static void network_add_node_to_ring(network_t* network,
                                       const node_id_t* node_id,
                                       uint32_t addr,
-                                      uint16_t port) {
+                                      uint16_t port,
+                                      const wire_addr_t* v6_addr) {
   if (network == NULL || node_id == NULL) return;
 
   // Check if already in ring table — skip duplicate insertion
@@ -1200,6 +1201,10 @@ static void network_add_node_to_ring(network_t* network,
       node->weight = FIND_BLOCK_MIN_WEIGHT;
       node->last_gossip_time = (uint64_t)time(NULL) * 1000;
       net_node_record_success(node);
+      if (v6_addr != NULL && v6_addr->family == WIRE_ADDR_FAMILY_V6) {
+        node->rendv_family = PLATFORM_AF_INET6;
+        memcpy(node->rendv6, v6_addr->bytes, 16);
+      }
       ring_set_insert(network->rings, node, latency_us);
     }
     return;
@@ -1225,6 +1230,10 @@ static void network_add_node_to_ring(network_t* network,
       node->weight = FIND_BLOCK_MIN_WEIGHT;
       node->last_gossip_time = (uint64_t)time(NULL) * 1000;
       net_node_record_success(node);
+      if (v6_addr != NULL && v6_addr->family == WIRE_ADDR_FAMILY_V6) {
+        node->rendv_family = PLATFORM_AF_INET6;
+        memcpy(node->rendv6, v6_addr->bytes, 16);
+      }
       ring_set_insert(network->rings, node, 0);
     }
   }
@@ -1441,7 +1450,9 @@ static void network_relay_send_punch(network_t* network,
     log_warn("network: cannot send PUNCH — no relay client");
     return;
   }
-  if (network->relay->reflexive_addr == 0 || network->relay->reflexive_port == 0) {
+  if ((network->relay->reflexive_addr == 0 &&
+       network->relay->reflexive6.family == WIRE_ADDR_FAMILY_NONE) ||
+      network->relay->reflexive_port == 0) {
     log_warn("network: cannot send PUNCH — local SRFLX address unknown");
     return;
   }
@@ -1459,6 +1470,9 @@ static void network_relay_send_punch(network_t* network,
      relay's reflexive_port would point at the relay socket, not the QUIC
      listener, so the direct connection would never establish. */
   punch.reflexive_addr = network->relay->reflexive_addr;
+  if (network->relay->reflexive6.family == WIRE_ADDR_FAMILY_V6) {
+    punch.reflexive6 = network->relay->reflexive6;
+  }
   punch.reflexive_port = (network->quic_listener != NULL &&
                           network->quic_listener->listen_port > 0)
                              ? network->quic_listener->listen_port
@@ -1508,8 +1522,17 @@ static void network_handle_relay_punch(network_t* network,
   if (network == NULL || punch == NULL) return;
   if (network->quic_listener == NULL) return;  /* no QUIC support */
 
-  char host_str[16];
-  if (_ipv4_to_string(punch->reflexive_addr, host_str, sizeof(host_str)) != 0) {
+  char host_str[64];
+  if (punch->reflexive6.family == WIRE_ADDR_FAMILY_V6) {
+    platform_address_t punch_platform;
+    memset(&punch_platform, 0, sizeof(punch_platform));
+    punch_platform.family = PLATFORM_AF_INET6;
+    memcpy(punch_platform.inet6.addr, punch->reflexive6.bytes, 16);
+    if (platform_address_to_string(&punch_platform, host_str, sizeof(host_str)) != 0) {
+      log_error("network: PUNCH v6 reflexive failed to format");
+      return;
+    }
+  } else if (_ipv4_to_string(punch->reflexive_addr, host_str, sizeof(host_str)) != 0) {
     log_error("network: PUNCH reflexive_addr 0x%08x failed to format",
               punch->reflexive_addr);
     return;
@@ -2020,6 +2043,11 @@ static void network_handle_gossip_tick(network_t* network, message_t* msg) {
       gossip.rendezvous_addr = network->relay->reflexive_addr;
       gossip.rendezvous_port = network->quic_listener->listen_port;
     }
+    if (network->relay != NULL &&
+        network->relay->reflexive6.family == WIRE_ADDR_FAMILY_V6 &&
+        network->quic_listener != NULL && network->quic_listener->listen_port > 0) {
+      gossip.rendv6 = network->relay->reflexive6;
+    }
 
     // Fill targets: 1 random node per ring, excluding the target itself
     net_node_t ring_targets[RING_MAX_RINGS];
@@ -2058,7 +2086,8 @@ static void network_handle_gossip_received(network_t* network, message_t* msg) {
 
   // Add sender to ring table
   network_add_node_to_ring(network, &gossip->sender_id,
-                            gossip->rendezvous_addr, gossip->rendezvous_port);
+                            gossip->rendezvous_addr, gossip->rendezvous_port,
+                            &gossip->rendv6);
 
   // Add targets from the gossip packet, capped at GOSSIP_PER_SOURCE_CAP new
   // insertions. Targets already in the ring are skipped without consuming
@@ -2074,7 +2103,7 @@ static void network_handle_gossip_received(network_t* network, message_t* msg) {
       net_node_t* existing = ring_set_find_by_id(network->rings,
                                                  &gossip->targets[index]);
       if (existing == NULL) {
-        network_add_node_to_ring(network, &gossip->targets[index], 0, 0);
+        network_add_node_to_ring(network, &gossip->targets[index], 0, 0, NULL);
         inserted++;
       }
     }
@@ -2094,6 +2123,11 @@ static void network_handle_gossip_received(network_t* network, message_t* msg) {
         network->quic_listener != NULL && network->quic_listener->listen_port > 0) {
       pull.rendezvous_addr = network->relay->reflexive_addr;
       pull.rendezvous_port = network->quic_listener->listen_port;
+    }
+    if (network->relay != NULL &&
+        network->relay->reflexive6.family == WIRE_ADDR_FAMILY_V6 &&
+        network->quic_listener != NULL && network->quic_listener->listen_port > 0) {
+      pull.rendv6 = network->relay->reflexive6;
     }
 
     net_node_t ring_targets[RING_MAX_RINGS];
@@ -2126,7 +2160,8 @@ static void network_handle_gossip_pull_received(network_t* network, message_t* m
 
   // Add sender to ring table
   network_add_node_to_ring(network, &pull->sender_id,
-                            pull->rendezvous_addr, pull->rendezvous_port);
+                            pull->rendezvous_addr, pull->rendezvous_port,
+                            &pull->rendv6);
 
   // Add targets from the pull packet, capped at GOSSIP_PER_SOURCE_CAP new
   // insertions. Targets already in the ring are skipped without consuming
@@ -2140,7 +2175,7 @@ static void network_handle_gossip_pull_received(network_t* network, message_t* m
       net_node_t* existing = ring_set_find_by_id(network->rings,
                                                  &pull->targets[index]);
       if (existing == NULL) {
-        network_add_node_to_ring(network, &pull->targets[index], 0, 0);
+        network_add_node_to_ring(network, &pull->targets[index], 0, 0, NULL);
         inserted++;
       }
     }

@@ -11,6 +11,7 @@
 #include "../Util/atomic_compat.h"
 #include "../Platform/platform.h"
 #include "../Network/stream_framer.h"
+#include "../Network/wire.h"
 #include <stdint.h>
 #include <stddef.h>
 #ifdef _WIN32
@@ -53,6 +54,7 @@ typedef struct relay_client_t {
   uint32_t local_endpoint_id;
   uint32_t reflexive_addr;   /* Server-reflexive IP (host byte order, from ADDR_RESPONSE). 0 if unknown. */
   uint16_t reflexive_port;   /* Server-reflexive port (host byte order, from ADDR_RESPONSE). 0 if unknown. */
+  wire_addr_t reflexive6;    /* Server-reflexive v6 address (from ADDR_RESPONSE). Family NONE when only v4 reflexive is known. */
   ATOMIC(uint8_t) connected;
 
   pd_loop_t* loop;

@@ -65,6 +65,15 @@ void nat_detect_dispatch(void* state, message_t* msg) {
           (network_addr_response_payload_t*)msg->payload;
       if (response == NULL) break;
 
+      /* v6 reflexive addresses carry no v4 classification data; skip NAT
+         classification until a v4 reflexive arrives. */
+      relay_client_t* source_client = (relay_client_t*)response->source_client;
+      if (source_client != NULL &&
+          source_client->reflexive6.family == WIRE_ADDR_FAMILY_V6) {
+        log_info("nat_detect: v6 reflexive address received — skipping v4 NAT classification");
+        break;
+      }
+
       /* Match the source relay_client against detect->relay_a / detect->relay_b
          to record the reflexive address in the right slot. If source_client
          doesn't match either (e.g. the network's primary relay when

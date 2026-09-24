@@ -6,6 +6,8 @@
 #include "network.h"
 #include "relay_client.h"
 #include "quic_listener.h"
+#include "wire.h"
+#include "../Platform/platform_socket.h"
 #include "../Util/allocator.h"
 #include "../Util/base58.h"
 #include "../Util/log.h"
@@ -463,21 +465,44 @@ int peer_info_from_node(peer_info_t* info, const struct network_t* network,
      nodes, (1) fails (nothing listening on the reflexive port) and (2)
      succeeds via direct connection. Advertising both lets the connecting
      node try each in turn. */
-  if (network->relay != NULL && network->relay->reflexive_port != 0 &&
-      network->relay->reflexive_addr != 0) {
-    char ip_str[INET_ADDRSTRLEN];
-    _peer_info_ipv4_to_string(network->relay->reflexive_addr,
-                              ip_str, sizeof(ip_str));
-    if (_peer_info_append_address(info, PEER_ADDR_SRFLX, ip_str,
-                                  network->relay->reflexive_port, 0) != 0) {
-      log_warn("peer_info_from_node: failed to append SRFLX candidate");
-    }
-    if (network->quic_listener != NULL &&
-        network->quic_listener->listen_port > 0 &&
-        network->quic_listener->listen_port != network->relay->reflexive_port) {
+  if (network->relay != NULL && network->relay->reflexive_port != 0) {
+    if (network->relay->reflexive6.family == WIRE_ADDR_FAMILY_V6) {
+      /* v6 SRFLX: format the raw v6 bytes (never v4-mapped here — the relay
+         reports v4-mapped peers via the u32 reflexive_addr instead). */
+      platform_address_t reflexive_platform;
+      memset(&reflexive_platform, 0, sizeof(reflexive_platform));
+      reflexive_platform.family = PLATFORM_AF_INET6;
+      memcpy(reflexive_platform.inet6.addr, network->relay->reflexive6.bytes, 16);
+      char ip_str[64];
+      if (platform_address_to_string(&reflexive_platform, ip_str, sizeof(ip_str)) != 0) {
+        log_warn("peer_info_from_node: failed to format v6 SRFLX");
+      } else if (_peer_info_append_address(info, PEER_ADDR_SRFLX, ip_str,
+                                           network->relay->reflexive_port, 0) != 0) {
+        log_warn("peer_info_from_node: failed to append v6 SRFLX candidate");
+      } else if (network->quic_listener != NULL &&
+                 network->quic_listener->listen_port > 0 &&
+                 network->quic_listener->listen_port != network->relay->reflexive_port) {
+        /* The listener-port second candidate uses the same v6 ip_str. */
+        if (_peer_info_append_address(info, PEER_ADDR_SRFLX, ip_str,
+                                      network->quic_listener->listen_port, 0) != 0) {
+          log_warn("peer_info_from_node: failed to append v6 SRFLX listener candidate");
+        }
+      }
+    } else {
+      char ip_str[INET_ADDRSTRLEN];
+      _peer_info_ipv4_to_string(network->relay->reflexive_addr,
+                                ip_str, sizeof(ip_str));
       if (_peer_info_append_address(info, PEER_ADDR_SRFLX, ip_str,
-                                    network->quic_listener->listen_port, 0) != 0) {
-        log_warn("peer_info_from_node: failed to append SRFLX listener candidate");
+                                    network->relay->reflexive_port, 0) != 0) {
+        log_warn("peer_info_from_node: failed to append SRFLX candidate");
+      }
+      if (network->quic_listener != NULL &&
+          network->quic_listener->listen_port > 0 &&
+          network->quic_listener->listen_port != network->relay->reflexive_port) {
+        if (_peer_info_append_address(info, PEER_ADDR_SRFLX, ip_str,
+                                      network->quic_listener->listen_port, 0) != 0) {
+          log_warn("peer_info_from_node: failed to append SRFLX listener candidate");
+        }
       }
     }
   }

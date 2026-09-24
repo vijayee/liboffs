@@ -162,16 +162,20 @@ static void _relay_handle_addr_request(
 
   uint32_t reflexive_addr = 0;
   uint16_t reflexive_port = 0;
+  wire_addr_t reflexive6;
+  wire_addr_clear(&reflexive6);
   QUIC_ADDRESS_FAMILY family = QuicAddrGetFamily(&remote_addr);
   if (family == QUIC_ADDRESS_FAMILY_INET) {
     reflexive_addr = ntohl(remote_addr.Ipv4.sin_addr.s_addr);
     reflexive_port = ntohs(remote_addr.Ipv4.sin_port);
   } else if (family == QUIC_ADDRESS_FAMILY_INET6) {
-    reflexive_addr = ntohl((uint32_t)remote_addr.Ipv6.sin6_addr.s6_addr[15] |
-                           ((uint32_t)remote_addr.Ipv6.sin6_addr.s6_addr[14] << 8) |
-                           ((uint32_t)remote_addr.Ipv6.sin6_addr.s6_addr[13] << 16) |
-                           ((uint32_t)remote_addr.Ipv6.sin6_addr.s6_addr[12] << 24));
     reflexive_port = ntohs(remote_addr.Ipv6.sin6_port);
+    /* A v4-mapped peer address reports as v4. */
+    if (IN6_IS_ADDR_V4MAPPED(&remote_addr.Ipv6.sin6_addr)) {
+      reflexive_addr = ntohl(*(const uint32_t*)&remote_addr.Ipv6.sin6_addr.s6_addr[12]);
+    } else {
+      wire_addr_set_v6(&reflexive6, remote_addr.Ipv6.sin6_addr.s6_addr);
+    }
   }
 
   wire_addr_response_t response;
@@ -180,6 +184,9 @@ static void _relay_handle_addr_request(
   response.endpoint_id = client->endpoint_id;
   response.reflexive_addr = reflexive_addr;
   response.reflexive_port = reflexive_port;
+  if (reflexive6.family != WIRE_ADDR_FAMILY_NONE) {
+    response.reflexive6 = reflexive6;
+  }
 
   cbor_item_t* cbor = wire_addr_response_encode(&response);
   if (cbor == NULL) {

@@ -129,8 +129,10 @@ static void _relay_client_process_message(
         client->local_endpoint_id = response.endpoint_id;
         client->reflexive_addr = response.reflexive_addr;
         client->reflexive_port = response.reflexive_port;
-        log_info("relay_client: received ADDR_RESPONSE, endpoint_id=%u, addr=%u:%u",
-                 response.endpoint_id, response.reflexive_addr, response.reflexive_port);
+        client->reflexive6 = response.reflexive6;  /* family NONE ⇒ v4-only */
+        log_info("relay_client: received ADDR_RESPONSE, endpoint_id=%u, addr=%u:%u, v6_family=%u",
+                 response.endpoint_id, response.reflexive_addr, response.reflexive_port,
+                 response.reflexive6.family);
 
         /* Forward the response to the NAT detection actor if active so it can
            compare reflexive addresses from two relays and classify the local
