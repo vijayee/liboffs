@@ -1978,7 +1978,7 @@ static offs_client_t* _connect_attempt(const char* transport_url, const char* ap
     }
 
     /* Start connection */
-    if (QUIC_FAILED(msquic->ConnectionStart(connection, configuration, QUIC_ADDRESS_FAMILY_INET, wt_host, port))) {
+    if (QUIC_FAILED(msquic->ConnectionStart(connection, configuration, QUIC_ADDRESS_FAMILY_UNSPEC, wt_host, port))) {
       msquic->ConnectionClose(connection);
       msquic->ConfigurationClose(configuration);
       msquic->RegistrationClose(registration);
