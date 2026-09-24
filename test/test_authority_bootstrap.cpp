@@ -92,6 +92,11 @@ TEST(AuthorityBootstrap, SetBootstrapPeersParsesCsvAndNormalizes) {
   ASSERT_EQ(0, authority_set_bootstrap_peers(authority, " 10.0.0.2:8080 , 10.0.0.3:9090"));
   ASSERT_EQ(2u, authority->bootstrap_peer_count);
 
+  // 5-digit port on an IPv6 literal must not be truncated by normalization.
+  ASSERT_EQ(0, authority_set_bootstrap_peers(authority, "[::1]:65535"));
+  ASSERT_EQ(1u, authority->bootstrap_peer_count);
+  EXPECT_STREQ("[::1]:65535", authority->bootstrap_peers[0]);
+
   EXPECT_EQ(-1, authority_set_bootstrap_peers(authority, "10.0.0.1:8080,garbage"));
   EXPECT_EQ(0, authority_set_bootstrap_peers(authority, NULL));
   EXPECT_EQ(0u, authority->bootstrap_peer_count);

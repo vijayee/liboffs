@@ -165,9 +165,10 @@ static int authority_bootstrap_contains(authority_t* authority, const char* endp
 }
 
 /* Re-encode a parsed endpoint so stored strings are normalized
- * ("host:port", or "[ipv6]:port" when the host contains ':'). */
+ * ("host:port", or "[ipv6]:port" when the host contains ':'). The buffer
+ * holds the worst case "[host]:65535" + NUL: brackets, colon, 5 digits. */
 static char* authority_bootstrap_encode(const char* host, uint16_t port) {
-  size_t length = strlen(host) + 8;
+  size_t length = strlen(host) + 12;
   char* stored = get_memory(length);
   if (stored == NULL) return NULL;
   if (strchr(host, ':') != NULL) {
