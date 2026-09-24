@@ -8,6 +8,10 @@ extern "C" {
 #include "../src/ClientAPI/health_handler.h"
 #include "../src/ClientAPI/Unix/unix_transport.h"
 #include "../src/ClientAPI/client_api_wire.h"
+#include "../src/Node/node.h"
+#include "../src/Network/authority.h"
+#include "../src/Network/network.h"
+#include "../src/Network/peer_book.h"
 #include "../src/BlockCache/block_cache.h"
 #include "../src/BlockCache/block.h"
 #include "../src/OFFStreams/ofd_cache.h"
@@ -1156,6 +1160,188 @@ static void _bootstrap_list_callback(void* ctx, uint8_t status,
     bctx->entry_count.store(entry_count, std::memory_order_release);
     bctx->entries = entries;
     bctx->called.store(1, std::memory_order_release);
+}
+
+/* Success-path fixture: the daemon-side unix transport is wired with a real
+   authority + network (peer-book actor started) via
+   unix_transport_set_config_ctx, so the bootstrap peer handlers run their
+   full success path and the C client sees real list responses. Mirrors the
+   proven TestUnixTransportPeerSuccess wiring (test_unix_transport.cpp). */
+class TestOffsClientPeer : public testing::Test {
+protected:
+    scheduler_pool_t* pool;
+    timer_actor_t* timer;
+    block_cache_t* bc;
+    ofd_cache_t* ofd_cache;
+    tuple_cache_t* tc;
+    authority_t* authority;
+    network_t* network;
+    offs_node_t node_obj;
+    unix_transport_t* transport;
+    char* cache_dir;
+    char socket_path[128];
+    char url[256];
+
+    void SetUp() override {
+        pool = scheduler_pool_create(4);
+        scheduler_pool_start(pool);
+        timer = timer_actor_create(pool);
+
+        char dir_template[] = "/tmp/test_offs_client_peer_XXXXXX";
+        cache_dir = mkdtemp(dir_template);
+        cache_dir = strdup(cache_dir);
+
+        config_t config = {
+            .index_bucket_size = 10,
+            .index_wait = 1000,
+            .index_max_wait = 5000,
+            .section_size = 128000,
+            .section_wait = 1000,
+            .section_max_wait = 5000,
+            .cache_size = 50,
+            .max_tuple_size = 30,
+            .lru_size = 50
+        };
+        bc = block_cache_create(config, cache_dir, standard, timer, pool, NULL, 0);
+        ofd_cache = ofd_cache_create(pool, bc, 300000);
+        tc = tuple_cache_create(100, pool);
+
+        authority = authority_create(&config);
+        ASSERT_NE(authority, nullptr);
+
+        /* network_create may return NULL on a no-MSQUIC build; the test
+           skips itself in that case (bootstrap ops need the peer-book
+           actor). The reconnect tick timer is armed by peer_book_start but
+           the fixture tears down before the first 5s fire. */
+        network = network_create(authority, bc, timer, pool, &config);
+        if (network != nullptr && network->peer_book != nullptr) {
+            peer_book_start(network->peer_book);
+        }
+
+        memset(&node_obj, 0, sizeof(node_obj));
+        node_obj.config = &config;
+        node_obj.authority = authority;
+        node_obj.network = network;
+        node_obj.block_cache = bc;
+        node_obj.scheduler = pool;
+        node_obj.timer = timer;
+
+        snprintf(socket_path, sizeof(socket_path), "/tmp/test_client_peer_sock_%d",
+                 platform_getpid());
+        unlink(socket_path);
+
+        /* No api_key_hash -> connections start authenticated, so the peer
+           handlers run their success path; the config ctx borrows the node
+           so per-connection peer_ctx.network/authority are populated. */
+        transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path,
+                                          NULL, NULL);
+        ASSERT_NE(transport, nullptr);
+        unix_transport_set_config_ctx(transport, &node_obj, cache_dir, NULL, NULL);
+        unix_transport_start(transport);
+
+        snprintf(url, sizeof(url), "unix://%s", socket_path);
+    }
+
+    void TearDown() override {
+        if (transport != nullptr) {
+            unix_transport_stop(transport);
+        }
+        scheduler_pool_wait_for_idle(pool);
+        scheduler_pool_stop(pool);
+        ofd_cache_destroy(ofd_cache);
+        tuple_cache_destroy(tc);
+        /* network_destroy before block_cache_destroy (network borrows the
+           cache's respiration pointer); authority_destroy last. Mirrors the
+           proven test_quic_integration + off_server teardown order. */
+        if (network != nullptr) {
+            network_destroy(network);
+        }
+        block_cache_destroy(bc);
+        timer_actor_destroy(timer);
+        if (transport != nullptr) {
+            unix_transport_destroy(transport);
+        }
+        scheduler_pool_destroy(pool);
+        authority_destroy(authority);
+        rm_rf(cache_dir);
+        free(cache_dir);
+    }
+};
+
+/* Success path for the C-client bootstrap ops over a wired daemon: add is
+   accepted (OK), the list reply delivers the entry as a
+   [host, port, source] triple, and the payload ownership contract (count + 1
+   offs_client_release_payload calls: one per host string, one for the
+   array) is exercised — the valgrind run proves the accounting has no
+   leak. remove then clears the list, delivered as an empty entries array
+   (single release for the array). */
+TEST_F(TestOffsClientPeer, BootstrapListSuccessReleasesPayloads) {
+    if (network == nullptr || network->peer_book == nullptr) {
+        GTEST_SKIP() << "network_create returned NULL (no MSQUIC) — bootstrap ops need a peer-book";
+    }
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+
+    // add -> result callback with OK
+    PeerConnectCallbackContext add_ctx;
+    EXPECT_EQ(offs_client_bootstrap_add(client, "10.0.0.5:8085",
+                                        _peer_connect_callback, &add_ctx), 0);
+    for (int attempts = 0; attempts < 200 && !add_ctx.called.load(std::memory_order_acquire);
+         attempts++) {
+        platform_usleep(10000);
+    }
+    EXPECT_EQ(add_ctx.called.load(), 1);
+    EXPECT_EQ(add_ctx.status.load(), CLIENT_API_STATUS_OK);
+
+    // list -> one managed entry with the parsed host/port and MANAGED source
+    BootstrapListCallbackContext list_ctx;
+    EXPECT_EQ(offs_client_bootstrap_list(client, _bootstrap_list_callback,
+                                         &list_ctx), 0);
+    for (int attempts = 0; attempts < 200 && !list_ctx.called.load(std::memory_order_acquire);
+         attempts++) {
+        platform_usleep(10000);
+    }
+    EXPECT_EQ(list_ctx.called.load(), 1);
+    EXPECT_EQ(list_ctx.status.load(), CLIENT_API_STATUS_OK);
+    ASSERT_NE(list_ctx.entries, nullptr);
+    ASSERT_EQ(list_ctx.entry_count.load(), 1u);
+    EXPECT_STREQ(list_ctx.entries[0].host, "10.0.0.5");
+    EXPECT_EQ(list_ctx.entries[0].port, 8085);
+    EXPECT_EQ(list_ctx.entries[0].source, CLIENT_API_BOOTSTRAP_SOURCE_MANAGED);
+
+    /* Ownership contract: each host string AND the array are held until
+       released — count + 1 calls. */
+    for (size_t index = 0; index < list_ctx.entry_count.load(); index++) {
+        offs_client_release_payload(client, (void*)list_ctx.entries[index].host);
+    }
+    offs_client_release_payload(client, (void*)list_ctx.entries);
+
+    // remove -> OK, then the list comes back empty
+    PeerConnectCallbackContext remove_ctx;
+    EXPECT_EQ(offs_client_bootstrap_remove(client, "10.0.0.5:8085",
+                                           _peer_connect_callback, &remove_ctx), 0);
+    for (int attempts = 0; attempts < 200 && !remove_ctx.called.load(std::memory_order_acquire);
+         attempts++) {
+        platform_usleep(10000);
+    }
+    EXPECT_EQ(remove_ctx.called.load(), 1);
+    EXPECT_EQ(remove_ctx.status.load(), CLIENT_API_STATUS_OK);
+
+    BootstrapListCallbackContext empty_ctx;
+    EXPECT_EQ(offs_client_bootstrap_list(client, _bootstrap_list_callback,
+                                         &empty_ctx), 0);
+    for (int attempts = 0; attempts < 200 && !empty_ctx.called.load(std::memory_order_acquire);
+         attempts++) {
+        platform_usleep(10000);
+    }
+    EXPECT_EQ(empty_ctx.called.load(), 1);
+    EXPECT_EQ(empty_ctx.status.load(), CLIENT_API_STATUS_OK);
+    EXPECT_EQ(empty_ctx.entry_count.load(), 0u);
+    /* A zero-entry reply still holds the (empty) array for the consumer. */
+    offs_client_release_payload(client, (void*)empty_ctx.entries);
+
+    offs_client_disconnect(client);
+    offs_client_destroy(client);
 }
 
 /* The test transport has no peering state (no node borrow), so bootstrap

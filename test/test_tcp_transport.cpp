@@ -4,6 +4,11 @@ extern "C" {
 #include "../src/ClientAPI/TCP/tcp_transport.h"
 #include "../src/ClientAPI/health_handler.h"
 #include "../src/ClientAPI/client_api_wire.h"
+#include "../src/Node/node.h"
+#include "../src/Network/authority.h"
+#include "../src/Network/network.h"
+#include "../src/Network/peer_book.h"
+#include "../src/Network/quic_listener.h"
 #include "../src/Network/stream_framer.h"
 #include "../src/BlockCache/block_cache.h"
 #include "../src/BlockCache/block.h"
@@ -617,6 +622,222 @@ TEST_F(TestTcpTransport, PeerOpsDispatchOnUnwiredNode) {
     bootstrap_add.endpoint = (char*)"10.0.0.1:8080";
     _assert_peer_frame_internal_error(sock, client_api_bootstrap_add_encode(&bootstrap_add));
 
+    platform_socket_destroy(sock);
+}
+
+/* Success-path fixture: the transport is wired with a real authority +
+   network (peer-book actor started) via tcp_transport_set_peer_node, so the
+   bootstrap peer handlers run their full success path over TCP. Mirrors the
+   proven TestUnixTransportPeerSuccess wiring. */
+class TestTcpTransportPeer : public testing::Test {
+protected:
+    scheduler_pool_t* pool;
+    timer_actor_t* timer;
+    block_cache_t* bc;
+    ofd_cache_t* ofd_cache;
+    tuple_cache_t* tc;
+    authority_t* authority;
+    network_t* network;
+    offs_node_t node_obj;
+    tcp_transport_t* transport;
+    char* cache_dir;
+    uint16_t port;
+
+    void SetUp() override {
+        port = _next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
+        pool = scheduler_pool_create(4);
+        scheduler_pool_start(pool);
+        timer = timer_actor_create(pool);
+
+        char dir_template[] = "/tmp/test_tcp_transport_peer_XXXXXX";
+        cache_dir = mkdtemp(dir_template);
+        cache_dir = strdup(cache_dir);
+
+        config_t config = {
+            .index_bucket_size = 10,
+            .index_wait = 1000,
+            .index_max_wait = 5000,
+            .section_size = 128000,
+            .section_wait = 1000,
+            .section_max_wait = 5000,
+            .cache_size = 50,
+            .max_tuple_size = 30,
+            .lru_size = 50
+        };
+        bc = block_cache_create(config, cache_dir, standard, timer, pool, NULL, 0);
+        ofd_cache = ofd_cache_create(pool, bc, 300000);
+        tc = tuple_cache_create(100, pool);
+
+        authority = authority_create(&config);
+        ASSERT_NE(authority, nullptr);
+
+        /* network_create may return NULL on a no-MSQUIC build; the test
+           skips itself in that case (bootstrap ops need the peer-book
+           actor). */
+        network = network_create(authority, bc, timer, pool, &config);
+        if (network != nullptr && network->peer_book != nullptr) {
+            peer_book_start(network->peer_book);
+        }
+
+        memset(&node_obj, 0, sizeof(node_obj));
+        node_obj.config = &config;
+        node_obj.authority = authority;
+        node_obj.network = network;
+        node_obj.block_cache = bc;
+        node_obj.scheduler = pool;
+        node_obj.timer = timer;
+
+        transport = tcp_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1",
+                                         port, NULL, NULL, NULL, NULL);
+        for (int retry = 0; transport == nullptr && retry < 10; retry++) {
+            port = _next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
+            transport = tcp_transport_create(pool, bc, ofd_cache, tc, "127.0.0.1",
+                                             port, NULL, NULL, NULL, NULL);
+        }
+        ASSERT_NE(transport, nullptr);
+        /* api_key_hash is NULL, so connections start authenticated and the
+           peer handlers run their success path. */
+        tcp_transport_set_peer_node(transport, &node_obj);
+        tcp_transport_start(transport);
+    }
+
+    void TearDown() override {
+        if (transport != nullptr) {
+            tcp_transport_stop(transport);
+        }
+        scheduler_pool_wait_for_idle(pool);
+        scheduler_pool_stop(pool);
+        ofd_cache_destroy(ofd_cache);
+        tuple_cache_destroy(tc);
+        /* network_destroy before block_cache_destroy (network borrows the
+           cache's respiration pointer); authority_destroy last. */
+        if (network != nullptr) {
+            /* network_create opens a QUIC listener it never destroys (the
+               listener is torn down by its owner in the node lifecycle, which
+               this fixture does not run) — destroy the never-started listener
+               here so the suite stays valgrind-clean. */
+            quic_listener_destroy(network->quic_listener);
+            network_destroy(network);
+        }
+        block_cache_destroy(bc);
+        timer_actor_destroy(timer);
+        if (transport != nullptr) {
+            tcp_transport_destroy(transport);
+        }
+        scheduler_pool_destroy(pool);
+        authority_destroy(authority);
+        rm_rf(cache_dir);
+        free(cache_dir);
+    }
+};
+
+/* BOOTSTRAP_ADD / BOOTSTRAP_LIST / BOOTSTRAP_REMOVE over a wired TCP
+   transport: add succeeds (OK result frame, endpoint lands in the managed
+   list), a duplicate add is CONFLICT, the remove round-trip clears the
+   list, and each list reply carries the [host, port, source] triple with
+   the MANAGED source. */
+TEST_F(TestTcpTransportPeer, BootstrapAddListRemoveHappyPath) {
+    if (network == nullptr || network->peer_book == nullptr) {
+        GTEST_SKIP() << "network_create returned NULL (no MSQUIC) — bootstrap ops need a peer-book";
+    }
+    platform_socket_t* sock = _connect_with_retry("127.0.0.1", port);
+    ASSERT_NE(sock, nullptr);
+
+    /* AUTH auto-accepts with no reply frame (api_key_hash is NULL on this
+       transport). */
+    client_api_auth_request_t auth;
+    memset(&auth, 0, sizeof(auth));
+    auth.api_key = (uint8_t*)"unused";
+    auth.api_key_len = strlen("unused");
+    cbor_item_t* auth_frame = client_api_auth_request_encode(&auth);
+    ASSERT_NE(auth_frame, nullptr);
+    ASSERT_EQ(_send_frame(sock, auth_frame), 0);
+
+    stream_framer_t* framer = stream_framer_create();
+
+    // add -> OK result frame
+    client_api_bootstrap_add_t add_req;
+    memset(&add_req, 0, sizeof(add_req));
+    add_req.endpoint = (char*)"10.0.0.6:8086";
+    ASSERT_EQ(_send_frame(sock, client_api_bootstrap_add_encode(&add_req)), 0);
+    cbor_item_t* response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+    EXPECT_EQ(client_api_wire_get_type(response), CLIENT_API_PEER_CONNECT_RESULT);
+    client_api_peer_connect_result_t add_result;
+    memset(&add_result, 0, sizeof(add_result));
+    ASSERT_EQ(0, client_api_peer_connect_result_decode(response, &add_result));
+    EXPECT_EQ(add_result.status, CLIENT_API_STATUS_OK);
+    client_api_peer_connect_result_destroy(&add_result);
+    cbor_decref(&response);
+
+    // list -> one MANAGED entry
+    ASSERT_EQ(_send_frame(sock, client_api_bootstrap_list_request_encode()), 0);
+    response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+    EXPECT_EQ(client_api_wire_get_type(response), CLIENT_API_BOOTSTRAP_LIST_RESPONSE);
+    client_api_bootstrap_list_response_t list_msg;
+    memset(&list_msg, 0, sizeof(list_msg));
+    ASSERT_EQ(0, client_api_bootstrap_list_response_decode(response, &list_msg));
+    ASSERT_NE(list_msg.entries, nullptr);
+    ASSERT_EQ(1u, cbor_array_size(list_msg.entries));
+    cbor_item_t* entry = cbor_array_get(list_msg.entries, 0);
+    ASSERT_TRUE(cbor_isa_array(entry));
+    ASSERT_EQ(3u, cbor_array_size(entry));
+    cbor_item_t* host_item = cbor_array_get(entry, 0);
+    cbor_item_t* port_item = cbor_array_get(entry, 1);
+    cbor_item_t* source_item = cbor_array_get(entry, 2);
+    /* CBOR strings are not NUL-terminated: compare by length + memcmp. */
+    ASSERT_NE(cbor_string_handle(host_item), nullptr);
+    ASSERT_EQ(strlen("10.0.0.6"), cbor_string_length(host_item));
+    EXPECT_EQ(0, memcmp(cbor_string_handle(host_item), "10.0.0.6",
+                        cbor_string_length(host_item)));
+    EXPECT_EQ(8086, cbor_get_uint16(port_item));
+    EXPECT_EQ(CLIENT_API_BOOTSTRAP_SOURCE_MANAGED, cbor_get_uint8(source_item));
+    cbor_decref(&host_item);
+    cbor_decref(&port_item);
+    cbor_decref(&source_item);
+    cbor_decref(&entry);
+    client_api_bootstrap_list_response_destroy(&list_msg);
+    cbor_decref(&response);
+
+    // duplicate add -> CONFLICT
+    ASSERT_EQ(_send_frame(sock, client_api_bootstrap_add_encode(&add_req)), 0);
+    response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+    client_api_peer_connect_result_t dup_result;
+    memset(&dup_result, 0, sizeof(dup_result));
+    ASSERT_EQ(0, client_api_peer_connect_result_decode(response, &dup_result));
+    EXPECT_EQ(dup_result.status, CLIENT_API_STATUS_CONFLICT);
+    client_api_peer_connect_result_destroy(&dup_result);
+    cbor_decref(&response);
+
+    // remove -> OK
+    client_api_bootstrap_remove_t remove_req;
+    memset(&remove_req, 0, sizeof(remove_req));
+    remove_req.endpoint = (char*)"10.0.0.6:8086";
+    ASSERT_EQ(_send_frame(sock, client_api_bootstrap_remove_encode(&remove_req)), 0);
+    response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+    client_api_peer_connect_result_t remove_result;
+    memset(&remove_result, 0, sizeof(remove_result));
+    ASSERT_EQ(0, client_api_peer_connect_result_decode(response, &remove_result));
+    EXPECT_EQ(remove_result.status, CLIENT_API_STATUS_OK);
+    client_api_peer_connect_result_destroy(&remove_result);
+    cbor_decref(&response);
+
+    // list -> empty
+    ASSERT_EQ(_send_frame(sock, client_api_bootstrap_list_request_encode()), 0);
+    response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+    client_api_bootstrap_list_response_t empty_msg;
+    memset(&empty_msg, 0, sizeof(empty_msg));
+    ASSERT_EQ(0, client_api_bootstrap_list_response_decode(response, &empty_msg));
+    ASSERT_NE(empty_msg.entries, nullptr);
+    EXPECT_EQ(0u, cbor_array_size(empty_msg.entries));
+    client_api_bootstrap_list_response_destroy(&empty_msg);
+    cbor_decref(&response);
+
+    stream_framer_destroy(framer);
     platform_socket_destroy(sock);
 }
 

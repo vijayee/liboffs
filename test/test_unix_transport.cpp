@@ -18,6 +18,7 @@ extern "C" {
 #include "../src/Network/authority.h"
 #include "../src/Network/network.h"
 #include "../src/Network/peer_book.h"
+#include "../src/Network/quic_listener.h"
 #include "../src/Node/node.h"
 #include "../src/Timer/timer_actor.h"
 #include "../src/Util/rm_rf.h"
@@ -1272,6 +1273,10 @@ protected:
 
         authority = authority_create(&config);
         ASSERT_NE(authority, nullptr);
+        /* Seed one config-source bootstrap peer before the peer-book actor
+           exists (invariant window (a)): the bootstrap wire tests below
+           exercise the config-source branch of add/remove/list. */
+        ASSERT_EQ(0, authority_set_bootstrap_peers(authority, "10.0.0.3:7070"));
         /* Supply a checked-in leaf cert so authority_init_local_id derives a
            real public_key (peer_handle_info_request returns INTERNAL_ERROR
            "No local public key configured" when public_key is NULL). The path
@@ -1333,6 +1338,11 @@ protected:
            cache's respiration pointer); authority_destroy last. Mirrors the
            proven test_quic_integration + off_server teardown order. */
         if (network != nullptr) {
+            /* network_create opens a QUIC listener it never destroys (the
+               listener is torn down by its owner in the node lifecycle, which
+               this fixture does not run) — destroy the never-started listener
+               here so the suite stays valgrind-clean. */
+            quic_listener_destroy(network->quic_listener);
             network_destroy(network);
         }
         block_cache_destroy(bc);
@@ -1432,6 +1442,150 @@ TEST_F(TestUnixTransportPeerSuccess, PeerListReturnsEmpty) {
         client_api_peer_list_response_destroy(&msg);
     }
     cbor_decref(&response);
+    stream_framer_destroy(framer);
+    platform_socket_destroy(sock);
+}
+
+/* Decode one [host: string, port: uint16, source: uint8] entry of a
+   BOOTSTRAP_LIST_RESPONSE and check it against the expectation. */
+static void _expect_bootstrap_entry(cbor_item_t* entries, size_t index,
+                                    const char* expected_host,
+                                    uint16_t expected_port,
+                                    uint8_t expected_source) {
+    ASSERT_LT(index, cbor_array_size(entries));
+    cbor_item_t* entry = cbor_array_get(entries, index);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_TRUE(cbor_isa_array(entry));
+    ASSERT_EQ(3u, cbor_array_size(entry));
+    cbor_item_t* host_item = cbor_array_get(entry, 0);
+    cbor_item_t* port_item = cbor_array_get(entry, 1);
+    cbor_item_t* source_item = cbor_array_get(entry, 2);
+    /* CBOR strings are not NUL-terminated: compare by length + memcmp. */
+    ASSERT_NE(cbor_string_handle(host_item), nullptr);
+    ASSERT_EQ(strlen(expected_host), cbor_string_length(host_item));
+    EXPECT_EQ(0, memcmp(cbor_string_handle(host_item), expected_host,
+                        cbor_string_length(host_item)));
+    EXPECT_EQ(expected_port, cbor_get_uint16(port_item));
+    EXPECT_EQ(expected_source, cbor_get_uint8(source_item));
+    cbor_decref(&host_item);
+    cbor_decref(&port_item);
+    cbor_decref(&source_item);
+    cbor_decref(&entry);
+}
+
+/* Decode a PEER_CONNECT_RESULT reply and check its status byte. */
+static void _expect_peer_connect_result(cbor_item_t* response,
+                                        uint8_t expected_status) {
+    ASSERT_EQ(client_api_wire_get_type(response), CLIENT_API_PEER_CONNECT_RESULT);
+    client_api_peer_connect_result_t result;
+    memset(&result, 0, sizeof(result));
+    int decode_result = client_api_peer_connect_result_decode(response, &result);
+    ASSERT_EQ(decode_result, 0);
+    EXPECT_EQ(result.status, expected_status);
+    client_api_peer_connect_result_destroy(&result);
+}
+
+/* Send one cbor frame and receive the next reply frame back. */
+static cbor_item_t* _roundtrip_frame(platform_socket_t* sock,
+                                     stream_framer_t* framer,
+                                     cbor_item_t* request) {
+    EXPECT_EQ(_send_frame(sock, request), 0);
+    return _recv_frame(sock, framer);
+}
+
+/* BOOTSTRAP_ADD / BOOTSTRAP_LIST / BOOTSTRAP_REMOVE over the real
+   network+peer-book actor: add succeeds (OK result frame, the endpoint
+   lands in the managed list), a duplicate add is CONFLICT, an invalid
+   endpoint is BAD_REQUEST, a managed entry is removable while a config
+   entry is immutable (CONFLICT), and the list snapshot reflects every step
+   with the correct host/port/source triple. The fire-and-forget connect
+   toward the added endpoint stays silent (no QUIC listener on the
+   transport side). */
+TEST_F(TestUnixTransportPeerSuccess, BootstrapAddListRemoveHappyPath) {
+    if (network == nullptr || network->peer_book == nullptr) {
+        GTEST_SKIP() << "network_create returned NULL (no MSQUIC) — bootstrap ops need a peer-book";
+    }
+    platform_socket_t* sock = _connect_with_retry(socket_path);
+    ASSERT_NE(sock, (platform_socket_t*)NULL);
+    stream_framer_t* framer = stream_framer_create();
+
+    // add -> OK result frame
+    client_api_bootstrap_add_t add_req;
+    memset(&add_req, 0, sizeof(add_req));
+    add_req.endpoint = (char*)"10.0.0.7:8087";
+    cbor_item_t* response =
+        _roundtrip_frame(sock, framer, client_api_bootstrap_add_encode(&add_req));
+    ASSERT_NE(response, nullptr);
+    _expect_peer_connect_result(response, CLIENT_API_STATUS_OK);
+    cbor_decref(&response);
+
+    // list -> the config-seeded entry first, then the managed add
+    cbor_item_t* response2 =
+        _roundtrip_frame(sock, framer, client_api_bootstrap_list_request_encode());
+    ASSERT_NE(response2, nullptr);
+    EXPECT_EQ(client_api_wire_get_type(response2), CLIENT_API_BOOTSTRAP_LIST_RESPONSE);
+    client_api_bootstrap_list_response_t list_msg;
+    memset(&list_msg, 0, sizeof(list_msg));
+    ASSERT_EQ(0, client_api_bootstrap_list_response_decode(response2, &list_msg));
+    ASSERT_NE(list_msg.entries, nullptr);
+    ASSERT_EQ(2u, cbor_array_size(list_msg.entries));
+    _expect_bootstrap_entry(list_msg.entries, 0, "10.0.0.3", 7070,
+                            CLIENT_API_BOOTSTRAP_SOURCE_CONFIG);
+    _expect_bootstrap_entry(list_msg.entries, 1, "10.0.0.7", 8087,
+                            CLIENT_API_BOOTSTRAP_SOURCE_MANAGED);
+    client_api_bootstrap_list_response_destroy(&list_msg);
+    cbor_decref(&response2);
+
+    // duplicate add -> CONFLICT
+    cbor_item_t* response3 =
+        _roundtrip_frame(sock, framer, client_api_bootstrap_add_encode(&add_req));
+    ASSERT_NE(response3, nullptr);
+    _expect_peer_connect_result(response3, CLIENT_API_STATUS_CONFLICT);
+    cbor_decref(&response3);
+
+    // invalid endpoint -> BAD_REQUEST
+    client_api_bootstrap_add_t bad_req;
+    memset(&bad_req, 0, sizeof(bad_req));
+    bad_req.endpoint = (char*)"not-an-endpoint";
+    cbor_item_t* response4 =
+        _roundtrip_frame(sock, framer, client_api_bootstrap_add_encode(&bad_req));
+    ASSERT_NE(response4, nullptr);
+    _expect_peer_connect_result(response4, CLIENT_API_STATUS_BAD_REQUEST);
+    cbor_decref(&response4);
+
+    // remove the managed entry -> OK
+    client_api_bootstrap_remove_t remove_req;
+    memset(&remove_req, 0, sizeof(remove_req));
+    remove_req.endpoint = (char*)"10.0.0.7:8087";
+    cbor_item_t* response5 =
+        _roundtrip_frame(sock, framer, client_api_bootstrap_remove_encode(&remove_req));
+    ASSERT_NE(response5, nullptr);
+    _expect_peer_connect_result(response5, CLIENT_API_STATUS_OK);
+    cbor_decref(&response5);
+
+    // remove the config-seeded entry -> CONFLICT (config source is immutable)
+    memset(&remove_req, 0, sizeof(remove_req));
+    remove_req.endpoint = (char*)"10.0.0.3:7070";
+    cbor_item_t* response6 =
+        _roundtrip_frame(sock, framer, client_api_bootstrap_remove_encode(&remove_req));
+    ASSERT_NE(response6, nullptr);
+    _expect_peer_connect_result(response6, CLIENT_API_STATUS_CONFLICT);
+    cbor_decref(&response6);
+
+    // list -> only the config entry remains
+    cbor_item_t* response7 =
+        _roundtrip_frame(sock, framer, client_api_bootstrap_list_request_encode());
+    ASSERT_NE(response7, nullptr);
+    client_api_bootstrap_list_response_t list_msg2;
+    memset(&list_msg2, 0, sizeof(list_msg2));
+    ASSERT_EQ(0, client_api_bootstrap_list_response_decode(response7, &list_msg2));
+    ASSERT_NE(list_msg2.entries, nullptr);
+    ASSERT_EQ(1u, cbor_array_size(list_msg2.entries));
+    _expect_bootstrap_entry(list_msg2.entries, 0, "10.0.0.3", 7070,
+                            CLIENT_API_BOOTSTRAP_SOURCE_CONFIG);
+    client_api_bootstrap_list_response_destroy(&list_msg2);
+    cbor_decref(&response7);
+
     stream_framer_destroy(framer);
     platform_socket_destroy(sock);
 }

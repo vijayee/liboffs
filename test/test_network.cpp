@@ -34,6 +34,7 @@ extern "C" {
 #include "Network/wire.h"
 #include "Network/peer_connection.h"
 #include "Network/connection_manager.h"
+#include "Network/peer_book.h"
 #include "Network/topology_metrics.h"
 #include "Network/closest_nodes.h"
 #include "Network/measure_nodes.h"
@@ -4260,4 +4261,209 @@ TEST_F(GossipCapTest, AlreadyPresentTargetsDoNotConsumeBudget) {
   size_t after = ring_set_total_nodes(network->rings);
   size_t expected = 3u + 1u + (size_t)kGossipPerSourceCap;
   EXPECT_EQ(after, expected);
+}
+
+// --- Partition-heal backoff state machine (OFFS-206) ---
+//
+// The heal branch runs on the network actor when the peer-book actor's
+// reconnect tick delivers a PEER_BOOK_RECONNECT snapshot
+// (network_handle_peer_book_reconnect). This fixture mirrors GossipCapTest's
+// minimal network_t (calloc'd + the init the handlers need) and adds a real
+// connection_manager so the relay-admission backoff reset site can admit
+// peers. The heal branch is driven through network_dispatch with synthetic
+// reconnect payloads; time travel is done by writing
+// bootstrap_next_attempt_ms directly (white-box unit test — no real sleeps).
+class PeerBookBackoffTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    config = config_default();
+    authority = authority_create(&config);
+    ASSERT_NE(authority, nullptr);
+
+    network = (network_t*)calloc(1, sizeof(network_t));
+    ASSERT_NE(network, nullptr);
+    network->authority = authority;
+    network->rings = ring_set_create(0, 0, 0);
+    ASSERT_NE(network->rings, nullptr);
+    hebbian_table_init(&network->hebbian, 4, 0.999f);
+    rate_limit_table_init(&network->rate_limits, 4);
+    // The relay-admission path (a backoff reset site) admits peers into
+    // conn_mgr, which enforces max_connections — mirror network_create's
+    // init so admission actually succeeds here.
+    hebbian_config_t hebbian_cfg;
+    hebbian_config_init(&hebbian_cfg);
+    connection_manager_init(&network->conn_mgr, 16, &hebbian_cfg);
+    // find_block_response dereferences the wanted_list unconditionally in
+    // the found branch (relay-admission test drives that handler).
+    network->wanted_list = wanted_list_create();
+    ASSERT_NE(network->wanted_list, nullptr);
+
+    // Distinct local id so the sender id never collides with targets.
+    memset(authority->local_id.hash, 0xAB, NODE_ID_HASH_SIZE);
+  }
+
+  void TearDown() override {
+    if (network != nullptr) {
+      wanted_list_destroy(network->wanted_list);
+      connection_manager_deinit(&network->conn_mgr);
+      ring_set_clear_nodes(network->rings);
+      ring_set_destroy(network->rings);
+      hebbian_table_deinit(&network->hebbian);
+      rate_limit_table_deinit(&network->rate_limits);
+      free(network);
+    }
+    authority_destroy(authority);
+  }
+
+  // Fire one reconnect tick at the network actor with a one-endpoint config
+  // bootstrap snapshot (NULL endpoint -> empty snapshot, heal branch inert).
+  void DispatchReconnectTick(const char* endpoint) {
+    char* endpoints[1];
+    endpoints[0] = const_cast<char*>(endpoint);
+    peer_book_reconnect_payload_t snapshot;
+    memset(&snapshot, 0, sizeof(snapshot));
+    snapshot.config_endpoints = endpoint != NULL ? endpoints : NULL;
+    snapshot.config_count = endpoint != NULL ? 1 : 0;
+
+    message_t msg = {};
+    msg.type = PEER_BOOK_RECONNECT;
+    msg.payload = &snapshot;
+    msg.payload_destroy = NULL;
+    network_dispatch(network, &msg);
+  }
+
+  config_t config;
+  authority_t* authority;
+  network_t* network;
+};
+
+// First heal tick with zero connected peers and a non-empty bootstrap list:
+// the connect attempt fires immediately and arms the 1s base backoff.
+TEST_F(PeerBookBackoffTest, FirstAttemptArmsBaseBackoff) {
+  DispatchReconnectTick("127.0.0.1:64910");
+
+  EXPECT_EQ(network->bootstrap_backoff_ms, 1000u);
+  // next_attempt = now + backoff, so it always sits at least one backoff
+  // window past the attempt time (which is > 0).
+  EXPECT_GE(network->bootstrap_next_attempt_ms,
+            (uint64_t)network->bootstrap_backoff_ms);
+}
+
+// A tick arriving before the armed deadline is gated: no connect attempt, no
+// backoff doubling, next_attempt untouched.
+TEST_F(PeerBookBackoffTest, GateBlocksRefireBeforeDeadline) {
+  DispatchReconnectTick("127.0.0.1:64910");
+  EXPECT_EQ(network->bootstrap_backoff_ms, 1000u);
+  uint64_t armed_deadline = network->bootstrap_next_attempt_ms;
+  ASSERT_GT(armed_deadline, 0u);
+
+  DispatchReconnectTick("127.0.0.1:64910");
+
+  EXPECT_EQ(network->bootstrap_backoff_ms, 1000u);
+  EXPECT_EQ(network->bootstrap_next_attempt_ms, armed_deadline);
+}
+
+// Backoff doubles per gated-out attempt (1s doubling) and caps at 60s. The
+// deadline is advanced to the past between dispatches (white-box field write)
+// so the whole progression runs in milliseconds of test time.
+TEST_F(PeerBookBackoffTest, BackoffDoublesAndCaps) {
+  static const uint32_t expected_progression[] = {
+      1000u, 2000u, 4000u, 8000u, 16000u, 32000u, 60000u /* 64000 capped */};
+
+  for (size_t step = 0; step < sizeof(expected_progression) / sizeof(expected_progression[0]);
+       step++) {
+    network->bootstrap_next_attempt_ms = 0;  // deadline passed: allow refire
+    DispatchReconnectTick("127.0.0.1:64910");
+    EXPECT_EQ(network->bootstrap_backoff_ms, expected_progression[step])
+        << "step " << step;
+    // Every attempt re-arms the deadline one (current) backoff window out.
+    EXPECT_GE(network->bootstrap_next_attempt_ms,
+              (uint64_t)network->bootstrap_backoff_ms)
+        << "step " << step;
+  }
+
+  // The cap holds: further attempts keep 60s instead of doubling past it.
+  network->bootstrap_next_attempt_ms = 0;
+  DispatchReconnectTick("127.0.0.1:64910");
+  EXPECT_EQ(network->bootstrap_backoff_ms, 60000u);
+}
+
+// With a connected peer the heal branch is skipped entirely: an already
+// armed backoff is neither doubled nor reset by the tick (the reset belongs
+// to the successful-connection handlers, not the heal branch).
+TEST_F(PeerBookBackoffTest, ConnectedPeerSkipsHealBranch) {
+  node_id_t peer_id = {};
+  memset(peer_id.hash, 0x11, NODE_ID_HASH_SIZE);
+  peer_connection_t* peer =
+      connection_manager_add(&network->conn_mgr, &peer_id, NULL, network->pool);
+  ASSERT_NE(peer, nullptr);
+  ASSERT_TRUE(peer->connected);  // peer_connection_create marks peers live
+
+  // Pre-arm the backoff as if a previous partition had been weathered.
+  network->bootstrap_backoff_ms = 4000u;
+  network->bootstrap_next_attempt_ms = 0;
+
+  DispatchReconnectTick("127.0.0.1:64910");
+
+  EXPECT_EQ(network->bootstrap_backoff_ms, 4000u);
+  EXPECT_EQ(network->bootstrap_next_attempt_ms, 0u);
+}
+
+// A peer reaching us over the relay (relay-admission path in
+// NETWORK_RELAY_RECEIVED) means the partition is over: the armed backoff is
+// reset to the disarmed state so the next disconnect-driven heal fires
+// immediately. Wire_ping_response is the carrier message because its
+// element 1 is the sender_id (what wire_extract_sender_id reads) and its
+// handler is inert on a shell network (no reply, NULL-guarded caches).
+TEST_F(PeerBookBackoffTest, BackoffResetsOnRelayAdmission) {
+  DispatchReconnectTick("127.0.0.1:64910");
+  ASSERT_EQ(network->bootstrap_backoff_ms, 1000u);
+  ASSERT_GT(network->bootstrap_next_attempt_ms, 0u);
+
+  wire_ping_response_t ping_response;
+  memset(&ping_response, 0, sizeof(ping_response));
+  ping_response.message_id = 0x1122334455667788ULL;
+  ping_response.echo_time = 0;  // now_ms > 0 -> harmless RTT sample
+  ping_response.capacity = 1.0f;
+  ping_response.phase = (node_phase_e)0;
+  memset(ping_response.sender_id.hash, 0x77, NODE_ID_HASH_SIZE);
+
+  cbor_item_t* encoded = wire_ping_response_encode(&ping_response);
+  ASSERT_NE(encoded, nullptr);
+
+  size_t buf_len = 0;
+  uint8_t* buf = serialize_wire_message(encoded, &buf_len);
+  ASSERT_NE(buf, nullptr);
+  ASSERT_GT(buf_len, (size_t)0);
+
+  wire_relay_received_t relay_payload = {};
+  relay_payload.src_endpoint_id = 0;
+  relay_payload.payload = buf;
+  relay_payload.payload_len = buf_len;
+
+  message_t msg = {};
+  msg.type = NETWORK_RELAY_RECEIVED;
+  msg.payload = &relay_payload;
+  msg.payload_destroy = NULL;
+  network_dispatch(network, &msg);
+
+  free(buf);
+
+  // The sender was admitted to the connection manager, which is the
+  // partition-over signal that clears the heal state.
+  EXPECT_EQ(network->conn_mgr.peer_count, 1u);
+  EXPECT_EQ(network->bootstrap_backoff_ms, 0u);
+  EXPECT_EQ(network->bootstrap_next_attempt_ms, 0u);
+}
+
+// An empty snapshot (no config and no managed endpoints) never runs the heal
+// branch even with zero connected peers and an expired deadline.
+TEST_F(PeerBookBackoffTest, EmptySnapshotSkipsHeal) {
+  network->bootstrap_backoff_ms = 0;
+  network->bootstrap_next_attempt_ms = 0;
+
+  DispatchReconnectTick(NULL);
+
+  EXPECT_EQ(network->bootstrap_backoff_ms, 0u);
+  EXPECT_EQ(network->bootstrap_next_attempt_ms, 0u);
 }
