@@ -26,6 +26,9 @@ typedef struct authority_t {
   char** bootstrap_peers;
   size_t bootstrap_peer_count;
 
+  char** managed_bootstrap_peers;
+  size_t managed_bootstrap_peer_count;
+
   char* peer_store_path;
   char** persisted_peers;
   size_t persisted_peer_count;
@@ -87,6 +90,18 @@ int authority_load(authority_t* authority);
 typedef struct network_t network_t;
 int authority_save_peers(const authority_t* authority, const network_t* network);
 int authority_load_peers(authority_t* authority, network_t* network);
+
+/* Bootstrap peers. bootstrap_peers is config-seeded and immutable at runtime;
+ * managed_bootstrap_peers is operator-added and persisted in peer-store
+ * index 6. Endpoints are "host:port" or "[ipv6]:port" strings.
+ *
+ * authority_bootstrap_add returns 0 = added, -1 = invalid endpoint,
+ * -2 = duplicate (in either list).
+ * authority_bootstrap_remove returns 0 = removed, -1 = not found,
+ * -2 = config-source entry (conflict). */
+int authority_bootstrap_add(authority_t* authority, const char* endpoint);
+int authority_bootstrap_remove(authority_t* authority, const char* endpoint);
+int authority_set_bootstrap_peers(authority_t* authority, const char* csv);
 
 void authority_update_capacity(authority_t* authority, float capacity);
 void authority_update_phase(authority_t* authority, float capacity);

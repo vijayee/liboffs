@@ -3,6 +3,7 @@
 //
 
 #include "authority.h"
+#include "endpoint.h"
 #include "network.h"
 #include "hebbian.h"
 #include "ring_set.h"
@@ -48,6 +49,12 @@ void authority_destroy(authority_t* authority) {
       free(authority->bootstrap_peers[index]);
     }
     free(authority->bootstrap_peers);
+  }
+  if (authority->managed_bootstrap_peers != NULL) {
+    for (size_t index = 0; index < authority->managed_bootstrap_peer_count; index++) {
+      free(authority->managed_bootstrap_peers[index]);
+    }
+    free(authority->managed_bootstrap_peers);
   }
   if (authority->persisted_peers != NULL) {
     for (size_t index = 0; index < authority->persisted_peer_count; index++) {
@@ -123,6 +130,152 @@ int authority_init_local_id(authority_t* authority) {
   authority->public_key = NULL;
   authority->public_key_len = 0;
   node_id_generate(&authority->local_id);
+  return 0;
+}
+
+// --- Bootstrap peers (config-seeded + operator-managed) ---
+
+/* True when the parsed endpoint is already present in either the config-seeded
+ * or the operator-managed list. Entries are compared by parsed host+port, so
+ * non-normalized (e.g. hand-seeded) entries compare stably. */
+static int authority_bootstrap_contains(authority_t* authority, const char* endpoint) {
+  char host[256];
+  uint16_t port = 0;
+  if (endpoint_parse(endpoint, host, sizeof(host), &port) != 0) return 1;
+
+  for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
+    char config_host[256];
+    uint16_t config_port = 0;
+    if (endpoint_parse(authority->bootstrap_peers[index], config_host,
+                       sizeof(config_host), &config_port) == 0 &&
+        strcmp(config_host, host) == 0 && config_port == port) {
+      return 1;
+    }
+  }
+  for (size_t index = 0; index < authority->managed_bootstrap_peer_count; index++) {
+    char managed_host[256];
+    uint16_t managed_port = 0;
+    if (endpoint_parse(authority->managed_bootstrap_peers[index], managed_host,
+                       sizeof(managed_host), &managed_port) == 0 &&
+        strcmp(managed_host, host) == 0 && managed_port == port) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* Re-encode a parsed endpoint so stored strings are normalized
+ * ("host:port", or "[ipv6]:port" when the host contains ':'). */
+static char* authority_bootstrap_encode(const char* host, uint16_t port) {
+  size_t length = strlen(host) + 8;
+  char* stored = get_memory(length);
+  if (stored == NULL) return NULL;
+  if (strchr(host, ':') != NULL) {
+    snprintf(stored, length, "[%s]:%u", host, (unsigned)port);
+  } else {
+    snprintf(stored, length, "%s:%u", host, (unsigned)port);
+  }
+  return stored;
+}
+
+int authority_bootstrap_add(authority_t* authority, const char* endpoint) {
+  if (authority == NULL || endpoint == NULL) return -1;
+  char host[256];
+  uint16_t port = 0;
+  if (endpoint_parse(endpoint, host, sizeof(host), &port) != 0) return -1;
+  if (authority_bootstrap_contains(authority, endpoint)) return -2;
+
+  char* stored = authority_bootstrap_encode(host, port);
+  if (stored == NULL) return -1;
+
+  size_t new_count = authority->managed_bootstrap_peer_count + 1;
+  char** expanded =
+      realloc(authority->managed_bootstrap_peers, new_count * sizeof(char*));
+  if (expanded == NULL) {
+    free(stored);
+    return -1;
+  }
+  authority->managed_bootstrap_peers = expanded;
+  authority->managed_bootstrap_peers[authority->managed_bootstrap_peer_count] = stored;
+  authority->managed_bootstrap_peer_count = new_count;
+  return 0;
+}
+
+int authority_bootstrap_remove(authority_t* authority, const char* endpoint) {
+  if (authority == NULL || endpoint == NULL) return -1;
+
+  char host[256];
+  uint16_t port = 0;
+  if (endpoint_parse(endpoint, host, sizeof(host), &port) != 0) return -1;
+
+  for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
+    char config_host[256];
+    uint16_t config_port = 0;
+    if (endpoint_parse(authority->bootstrap_peers[index], config_host,
+                       sizeof(config_host), &config_port) == 0 &&
+        strcmp(config_host, host) == 0 && config_port == port) {
+      return -2;  // config-seeded entries are immutable at runtime
+    }
+  }
+
+  for (size_t index = 0; index < authority->managed_bootstrap_peer_count; index++) {
+    char managed_host[256];
+    uint16_t managed_port = 0;
+    if (endpoint_parse(authority->managed_bootstrap_peers[index], managed_host,
+                       sizeof(managed_host), &managed_port) == 0 &&
+        strcmp(managed_host, host) == 0 && managed_port == port) {
+      free(authority->managed_bootstrap_peers[index]);
+      for (size_t shift = index; shift + 1 < authority->managed_bootstrap_peer_count; shift++) {
+        authority->managed_bootstrap_peers[shift] =
+            authority->managed_bootstrap_peers[shift + 1];
+      }
+      authority->managed_bootstrap_peer_count--;
+      return 0;
+    }
+  }
+  return -1;
+}
+
+int authority_set_bootstrap_peers(authority_t* authority, const char* csv) {
+  if (authority == NULL) return -1;
+  if (authority->bootstrap_peers != NULL) {
+    for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
+      free(authority->bootstrap_peers[index]);
+    }
+    free(authority->bootstrap_peers);
+    authority->bootstrap_peers = NULL;
+    authority->bootstrap_peer_count = 0;
+  }
+  if (csv == NULL || csv[0] == '\0') return 0;
+
+  char* copy = strdup(csv);
+  if (copy == NULL) return -1;
+  char* saveptr = NULL;
+  for (char* token = strtok_r(copy, ",", &saveptr); token != NULL;
+       token = strtok_r(NULL, ",", &saveptr)) {
+    char host[256];
+    uint16_t port = 0;
+    if (endpoint_parse(token, host, sizeof(host), &port) != 0) {
+      free(copy);
+      return -1;
+    }
+    char* stored = authority_bootstrap_encode(host, port);
+    if (stored == NULL) {
+      free(copy);
+      return -1;
+    }
+    size_t new_count = authority->bootstrap_peer_count + 1;
+    char** expanded = realloc(authority->bootstrap_peers, new_count * sizeof(char*));
+    if (expanded == NULL) {
+      free(stored);
+      free(copy);
+      return -1;
+    }
+    authority->bootstrap_peers = expanded;
+    authority->bootstrap_peers[authority->bootstrap_peer_count] = stored;
+    authority->bootstrap_peer_count = new_count;
+  }
+  free(copy);
   return 0;
 }
 
@@ -276,6 +429,7 @@ int authority_load(authority_t* authority) {
 //   [ [bytes[32], uint32, uint16, float, float, float, uint8, float,
 //       uint8, uint8, uint64, uint64], ... ]  // peers (index 4) — v3 12-field record
 //   [ string, ... ]                     // friend peers as Base58 strings (index 5)
+//   [ string, ... ]                     // managed bootstrap entries as "host:port" strings (index 6, v3 extension — optional)
 // ]
 // Peer record fields (v3): id, addr, port, latency_ms, weight, capacity, phase,
 // availability, relay_verified, nat_type, last_seen_ms, bad_blocks_received.
@@ -288,7 +442,7 @@ int authority_save_peers(const authority_t* authority, const network_t* network)
   size_t hebbian_count = network->hebbian.count;
   size_t peer_count = (network->rings != NULL) ? ring_set_total_nodes(network->rings) : 0;
 
-  cbor_item_t* root = cbor_new_definite_array(6);
+  cbor_item_t* root = cbor_new_definite_array(7);
 
   // Index 0: version
   {
@@ -405,6 +559,17 @@ int authority_save_peers(const authority_t* authority, const network_t* network)
   }
   (void)cbor_array_push(root, friends_arr);
   cbor_decref(&friends_arr);
+
+  // Index 6: operator-managed bootstrap entries as normalized strings
+  cbor_item_t* managed_arr =
+      cbor_new_definite_array(authority->managed_bootstrap_peer_count);
+  for (size_t index = 0; index < authority->managed_bootstrap_peer_count; index++) {
+    cbor_item_t* str_item = cbor_build_string(authority->managed_bootstrap_peers[index]);
+    (void)cbor_array_push(managed_arr, str_item);
+    cbor_decref(&str_item);
+  }
+  (void)cbor_array_push(root, managed_arr);
+  cbor_decref(&managed_arr);
 
   unsigned char* buffer = NULL;
   size_t buffer_size = 0;
@@ -652,6 +817,45 @@ int authority_load_peers(authority_t* authority, network_t* network) {
         }
       }
       cbor_decref(&friends_item);
+    }
+
+    // Index 6: managed bootstrap entries (absent in older stores = empty)
+    if (arr_size >= 7) {
+      cbor_item_t* managed_item = cbor_array_get(root, 6);
+      if (cbor_isa_array(managed_item)) {
+        if (authority->managed_bootstrap_peers != NULL) {
+          for (size_t idx = 0; idx < authority->managed_bootstrap_peer_count; idx++) {
+            free(authority->managed_bootstrap_peers[idx]);
+          }
+          free(authority->managed_bootstrap_peers);
+          authority->managed_bootstrap_peers = NULL;
+          authority->managed_bootstrap_peer_count = 0;
+        }
+        size_t managed_count = cbor_array_size(managed_item);
+        if (managed_count > 0) {
+          authority->managed_bootstrap_peers =
+              get_clear_memory(managed_count * sizeof(char*));
+          for (size_t index = 0; index < managed_count; index++) {
+            cbor_item_t* str_item = cbor_array_get(managed_item, index);
+            if (cbor_isa_string(str_item)) {
+              char discarded_host[256];
+              uint16_t discarded_port = 0;
+              char* stored = strndup((char*)cbor_string_handle(str_item),
+                                     cbor_string_length(str_item));
+              if (stored != NULL &&
+                  endpoint_parse(stored, discarded_host, sizeof(discarded_host),
+                                 &discarded_port) == 0) {
+                authority->managed_bootstrap_peers[authority->managed_bootstrap_peer_count++] =
+                    stored;
+              } else {
+                free(stored);
+              }
+            }
+            cbor_decref(&str_item);
+          }
+        }
+      }
+      cbor_decref(&managed_item);
     }
 
     cbor_decref(&root);

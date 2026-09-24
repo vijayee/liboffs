@@ -35,6 +35,7 @@ if (BUILD_TESTING)
             test_buffer.cpp
             test_endpoint.cpp
             test_bootstrap_wire.cpp
+            test_authority_bootstrap.cpp
             test_refcounter.cpp
             test_block.cpp
             test_qr.cpp
