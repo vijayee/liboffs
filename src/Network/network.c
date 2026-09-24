@@ -968,13 +968,34 @@ static void network_handle_salutation(network_t* network, message_t* msg,
     // no address in the ring set, so FIND_NODE responses were useless.
     uint32_t ring_addr = 0;
     uint16_t ring_port = 0;
+    platform_address_t peer_platform_addr;
+    memset(&peer_platform_addr, 0, sizeof(peer_platform_addr));
     if (pending->peer_addr.ss_family == AF_INET) {
       struct sockaddr_in* sin = (struct sockaddr_in*)&pending->peer_addr;
       ring_addr = ntohl(sin->sin_addr.s_addr);
       ring_port = ntohs(sin->sin_port);
+      /* platform_address_t.inet.addr is network byte order (the setter swaps
+         to the legacy host-order u32 itself); port is host byte order. */
+      peer_platform_addr.family = PLATFORM_AF_INET;
+      peer_platform_addr.inet.addr = sin->sin_addr.s_addr;
+      peer_platform_addr.inet.port = ring_port;
+    } else if (pending->peer_addr.ss_family == AF_INET6) {
+      struct sockaddr_in6* sin6 = (struct sockaddr_in6*)&pending->peer_addr;
+      ring_port = ntohs(sin6->sin6_port);
+      peer_platform_addr.family = PLATFORM_AF_INET6;
+      memcpy(peer_platform_addr.inet6.addr, &sin6->sin6_addr, 16);
+      peer_platform_addr.inet6.port = ring_port;
     }
     net_node_t* node = net_node_create(&salut->sender_id, ring_addr, ring_port);
     if (node != NULL) {
+      // Store the full sockaddr the QUIC connection reported: v4-mapped v6
+      // collapses to the legacy u32 inside the helper, so v4 nodes keep the
+      // exact state they had before, while pure-v6 peers gain addr6 instead
+      // of an all-zero address.
+      if (peer_platform_addr.family == PLATFORM_AF_INET ||
+          peer_platform_addr.family == PLATFORM_AF_INET6) {
+        net_node_set_platform_addr(node, &peer_platform_addr);
+      }
       node->weight = FIND_BLOCK_MIN_WEIGHT;
       // Direct-QUIC salutation verified the peer's identity (BLAKE3(public_key)
       // == sender_id), so mark the ring node relay_verified=true — secure-mode
