@@ -96,6 +96,50 @@ TEST(BootstrapWire, ListResponseRoundTrip) {
   cbor_decref(&entries);
 }
 
+TEST(BootstrapWire, AddDecodeRejectsOversizedAndEmptyEndpoint) {
+  // Oversized endpoint (>256 bytes) must be rejected.
+  std::string oversized(257, 'a');
+  cbor_item_t* frame = cbor_new_definite_array(2);
+  cbor_item_t* type_item = cbor_build_uint8(CLIENT_API_BOOTSTRAP_ADD);
+  cbor_item_t* endpoint_item = cbor_build_string(oversized.c_str());
+  cbor_array_push(frame, type_item);
+  cbor_array_push(frame, endpoint_item);
+  cbor_decref(&type_item);
+  cbor_decref(&endpoint_item);
+
+  client_api_bootstrap_add_t msg;
+  memset(&msg, 0, sizeof(msg));
+  EXPECT_NE(0, client_api_bootstrap_add_decode(frame, &msg));
+  cbor_decref(&frame);
+
+  // Empty endpoint must be rejected.
+  frame = cbor_new_definite_array(2);
+  type_item = cbor_build_uint8(CLIENT_API_BOOTSTRAP_ADD);
+  endpoint_item = cbor_build_string("");
+  cbor_array_push(frame, type_item);
+  cbor_array_push(frame, endpoint_item);
+  cbor_decref(&type_item);
+  cbor_decref(&endpoint_item);
+  EXPECT_NE(0, client_api_bootstrap_add_decode(frame, &msg));
+  cbor_decref(&frame);
+}
+
+TEST(BootstrapWire, ListResponseEncodeNullEntriesYieldsEmptyArray) {
+  client_api_bootstrap_list_response_t msg;
+  memset(&msg, 0, sizeof(msg));
+
+  cbor_item_t* frame = client_api_bootstrap_list_response_encode(&msg);
+  ASSERT_NE(frame, nullptr);
+
+  client_api_bootstrap_list_response_t decoded;
+  EXPECT_EQ(0, client_api_bootstrap_list_response_decode(frame, &decoded));
+  ASSERT_TRUE(cbor_isa_array(decoded.entries));
+  EXPECT_EQ(0, cbor_array_size(decoded.entries));
+
+  client_api_bootstrap_list_response_destroy(&decoded);
+  cbor_decref(&frame);
+}
+
 TEST(BootstrapWire, ListRequestEncodeHasTypeOnly) {
   cbor_item_t* frame = client_api_bootstrap_list_request_encode();
   ASSERT_NE(frame, nullptr);

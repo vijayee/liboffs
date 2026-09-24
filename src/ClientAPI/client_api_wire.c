@@ -1786,7 +1786,7 @@ cbor_item_t* client_api_bootstrap_add_encode(const client_api_bootstrap_add_t* m
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
-  item = cbor_build_string(msg->endpoint);
+  item = _encode_string(msg->endpoint);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
@@ -1828,7 +1828,7 @@ cbor_item_t* client_api_bootstrap_remove_encode(const client_api_bootstrap_remov
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
-  item = cbor_build_string(msg->endpoint);
+  item = _encode_string(msg->endpoint);
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
