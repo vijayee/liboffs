@@ -674,14 +674,6 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
   }
 
   // Start connection to relay server
-  QUIC_ADDR server_addr;
-  QuicAddrSetFamily(&server_addr, QUIC_ADDRESS_FAMILY_UNSPEC);
-  if (host != NULL) {
-    QuicAddrFromString(host, port, &server_addr);
-  } else {
-    QuicAddrSetPort(&server_addr, port);
-  }
-
   if (QUIC_FAILED(status = client->msquic->ConnectionStart(
           client->connection,
           client->configuration,
@@ -700,7 +692,11 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
     return -1;
   }
 
-  // Store relay address
+  // Store relay address — currently write-only (no consumers). Two caveats
+  // when a future consumer appears: (a) a hostname host (non-literal) leaves
+  // the storage zeroed except sin_family=AF_INET — do not treat it as
+  // populated; (b) link-local v6 literals get sin6_scope_id = 0, which is
+  // unrouteable.
   memset(&client->relay_addr, 0, sizeof(client->relay_addr));
   if (host != NULL) {
     struct in6_addr in6;
