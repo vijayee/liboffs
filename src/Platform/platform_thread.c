@@ -7,6 +7,8 @@
   #define _POSIX_C_SOURCE 200809L
   #include <stdlib.h>
   #include <pthread.h>
+  #include <time.h>
+  #include <errno.h>
 #endif
 
 #include "platform_thread.h"
@@ -122,6 +124,16 @@ void platform_condvar_destroy(platform_condvar_t* cv) {
 
 void platform_condvar_wait(platform_condvar_t* cv, platform_mutex_t* m) {
   SleepConditionVariableCS(&cv->handle, &m->handle, INFINITE);
+}
+
+int platform_condvar_timed_wait(platform_condvar_t* cv, platform_mutex_t* m,
+                                uint32_t timeout_ms) {
+  /* SleepConditionVariableCS returns nonzero when the variable was signalled
+     (or the mutex was abandoned) and zero on timeout. */
+  if (SleepConditionVariableCS(&cv->handle, &m->handle, timeout_ms)) {
+    return 0;
+  }
+  return -1;
 }
 
 void platform_condvar_signal(platform_condvar_t* cv)    { WakeConditionVariable(&cv->handle); }
@@ -314,6 +326,22 @@ void platform_condvar_destroy(platform_condvar_t* cv) {
 
 void platform_condvar_wait(platform_condvar_t* cv, platform_mutex_t* m) {
   pthread_cond_wait(&cv->handle, &m->handle);
+}
+
+int platform_condvar_timed_wait(platform_condvar_t* cv, platform_mutex_t* m,
+                                uint32_t timeout_ms) {
+  /* The condvar is initialized without attribute clocks, so timed waits run
+     against CLOCK_REALTIME: build an absolute deadline of now + timeout. */
+  struct timespec deadline;
+  clock_gettime(CLOCK_REALTIME, &deadline);
+  deadline.tv_sec += (time_t)(timeout_ms / 1000u);
+  deadline.tv_nsec += (long)(timeout_ms % 1000u) * 1000000L;
+  if (deadline.tv_nsec >= 1000000000L) {
+    deadline.tv_sec += 1;
+    deadline.tv_nsec -= 1000000000L;
+  }
+  int rc = pthread_cond_timedwait(&cv->handle, &m->handle, &deadline);
+  return (rc == ETIMEDOUT) ? -1 : 0;
 }
 
 void platform_condvar_signal(platform_condvar_t* cv) {

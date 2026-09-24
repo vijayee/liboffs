@@ -3,6 +3,7 @@
 //
 
 #include "peer_handlers.h"
+#include "../Network/peer_book.h"
 #include "../Network/peer_info.h"
 #include "../Network/node_id.h"
 #include "../Network/endpoint.h"
@@ -291,9 +292,10 @@ void peer_handle_friend_add(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     return;
   }
 
-  if (ctx->network == NULL || ctx->authority == NULL) {
+  if (ctx->network == NULL || ctx->network->peer_book == NULL) {
     /* Transports wired without a node borrow (cache-only deployments) have no
-       peering state to mutate; fail cleanly instead of dereferencing NULL. */
+       peer-book actor (hence no peering state to mutate); fail cleanly
+       instead of dereferencing NULL. */
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
                     "Peering unavailable on this transport");
     return;
@@ -305,39 +307,39 @@ void peer_handle_friend_add(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     return;
   }
 
-  /* Allocate heap storage first so we can decode directly into it */
-  peer_info_t* new_friend = get_clear_memory(sizeof(peer_info_t));
-  if (new_friend == NULL) {
-    client_api_friend_add_destroy(&msg);
-    ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR, "Memory allocation failed");
-    return;
-  }
+  /* Decode into a caller-owned peer_info_t: the peer-book actor deep-copies
+     it into the list, so this copy stays ours for the best-effort connect
+     below and is destroyed here. */
+  peer_info_t new_friend;
+  memset(&new_friend, 0, sizeof(new_friend));
 
   int decode_ok = peer_info_from_payload(msg.format, msg.data, msg.data_size,
-                                         new_friend);
+                                         &new_friend);
 
   client_api_friend_add_destroy(&msg);
 
   if (decode_ok != 0) {
-    peer_info_destroy(new_friend);
-    free(new_friend);
+    peer_info_destroy(&new_friend);
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_BAD_REQUEST, "Failed to decode friend peer info");
     return;
   }
 
-  /* Append to authority->friend_peers */
-  authority_t* auth = ctx->authority;
-  size_t new_count = auth->friend_peer_count + 1;
-  peer_info_t** expanded = realloc(auth->friend_peers, new_count * sizeof(peer_info_t*));
-  if (expanded == NULL) {
-    peer_info_destroy(new_friend);
-    free(new_friend);
-    ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR, "Failed to expand friend list");
+  /* Add through the peer-book actor (round-trip; -1 = invalid/OOM/timeout,
+     -2 = already a friend). A timed-out add may still have been applied —
+     reported as BAD_REQUEST. */
+  int add_result = peer_book_friend_add(ctx->network->peer_book, &new_friend,
+                                        PEER_BOOK_TIMEOUT_MS);
+
+  if (add_result != 0 && add_result != -2) {
+    peer_info_destroy(&new_friend);
+    client_api_peer_connect_result_t result;
+    memset(&result, 0, sizeof(result));
+    result.status = CLIENT_API_STATUS_BAD_REQUEST;
+
+    cbor_item_t* out_frame = client_api_peer_connect_result_encode(&result);
+    ctx->send_frame(ctx->conn, out_frame);
     return;
   }
-  auth->friend_peers = expanded;
-  auth->friend_peers[auth->friend_peer_count] = new_friend;
-  auth->friend_peer_count = new_count;
 
   /* Persist via the debounced dirty flag — previously only the HTTP handlers
      saved immediately, so a crash before shutdown could lose friend changes. */
@@ -347,10 +349,12 @@ void peer_handle_friend_add(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
      Friend peers are admitted via connection_manager_add_friend so they
      skip Hebbian decay eviction. See audit #18. */
   int connected = (network_connect_peer_candidates(ctx->network,
-                                                   &new_friend->node_id,
-                                                   new_friend->addresses,
-                                                   new_friend->address_count,
+                                                   &new_friend.node_id,
+                                                   new_friend.addresses,
+                                                   new_friend.address_count,
                                                    true) == 0) ? 1 : 0;
+
+  peer_info_destroy(&new_friend);
 
   /* Report whether the best-effort connect to the first direct address
      succeeded, mirroring peer_handle_connect. The friend is added to the
@@ -395,28 +399,12 @@ void peer_handle_friend_remove(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
 
   client_api_friend_remove_destroy(&msg);
 
-  /* Find and remove from authority->friend_peers */
-  authority_t* auth = ctx->authority;
-  size_t found_index = 0;
-  int found = 0;
-  for (size_t index = 0; index < auth->friend_peer_count; index++) {
-    if (node_id_equals(&auth->friend_peers[index]->node_id, &target_id)) {
-      found_index = index;
-      found = 1;
-      break;
-    }
-  }
-
-  if (found) {
-    peer_info_destroy(auth->friend_peers[found_index]);
-    free(auth->friend_peers[found_index]);
-
-    /* Shift remaining entries down */
-    for (size_t index = found_index; index + 1 < auth->friend_peer_count; index++) {
-      auth->friend_peers[index] = auth->friend_peers[index + 1];
-    }
-    auth->friend_peer_count--;
-  }
+  /* Remove through the peer-book actor. 0 = removed, -1 = not found (the
+     wire result frame carries no distinction and the call has always been
+     idempotent here — both map to OK). -1 after a timeout also lands here;
+     the mutation may still have been applied by the actor. */
+  (void)peer_book_friend_remove(ctx->network->peer_book, &target_id,
+                                PEER_BOOK_TIMEOUT_MS);
 
   /* Also remove from connection_manager */
   connection_manager_remove(&ctx->network->conn_mgr, &target_id);
@@ -441,24 +429,28 @@ void peer_handle_friend_list_request(peer_handler_ctx_t* ctx, cbor_item_t* frame
     return;
   }
 
-  if (ctx->network == NULL || ctx->authority == NULL) {
+  if (ctx->network == NULL || ctx->network->peer_book == NULL) {
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
                     "Peering unavailable on this transport");
     return;
   }
 
-  authority_t* auth = ctx->authority;
-
-  /* Count non-NULL friend entries */
-  size_t valid_count = 0;
-  for (size_t index = 0; index < auth->friend_peer_count; index++) {
-    if (auth->friend_peers[index] != NULL) valid_count++;
+  /* Snapshot the friend list through the peer-book actor: the reply holds
+     deep-copied peer_info_t entries owned by this handler. */
+  peer_info_t** friends = NULL;
+  size_t friend_count = 0;
+  if (peer_book_snapshot_friends(ctx->network->peer_book, &friends,
+                                 &friend_count,
+                                 PEER_BOOK_TIMEOUT_MS) != 0) {
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                    "Friend list snapshot failed");
+    return;
   }
 
-  cbor_item_t* friends_array = cbor_new_definite_array(valid_count);
+  cbor_item_t* friends_array = cbor_new_definite_array(friend_count);
 
-  for (size_t index = 0; index < auth->friend_peer_count; index++) {
-    peer_info_t* friend_info = auth->friend_peers[index];
+  for (size_t index = 0; index < friend_count; index++) {
+    peer_info_t* friend_info = friends[index];
     if (friend_info == NULL) continue;
 
     /* Encode peer_info as CBOR and serialize to bytes */
@@ -496,6 +488,8 @@ void peer_handle_friend_list_request(peer_handler_ctx_t* ctx, cbor_item_t* frame
 
   cbor_item_t* out_frame = client_api_friend_list_response_encode(&response);
   client_api_friend_list_response_destroy(&response);
+
+  peer_book_free_peer_info_array(friends, friend_count);
   ctx->send_frame(ctx->conn, out_frame);
 }
 
@@ -538,9 +532,10 @@ void peer_handle_bootstrap_add(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     return;
   }
 
-  if (ctx->network == NULL || ctx->authority == NULL) {
+  if (ctx->network == NULL || ctx->network->peer_book == NULL) {
     /* Transports wired without a node borrow (cache-only deployments) have no
-       peering state to mutate; fail cleanly instead of dereferencing NULL. */
+       peer-book actor (hence no peering state to mutate); fail cleanly
+       instead of dereferencing NULL. */
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
                     "Peering unavailable on this transport");
     return;
@@ -553,9 +548,11 @@ void peer_handle_bootstrap_add(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     return;
   }
 
-  /* authority_bootstrap_add parses and re-encodes the endpoint into its own
-     storage, so the decoded string can be freed right after the call. */
-  int add_result = authority_bootstrap_add(ctx->authority, msg.endpoint);
+  /* The peer-book actor parses and re-encodes the endpoint into its own
+     storage (authority_bootstrap_add runs on the actor thread now), so the
+     decoded string can be freed right after the round-trip. */
+  int add_result = peer_book_bootstrap_add(ctx->network->peer_book, msg.endpoint,
+                                           PEER_BOOK_TIMEOUT_MS);
 
   char host[256];
   uint16_t port = 0;
@@ -612,7 +609,9 @@ void peer_handle_bootstrap_remove(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     return;
   }
 
-  int remove_result = authority_bootstrap_remove(ctx->authority, msg.endpoint);
+  int remove_result = peer_book_bootstrap_remove(ctx->network->peer_book,
+                                                 msg.endpoint,
+                                                 PEER_BOOK_TIMEOUT_MS);
   client_api_bootstrap_remove_destroy(&msg);
 
   client_api_peer_connect_result_t result;
@@ -642,28 +641,45 @@ void peer_handle_bootstrap_list_request(peer_handler_ctx_t* ctx, cbor_item_t* fr
     return;
   }
 
-  if (ctx->network == NULL || ctx->authority == NULL) {
+  if (ctx->network == NULL || ctx->network->peer_book == NULL) {
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
                     "Peering unavailable on this transport");
     return;
   }
 
-  authority_t* auth = ctx->authority;
-  size_t total_count = auth->bootstrap_peer_count + auth->managed_bootstrap_peer_count;
-  cbor_item_t* entries = cbor_new_definite_array(total_count);
+  /* Snapshot the bootstrap lists through the peer-book actor: config-seeded
+     and operator-managed endpoints arrive as owned heap strings. */
+  char** config_endpoints = NULL;
+  size_t config_count = 0;
+  char** managed_endpoints = NULL;
+  size_t managed_count = 0;
+  if (peer_book_snapshot_bootstrap(ctx->network->peer_book, &config_endpoints,
+                                   &config_count, &managed_endpoints,
+                                   &managed_count,
+                                   PEER_BOOK_TIMEOUT_MS) != 0) {
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                    "Bootstrap list snapshot failed");
+    return;
+  }
+
+  cbor_item_t* entries = cbor_new_definite_array(config_count + managed_count);
   if (entries == NULL) {
+    peer_book_free_string_array(config_endpoints, config_count);
+    peer_book_free_string_array(managed_endpoints, managed_count);
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR, "Memory allocation failed");
     return;
   }
 
-  for (size_t index = 0; index < auth->bootstrap_peer_count; index++) {
-    _push_bootstrap_entry(entries, auth->bootstrap_peers[index],
+  for (size_t index = 0; index < config_count; index++) {
+    _push_bootstrap_entry(entries, config_endpoints[index],
                           CLIENT_API_BOOTSTRAP_SOURCE_CONFIG);
   }
-  for (size_t index = 0; index < auth->managed_bootstrap_peer_count; index++) {
-    _push_bootstrap_entry(entries, auth->managed_bootstrap_peers[index],
+  for (size_t index = 0; index < managed_count; index++) {
+    _push_bootstrap_entry(entries, managed_endpoints[index],
                           CLIENT_API_BOOTSTRAP_SOURCE_MANAGED);
   }
+  peer_book_free_string_array(config_endpoints, config_count);
+  peer_book_free_string_array(managed_endpoints, managed_count);
 
   client_api_bootstrap_list_response_t response;
   memset(&response, 0, sizeof(response));

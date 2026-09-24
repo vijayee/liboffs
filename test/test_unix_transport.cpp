@@ -17,6 +17,7 @@ extern "C" {
 #include "../src/Configuration/config.h"
 #include "../src/Network/authority.h"
 #include "../src/Network/network.h"
+#include "../src/Network/peer_book.h"
 #include "../src/Node/node.h"
 #include "../src/Timer/timer_actor.h"
 #include "../src/Util/rm_rf.h"
@@ -1290,8 +1291,14 @@ protected:
 
         /* network_create may return NULL on a build without MSQUIC; the
            authority-only success tests still run, and the peer_list test
-           skips itself in that case. */
+           skips itself in that case. The peer/friend handlers round-trip
+           through the network's peer-book actor, so start it (no timers on
+           the list paths; the reconnect tick timer is armed here but the
+           fixture tears down before the first 5s fire). */
         network = network_create(authority, bc, timer, pool, &config);
+        if (network != nullptr && network->peer_book != nullptr) {
+            peer_book_start(network->peer_book);
+        }
 
         memset(&node_obj, 0, sizeof(node_obj));
         node_obj.config = &config;

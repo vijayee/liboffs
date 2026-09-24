@@ -40,6 +40,13 @@ void platform_rwlock_write_unlock(platform_rwlock_t* rw);
 platform_condvar_t* platform_condvar_create(void);
 void platform_condvar_destroy(platform_condvar_t* cv);
 void platform_condvar_wait(platform_condvar_t* cv, platform_mutex_t* m);
+/* Bounded wait: block until the condvar is signalled or timeout_ms elapses.
+   The caller must hold the mutex on entry; it is re-acquired before return.
+   Returns 0 when signalled, -1 when the timeout elapsed. Used by the
+   peer-book actor's synchronous request round-trips (src/Network/peer_book.c)
+   so an unresponsive actor cannot hang an HTTP/wire worker forever. */
+int platform_condvar_timed_wait(platform_condvar_t* cv, platform_mutex_t* m,
+                                uint32_t timeout_ms);
 void platform_condvar_signal(platform_condvar_t* cv);
 void platform_condvar_broadcast(platform_condvar_t* cv);
 

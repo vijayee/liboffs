@@ -35,6 +35,7 @@ typedef struct relay_client_t relay_client_t;
 typedef struct nat_detect_t nat_detect_t;
 typedef struct quic_listener_t quic_listener_t;
 typedef struct mdns_t mdns_t;
+typedef struct peer_book_t peer_book_t;
 
 #define CLOSEST_NODES_PENDING_MAX 32
 
@@ -135,11 +136,17 @@ typedef struct network_t {
 
   pending_quic_t* pending_connections;  /* QUIC connections awaiting salutation */
 
-  // Friend peer reconnect state
-  ATOMIC(uint64_t) friend_reconnect_timer_id;
+  /* Peer-book actor: owns and serializes authority->friend_peers /
+     bootstrap_peers / managed_bootstrap_peers after peer_book_start. Created
+     in network_create, destroyed in network_destroy. NULL only in list-only
+     tests that build a shell network_t by hand. See
+     src/Network/peer_book.h for the access invariant. */
+  peer_book_t* peer_book;
 
   /* Partition heal: reconnect to bootstrap peers when the node has zero
-     connected peers. Exponential backoff in ms (1s doubling to 60s cap). */
+     connected peers. Exponential backoff in ms (1s doubling to 60s cap).
+     Evaluated on the network actor when the peer-book actor's reconnect
+     tick delivers the list snapshot (PEER_BOOK_RECONNECT). */
   uint64_t bootstrap_next_attempt_ms;
   uint32_t bootstrap_backoff_ms;
 

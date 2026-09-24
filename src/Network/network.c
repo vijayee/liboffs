@@ -4,6 +4,7 @@
 
 #include "network.h"
 #include "peer_info.h"
+#include "peer_book.h"
 #include "connection_manager.h"
 #include "endpoint.h"
 #include "wire.h"
@@ -49,7 +50,6 @@
 
 #define TOPOLOGY_METRICS_PUSH_INTERVAL_MS 300000  // 5 minutes
 #define PING_CAPACITY_INTERVAL_MS 900000  // 15 minutes
-#define FRIEND_RECONNECT_INTERVAL_MS 5000
 
 /* Per-source cap on new ring insertions from a single gossip/pull packet.
    Bounds ring chaff: a malicious peer can advertise at most this many
@@ -138,9 +138,15 @@ static void network_handle_relay_punch(network_t* network,
                                        const wire_relay_punch_t* punch);
 /* Forward declaration for the direct-upgrade tick helper. Defined later. */
 static void network_attempt_direct_upgrades(network_t* network);
-/* Forward declaration for the bootstrap connect helper (startup + partition
-   heal). Defined later, near network_start_connections. */
-static void network_connect_bootstrap_lists(network_t* network);
+/* Forward declarations for the reconnect flow. The peer-book actor owns the
+   peer lists (src/Network/peer_book.h); the network actor only ever sees
+   them via the PEER_BOOK_RECONNECT snapshot payload (tick) or the bounded
+   peer_book_snapshot_* round-trips (startup connect loop, below). */
+static void network_handle_peer_book_reconnect(
+    network_t* network, const peer_book_reconnect_payload_t* snapshot);
+static void network_connect_endpoint_list(network_t* network,
+                                          char** endpoints, size_t count,
+                                          const char* label);
 
 // Forward declarations for the static relay-challenge table helpers (defined
 // below; the test-only wrappers at the top of the file call them).
@@ -330,7 +336,6 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   network->hebbian_decay_timer_id = 0;
   network->metrics_push_timer_id = 0;
   network->ping_capacity_timer_id = 0;
-  network->friend_reconnect_timer_id = 0;
   /* Partition heal state: backoff starts disarmed (first tick attempts
      immediately); network_create already zeroes these via get_clear_memory,
      set explicitly for clarity alongside the other timer state. */
@@ -379,6 +384,12 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
 
   actor_init(&network->actor, network, network_dispatch, pool);
 
+  /* Peer-book actor: owns and serializes the three peer lists (see
+     src/Network/peer_book.h for the access invariant). Created before any
+     transport can start; the node calls peer_book_start after the
+     startup-phase direct seeding/loading is done. */
+  network->peer_book = peer_book_create(authority, network, timer, pool);
+
   network->respiration = respiration_actor_create(network, pool);
   block_cache->respiration = network->respiration;
 
@@ -417,15 +428,6 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
       &network->actor,
       NETWORK_PING_CAPACITY_TICK,
       &network->ping_capacity_timer_id);
-
-  // Friend reconnect timer: attempt reconnection periodically
-  network->friend_reconnect_timer_id = 0;
-  timer_actor_set(timer,
-      FRIEND_RECONNECT_INTERVAL_MS,
-      FRIEND_RECONNECT_INTERVAL_MS,
-      &network->actor,
-      NETWORK_FRIEND_RECONNECT_TICK,
-      &network->friend_reconnect_timer_id);
 
   // Request timeout sweep: 1s recurring tick that sweeps wanted_list and
   // closest_pending for entries whose deadline_ms has passed. Each expired
@@ -529,10 +531,6 @@ void network_destroy(network_t* network) {
     timer_actor_cancel(network->timer, atomic_load(&network->ping_capacity_timer_id));
     network->ping_capacity_timer_id = 0;
   }
-  if (atomic_load(&network->friend_reconnect_timer_id) != 0) {
-    timer_actor_cancel(network->timer, atomic_load(&network->friend_reconnect_timer_id));
-    atomic_store(&network->friend_reconnect_timer_id, 0);
-  }
   if (atomic_load(&network->request_timer_id) != 0) {
     timer_actor_cancel(network->timer, atomic_load(&network->request_timer_id));
     atomic_store(&network->request_timer_id, 0);
@@ -549,6 +547,14 @@ void network_destroy(network_t* network) {
     mdns_destroy(network->mdns);
     network->mdns = NULL;
   }
+  /* Peer-book first: cancels its reconnect tick and drains its mailbox
+     while every other actor on the pool is still alive. After this call
+     direct access to the authority peer lists is legal again per the
+     invariant in peer_book.h (final save / restart re-seed run later,
+     after the pool has stopped). */
+  peer_book_destroy(network->peer_book);
+  network->peer_book = NULL;
+
   respiration_actor_destroy(network->respiration);
   network->respiration = NULL;
 
@@ -4435,10 +4441,17 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
   }
 }
 
-// --- Friend reconnect tick handler ---
-static void network_handle_friend_reconnect_tick(network_t* network, message_t* msg) {
-  (void)msg;
-  if (network->authority == NULL) return;
+// --- Peer-book reconnect tick handler (network side) ---
+/* The peer-book actor owns the peer lists and arms the reconnect tick
+   (PEER_BOOK_RECONNECT_TICK); on each tick it snapshots the three lists into
+   this payload and sends it here fire-and-forget, so all authority list
+   access stays on the peer-book actor thread while every network-actor-owned
+   read below (conn_mgr, backoff state) stays on this thread.
+   network_connect_peer_candidates is safe from this (network actor) thread —
+   it is also invoked from HTTP worker threads and pd_loop handlers. */
+static void network_handle_peer_book_reconnect(
+    network_t* network, const peer_book_reconnect_payload_t* snapshot) {
+  if (snapshot == NULL) return;
 
   /* Partition heal: if nothing is connected, re-enter the network via the
      bootstrap lists. Exponential backoff (1s doubling, 60s cap) so a dead
@@ -4450,11 +4463,13 @@ static void network_handle_friend_reconnect_tick(network_t* network, message_t* 
     if (peer != NULL && peer->connected) connected_count++;
   }
   if (connected_count == 0 &&
-      (network->authority->bootstrap_peer_count > 0 ||
-       network->authority->managed_bootstrap_peer_count > 0)) {
+      (snapshot->config_count > 0 || snapshot->managed_count > 0)) {
     uint64_t now_ms = platform_monotonic_ns() / 1000000u;
     if (now_ms >= network->bootstrap_next_attempt_ms) {
-      network_connect_bootstrap_lists(network);
+      network_connect_endpoint_list(network, snapshot->config_endpoints,
+                                    snapshot->config_count, "config bootstrap");
+      network_connect_endpoint_list(network, snapshot->managed_endpoints,
+                                    snapshot->managed_count, "managed bootstrap");
       network->bootstrap_backoff_ms =
           network->bootstrap_backoff_ms == 0 ? 1000u
                                              : network->bootstrap_backoff_ms * 2u;
@@ -4467,19 +4482,17 @@ static void network_handle_friend_reconnect_tick(network_t* network, message_t* 
 
   // Reconnect to friend peers (guarded: the node may have no friends at all,
   // in which case only the bootstrap heal above runs on this tick).
-  if (network->authority->friend_peers != NULL) {
-    for (size_t index = 0; index < network->authority->friend_peer_count; index++) {
-      peer_info_t* friend_info = network->authority->friend_peers[index];
-      peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &friend_info->node_id);
-      if (peer != NULL && peer->connected) continue;  // Already connected
+  for (size_t index = 0; index < snapshot->friend_count; index++) {
+    peer_info_t* friend_info = snapshot->friends[index];
+    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &friend_info->node_id);
+    if (peer != NULL && peer->connected) continue;  // Already connected
 
-      // Try candidates in priority order (HOST -> SRFLX -> DIRECT -> RELAY).
-      // The helper admits the peer to conn_mgr (with friend pinning) and
-      // sets relay_endpoint_id for RELAY candidates. See audit #18.
-      (void)network_connect_peer_candidates(network, &friend_info->node_id,
-                                            friend_info->addresses,
-                                            friend_info->address_count, true);
-    }
+    // Try candidates in priority order (HOST -> SRFLX -> DIRECT -> RELAY).
+    // The helper admits the peer to conn_mgr (with friend pinning) and
+    // sets relay_endpoint_id for RELAY candidates. See audit #18.
+    (void)network_connect_peer_candidates(network, &friend_info->node_id,
+                                          friend_info->addresses,
+                                          friend_info->address_count, true);
   }
 
   /* Also attempt direct upgrades for any peer (friend or not) currently in
@@ -4544,42 +4557,23 @@ static void network_attempt_direct_upgrades(network_t* network) {
 
 // --- Start connections to bootstrap and friend peers ---
 
-/* Attempt a fire-and-forget QUIC connect to every bootstrap peer, covering
-   both lists: the config-seeded bootstrap_peers and the operator-managed
-   (persisted) managed_bootstrap_peers. Malformed endpoints are skipped with
-   an error log; connect failures stay silent (QUIC async fire-and-forget).
-   Shared by startup and the partition-heal branch of the reconnect tick. */
-static void network_connect_bootstrap_lists(network_t* network) {
-  authority_t* authority = network->authority;
-  if (authority == NULL) return;
-
-  if (authority->bootstrap_peers != NULL) {
-    for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
-      char host[256];
-      uint16_t port = 0;
-      if (endpoint_parse(authority->bootstrap_peers[index], host, sizeof(host),
-                         &port) == 0) {
-        network_connect_peer(network, host, port);
-      } else {
-        log_error("network_connect_bootstrap_lists: invalid config bootstrap "
-                  "endpoint: %s",
-                  authority->bootstrap_peers[index]);
-      }
-    }
-  }
-  if (authority->managed_bootstrap_peers != NULL) {
-    for (size_t index = 0; index < authority->managed_bootstrap_peer_count;
-         index++) {
-      char host[256];
-      uint16_t port = 0;
-      if (endpoint_parse(authority->managed_bootstrap_peers[index], host,
-                         sizeof(host), &port) == 0) {
-        network_connect_peer(network, host, port);
-      } else {
-        log_error("network_connect_bootstrap_lists: invalid managed bootstrap "
-                  "endpoint: %s",
-                  authority->managed_bootstrap_peers[index]);
-      }
+/* Attempt a fire-and-forget QUIC connect to every endpoint in one bootstrap
+   list snapshot. Malformed endpoints are skipped with an error log; connect
+   failures stay silent (QUIC async fire-and-forget). Shared by startup
+   (network_start_connections, fed by peer-book snapshot round-trips) and the
+   partition-heal branch of the reconnect tick (fed by the
+   PEER_BOOK_RECONNECT payload). */
+static void network_connect_endpoint_list(network_t* network, char** endpoints,
+                                          size_t count, const char* label) {
+  if (endpoints == NULL) return;
+  for (size_t index = 0; index < count; index++) {
+    char host[256];
+    uint16_t port = 0;
+    if (endpoint_parse(endpoints[index], host, sizeof(host), &port) == 0) {
+      network_connect_peer(network, host, port);
+    } else {
+      log_error("network_connect_endpoint_list: invalid %s endpoint: %s",
+                label, endpoints[index]);
     }
   }
 }
@@ -4587,21 +4581,67 @@ static void network_connect_bootstrap_lists(network_t* network) {
 void network_start_connections(network_t* network) {
   if (network == NULL) return;
 
+  /* The peer-book actor owns the lists once started: fetch both snapshots
+     via bounded round-trips instead of reading the authority lists off the
+     caller's thread. When the node has no peer-book actor (list-only tests
+     built on a shell network_t, called before peer_book_start), fall back to
+     the startup-phase direct read allowed by the peer_book.h invariant. */
+  char** config_endpoints = NULL;
+  size_t config_count = 0;
+  char** managed_endpoints = NULL;
+  size_t managed_count = 0;
+  peer_info_t** friends = NULL;
+  size_t friend_count = 0;
+  if (network->peer_book != NULL) {
+    if (peer_book_snapshot_bootstrap(network->peer_book, &config_endpoints,
+                                     &config_count, &managed_endpoints,
+                                     &managed_count,
+                                     PEER_BOOK_TIMEOUT_MS) != 0) {
+      log_warn("network_start_connections: bootstrap snapshot timed out — "
+               "skipping the startup connect loop");
+      return;
+    }
+    if (peer_book_snapshot_friends(network->peer_book, &friends, &friend_count,
+                                   PEER_BOOK_TIMEOUT_MS) != 0) {
+      log_warn("network_start_connections: friend snapshot timed out — "
+               "skipping the startup connect loop");
+      peer_book_free_string_array(config_endpoints, config_count);
+      peer_book_free_string_array(managed_endpoints, managed_count);
+      return;
+    }
+  } else if (network->authority != NULL) {
+    config_endpoints = network->authority->bootstrap_peers;
+    config_count = network->authority->bootstrap_peer_count;
+    managed_endpoints = network->authority->managed_bootstrap_peers;
+    managed_count = network->authority->managed_bootstrap_peer_count;
+    friends = network->authority->friend_peers;
+    friend_count = network->authority->friend_peer_count;
+  }
+
   // Connect to bootstrap peers (fire-and-forget)
-  network_connect_bootstrap_lists(network);
+  network_connect_endpoint_list(network, config_endpoints, config_count,
+                                "config bootstrap");
+  network_connect_endpoint_list(network, managed_endpoints, managed_count,
+                                "managed bootstrap");
 
   // Connect to friend peers
-  if (network->authority != NULL && network->authority->friend_peers != NULL) {
-    for (size_t index = 0; index < network->authority->friend_peer_count; index++) {
-      peer_info_t* friend_info = network->authority->friend_peers[index];
-      peer_connection_t* existing = connection_manager_lookup(&network->conn_mgr, &friend_info->node_id);
-      if (existing != NULL && existing->connected) continue;
-      // Try candidates in priority order (HOST -> SRFLX -> DIRECT -> RELAY).
-      // See audit #18.
-      (void)network_connect_peer_candidates(network, &friend_info->node_id,
-                                            friend_info->addresses,
-                                            friend_info->address_count, true);
-    }
+  for (size_t index = 0; index < friend_count; index++) {
+    peer_info_t* friend_info = friends[index];
+    peer_connection_t* existing = connection_manager_lookup(&network->conn_mgr, &friend_info->node_id);
+    if (existing != NULL && existing->connected) continue;
+    // Try candidates in priority order (HOST -> SRFLX -> DIRECT -> RELAY).
+    // See audit #18.
+    (void)network_connect_peer_candidates(network, &friend_info->node_id,
+                                          friend_info->addresses,
+                                          friend_info->address_count, true);
+  }
+
+  /* Snapshot copies are ours to free; the direct-read fallback borrows the
+     authority arrays (NULL entries) — free only owned copies. */
+  if (network->peer_book != NULL) {
+    peer_book_free_peer_info_array(friends, friend_count);
+    peer_book_free_string_array(config_endpoints, config_count);
+    peer_book_free_string_array(managed_endpoints, managed_count);
   }
 }
 
@@ -4773,9 +4813,32 @@ void network_dispatch(void* state, message_t* msg) {
     case NETWORK_PING_CAPACITY_TICK:
       network_handle_ping_capacity_tick(network, msg);
       break;
-    case NETWORK_FRIEND_RECONNECT_TICK:
-      network_handle_friend_reconnect_tick(network, msg);
+    case PEER_BOOK_RECONNECT: {
+      /* The peer-book actor's reconnect tick delivered the list snapshot.
+         payload ownership stays with actor_run (payload_destroy frees it). */
+      peer_book_reconnect_payload_t* reconnect_snapshot =
+          (peer_book_reconnect_payload_t*)msg->payload;
+      network_handle_peer_book_reconnect(network, reconnect_snapshot);
       break;
+    }
+    case PEER_BOOK_SAVE_SNAPSHOT: {
+      /* The peer-book actor delivered the friend/managed lists for the
+         debounced peer-state save requested via PEER_BOOK_SAVE. Run the save
+         here — network state (rings/hebbian) stays on this thread — and only
+         now clear the dirty flag so a dropped request retries on the next
+         debounce. */
+      peer_book_save_snapshot_t* save_snapshot =
+          (peer_book_save_snapshot_t*)msg->payload;
+      if (save_snapshot != NULL && network->authority != NULL) {
+        authority_save_peers_snapshot(network->authority, network,
+                                      save_snapshot->b58_friends,
+                                      save_snapshot->b58_friend_count,
+                                      save_snapshot->managed_endpoints,
+                                      save_snapshot->managed_count);
+        network->peer_state_dirty = 0;
+      }
+      break;
+    }
     case NETWORK_GOSSIP_RECEIVED:
       network_handle_gossip_received(network, msg);
       break;
@@ -6004,10 +6067,25 @@ void network_dispatch(void* state, message_t* msg) {
     }
     case NETWORK_PEER_STATE_SAVE: {
       /* Debounced mid-run save fired by network_mark_peer_state_dirty after
-         the Hebbian decay tick. Clearing the dirty flag here coalesces
-         repeated ticks: a later mark re-arms the debounce. The Phase 8
-         authority_save_peers in offs_node_stop remains authoritative. */
+         the Hebbian decay tick. The friend/managed lists live on the
+         peer-book actor: ask it (fire-and-forget PEER_BOOK_SAVE) for the
+         snapshot and clear the dirty flag only when the
+         PEER_BOOK_SAVE_SNAPSHOT reply has been saved. A dropped request
+         leaves the flag set, so the next debounce retries; the Phase 8
+         authority_save_peers in offs_node_stop remains authoritative (it
+         runs after the pool is stopped, where direct list access is legal
+         per the invariant in peer_book.h). */
       if (network->authority != NULL && network->peer_state_dirty) {
+        if (network->peer_book != NULL) {
+          message_t save_request;
+          memset(&save_request, 0, sizeof(save_request));
+          save_request.type = PEER_BOOK_SAVE;
+          save_request.payload = NULL;
+          save_request.payload_destroy = NULL;
+          if (actor_send(&network->peer_book->actor, &save_request)) break;
+        }
+        /* No peer-book actor (list-only tests on a shell network_t): legacy
+           direct save, legal because no peer-book actor exists to race. */
         authority_save_peers(network->authority, network);
         network->peer_state_dirty = 0;
       }

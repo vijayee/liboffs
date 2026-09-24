@@ -196,7 +196,20 @@ typedef enum message_type_e {
   NETWORK_LOCAL_CLOSEST_NODES,
   NETWORK_LOCAL_FIND_NODE,
   NETWORK_CLOSEST_NODES_RESULT,
-  NETWORK_FRIEND_RECONNECT_TICK,
+  /* Peer-book actor messages (src/Network/peer_book.c). The peer-book actor
+     owns authority->friend_peers / bootstrap_peers / managed_bootstrap_peers
+     after peer_book_start: mutations and snapshots arrive as messages, and the
+     friend-reconnect tick timer targets the peer-book actor, which replies
+     fire-and-forget with a PEER_BOOK_RECONNECT snapshot for the network
+     actor. NETWORK_PEER_STATE_SAVE (below) asks the peer-book actor for the
+     friend/managed lists via fire-and-forget PEER_BOOK_SAVE / its
+     PEER_BOOK_SAVE_SNAPSHOT reply. */
+  PEER_BOOK_RECONNECT_TICK,
+  PEER_BOOK_RECONNECT,
+  PEER_BOOK_MUTATION,
+  PEER_BOOK_SNAPSHOT,
+  PEER_BOOK_SAVE,
+  PEER_BOOK_SAVE_SNAPSHOT,
   /* Respiration actor messages */
   RESPIRATION_EXHALE_TRIGGER,
   RESPIRATION_FIND_BLOCK_RESULT,

@@ -9,6 +9,7 @@
 #include "../ClientAPI/HTTP/http_server.h"
 #include "../Configuration/config_pending.h"
 #include "../Network/network.h"
+#include "../Network/peer_book.h"
 #include "../Platform/platform.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
@@ -87,9 +88,18 @@ int offs_node_start(offs_node_t* node) {
     return -1;
   }
 
-  // Load persisted peer state (Hebbian weights, ring nodes) on startup
+  // Load persisted peer state (Hebbian weights, ring nodes) on startup.
+  // Startup-phase direct list access: legal per the peer_book.h invariant
+  // because peer_book_start (below) has not run yet.
   if (node->authority != NULL) {
     authority_load_peers(node->authority, node->network);
+  }
+
+  /* Open the peer-book actor for business now that the startup-phase direct
+     seeding/loading of the peer lists is complete: arms the reconnect tick
+     and admits mutation/snapshot round-trips. */
+  if (node->network != NULL && node->network->peer_book != NULL) {
+    peer_book_start(node->network->peer_book);
   }
 
   ATOMIC_STORE(&node->running, 1);
@@ -275,7 +285,11 @@ void offs_node_restart(offs_node_t* node, const char* data_dir) {
   config_free(node->config);
   node->config = new_config;
 
-  /* Re-seed the config-seeded bootstrap list from the restarted config. */
+  /* Re-seed the config-seeded bootstrap list from the restarted config.
+     Startup-phase direct access: the scheduler pool was destroyed in Phase 2
+     (network_destroy also tore down the peer-book actor), so no actor can
+     race this write and a round-trip would be impossible. Legal per the
+     peer_book.h invariant (c). */
   if (authority_set_bootstrap_peers(node->authority, node->config->bootstrap_peers) != 0) {
     log_error("Failed to seed bootstrap peers from config on restart");
   }

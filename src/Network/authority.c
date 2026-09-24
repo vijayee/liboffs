@@ -473,6 +473,48 @@ int authority_save_peers(const authority_t* authority, const network_t* network)
   if (authority == NULL || network == NULL) return -1;
   if (authority->peer_store_path == NULL) return -1;
 
+  /* Startup/shutdown-phase save: read the friend and managed lists directly
+     (legal per the peer_book.h invariant here) and delegate to the snapshot
+     variant. */
+  const char** b58_friends = NULL;
+  size_t b58_friend_count = 0;
+  const char** managed = NULL;
+  size_t managed_count = 0;
+  if (authority->friend_peer_count > 0) {
+    b58_friends = get_clear_memory(authority->friend_peer_count * sizeof(char*));
+    if (b58_friends != NULL) {
+      for (size_t index = 0; index < authority->friend_peer_count; index++) {
+        char* b58 = peer_info_to_base58(authority->friend_peers[index]);
+        if (b58 == NULL) continue;
+        b58_friends[b58_friend_count++] = b58;
+      }
+    }
+  }
+  managed = (const char**)authority->managed_bootstrap_peers;
+  managed_count = authority->managed_bootstrap_peer_count;
+
+  int rc = authority_save_peers_snapshot(authority, network, b58_friends,
+                                         b58_friend_count, managed,
+                                         managed_count);
+
+  if (b58_friends != NULL) {
+    for (size_t index = 0; index < b58_friend_count; index++) {
+      free(b58_friends[index]);
+    }
+    free(b58_friends);
+  }
+  return rc;
+}
+
+int authority_save_peers_snapshot(const authority_t* authority,
+                                  const network_t* network,
+                                  const char** b58_friends,
+                                  size_t b58_friend_count,
+                                  const char** managed_bootstrap,
+                                  size_t managed_count) {
+  if (authority == NULL || network == NULL) return -1;
+  if (authority->peer_store_path == NULL) return -1;
+
   size_t hebbian_count = network->hebbian.count;
   size_t peer_count = (network->rings != NULL) ? ring_set_total_nodes(network->rings) : 0;
 
@@ -580,25 +622,21 @@ int authority_save_peers(const authority_t* authority, const network_t* network)
   (void)cbor_array_push(root, peers_array);
   cbor_decref(&peers_array);
 
-  // Index 5: friend peers as Base58-encoded peer_info strings
-  cbor_item_t* friends_arr = cbor_new_definite_array(authority->friend_peer_count);
-  for (size_t index = 0; index < authority->friend_peer_count; index++) {
-    char* b58 = peer_info_to_base58(authority->friend_peers[index]);
-    if (b58 != NULL) {
-      cbor_item_t* b58_item = cbor_build_string(b58);
-      (void)cbor_array_push(friends_arr, b58_item);
-      cbor_decref(&b58_item);
-      free(b58);
-    }
+  // Index 5: friend peers as Base58-encoded peer_info strings (snapshot or
+  // direct startup/shutdown read, per the peer_book.h invariant)
+  cbor_item_t* friends_arr = cbor_new_definite_array(b58_friend_count);
+  for (size_t index = 0; index < b58_friend_count; index++) {
+    cbor_item_t* b58_item = cbor_build_string(b58_friends[index]);
+    (void)cbor_array_push(friends_arr, b58_item);
+    cbor_decref(&b58_item);
   }
   (void)cbor_array_push(root, friends_arr);
   cbor_decref(&friends_arr);
 
   // Index 6: operator-managed bootstrap entries as normalized strings
-  cbor_item_t* managed_arr =
-      cbor_new_definite_array(authority->managed_bootstrap_peer_count);
-  for (size_t index = 0; index < authority->managed_bootstrap_peer_count; index++) {
-    cbor_item_t* str_item = cbor_build_string(authority->managed_bootstrap_peers[index]);
+  cbor_item_t* managed_arr = cbor_new_definite_array(managed_count);
+  for (size_t index = 0; index < managed_count; index++) {
+    cbor_item_t* str_item = cbor_build_string(managed_bootstrap[index]);
     (void)cbor_array_push(managed_arr, str_item);
     cbor_decref(&str_item);
   }

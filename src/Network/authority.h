@@ -88,12 +88,39 @@ int authority_load(authority_t* authority);
 // Save/load runtime peer state (Hebbian weights, ring nodes, latency data)
 // network_t is forward-declared to avoid circular includes
 typedef struct network_t network_t;
+
+/* Save the runtime peer state reading the friend (index 5) and managed
+ * bootstrap (index 6) lists directly off authority_t. Legal only in the
+ * startup/shutdown phases of the peer_book.h invariant (before
+ * peer_book_start / after peer_book_stop or pool stop); at runtime the
+ * network actor uses authority_save_peers_snapshot with the lists fetched
+ * from the peer-book actor. */
 int authority_save_peers(const authority_t* authority, const network_t* network);
+
+/* Same save, but the friend and managed bootstrap lists are supplied by the
+ * caller (the peer-book actor's PEER_BOOK_SAVE_SNAPSHOT payload): b58_friends
+ * holds the Base58 peer_info strings for index 5, managed_bootstrap the
+ * endpoint strings for index 6. Both arrays are borrowed (not freed here). */
+int authority_save_peers_snapshot(const authority_t* authority,
+                                  const network_t* network,
+                                  const char** b58_friends,
+                                  size_t b58_friend_count,
+                                  const char** managed_bootstrap,
+                                  size_t managed_count);
+
 int authority_load_peers(authority_t* authority, network_t* network);
 
 /* Bootstrap peers. bootstrap_peers is config-seeded and immutable at runtime;
  * managed_bootstrap_peers is operator-added and persisted in peer-store
  * index 6. Endpoints are "host:port" or "[ipv6]:port" strings.
+ *
+ * STARTUP-PHASE-ONLY: once the peer-book actor is running (peer_book_start,
+ * see src/Network/peer_book.h) these helpers and direct access to the
+ * friend_peers / bootstrap_peers / managed_bootstrap_peers arrays are legal
+ * only on the peer-book actor thread — runtime mutations and snapshots go
+ * through peer_book_* messages. The helpers below remain the single
+ * implementation of the add/remove/seed contract and are invoked by the
+ * peer-book actor's dispatch.
  *
  * authority_bootstrap_add returns 0 = added, -1 = invalid endpoint,
  * -2 = duplicate (in either list).

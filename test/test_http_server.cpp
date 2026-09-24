@@ -15,6 +15,7 @@ extern "C" {
 #include "../src/ClientAPI/HTTP/peer_routes.h"
 #include "../src/Configuration/config.h"
 #include "../src/Network/authority.h"
+#include "../src/Network/peer_book.h"
 #include "../src/Node/node.h"
 #include "../src/Scheduler/scheduler.h"
 #include "../src/Platform/platform.h"
@@ -906,10 +907,11 @@ TEST_F(LocalBindingAuth, ConfigGetAllowedOnLoopback) {
 
 // --- /bootstrap routes happy path ---
 //
-// A stack offs_node_t with a heap authority and a NULL network: the bootstrap
-// handlers only touch the authority lists, and network_mark_peer_state_dirty
-// / network_connect_peer are NULL-safe no-ops (fire-and-forget connect), so
-// the routes are exercised without a live QUIC stack.
+// A stack offs_node_t with a heap authority, a zeroed network_t shell, and a
+// peer-book actor created on the test scheduler pool: the bootstrap handlers
+// run their round-trips through that actor (no timer, so the reconnect tick
+// never fires), while network_mark_peer_state_dirty / network_connect_peer
+// stay NULL-safe no-ops on the shell. No live QUIC stack is needed.
 
 class TestHttpServerBootstrapRoutes : public testing::Test {
 public:
@@ -919,6 +921,8 @@ public:
   config_t config;
   offs_node_t node;
   authority_t* authority;
+  network_t network_shell;
+  peer_book_t* peer_book;
 
   void SetUp() override {
     port = _next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
@@ -933,7 +937,16 @@ public:
     ASSERT_TRUE(authority != NULL);
     node.config = &config;
     node.authority = authority;
-    node.network = NULL;
+    /* Zeroed network shell so the routes can resolve the peer-book actor;
+       peer_book_create is passed network == NULL so the reconnect tick path
+       (which would actor_send into the shell's uninitialized actor) is
+       disabled. */
+    memset(&network_shell, 0, sizeof(network_shell));
+    peer_book = peer_book_create(authority, NULL, NULL, pool);
+    ASSERT_TRUE(peer_book != NULL);
+    network_shell.peer_book = peer_book;
+    node.network = &network_shell;
+    ASSERT_EQ(peer_book_start(peer_book), 0);
   }
 
   void TearDown() override {
@@ -945,6 +958,9 @@ public:
     if (server != NULL) {
       http_server_destroy(server);
     }
+    node.network = NULL;
+    peer_book_destroy(peer_book);
+    peer_book = NULL;
     scheduler_pool_destroy(pool);
     authority_destroy(authority);
     free(config.api_key_hash);

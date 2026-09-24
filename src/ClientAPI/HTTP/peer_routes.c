@@ -9,6 +9,7 @@
 #include "../../Network/peer_info.h"
 #include "../../Network/network.h"
 #include "../../Network/authority.h"
+#include "../../Network/peer_book.h"
 #include "../../Network/endpoint.h"
 #include "../../Network/connection_manager.h"
 #include "../../Network/node_id.h"
@@ -25,6 +26,14 @@
 typedef struct {
   offs_node_t* node;
 } peer_routes_ctx_t;
+
+/* The peer-book actor lives on the network_t (created with it). NULL for
+   cache-only deployments without a network — those routes report peering as
+   unavailable, mirroring the wire handlers. */
+static peer_book_t* _peer_book_of(peer_routes_ctx_t* ctx) {
+  if (ctx->node == NULL || ctx->node->network == NULL) return NULL;
+  return ctx->node->network->peer_book;
+}
 
 /* --- Connect status codes --- */
 #define CONNECT_STATUS_OK               0
@@ -405,36 +414,21 @@ static void _peer_list_handler(http_request_t* request, http_response_t* respons
 
 /* --- POST /friends --- */
 
-static int _add_friend_peer(peer_routes_ctx_t* ctx, peer_info_t* info) {
-  authority_t* authority = ctx->node->authority;
-
-  /* Check if already a friend */
-  for (size_t index = 0; index < authority->friend_peer_count; index++) {
-    if (peer_info_equals(authority->friend_peers[index], info)) {
-      return -2;  /* Already a friend — not an error */
-    }
-  }
-
-  /* Grow array */
-  size_t new_count = authority->friend_peer_count + 1;
-  peer_info_t** new_array = realloc(authority->friend_peers,
-                                    new_count * sizeof(peer_info_t*));
-  if (new_array == NULL) return -1;  /* OOM — real error */
-
-  authority->friend_peers = new_array;
-  authority->friend_peers[authority->friend_peer_count] = info;
-  authority->friend_peer_count = new_count;
-
-  return 0;
-}
-
 static void _friend_add_handler(http_request_t* request, http_response_t* response,
                                  void* user_data) {
   peer_routes_ctx_t* ctx = (peer_routes_ctx_t*)user_data;
 
   if (_check_auth(request, response) != 0) return;
 
-  /* Decode peer_info from body */
+  peer_book_t* peer_book = _peer_book_of(ctx);
+  if (peer_book == NULL) {
+    http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_end(response);
+    return;
+  }
+
+  /* Decode peer_info from body. The peer-book actor deep-copies it into the
+     list, so this copy stays owned here for the best-effort connect below. */
   peer_info_t* info = get_clear_memory(sizeof(peer_info_t));
   if (_decode_peer_info_body(request, info) != 0) {
     free(info);
@@ -443,8 +437,9 @@ static void _friend_add_handler(http_request_t* request, http_response_t* respon
     return;
   }
 
-  /* Add to friend peers (takes ownership of info) */
-  int add_result = _add_friend_peer(ctx, info);
+  /* Add through the peer-book actor (round-trip; -1 = invalid/OOM/timeout,
+     -2 = already a friend). A timed-out add may still have been applied. */
+  int add_result = peer_book_friend_add(peer_book, info, PEER_BOOK_TIMEOUT_MS);
   if (add_result != 0) {
     if (add_result == -2) {
       /* Already a friend */
@@ -472,6 +467,9 @@ static void _friend_add_handler(http_request_t* request, http_response_t* respon
 
   /* Try to connect immediately */
   _connect_to_peer(ctx->node, info);
+
+  peer_info_destroy(info);
+  free(info);
 
   cJSON* json = cJSON_CreateObject();
   cJSON_AddStringToObject(json, "status", "added");
@@ -510,40 +508,14 @@ static void _friend_remove_handler(http_request_t* request, http_response_t* res
     return;
   }
 
-  /* Find and remove from friend_peers */
-  authority_t* authority = ctx->node->authority;
-  size_t found_index = authority->friend_peer_count;
-  for (size_t index = 0; index < authority->friend_peer_count; index++) {
-    if (node_id_equals(&authority->friend_peers[index]->node_id, &target_id)) {
-      found_index = index;
-      break;
-    }
-  }
-
-  if (found_index == authority->friend_peer_count) {
+  /* Remove through the peer-book actor: 0 = removed, -1 = not found
+     (invalid/timeout map here too). */
+  int remove_result = peer_book_friend_remove(_peer_book_of(ctx), &target_id,
+                                              PEER_BOOK_TIMEOUT_MS);
+  if (remove_result != 0) {
     http_response_set_status(response, HTTP_STATUS_NOT_FOUND);
     http_response_end(response);
     return;
-  }
-
-  peer_info_t* removed = authority->friend_peers[found_index];
-
-  /* Shift remaining entries */
-  for (size_t index = found_index; index < authority->friend_peer_count - 1; index++) {
-    authority->friend_peers[index] = authority->friend_peers[index + 1];
-  }
-  authority->friend_peer_count--;
-
-  /* Shrink array */
-  if (authority->friend_peer_count == 0) {
-    free(authority->friend_peers);
-    authority->friend_peers = NULL;
-  } else {
-    peer_info_t** new_array = realloc(authority->friend_peers,
-                                      authority->friend_peer_count * sizeof(peer_info_t*));
-    if (new_array != NULL) {
-      authority->friend_peers = new_array;
-    }
   }
 
   /* Remove from connection_manager if connected */
@@ -551,9 +523,6 @@ static void _friend_remove_handler(http_request_t* request, http_response_t* res
 
   /* Persist via the debounced dirty flag — same mechanism as the wire handlers. */
   network_mark_peer_state_dirty(ctx->node->network);
-
-  peer_info_destroy(removed);
-  free(removed);
 
   cJSON* json = cJSON_CreateObject();
   cJSON_AddStringToObject(json, "status", "removed");
@@ -574,12 +543,22 @@ static void _friend_list_handler(http_request_t* request, http_response_t* respo
 
   if (_check_auth(request, response) != 0) return;
 
-  authority_t* authority = ctx->node->authority;
   connection_manager_t* mgr = &ctx->node->network->conn_mgr;
 
+  /* Snapshot the friend list through the peer-book actor (deep-copied
+     peer_info_t entries, owned by this handler). */
+  peer_info_t** friends = NULL;
+  size_t friend_count = 0;
+  if (peer_book_snapshot_friends(_peer_book_of(ctx), &friends, &friend_count,
+                                 PEER_BOOK_TIMEOUT_MS) != 0) {
+    http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_end(response);
+    return;
+  }
+
   cJSON* arr = cJSON_CreateArray();
-  for (size_t index = 0; index < authority->friend_peer_count; index++) {
-    peer_info_t* friend_peer = authority->friend_peers[index];
+  for (size_t index = 0; index < friend_count; index++) {
+    peer_info_t* friend_peer = friends[index];
     peer_connection_t* conn = connection_manager_lookup(mgr, &friend_peer->node_id);
     bool connected = (conn != NULL && conn->connected);
     cJSON* entry = cJSON_CreateObject();
@@ -587,6 +566,7 @@ static void _friend_list_handler(http_request_t* request, http_response_t* respo
     cJSON_AddBoolToObject(entry, "connected", connected);
     cJSON_AddItemToArray(arr, entry);
   }
+  peer_book_free_peer_info_array(friends, friend_count);
 
   char* json_str = cJSON_Print(arr);
   cJSON_Delete(arr);
@@ -653,7 +633,8 @@ static void _bootstrap_add_handler(http_request_t* request, http_response_t* res
     return;
   }
 
-  int add_result = authority_bootstrap_add(ctx->node->authority, endpoint);
+  int add_result = peer_book_bootstrap_add(_peer_book_of(ctx), endpoint,
+                                           PEER_BOOK_TIMEOUT_MS);
   if (add_result != 0) {
     if (add_result == -2) {
       /* Already a bootstrap peer (config or managed list) */
@@ -726,7 +707,8 @@ static void _bootstrap_remove_handler(http_request_t* request, http_response_t* 
     return;
   }
 
-  int remove_result = authority_bootstrap_remove(ctx->node->authority, endpoint);
+  int remove_result = peer_book_bootstrap_remove(_peer_book_of(ctx), endpoint,
+                                                 PEER_BOOK_TIMEOUT_MS);
   if (remove_result == -1) {
     /* Not found in either list */
     http_response_set_status(response, HTTP_STATUS_NOT_FOUND);
@@ -784,12 +766,27 @@ static void _bootstrap_list_handler(http_request_t* request, http_response_t* re
 
   if (_check_auth(request, response) != 0) return;
 
-  authority_t* authority = ctx->node->authority;
+  /* Snapshot the bootstrap lists through the peer-book actor (owned heap
+     endpoint strings for both lists). */
+  char** config_endpoints = NULL;
+  size_t config_count = 0;
+  char** managed_endpoints = NULL;
+  size_t managed_count = 0;
+  if (peer_book_snapshot_bootstrap(_peer_book_of(ctx), &config_endpoints,
+                                   &config_count, &managed_endpoints,
+                                   &managed_count,
+                                   PEER_BOOK_TIMEOUT_MS) != 0) {
+    http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_end(response);
+    return;
+  }
 
   cJSON* json = cJSON_CreateObject();
   cJSON* config_array = cJSON_AddArrayToObject(json, "config");
   cJSON* managed_array = cJSON_AddArrayToObject(json, "managed");
   if (config_array == NULL || managed_array == NULL) {
+    peer_book_free_string_array(config_endpoints, config_count);
+    peer_book_free_string_array(managed_endpoints, managed_count);
     cJSON_Delete(json);
     http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
     http_response_end(response);
@@ -797,10 +794,10 @@ static void _bootstrap_list_handler(http_request_t* request, http_response_t* re
   }
 
   /* Config-seeded entries first, then operator-added managed entries. */
-  for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
+  for (size_t index = 0; index < config_count; index++) {
     char host[256];
     uint16_t port = 0;
-    if (endpoint_parse(authority->bootstrap_peers[index], host, sizeof(host), &port) != 0) {
+    if (endpoint_parse(config_endpoints[index], host, sizeof(host), &port) != 0) {
       continue;
     }
     cJSON* entry = cJSON_CreateObject();
@@ -809,10 +806,10 @@ static void _bootstrap_list_handler(http_request_t* request, http_response_t* re
     cJSON_AddItemToArray(config_array, entry);
   }
 
-  for (size_t index = 0; index < authority->managed_bootstrap_peer_count; index++) {
+  for (size_t index = 0; index < managed_count; index++) {
     char host[256];
     uint16_t port = 0;
-    if (endpoint_parse(authority->managed_bootstrap_peers[index], host, sizeof(host), &port) != 0) {
+    if (endpoint_parse(managed_endpoints[index], host, sizeof(host), &port) != 0) {
       continue;
     }
     cJSON* entry = cJSON_CreateObject();
@@ -820,6 +817,8 @@ static void _bootstrap_list_handler(http_request_t* request, http_response_t* re
     cJSON_AddNumberToObject(entry, "port", (double)port);
     cJSON_AddItemToArray(managed_array, entry);
   }
+  peer_book_free_string_array(config_endpoints, config_count);
+  peer_book_free_string_array(managed_endpoints, managed_count);
 
   char* json_str = cJSON_Print(json);
   cJSON_Delete(json);
