@@ -5,6 +5,7 @@
 
 #ifndef _WIN32
   #include <stdlib.h>
+  #include <stdio.h>
   #include <string.h>
   #include <unistd.h>
   #include <sys/socket.h>
@@ -110,6 +111,97 @@
       return -1;
     }
     return bind(sock->fd, (struct sockaddr*)&storage, addrlen);
+  }
+
+  platform_socket_t* platform_listen_socket_create(const char* host, uint16_t port,
+                                                   platform_address_t* out_addr) {
+    platform_address_family_e sock_family = PLATFORM_AF_INET6;
+    platform_socket_t* sock = platform_socket_create(PLATFORM_AF_INET6, 1);
+    if (sock != NULL) {
+      /* IPV6_V6ONLY=0 makes the socket dual-stack: it serves both IPv4
+       * (as v4-mapped connections) and IPv6 on the one listener. */
+      int off = 0;
+      (void)setsockopt(sock->fd, IPPROTO_IPV6, IPV6_V6ONLY,
+                       (const char*)&off, sizeof(off));
+    } else {
+      /* No IPv6 support on this host: bind a plain IPv4 listener. */
+      sock_family = PLATFORM_AF_INET;
+      sock = platform_socket_create(PLATFORM_AF_INET, 1);
+    }
+    if (sock == NULL) {
+      return NULL;
+    }
+
+    platform_address_t addr;
+    memset(&addr, 0, sizeof(addr));
+    if (platform_address_parse(&addr, host, port) != 0) {
+      /* Unparsable host (or plain hostname): bind the wildcard. */
+      memset(&addr, 0, sizeof(addr));
+      addr.family = sock_family;
+      if (sock_family == PLATFORM_AF_INET6) {
+        addr.inet6.port = port;
+      } else {
+        addr.inet.port = port;
+      }
+    }
+    if (addr.family == PLATFORM_AF_INET && sock_family == PLATFORM_AF_INET6) {
+      /* v4 host on a dual-stack socket: bind the v4-mapped address so both
+       * families are served on one socket. inet.addr already holds the
+       * address bytes in network order, so copy them straight in. The
+       * union overlap means inet.port lives inside inet6.addr[4..5], so
+       * the whole byte array must be cleared first. */
+      uint8_t v4_bytes[4];
+      memcpy(v4_bytes, &addr.inet.addr, sizeof(v4_bytes));
+      memset(addr.inet6.addr, 0, sizeof(addr.inet6.addr));
+      addr.inet6.addr[10] = 0xFF;
+      addr.inet6.addr[11] = 0xFF;
+      memcpy(&addr.inet6.addr[12], v4_bytes, sizeof(v4_bytes));
+      addr.inet6.port = port;
+      addr.family = PLATFORM_AF_INET6;
+    }
+    if (addr.family != sock_family) {
+      fprintf(stderr, "listen_socket: host '%s' requires an unsupported family\n",
+              host);
+      platform_socket_destroy(sock);
+      return NULL;
+    }
+    if (platform_socket_bind(sock, &addr) < 0) {
+      if (sock_family == PLATFORM_AF_INET6) {
+        /* Host without IPv6 (or v6 bind refused): fall back to an IPv4
+         * bind, once, with a warning. */
+        fprintf(stderr, "listen_socket: IPv6 bind failed for %s:%u, "
+                        "falling back to IPv4\n", host, (unsigned)port);
+        platform_socket_destroy(sock);
+        sock_family = PLATFORM_AF_INET;
+        sock = platform_socket_create(PLATFORM_AF_INET, 1);
+        if (sock == NULL) {
+          return NULL;
+        }
+        memset(&addr, 0, sizeof(addr));
+        addr.family = PLATFORM_AF_INET;
+        addr.inet.port = port;
+        if (platform_address_parse(&addr, host, port) != 0) {
+          addr.inet.addr = 0;
+          addr.inet.port = port;
+        }
+        if (addr.family != PLATFORM_AF_INET ||
+            platform_socket_bind(sock, &addr) < 0) {
+          fprintf(stderr, "listen_socket: IPv4 fallback bind failed for %s:%u\n",
+                  host, (unsigned)port);
+          platform_socket_destroy(sock);
+          return NULL;
+        }
+      } else {
+        fprintf(stderr, "listen_socket: bind failed for %s:%u\n",
+                host, (unsigned)port);
+        platform_socket_destroy(sock);
+        return NULL;
+      }
+    }
+    if (out_addr != NULL) {
+      *out_addr = addr;
+    }
+    return sock;
   }
 
   int platform_socket_listen(platform_socket_t* sock, int backlog) {
@@ -229,6 +321,7 @@
   #include <ws2tcpip.h>
   #include <afunix.h>
   #include <stdlib.h>
+  #include <stdio.h>
   #include <string.h>
   #include <errno.h>
 
@@ -362,6 +455,97 @@
       return -1;
     }
     return bind(sock->fd, (struct sockaddr*)&storage, addrlen) == 0 ? 0 : -1;
+  }
+
+  platform_socket_t* platform_listen_socket_create(const char* host, uint16_t port,
+                                                   platform_address_t* out_addr) {
+    platform_address_family_e sock_family = PLATFORM_AF_INET6;
+    platform_socket_t* sock = platform_socket_create(PLATFORM_AF_INET6, 1);
+    if (sock != NULL) {
+      /* IPV6_V6ONLY=0 makes the socket dual-stack: it serves both IPv4
+       * (as v4-mapped connections) and IPv6 on the one listener. */
+      DWORD off = 0;
+      (void)setsockopt(sock->fd, IPPROTO_IPV6, IPV6_V6ONLY,
+                       (const char*)&off, sizeof(off));
+    } else {
+      /* No IPv6 support on this host: bind a plain IPv4 listener. */
+      sock_family = PLATFORM_AF_INET;
+      sock = platform_socket_create(PLATFORM_AF_INET, 1);
+    }
+    if (sock == NULL) {
+      return NULL;
+    }
+
+    platform_address_t addr;
+    memset(&addr, 0, sizeof(addr));
+    if (platform_address_parse(&addr, host, port) != 0) {
+      /* Unparsable host (or plain hostname): bind the wildcard. */
+      memset(&addr, 0, sizeof(addr));
+      addr.family = sock_family;
+      if (sock_family == PLATFORM_AF_INET6) {
+        addr.inet6.port = port;
+      } else {
+        addr.inet.port = port;
+      }
+    }
+    if (addr.family == PLATFORM_AF_INET && sock_family == PLATFORM_AF_INET6) {
+      /* v4 host on a dual-stack socket: bind the v4-mapped address so both
+       * families are served on one socket. inet.addr already holds the
+       * address bytes in network order, so copy them straight in. The
+       * union overlap means inet.port lives inside inet6.addr[4..5], so
+       * the whole byte array must be cleared first. */
+      uint8_t v4_bytes[4];
+      memcpy(v4_bytes, &addr.inet.addr, sizeof(v4_bytes));
+      memset(addr.inet6.addr, 0, sizeof(addr.inet6.addr));
+      addr.inet6.addr[10] = 0xFF;
+      addr.inet6.addr[11] = 0xFF;
+      memcpy(&addr.inet6.addr[12], v4_bytes, sizeof(v4_bytes));
+      addr.inet6.port = port;
+      addr.family = PLATFORM_AF_INET6;
+    }
+    if (addr.family != sock_family) {
+      fprintf(stderr, "listen_socket: host '%s' requires an unsupported family\n",
+              host);
+      platform_socket_destroy(sock);
+      return NULL;
+    }
+    if (platform_socket_bind(sock, &addr) < 0) {
+      if (sock_family == PLATFORM_AF_INET6) {
+        /* Host without IPv6 (or v6 bind refused): fall back to an IPv4
+         * bind, once, with a warning. */
+        fprintf(stderr, "listen_socket: IPv6 bind failed for %s:%u, "
+                        "falling back to IPv4\n", host, (unsigned)port);
+        platform_socket_destroy(sock);
+        sock_family = PLATFORM_AF_INET;
+        sock = platform_socket_create(PLATFORM_AF_INET, 1);
+        if (sock == NULL) {
+          return NULL;
+        }
+        memset(&addr, 0, sizeof(addr));
+        addr.family = PLATFORM_AF_INET;
+        addr.inet.port = port;
+        if (platform_address_parse(&addr, host, port) != 0) {
+          addr.inet.addr = 0;
+          addr.inet.port = port;
+        }
+        if (addr.family != PLATFORM_AF_INET ||
+            platform_socket_bind(sock, &addr) < 0) {
+          fprintf(stderr, "listen_socket: IPv4 fallback bind failed for %s:%u\n",
+                  host, (unsigned)port);
+          platform_socket_destroy(sock);
+          return NULL;
+        }
+      } else {
+        fprintf(stderr, "listen_socket: bind failed for %s:%u\n",
+                host, (unsigned)port);
+        platform_socket_destroy(sock);
+        return NULL;
+      }
+    }
+    if (out_addr != NULL) {
+      *out_addr = addr;
+    }
+    return sock;
   }
 
   int platform_socket_listen(platform_socket_t* sock, int backlog) {

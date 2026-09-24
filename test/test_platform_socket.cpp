@@ -290,6 +290,47 @@ TEST(TestPlatformLocal, Shutdown) {
 }
 
 /* ================================================================
+ * platform_listen_socket_create (dual-stack listener helper)
+ * ================================================================ */
+
+TEST(TestPlatformListenSocket, BindsWildcardV4) {
+  platform_address_t addr;
+  platform_socket_t* sock = platform_listen_socket_create("0.0.0.0", 24810, &addr);
+  ASSERT_NE(sock, (platform_socket_t*)NULL);
+  /* On an IPv6-capable host the socket is dual-stack, so the v4 wildcard
+   * binds as the v4-mapped INET6 wildcard (::ffff:0.0.0.0) and still serves
+   * both families. On a v4-only host it stays AF_INET. */
+  EXPECT_TRUE(addr.family == PLATFORM_AF_INET6 || addr.family == PLATFORM_AF_INET);
+  platform_socket_destroy(sock);
+}
+
+TEST(TestPlatformListenSocket, BindsV6Loopback) {
+  platform_address_t addr;
+  platform_socket_t* sock = platform_listen_socket_create("::1", 24811, &addr);
+  ASSERT_NE(sock, (platform_socket_t*)NULL);
+  EXPECT_EQ(addr.family, PLATFORM_AF_INET6);
+  platform_socket_destroy(sock);
+}
+
+TEST(TestPlatformListenSocket, BindsDualStackWildcard) {
+  platform_address_t addr;
+  platform_socket_t* sock = platform_listen_socket_create("::", 24812, &addr);
+  ASSERT_NE(sock, (platform_socket_t*)NULL);
+  EXPECT_EQ(addr.family, PLATFORM_AF_INET6);
+  platform_socket_destroy(sock);
+}
+
+TEST(TestPlatformListenSocket, MapsV4HostOnDualStackSocket) {
+  platform_address_t addr;
+  platform_socket_t* sock = platform_listen_socket_create("127.0.0.1", 24813, &addr);
+  ASSERT_NE(sock, (platform_socket_t*)NULL);
+  /* On an IPv6-capable host the socket is dual-stack, so a v4 host binds as
+   * a v4-mapped INET6 address. On a v4-only host it stays AF_INET. */
+  EXPECT_TRUE(addr.family == PLATFORM_AF_INET6 || addr.family == PLATFORM_AF_INET);
+  platform_socket_destroy(sock);
+}
+
+/* ================================================================
  * platform_socket TCP loopback test
  * ================================================================ */
 
