@@ -33,6 +33,7 @@ if (BUILD_TESTING)
     message(STATUS "${C_INC}")
     add_executable(testliboffs test_main.cpp
             test_buffer.cpp
+            test_endpoint.cpp
             test_refcounter.cpp
             test_block.cpp
             test_qr.cpp
