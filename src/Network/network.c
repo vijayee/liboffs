@@ -5,6 +5,7 @@
 #include "network.h"
 #include "peer_info.h"
 #include "connection_manager.h"
+#include "endpoint.h"
 #include "wire.h"
 #include "peer_verify.h"
 #include "quic_listener.h"
@@ -31,6 +32,7 @@
 #include "../BlockCache/index.h"
 #include "../Buffer/buffer.h"
 #include "../Metrics/metrics.h"
+#include "../Platform/platform_time.h"
 #include "../RefCounter/refcounter.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
@@ -136,6 +138,9 @@ static void network_handle_relay_punch(network_t* network,
                                        const wire_relay_punch_t* punch);
 /* Forward declaration for the direct-upgrade tick helper. Defined later. */
 static void network_attempt_direct_upgrades(network_t* network);
+/* Forward declaration for the bootstrap connect helper (startup + partition
+   heal). Defined later, near network_start_connections. */
+static void network_connect_bootstrap_lists(network_t* network);
 
 // Forward declarations for the static relay-challenge table helpers (defined
 // below; the test-only wrappers at the top of the file call them).
@@ -326,6 +331,11 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   network->metrics_push_timer_id = 0;
   network->ping_capacity_timer_id = 0;
   network->friend_reconnect_timer_id = 0;
+  /* Partition heal state: backoff starts disarmed (first tick attempts
+     immediately); network_create already zeroes these via get_clear_memory,
+     set explicitly for clarity alongside the other timer state. */
+  network->bootstrap_next_attempt_ms = 0;
+  network->bootstrap_backoff_ms = 0;
   network->request_timer_id = 0;
   network->request_timeout_ms = 30000;  /* 30s default per-pending-request timeout */
   /* Seed the monotonic message ID counter from the wall clock so the first
@@ -919,6 +929,10 @@ static void network_handle_salutation(network_t* network, message_t* msg,
       &network->conn_mgr, &salut->sender_id, &pending->peer_addr, network->pool);
 
   if (peer != NULL) {
+    /* Successful peer connection: reset the partition-heal backoff so the
+       next disconnect-driven partition reconnects immediately. */
+    network->bootstrap_backoff_ms = 0;
+    network->bootstrap_next_attempt_ms = 0;
 #ifdef HAS_MSQUIC
     peer->quic_connection = quic_connection;
     peer->quic_stream = pending->quic_stream;
@@ -4419,19 +4433,48 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
 // --- Friend reconnect tick handler ---
 static void network_handle_friend_reconnect_tick(network_t* network, message_t* msg) {
   (void)msg;
-  if (network->authority == NULL || network->authority->friend_peers == NULL) return;
+  if (network->authority == NULL) return;
 
-  for (size_t index = 0; index < network->authority->friend_peer_count; index++) {
-    peer_info_t* friend_info = network->authority->friend_peers[index];
-    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &friend_info->node_id);
-    if (peer != NULL && peer->connected) continue;  // Already connected
+  /* Partition heal: if nothing is connected, re-enter the network via the
+     bootstrap lists. Exponential backoff (1s doubling, 60s cap) so a dead
+     bootstrap peer cannot cause a hot connect loop. Backoff resets on any
+     successful peer connection (see the salutation handler). */
+  size_t connected_count = 0;
+  for (size_t index = 0; index < network->conn_mgr.peer_count; index++) {
+    peer_connection_t* peer = network->conn_mgr.peers[index];
+    if (peer != NULL && peer->connected) connected_count++;
+  }
+  if (connected_count == 0 &&
+      (network->authority->bootstrap_peer_count > 0 ||
+       network->authority->managed_bootstrap_peer_count > 0)) {
+    uint64_t now_ms = platform_monotonic_ns() / 1000000u;
+    if (now_ms >= network->bootstrap_next_attempt_ms) {
+      network_connect_bootstrap_lists(network);
+      network->bootstrap_backoff_ms =
+          network->bootstrap_backoff_ms == 0 ? 1000u
+                                             : network->bootstrap_backoff_ms * 2u;
+      if (network->bootstrap_backoff_ms > 60000u) {
+        network->bootstrap_backoff_ms = 60000u;
+      }
+      network->bootstrap_next_attempt_ms = now_ms + network->bootstrap_backoff_ms;
+    }
+  }
 
-    // Try candidates in priority order (HOST -> SRFLX -> DIRECT -> RELAY).
-    // The helper admits the peer to conn_mgr (with friend pinning) and
-    // sets relay_endpoint_id for RELAY candidates. See audit #18.
-    (void)network_connect_peer_candidates(network, &friend_info->node_id,
-                                          friend_info->addresses,
-                                          friend_info->address_count, true);
+  // Reconnect to friend peers (guarded: the node may have no friends at all,
+  // in which case only the bootstrap heal above runs on this tick).
+  if (network->authority->friend_peers != NULL) {
+    for (size_t index = 0; index < network->authority->friend_peer_count; index++) {
+      peer_info_t* friend_info = network->authority->friend_peers[index];
+      peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &friend_info->node_id);
+      if (peer != NULL && peer->connected) continue;  // Already connected
+
+      // Try candidates in priority order (HOST -> SRFLX -> DIRECT -> RELAY).
+      // The helper admits the peer to conn_mgr (with friend pinning) and
+      // sets relay_endpoint_id for RELAY candidates. See audit #18.
+      (void)network_connect_peer_candidates(network, &friend_info->node_id,
+                                            friend_info->addresses,
+                                            friend_info->address_count, true);
+    }
   }
 
   /* Also attempt direct upgrades for any peer (friend or not) currently in
@@ -4495,23 +4538,52 @@ static void network_attempt_direct_upgrades(network_t* network) {
 }
 
 // --- Start connections to bootstrap and friend peers ---
+
+/* Attempt a fire-and-forget QUIC connect to every bootstrap peer, covering
+   both lists: the config-seeded bootstrap_peers and the operator-managed
+   (persisted) managed_bootstrap_peers. Malformed endpoints are skipped with
+   an error log; connect failures stay silent (QUIC async fire-and-forget).
+   Shared by startup and the partition-heal branch of the reconnect tick. */
+static void network_connect_bootstrap_lists(network_t* network) {
+  authority_t* authority = network->authority;
+  if (authority == NULL) return;
+
+  if (authority->bootstrap_peers != NULL) {
+    for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
+      char host[256];
+      uint16_t port = 0;
+      if (endpoint_parse(authority->bootstrap_peers[index], host, sizeof(host),
+                         &port) == 0) {
+        network_connect_peer(network, host, port);
+      } else {
+        log_error("network_connect_bootstrap_lists: invalid config bootstrap "
+                  "endpoint: %s",
+                  authority->bootstrap_peers[index]);
+      }
+    }
+  }
+  if (authority->managed_bootstrap_peers != NULL) {
+    for (size_t index = 0; index < authority->managed_bootstrap_peer_count;
+         index++) {
+      char host[256];
+      uint16_t port = 0;
+      if (endpoint_parse(authority->managed_bootstrap_peers[index], host,
+                         sizeof(host), &port) == 0) {
+        network_connect_peer(network, host, port);
+      } else {
+        log_error("network_connect_bootstrap_lists: invalid managed bootstrap "
+                  "endpoint: %s",
+                  authority->managed_bootstrap_peers[index]);
+      }
+    }
+  }
+}
+
 void network_start_connections(network_t* network) {
   if (network == NULL) return;
 
   // Connect to bootstrap peers (fire-and-forget)
-  if (network->authority != NULL && network->authority->bootstrap_peers != NULL) {
-    for (size_t index = 0; index < network->authority->bootstrap_peer_count; index++) {
-      char* peer_str = network->authority->bootstrap_peers[index];
-      // Parse host:port from string
-      char* colon = strchr(peer_str, ':');
-      if (colon != NULL) {
-        *colon = '\0';
-        uint16_t port = (uint16_t)atoi(colon + 1);
-        network_connect_peer(network, peer_str, port);
-        *colon = ':';
-      }
-    }
-  }
+  network_connect_bootstrap_lists(network);
 
   // Connect to friend peers
   if (network->authority != NULL && network->authority->friend_peers != NULL) {

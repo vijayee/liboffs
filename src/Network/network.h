@@ -138,6 +138,11 @@ typedef struct network_t {
   // Friend peer reconnect state
   ATOMIC(uint64_t) friend_reconnect_timer_id;
 
+  /* Partition heal: reconnect to bootstrap peers when the node has zero
+     connected peers. Exponential backoff in ms (1s doubling to 60s cap). */
+  uint64_t bootstrap_next_attempt_ms;
+  uint32_t bootstrap_backoff_ms;
+
   ATOMIC(uint64_t) next_message_id;  /* monotonic per-node counter; avoids the
                                          time(NULL)*1000 second-granularity
                                          collisions that cross-delivered
