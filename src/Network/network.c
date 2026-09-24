@@ -1515,6 +1515,11 @@ static void network_handle_relay_punch(network_t* network,
   if (peer == NULL) {
     peer = connection_manager_add(&network->conn_mgr, &punch->sender_id,
                                    NULL, network->pool);
+    if (peer != NULL) {
+      /* Peer reached us over the relay — partition is over. */
+      network->bootstrap_backoff_ms = 0;
+      network->bootstrap_next_attempt_ms = 0;
+    }
   }
   if (peer == NULL) {
     log_error("network: PUNCH — failed to admit peer for direct attempt");
@@ -5486,6 +5491,11 @@ void network_dispatch(void* state, message_t* msg) {
           peer_connection_t* existing = connection_manager_lookup(&network->conn_mgr, &sender_id);
           if (existing == NULL) {
             existing = connection_manager_add(&network->conn_mgr, &sender_id, NULL, network->pool);
+            if (existing != NULL) {
+              /* Peer reached us over the relay — partition is over. */
+              network->bootstrap_backoff_ms = 0;
+              network->bootstrap_next_attempt_ms = 0;
+            }
             // Relay-admitted peers are relay_verified=false (identity NOT
             // confirmed): the relayed message carries only the sender_id
             // hash, not the public_key preimage, so the BLAKE3 salutation

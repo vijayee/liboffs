@@ -375,13 +375,15 @@ typedef struct {
 // --- Bootstrap Add ---
 // [type, endpoint: string]  e.g. "10.0.0.1:8080" or "[2001:db8::1]:8080"
 typedef struct {
-  char* endpoint;  // caller frees via client_api_bootstrap_add_destroy
+  char* endpoint;  // decode side frees via client_api_bootstrap_add_destroy;
+                   // encode-path callers pass borrowed strings
 } client_api_bootstrap_add_t;
 
 // --- Bootstrap Remove ---
 // [type, endpoint: string]
 typedef struct {
-  char* endpoint;
+  char* endpoint;  // decode side frees via client_api_bootstrap_remove_destroy;
+                   // encode-path callers pass borrowed strings
 } client_api_bootstrap_remove_t;
 
 // --- Bootstrap List Request ---
@@ -394,7 +396,9 @@ typedef struct {
 #define CLIENT_API_BOOTSTRAP_SOURCE_MANAGED 1
 
 typedef struct {
-  cbor_item_t* entries;  // owned by struct, freed by _destroy
+  cbor_item_t* entries;  // owned by struct, freed by _destroy (decode side
+                         // holds a fresh reference; the daemon encode path
+                         // sets its own entries and destroys after encoding)
 } client_api_bootstrap_list_response_t;
 
 // --- Representation op request (mark permanent / delete ephemeral / pin / unpin) ---

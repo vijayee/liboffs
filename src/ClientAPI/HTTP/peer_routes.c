@@ -467,8 +467,8 @@ static void _friend_add_handler(http_request_t* request, http_response_t* respon
     return;
   }
 
-  /* Persist the updated peer list to disk */
-  authority_save_peers(ctx->node->authority, ctx->node->network);
+  /* Persist via the debounced dirty flag — same mechanism as the wire handlers. */
+  network_mark_peer_state_dirty(ctx->node->network);
 
   /* Try to connect immediately */
   _connect_to_peer(ctx->node, info);
@@ -549,8 +549,8 @@ static void _friend_remove_handler(http_request_t* request, http_response_t* res
   /* Remove from connection_manager if connected */
   connection_manager_remove(&ctx->node->network->conn_mgr, &target_id);
 
-  /* Persist the updated peer list to disk */
-  authority_save_peers(ctx->node->authority, ctx->node->network);
+  /* Persist via the debounced dirty flag — same mechanism as the wire handlers. */
+  network_mark_peer_state_dirty(ctx->node->network);
 
   peer_info_destroy(removed);
   free(removed);

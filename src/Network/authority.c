@@ -240,9 +240,7 @@ int authority_bootstrap_remove(authority_t* authority, const char* endpoint) {
 int authority_set_bootstrap_peers(authority_t* authority, const char* csv) {
   if (authority == NULL) return -1;
   if (csv == NULL || csv[0] == '\0') {
-    /* Empty seed clears the list. Parse into temporaries below and swap only
-       on full success so an invalid mid-CSV token can never leave a partial
-       (shrunken) resilience-critical bootstrap list. */
+    /* Empty seed clears the list unconditionally. */
     for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
       free(authority->bootstrap_peers[index]);
     }
@@ -267,6 +265,20 @@ int authority_set_bootstrap_peers(authority_t* authority, const char* csv) {
       free(copy);
       goto fail;
     }
+    /* Skip tokens whose parsed host:port duplicates an earlier token in the
+       same CSV (same comparison rule as authority_bootstrap_contains, but
+       over the temporaries being built here). */
+    bool duplicate = false;
+    for (size_t prior = 0; prior < parsed_count && !duplicate; prior++) {
+      char prior_host[256];
+      uint16_t prior_port = 0;
+      if (endpoint_parse(parsed[prior], prior_host, sizeof(prior_host),
+                         &prior_port) == 0 &&
+          strcmp(prior_host, host) == 0 && prior_port == port) {
+        duplicate = true;
+      }
+    }
+    if (duplicate) continue;
     char* stored = authority_bootstrap_encode(host, port);
     if (stored == NULL) {
       free(copy);
