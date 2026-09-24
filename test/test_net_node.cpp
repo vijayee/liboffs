@@ -33,7 +33,7 @@ TEST(TestNetNodeAddr, SetPlatformAddrV4MappedCollapsesToV4) {
   addr.inet6.addr[15] = 2;
   net_node_set_platform_addr(node, &addr);
   EXPECT_EQ(node->addr_family, PLATFORM_AF_INET);
-  EXPECT_NE(node->addr, 0);
+  EXPECT_EQ(node->addr, 0xC0000002u);  /* 192.0.0.2 host byte order */
   net_node_destroy(node);
 }
 
@@ -103,8 +103,7 @@ TEST(TestNetNodeAddr, SetRendvPlatformV4MappedCollapses) {
   addr.inet6.addr[15] = 2;
   net_node_set_rendv_platform(node, &addr);
   EXPECT_EQ(node->rendv_family, PLATFORM_AF_INET);
-  EXPECT_NE(node->rendv_addr, 0);
-  EXPECT_EQ(node->rendv_addr, 0x020000C0u);  /* 192.0.0.2, byte-swapped per node->addr convention */
+  EXPECT_EQ(node->rendv_addr, 0xC0000002u);  /* 192.0.0.2, host byte order */
   net_node_destroy(node);
 }
 
@@ -124,5 +123,21 @@ TEST(TestNetNodeAddr, AddrlessNodeStringFails) {
   net_node_t* node = net_node_create_unidentified(0, 0);
   char buf[64];
   EXPECT_NE(net_node_addr_string(node, false, buf, sizeof(buf)), 0);
+  net_node_destroy(node);
+}
+
+TEST(TestNetNodeAddr, V4MappedRoundTripsToCorrectString) {
+  net_node_t* node = net_node_create_unidentified(0, 0);
+  platform_address_t in;
+  memset(&in, 0, sizeof(in));
+  in.family = PLATFORM_AF_INET6;
+  in.inet6.addr[10] = 0xFF;
+  in.inet6.addr[11] = 0xFF;
+  in.inet6.addr[12] = 192;
+  in.inet6.addr[15] = 2;
+  net_node_set_platform_addr(node, &in);
+  char buf[64];
+  EXPECT_EQ(net_node_addr_string(node, false, buf, sizeof(buf)), 0);
+  EXPECT_STREQ(buf, "192.0.0.2");
   net_node_destroy(node);
 }

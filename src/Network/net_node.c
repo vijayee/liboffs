@@ -50,15 +50,14 @@ void net_node_set_platform_addr(net_node_t* node, const platform_address_t* addr
       break;
     case PLATFORM_AF_INET6:
       if (memcmp(addr->inet6.addr, _v4_mapped_prefix, 12) == 0) {
-        /* v4-mapped collapses to the u32 fast-path. */
-        platform_address_t v4;
-        memset(&v4, 0, sizeof(v4));
-        v4.family = PLATFORM_AF_INET;
-        v4.inet.addr = ((uint32_t)addr->inet6.addr[12] << 24) |
-                       ((uint32_t)addr->inet6.addr[13] << 16) |
-                       ((uint32_t)addr->inet6.addr[14] << 8) |
-                       (uint32_t)addr->inet6.addr[15];
-        net_node_set_platform_addr(node, &v4);
+        /* v4-mapped collapses to the u32 fast-path. The legacy u32 is host
+           byte order, so the octets pack big-endian directly. */
+        node->addr_family = PLATFORM_AF_INET;
+        node->addr = ((uint32_t)addr->inet6.addr[12] << 24) |
+                     ((uint32_t)addr->inet6.addr[13] << 16) |
+                     ((uint32_t)addr->inet6.addr[14] << 8) |
+                     (uint32_t)addr->inet6.addr[15];
+        memset(node->addr6, 0, sizeof(node->addr6));
       } else {
         node->addr_family = PLATFORM_AF_INET6;
         node->addr = 0;
@@ -100,15 +99,12 @@ void net_node_set_rendv_platform(net_node_t* node, const platform_address_t* add
       break;
     case PLATFORM_AF_INET6:
       if (memcmp(addr->inet6.addr, _v4_mapped_prefix, 12) == 0) {
-        /* v4-mapped collapses to the u32 fast-path. */
-        platform_address_t v4;
-        memset(&v4, 0, sizeof(v4));
-        v4.family = PLATFORM_AF_INET;
-        v4.inet.addr = ((uint32_t)addr->inet6.addr[12] << 24) |
-                       ((uint32_t)addr->inet6.addr[13] << 16) |
-                       ((uint32_t)addr->inet6.addr[14] << 8) |
-                       (uint32_t)addr->inet6.addr[15];
-        net_node_set_rendv_platform(node, &v4);
+        node->rendv_family = PLATFORM_AF_INET;
+        node->rendv_addr = ((uint32_t)addr->inet6.addr[12] << 24) |
+                           ((uint32_t)addr->inet6.addr[13] << 16) |
+                           ((uint32_t)addr->inet6.addr[14] << 8) |
+                           (uint32_t)addr->inet6.addr[15];
+        memset(node->rendv6, 0, sizeof(node->rendv6));
       } else {
         node->rendv_family = PLATFORM_AF_INET6;
         memcpy(node->rendv6, addr->inet6.addr, 16);
