@@ -172,7 +172,10 @@ static void _relay_handle_addr_request(
     reflexive_port = ntohs(remote_addr.Ipv6.sin6_port);
     /* A v4-mapped peer address reports as v4. */
     if (IN6_IS_ADDR_V4MAPPED(&remote_addr.Ipv6.sin6_addr)) {
-      reflexive_addr = ntohl(*(const uint32_t*)&remote_addr.Ipv6.sin6_addr.s6_addr[12]);
+      reflexive_addr = (uint32_t)remote_addr.Ipv6.sin6_addr.s6_addr[12] << 24 |
+                       ((uint32_t)remote_addr.Ipv6.sin6_addr.s6_addr[13] << 16) |
+                       ((uint32_t)remote_addr.Ipv6.sin6_addr.s6_addr[14] << 8) |
+                       (uint32_t)remote_addr.Ipv6.sin6_addr.s6_addr[15];
     } else {
       wire_addr_set_v6(&reflexive6, remote_addr.Ipv6.sin6_addr.s6_addr);
     }

@@ -2047,6 +2047,7 @@ static void network_handle_gossip_tick(network_t* network, message_t* msg) {
         network->relay->reflexive6.family == WIRE_ADDR_FAMILY_V6 &&
         network->quic_listener != NULL && network->quic_listener->listen_port > 0) {
       gossip.rendv6 = network->relay->reflexive6;
+      gossip.rendezvous_port = network->quic_listener->listen_port;
     }
 
     // Fill targets: 1 random node per ring, excluding the target itself
@@ -2128,6 +2129,7 @@ static void network_handle_gossip_received(network_t* network, message_t* msg) {
         network->relay->reflexive6.family == WIRE_ADDR_FAMILY_V6 &&
         network->quic_listener != NULL && network->quic_listener->listen_port > 0) {
       pull.rendv6 = network->relay->reflexive6;
+      pull.rendezvous_port = network->quic_listener->listen_port;
     }
 
     net_node_t ring_targets[RING_MAX_RINGS];

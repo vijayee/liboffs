@@ -129,7 +129,9 @@ static void _relay_client_process_message(
         client->local_endpoint_id = response.endpoint_id;
         client->reflexive_addr = response.reflexive_addr;
         client->reflexive_port = response.reflexive_port;
-        client->reflexive6 = response.reflexive6;  /* family NONE ⇒ v4-only */
+        /* Decoder always fills the field: v4 fallback for old-format
+           senders, so the family is V4 or V6 after decode. */
+        client->reflexive6 = response.reflexive6;
         log_info("relay_client: received ADDR_RESPONSE, endpoint_id=%u, addr=%u:%u, v6_family=%u",
                  response.endpoint_id, response.reflexive_addr, response.reflexive_port,
                  response.reflexive6.family);
