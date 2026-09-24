@@ -675,7 +675,7 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
 
   // Start connection to relay server
   QUIC_ADDR server_addr;
-  QuicAddrSetFamily(&server_addr, QUIC_ADDRESS_FAMILY_INET);
+  QuicAddrSetFamily(&server_addr, QUIC_ADDRESS_FAMILY_UNSPEC);
   if (host != NULL) {
     QuicAddrFromString(host, port, &server_addr);
   } else {
@@ -685,7 +685,7 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
   if (QUIC_FAILED(status = client->msquic->ConnectionStart(
           client->connection,
           client->configuration,
-          QUIC_ADDRESS_FAMILY_INET,
+          QUIC_ADDRESS_FAMILY_UNSPEC,
           host != NULL ? host : "127.0.0.1",
           port))) {
     log_error("relay_client: ConnectionStart failed: 0x%x", status);
@@ -703,10 +703,18 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
   // Store relay address
   memset(&client->relay_addr, 0, sizeof(client->relay_addr));
   if (host != NULL) {
-    struct sockaddr_in* addr_in = (struct sockaddr_in*)&client->relay_addr;
-    addr_in->sin_family = AF_INET;
-    inet_pton(AF_INET, host, &addr_in->sin_addr);
-    addr_in->sin_port = htons(port);
+    struct in6_addr in6;
+    if (inet_pton(AF_INET6, host, &in6) == 1) {
+      struct sockaddr_in6* addr6 = (struct sockaddr_in6*)&client->relay_addr;
+      addr6->sin6_family = AF_INET6;
+      memcpy(&addr6->sin6_addr, &in6, sizeof(in6));
+      addr6->sin6_port = htons(port);
+    } else {
+      struct sockaddr_in* addr_in = (struct sockaddr_in*)&client->relay_addr;
+      addr_in->sin_family = AF_INET;
+      inet_pton(AF_INET, host, &addr_in->sin_addr);
+      addr_in->sin_port = htons(port);
+    }
   }
 
   // Start I/O thread

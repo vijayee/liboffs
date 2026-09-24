@@ -1069,7 +1069,7 @@ static void* _wt_h3_server_thread(void* arg) {
   }
 
   QUIC_ADDR addr = {0};
-  QuicAddrSetFamily(&addr, QUIC_ADDRESS_FAMILY_INET);
+  QuicAddrSetFamily(&addr, QUIC_ADDRESS_FAMILY_UNSPEC);
   QuicAddrSetPort(&addr, transport->port);
 
   status = transport->msquic->ListenerStart(transport->listener, &alpn, 1, &addr);

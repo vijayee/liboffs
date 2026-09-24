@@ -906,7 +906,7 @@ int quic_listener_connect(quic_listener_t* listener, const char* host, uint16_t 
   status = listener->msquic->ConnectionStart(
       connection,
       listener->configuration,
-      QUIC_ADDRESS_FAMILY_INET,
+      QUIC_ADDRESS_FAMILY_UNSPEC,
       host != NULL ? host : "127.0.0.1",
       port);
   if (QUIC_FAILED(status)) {
