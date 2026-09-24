@@ -438,3 +438,156 @@ TEST(TestWireValidation, RelayPunchRejectsTooShortArray) {
   wire_relay_punch_destroy(decoded);
   cbor_decref(&cbor);
 }
+
+/* --- trailing v6-aware address element (TestWireAddrField) --- */
+
+TEST(TestWireAddrField, PunchRoundTripV6) {
+  wire_relay_punch_t punch;
+  memset(&punch, 0, sizeof(punch));
+  punch.reflexive_addr = 0x01020304;
+  punch.reflexive_port = 23401;
+  uint8_t v6[16];
+  memset(v6, 0x20, sizeof(v6));
+  wire_addr_set_v6(&punch.reflexive6, v6);
+  cbor_item_t* cbor = wire_relay_punch_encode(&punch);
+  ASSERT_NE(cbor, nullptr);
+  EXPECT_EQ(cbor_array_size(cbor), (size_t)5);
+  wire_relay_punch_t* decoded =
+      (wire_relay_punch_t*)get_clear_memory(sizeof(wire_relay_punch_t));
+  EXPECT_EQ(wire_relay_punch_decode(cbor, decoded), 0);
+  EXPECT_EQ(decoded->reflexive6.family, WIRE_ADDR_FAMILY_V6);
+  EXPECT_EQ(memcmp(decoded->reflexive6.bytes, v6, 16), 0);
+  wire_relay_punch_destroy(decoded);
+  cbor_decref(&cbor);
+}
+
+TEST(TestWireAddrField, PunchV4OnlyHasNoTrailingField) {
+  wire_relay_punch_t punch;
+  memset(&punch, 0, sizeof(punch));
+  punch.reflexive_addr = 0x01020304;
+  punch.reflexive_port = 23401;
+  cbor_item_t* cbor = wire_relay_punch_encode(&punch);
+  ASSERT_NE(cbor, nullptr);
+  /* v4-only messages stay byte-compatible with the old format: exactly the
+     legacy element count, no trailing address element. */
+  EXPECT_EQ(cbor_array_size(cbor), (size_t)4);
+  wire_relay_punch_t* decoded =
+      (wire_relay_punch_t*)get_clear_memory(sizeof(wire_relay_punch_t));
+  EXPECT_EQ(wire_relay_punch_decode(cbor, decoded), 0);
+  EXPECT_EQ(decoded->reflexive6.family, WIRE_ADDR_FAMILY_V4);
+  EXPECT_EQ(decoded->reflexive6.bytes[15], 4);
+  wire_relay_punch_destroy(decoded);
+  cbor_decref(&cbor);
+}
+
+TEST(TestWireAddrField, OldFormatPunchDecodesWithV4Fallback) {
+  /* Hand-build the legacy 4-element array (no trailing address). The
+     node_id element is [hash_bytestring(32), str_bytestring]. */
+  cbor_item_t* array = cbor_new_definite_array(4);
+  cbor_item_t* item = cbor_build_uint8(WIRE_RELAY_PUNCH);
+  cbor_array_push(array, item); cbor_decref(&item);
+  item = _build_node_id_array();
+  cbor_array_push(array, item); cbor_decref(&item);
+  item = cbor_build_uint32(0x0A000001);
+  cbor_array_push(array, item); cbor_decref(&item);
+  item = cbor_build_uint16(23401);
+  cbor_array_push(array, item); cbor_decref(&item);
+  wire_relay_punch_t punch;
+  memset(&punch, 0, sizeof(punch));
+  EXPECT_EQ(wire_relay_punch_decode(array, &punch), 0);
+  EXPECT_EQ(punch.reflexive6.family, WIRE_ADDR_FAMILY_V4);
+  EXPECT_EQ(punch.reflexive6.bytes[15], 1);
+  cbor_decref(&array);
+}
+
+TEST(TestWireAddrField, GossipRoundTripV6Rendezvous) {
+  wire_gossip_t gossip;
+  memset(&gossip, 0, sizeof(gossip));
+  gossip.message_id = 42;
+  gossip.target_count = 0;
+  gossip.rendezvous_port = 23401;
+  uint8_t v6[16];
+  memset(v6, 0x2A, sizeof(v6));
+  wire_addr_set_v6(&gossip.rendv6, v6);
+  cbor_item_t* cbor = wire_gossip_encode(&gossip);
+  ASSERT_NE(cbor, nullptr);
+  EXPECT_EQ(cbor_array_size(cbor), (size_t)9);
+  wire_gossip_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  EXPECT_EQ(wire_gossip_decode(cbor, &decoded), 0);
+  EXPECT_EQ(decoded.rendv6.family, WIRE_ADDR_FAMILY_V6);
+  EXPECT_EQ(memcmp(decoded.rendv6.bytes, v6, 16), 0);
+  cbor_decref(&cbor);
+}
+
+TEST(TestWireAddrField, MalformedTrailingFieldRejected) {
+  wire_relay_punch_t punch;
+  memset(&punch, 0, sizeof(punch));
+  punch.reflexive_addr = 0x01020304;
+  punch.reflexive_port = 23401;
+  /* Set v6 so the encoded array has the trailing address element. */
+  uint8_t v6[16];
+  memset(v6, 0x20, sizeof(v6));
+  wire_addr_set_v6(&punch.reflexive6, v6);
+  cbor_item_t* cbor = wire_relay_punch_encode(&punch);
+  ASSERT_NE(cbor, nullptr);
+  /* Corrupt the trailing address element to a wrong bytestring length. */
+  cbor_item_t* bad = cbor_new_definite_array(2);
+  cbor_item_t* entry = cbor_build_uint8(WIRE_ADDR_FAMILY_V6);
+  cbor_array_push(bad, entry); cbor_decref(&entry);
+  entry = cbor_build_bytestring((const unsigned char*)"\x01\x02", 2);
+  cbor_array_push(bad, entry); cbor_decref(&entry);
+  cbor_array_replace(cbor, 4, bad);
+  cbor_decref(&bad);
+  wire_relay_punch_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  EXPECT_NE(wire_relay_punch_decode(cbor, &decoded), 0);
+  cbor_decref(&cbor);
+}
+
+TEST(TestWireAddrField, TrailingFieldWrongFamilyRejected) {
+  wire_relay_punch_t punch;
+  memset(&punch, 0, sizeof(punch));
+  punch.reflexive_addr = 0x01020304;
+  punch.reflexive_port = 23401;
+  /* Set v6 so the encoded array has the trailing address element. */
+  uint8_t v6[16];
+  memset(v6, 0x20, sizeof(v6));
+  wire_addr_set_v6(&punch.reflexive6, v6);
+  cbor_item_t* cbor = wire_relay_punch_encode(&punch);
+  ASSERT_NE(cbor, nullptr);
+  /* family tag 5 is neither V4 (4) nor V6 (6) */
+  cbor_item_t* bad = cbor_new_definite_array(2);
+  cbor_item_t* entry = cbor_build_uint8(5);
+  cbor_array_push(bad, entry); cbor_decref(&entry);
+  unsigned char bytes[16];
+  memset(bytes, 0x11, sizeof(bytes));
+  entry = cbor_build_bytestring(bytes, sizeof(bytes));
+  cbor_array_push(bad, entry); cbor_decref(&entry);
+  cbor_array_replace(cbor, 4, bad);
+  cbor_decref(&bad);
+  wire_relay_punch_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  EXPECT_NE(wire_relay_punch_decode(cbor, &decoded), 0);
+  cbor_decref(&cbor);
+}
+
+TEST(TestWireAddrField, TrailingFieldNonArrayRejected) {
+  wire_relay_punch_t punch;
+  memset(&punch, 0, sizeof(punch));
+  punch.reflexive_addr = 0x01020304;
+  punch.reflexive_port = 23401;
+  /* Set v6 so the encoded array has the trailing address element. */
+  uint8_t v6[16];
+  memset(v6, 0x20, sizeof(v6));
+  wire_addr_set_v6(&punch.reflexive6, v6);
+  cbor_item_t* cbor = wire_relay_punch_encode(&punch);
+  ASSERT_NE(cbor, nullptr);
+  cbor_item_t* bad = cbor_build_uint8(1);
+  cbor_array_replace(cbor, 4, bad);
+  cbor_decref(&bad);
+  wire_relay_punch_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  EXPECT_NE(wire_relay_punch_decode(cbor, &decoded), 0);
+  cbor_decref(&cbor);
+}

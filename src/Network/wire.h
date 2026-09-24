@@ -354,6 +354,7 @@ typedef struct wire_relay_punch_t {
   node_id_t sender_id;       // the node sending the punch
   uint32_t  reflexive_addr;  // sender's server-reflexive IPv4 (host byte order)
   uint16_t  reflexive_port;  // sender's server-reflexive port
+  wire_addr_t reflexive6;    // appended v6-aware address; see wire_addr_t
 } wire_relay_punch_t;
 
 // --- AddrRequest ---
@@ -369,6 +370,7 @@ typedef struct wire_addr_response_t {
   uint32_t endpoint_id;
   uint32_t reflexive_addr;
   uint16_t reflexive_port;
+  wire_addr_t reflexive6;    // appended v6-aware address; see wire_addr_t
 } wire_addr_response_t;
 
 // --- Gossip (ring maintenance / peer discovery) ---
@@ -390,6 +392,7 @@ typedef struct {
   uint16_t  rendezvous_port;
   node_id_t targets[RING_MAX_RINGS];  // 1 random node per non-empty ring
   uint8_t   target_count;
+  wire_addr_t rendv6;                 // appended v6-aware rendezvous address
 } wire_gossip_t;
 
 typedef struct {
@@ -399,6 +402,7 @@ typedef struct {
   uint16_t  rendezvous_port;
   node_id_t targets[RING_MAX_RINGS];
   uint8_t   target_count;
+  wire_addr_t rendv6;                 // appended v6-aware rendezvous address
 } wire_gossip_pull_t;
 
 // --- ClosestNodes (Meridian proximity routing) ---

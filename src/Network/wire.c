@@ -160,7 +160,7 @@ static int _wire_addr_decode(cbor_item_t* item, wire_addr_t* addr) {
     cbor_decref(&family_item);
     return -1;
   }
-  uint64_t family = cbor_get_uint64(family_item);
+  uint64_t family = cbor_get_int(family_item);
   cbor_decref(&family_item);
   if (family != WIRE_ADDR_FAMILY_V4 && family != WIRE_ADDR_FAMILY_V6) return -1;
   cbor_item_t* bytes_item = cbor_array_get(item, 1);
@@ -2001,7 +2001,8 @@ void wire_relay_challenge_response_destroy(wire_relay_challenge_response_t* msg)
 // --- RelayPunch (symmetric NAT simultaneous-open signal) ---
 
 cbor_item_t* wire_relay_punch_encode(const wire_relay_punch_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(4);
+  bool has_v6 = msg->reflexive6.family == WIRE_ADDR_FAMILY_V6;
+  cbor_item_t* array = cbor_new_definite_array(has_v6 ? 5 : 4);
   cbor_item_t* entry;
 
   entry = cbor_build_uint8(WIRE_RELAY_PUNCH);
@@ -2019,6 +2020,13 @@ cbor_item_t* wire_relay_punch_encode(const wire_relay_punch_t* msg) {
   entry = cbor_build_uint16(msg->reflexive_port);
   (void)cbor_array_push(array, entry);
   cbor_decref(&entry);
+
+  if (has_v6) {
+    entry = _wire_addr_encode(&msg->reflexive6);
+    if (entry == NULL) { cbor_decref(&array); return NULL; }
+    (void)cbor_array_push(array, entry);
+    cbor_decref(&entry);
+  }
 
   return array;
 }
@@ -2043,6 +2051,13 @@ int wire_relay_punch_decode(cbor_item_t* item, wire_relay_punch_t* msg) {
   uint16_t port_val;
   if (_array_get_uint16(item, 3, &port_val) != 0) return -1;
   msg->reflexive_port = port_val;
+
+  int addr_rc = _wire_addr_decode_optional(item, 4, &msg->reflexive6);
+  if (addr_rc < 0) return -1;
+  if (addr_rc > 0) {
+    /* No trailing element (old-format sender): derive v4 from the u32. */
+    wire_addr_set_v4(&msg->reflexive6, msg->reflexive_addr);
+  }
   return 0;
 }
 
@@ -2087,7 +2102,8 @@ int wire_addr_request_decode(cbor_item_t* item, wire_addr_request_t* msg) {
 // --- AddrResponse ---
 
 cbor_item_t* wire_addr_response_encode(const wire_addr_response_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(6);
+  bool has_v6 = msg->reflexive6.family == WIRE_ADDR_FAMILY_V6;
+  cbor_item_t* array = cbor_new_definite_array(has_v6 ? 7 : 6);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_ADDR_RESPONSE);
@@ -2114,6 +2130,13 @@ cbor_item_t* wire_addr_response_encode(const wire_addr_response_t* msg) {
   (void)cbor_array_push(array, item);
   cbor_decref(&item);
 
+  if (has_v6) {
+    item = _wire_addr_encode(&msg->reflexive6);
+    if (item == NULL) { cbor_decref(&array); return NULL; }
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+  }
+
   return array;
 }
 
@@ -2130,13 +2153,20 @@ int wire_addr_response_decode(cbor_item_t* item, wire_addr_response_t* msg) {
   uint16_t port_val;
   if (_array_get_uint16(item, 5, &port_val) != 0) return -1;
   msg->reflexive_port = port_val;
+  int addr_rc = _wire_addr_decode_optional(item, 6, &msg->reflexive6);
+  if (addr_rc < 0) return -1;
+  if (addr_rc > 0) {
+    /* No trailing element (old-format sender): derive v4 from the u32. */
+    wire_addr_set_v4(&msg->reflexive6, msg->reflexive_addr);
+  }
   return 0;
 }
 
 // --- Gossip ---
 
 cbor_item_t* wire_gossip_encode(const wire_gossip_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(8);
+  bool has_v6 = msg->rendv6.family == WIRE_ADDR_FAMILY_V6;
+  cbor_item_t* array = cbor_new_definite_array(has_v6 ? 9 : 8);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_GOSSIP);
@@ -2176,6 +2206,13 @@ cbor_item_t* wire_gossip_encode(const wire_gossip_t* msg) {
   (void)cbor_array_push(array, targets);
   cbor_decref(&targets);
 
+  if (has_v6) {
+    item = _wire_addr_encode(&msg->rendv6);
+    if (item == NULL) { cbor_decref(&array); return NULL; }
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+  }
+
   return array;
 }
 
@@ -2210,13 +2247,20 @@ int wire_gossip_decode(cbor_item_t* item, wire_gossip_t* msg) {
   }
   msg->target_count = (uint8_t)decode_count;
   cbor_decref(&targets_arr);
+  int addr_rc = _wire_addr_decode_optional(item, 8, &msg->rendv6);
+  if (addr_rc < 0) return -1;
+  if (addr_rc > 0) {
+    /* No trailing element (old-format sender): derive v4 from the u32. */
+    wire_addr_set_v4(&msg->rendv6, msg->rendezvous_addr);
+  }
   return 0;
 }
 
 // --- GossipPull ---
 
 cbor_item_t* wire_gossip_pull_encode(const wire_gossip_pull_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(8);
+  bool has_v6 = msg->rendv6.family == WIRE_ADDR_FAMILY_V6;
+  cbor_item_t* array = cbor_new_definite_array(has_v6 ? 9 : 8);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_GOSSIP_PULL);
@@ -2256,6 +2300,13 @@ cbor_item_t* wire_gossip_pull_encode(const wire_gossip_pull_t* msg) {
   (void)cbor_array_push(array, targets);
   cbor_decref(&targets);
 
+  if (has_v6) {
+    item = _wire_addr_encode(&msg->rendv6);
+    if (item == NULL) { cbor_decref(&array); return NULL; }
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+  }
+
   return array;
 }
 
@@ -2290,6 +2341,12 @@ int wire_gossip_pull_decode(cbor_item_t* item, wire_gossip_pull_t* msg) {
   }
   msg->target_count = (uint8_t)decode_count;
   cbor_decref(&targets_arr);
+  int addr_rc = _wire_addr_decode_optional(item, 8, &msg->rendv6);
+  if (addr_rc < 0) return -1;
+  if (addr_rc > 0) {
+    /* No trailing element (old-format sender): derive v4 from the u32. */
+    wire_addr_set_v4(&msg->rendv6, msg->rendezvous_addr);
+  }
   return 0;
 }
 
