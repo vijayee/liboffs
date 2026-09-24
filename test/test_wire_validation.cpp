@@ -395,6 +395,34 @@ TEST(TestWireValidation, RelayPunchRejectsWrongType) {
   cbor_decref(&cbor);
 }
 
+/* --- wire_addr_t helpers --- */
+
+TEST(TestWireAddr, SetV4ProducesV4MappedBytes) {
+  wire_addr_t addr;
+  wire_addr_set_v4(&addr, 0x01020304u);
+  EXPECT_EQ(addr.family, WIRE_ADDR_FAMILY_V4);
+  EXPECT_EQ(addr.bytes[10], 0xFF);
+  EXPECT_EQ(addr.bytes[11], 0xFF);
+  EXPECT_EQ(addr.bytes[12], 1);
+  EXPECT_EQ(addr.bytes[15], 4);
+}
+
+TEST(TestWireAddr, SetV6CopiesBytes) {
+  wire_addr_t addr;
+  uint8_t bytes[16];
+  memset(bytes, 0xAB, sizeof(bytes));
+  wire_addr_set_v6(&addr, bytes);
+  EXPECT_EQ(addr.family, WIRE_ADDR_FAMILY_V6);
+  EXPECT_EQ(memcmp(addr.bytes, bytes, 16), 0);
+}
+
+TEST(TestWireAddr, ClearYieldsNone) {
+  wire_addr_t addr;
+  wire_addr_set_v4(&addr, 1);
+  wire_addr_clear(&addr);
+  EXPECT_EQ(addr.family, WIRE_ADDR_FAMILY_NONE);
+}
+
 TEST(TestWireValidation, RelayPunchRejectsTooShortArray) {
   cbor_item_t* cbor = cbor_new_definite_array(3);
   cbor_item_t* entry;

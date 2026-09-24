@@ -41,6 +41,22 @@
 #define WIRE_RELAY_CHALLENGE_RESPONSE 35
 #define WIRE_RELAY_PUNCH         36
 
+/* Address-family tags for the optional appended address field on wire
+   messages. NONE means the sender advertised no v6-aware address; decoders
+   fall back to the legacy u32 IPv4 field. */
+#define WIRE_ADDR_FAMILY_NONE 0
+#define WIRE_ADDR_FAMILY_V4   4
+#define WIRE_ADDR_FAMILY_V6   6
+
+typedef struct wire_addr_t {
+  uint8_t family;    // WIRE_ADDR_FAMILY_*
+  uint8_t bytes[16]; // network byte order; v4-mapped when family==V4
+} wire_addr_t;
+
+void wire_addr_set_v4(wire_addr_t* out, uint32_t addr_host);
+void wire_addr_set_v6(wire_addr_t* out, const uint8_t bytes[16]);
+void wire_addr_clear(wire_addr_t* out);
+
 // Magic number for protocol identification
 #define WIRE_MAGIC 0x4F464653  // "OFFS"
 

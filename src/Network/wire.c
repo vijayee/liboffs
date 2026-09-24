@@ -117,6 +117,75 @@ static int _node_id_decode(cbor_item_t* item, node_id_t* id) {
   return 0;
 }
 
+void wire_addr_set_v4(wire_addr_t* out, uint32_t addr_host) {
+  memset(out, 0, sizeof(*out));
+  out->family = WIRE_ADDR_FAMILY_V4;
+  out->bytes[10] = 0xFF;
+  out->bytes[11] = 0xFF;
+  out->bytes[12] = (uint8_t)((addr_host >> 24) & 0xFF);
+  out->bytes[13] = (uint8_t)((addr_host >> 16) & 0xFF);
+  out->bytes[14] = (uint8_t)((addr_host >> 8) & 0xFF);
+  out->bytes[15] = (uint8_t)(addr_host & 0xFF);
+}
+
+void wire_addr_set_v6(wire_addr_t* out, const uint8_t bytes[16]) {
+  memset(out, 0, sizeof(*out));
+  out->family = WIRE_ADDR_FAMILY_V6;
+  memcpy(out->bytes, bytes, 16);
+}
+
+void wire_addr_clear(wire_addr_t* out) { memset(out, 0, sizeof(*out)); }
+
+/* Encode [family, 16-byte address]. Returns NULL on invalid input. */
+static cbor_item_t* _wire_addr_encode(const wire_addr_t* addr) {
+  if (addr->family != WIRE_ADDR_FAMILY_V4 && addr->family != WIRE_ADDR_FAMILY_V6) {
+    return NULL;
+  }
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item = cbor_build_uint8(addr->family);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+  item = cbor_build_bytestring(addr->bytes, 16);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+  return array;
+}
+
+/* Decode a strict [family, 16-byte bytestring] pair; family must be V4/V6.
+   Returns -1 on any malformation — there is no partial-fill tolerance. */
+static int _wire_addr_decode(cbor_item_t* item, wire_addr_t* addr) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) != 2) return -1;
+  cbor_item_t* family_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(family_item)) {
+    cbor_decref(&family_item);
+    return -1;
+  }
+  uint64_t family = cbor_get_uint64(family_item);
+  cbor_decref(&family_item);
+  if (family != WIRE_ADDR_FAMILY_V4 && family != WIRE_ADDR_FAMILY_V6) return -1;
+  cbor_item_t* bytes_item = cbor_array_get(item, 1);
+  if (!cbor_isa_bytestring(bytes_item) || cbor_bytestring_length(bytes_item) != 16) {
+    cbor_decref(&bytes_item);
+    return -1;
+  }
+  memcpy(addr->bytes, cbor_bytestring_handle(bytes_item), 16);
+  cbor_decref(&bytes_item);
+  addr->family = (uint8_t)family;
+  return 0;
+}
+
+/* Decode the optional trailing address element at `index` of `item`.
+   Returns 0 with addr->family set (V4 or V6), -1 on malformation,
+   1 when no trailing element is present (caller falls back to the u32). */
+static int _wire_addr_decode_optional(cbor_item_t* item, size_t index,
+                                      wire_addr_t* addr) {
+  if (cbor_array_size(item) <= index) return 1;
+  cbor_item_t* addr_item = cbor_array_get(item, index);
+  int rc = _wire_addr_decode(addr_item, addr);
+  cbor_decref(&addr_item);
+  return rc;
+}
+
 uint8_t wire_get_type(cbor_item_t* item) {
   if (!cbor_isa_array(item) || cbor_array_size(item) < 1) return 0;
   cbor_item_t* type_item = cbor_array_get(item, 0);
