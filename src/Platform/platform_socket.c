@@ -128,6 +128,11 @@
       sock_family = PLATFORM_AF_INET;
       sock = platform_socket_create(PLATFORM_AF_INET, 1);
     }
+    if (sock != NULL) {
+      /* Set before bind: SO_REUSEADDR only takes effect when applied
+       * prior to bind(), so the helper owns it. */
+      (void)platform_socket_set_reuseaddr(sock);
+    }
     if (sock == NULL) {
       return NULL;
     }
@@ -177,6 +182,7 @@
         if (sock == NULL) {
           return NULL;
         }
+        (void)platform_socket_set_reuseaddr(sock);
         memset(&addr, 0, sizeof(addr));
         addr.family = PLATFORM_AF_INET;
         addr.inet.port = port;
@@ -472,6 +478,11 @@
       sock_family = PLATFORM_AF_INET;
       sock = platform_socket_create(PLATFORM_AF_INET, 1);
     }
+    if (sock != NULL) {
+      /* Set before bind: SO_REUSEADDR only takes effect when applied
+       * prior to bind(), so the helper owns it. */
+      (void)platform_socket_set_reuseaddr(sock);
+    }
     if (sock == NULL) {
       return NULL;
     }
@@ -521,6 +532,7 @@
         if (sock == NULL) {
           return NULL;
         }
+        (void)platform_socket_set_reuseaddr(sock);
         memset(&addr, 0, sizeof(addr));
         addr.family = PLATFORM_AF_INET;
         addr.inet.port = port;

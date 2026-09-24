@@ -60,7 +60,9 @@ int platform_socket_bind(platform_socket_t* sock, const platform_address_t* addr
  * socket (IPV6_V6ONLY=0, serves both families on one socket); falls back to
  * an IPv4 socket when IPv6 is unavailable or the v6 bind fails (logs one
  * warning). Unparsable hosts bind the wildcard address of the chosen
- * family. *out_addr receives the bound address. Returns NULL on failure. */
+ * family. The helper enables SO_REUSEADDR on the socket before binding.
+ * *out_addr (if non-NULL) receives the requested (possibly v4-mapped)
+ * address. Returns NULL on failure. */
 platform_socket_t* platform_listen_socket_create(const char* host, uint16_t port,
                                                  platform_address_t* out_addr);
 int platform_socket_listen(platform_socket_t* sock, int backlog);

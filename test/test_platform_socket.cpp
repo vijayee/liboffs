@@ -330,6 +330,22 @@ TEST(TestPlatformListenSocket, MapsV4HostOnDualStackSocket) {
   platform_socket_destroy(sock);
 }
 
+TEST(TestPlatformListenSocket, NullOutAddrAccepted) {
+  platform_socket_t* sock = platform_listen_socket_create("::1", 24814, NULL);
+  ASSERT_NE(sock, (platform_socket_t*)NULL);
+  platform_socket_destroy(sock);
+}
+
+TEST(TestPlatformListenSocket, UnparsableHostBindsWildcard) {
+  platform_address_t addr;
+  platform_socket_t* sock = platform_listen_socket_create("not-an-address", 24815, &addr);
+  ASSERT_NE(sock, (platform_socket_t*)NULL);
+  /* unparsable host binds the wildcard of the chosen family (dual-stack ::
+   * preferred) */
+  EXPECT_TRUE(addr.family == PLATFORM_AF_INET6 || addr.family == PLATFORM_AF_INET);
+  platform_socket_destroy(sock);
+}
+
 /* ================================================================
  * platform_socket TCP loopback test
  * ================================================================ */
