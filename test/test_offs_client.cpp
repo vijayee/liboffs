@@ -7,6 +7,7 @@ extern "C" {
 #include "../src/ClientLibs/c/offs_client.h"
 #include "../src/ClientAPI/health_handler.h"
 #include "../src/ClientAPI/Unix/unix_transport.h"
+#include "../src/Network/quic_listener.h"
 #include "../src/ClientAPI/client_api_wire.h"
 #include "../src/Node/node.h"
 #include "../src/Network/authority.h"
@@ -1254,6 +1255,11 @@ protected:
            cache's respiration pointer); authority_destroy last. Mirrors the
            proven test_quic_integration + off_server teardown order. */
         if (network != nullptr) {
+            /* network_create opens a QUIC listener it never destroys (the
+               listener is torn down by its owner in the node lifecycle, which
+               this fixture does not run) — destroy the never-started listener
+               here so the suite stays valgrind-clean. */
+            quic_listener_destroy(network->quic_listener);
             network_destroy(network);
         }
         block_cache_destroy(bc);
