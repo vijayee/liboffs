@@ -5,6 +5,7 @@
 #include "peer_handlers.h"
 #include "../Network/peer_info.h"
 #include "../Network/node_id.h"
+#include "../Network/endpoint.h"
 #include "../Util/base58.h"
 #include "../Util/allocator.h"
 #include "../QR/qr.h"
@@ -330,6 +331,10 @@ void peer_handle_friend_add(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
   auth->friend_peers[auth->friend_peer_count] = new_friend;
   auth->friend_peer_count = new_count;
 
+  /* Persist via the debounced dirty flag — previously only the HTTP handlers
+     saved immediately, so a crash before shutdown could lose friend changes. */
+  network_mark_peer_state_dirty(ctx->network);
+
   /* Try candidates in priority order: HOST -> SRFLX -> DIRECT -> RELAY.
      Friend peers are admitted via connection_manager_add_friend so they
      skip Hebbian decay eviction. See audit #18. */
@@ -402,6 +407,10 @@ void peer_handle_friend_remove(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
   /* Also remove from connection_manager */
   connection_manager_remove(&ctx->network->conn_mgr, &target_id);
 
+  /* Persist via the debounced dirty flag — previously only the HTTP handlers
+     saved immediately, so a crash before shutdown could lose friend changes. */
+  network_mark_peer_state_dirty(ctx->network);
+
   client_api_peer_connect_result_t result;
   memset(&result, 0, sizeof(result));
   result.status = CLIENT_API_STATUS_OK;
@@ -467,5 +476,160 @@ void peer_handle_friend_list_request(peer_handler_ctx_t* ctx, cbor_item_t* frame
 
   cbor_item_t* out_frame = client_api_friend_list_response_encode(&response);
   client_api_friend_list_response_destroy(&response);
+  ctx->send_frame(ctx->conn, out_frame);
+}
+
+/* Build and push one [host: string, port: uint16, source: uint8] entry into
+   the bootstrap list response array. Unparseable endpoints are skipped. */
+static void _push_bootstrap_entry(cbor_item_t* entries, const char* endpoint,
+                                  uint8_t source) {
+  char host[256];
+  uint16_t port = 0;
+  if (endpoint == NULL) return;
+  if (endpoint_parse(endpoint, host, sizeof(host), &port) != 0) return;
+
+  cbor_item_t* entry = cbor_new_definite_array(3);
+  cbor_item_t* host_item = cbor_build_string(host);
+  cbor_item_t* port_item = cbor_build_uint16(port);
+  cbor_item_t* source_item = cbor_build_uint8(source);
+  if (entry == NULL || host_item == NULL || port_item == NULL ||
+      source_item == NULL) {
+    if (host_item != NULL) cbor_decref(&host_item);
+    if (port_item != NULL) cbor_decref(&port_item);
+    if (source_item != NULL) cbor_decref(&source_item);
+    if (entry != NULL) cbor_decref(&entry);
+    return;
+  }
+
+  (void)cbor_array_push(entry, host_item);
+  cbor_decref(&host_item);
+  (void)cbor_array_push(entry, port_item);
+  cbor_decref(&port_item);
+  (void)cbor_array_push(entry, source_item);
+  cbor_decref(&source_item);
+
+  (void)cbor_array_push(entries, entry);
+  cbor_decref(&entry);
+}
+
+void peer_handle_bootstrap_add(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
+  if (!ctx->is_authenticated) {
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
+
+  client_api_bootstrap_add_t msg;
+  if (client_api_bootstrap_add_decode(frame, &msg) != 0) {
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_BAD_REQUEST,
+                    "Invalid bootstrap add message");
+    return;
+  }
+
+  /* authority_bootstrap_add parses and re-encodes the endpoint into its own
+     storage, so the decoded string can be freed right after the call. */
+  int add_result = authority_bootstrap_add(ctx->authority, msg.endpoint);
+
+  char host[256];
+  uint16_t port = 0;
+  int parsed = endpoint_parse(msg.endpoint, host, sizeof(host), &port);
+  client_api_bootstrap_add_destroy(&msg);
+
+  if (add_result != 0) {
+    /* -1 covers both invalid endpoint and allocation failure inside the
+       authority (indistinguishable from the caller's side); -2 is a
+       duplicate in either list, reported as CONFLICT to match the HTTP
+       friend route's already_friend mapping. */
+    client_api_peer_connect_result_t result;
+    memset(&result, 0, sizeof(result));
+    result.status = (add_result == -2) ? CLIENT_API_STATUS_CONFLICT
+                                       : CLIENT_API_STATUS_BAD_REQUEST;
+
+    cbor_item_t* out_frame = client_api_peer_connect_result_encode(&result);
+    ctx->send_frame(ctx->conn, out_frame);
+    return;
+  }
+
+  /* Persist via the debounced dirty flag. */
+  network_mark_peer_state_dirty(ctx->network);
+
+  /* Fire-and-forget connect to the newly added bootstrap peer. */
+  if (parsed == 0) {
+    network_connect_peer(ctx->network, host, port);
+  }
+
+  client_api_peer_connect_result_t result;
+  memset(&result, 0, sizeof(result));
+  result.status = CLIENT_API_STATUS_OK;
+
+  cbor_item_t* out_frame = client_api_peer_connect_result_encode(&result);
+  ctx->send_frame(ctx->conn, out_frame);
+}
+
+void peer_handle_bootstrap_remove(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
+  if (!ctx->is_authenticated) {
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
+
+  client_api_bootstrap_remove_t msg;
+  if (client_api_bootstrap_remove_decode(frame, &msg) != 0) {
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_BAD_REQUEST,
+                    "Invalid bootstrap remove message");
+    return;
+  }
+
+  int remove_result = authority_bootstrap_remove(ctx->authority, msg.endpoint);
+  client_api_bootstrap_remove_destroy(&msg);
+
+  client_api_peer_connect_result_t result;
+  memset(&result, 0, sizeof(result));
+  if (remove_result == 0) {
+    result.status = CLIENT_API_STATUS_OK;
+
+    /* Persist via the debounced dirty flag. */
+    network_mark_peer_state_dirty(ctx->network);
+  } else if (remove_result == -2) {
+    /* Config-seeded entries are immutable at runtime. The wire result frame
+       carries only a status, so the CONFLICT byte is the message. */
+    result.status = CLIENT_API_STATUS_CONFLICT;
+  } else {
+    result.status = CLIENT_API_STATUS_NOT_FOUND;
+  }
+
+  cbor_item_t* out_frame = client_api_peer_connect_result_encode(&result);
+  ctx->send_frame(ctx->conn, out_frame);
+}
+
+void peer_handle_bootstrap_list_request(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
+  (void)frame; /* no payload */
+
+  if (!ctx->is_authenticated) {
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
+
+  authority_t* auth = ctx->authority;
+  size_t total_count = auth->bootstrap_peer_count + auth->managed_bootstrap_peer_count;
+  cbor_item_t* entries = cbor_new_definite_array(total_count);
+  if (entries == NULL) {
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR, "Memory allocation failed");
+    return;
+  }
+
+  for (size_t index = 0; index < auth->bootstrap_peer_count; index++) {
+    _push_bootstrap_entry(entries, auth->bootstrap_peers[index],
+                          CLIENT_API_BOOTSTRAP_SOURCE_CONFIG);
+  }
+  for (size_t index = 0; index < auth->managed_bootstrap_peer_count; index++) {
+    _push_bootstrap_entry(entries, auth->managed_bootstrap_peers[index],
+                          CLIENT_API_BOOTSTRAP_SOURCE_MANAGED);
+  }
+
+  client_api_bootstrap_list_response_t response;
+  memset(&response, 0, sizeof(response));
+  response.entries = entries;
+
+  cbor_item_t* out_frame = client_api_bootstrap_list_response_encode(&response);
+  client_api_bootstrap_list_response_destroy(&response);
   ctx->send_frame(ctx->conn, out_frame);
 }

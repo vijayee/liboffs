@@ -33,6 +33,9 @@ void peer_handle_list_request(peer_handler_ctx_t* ctx, cbor_item_t* frame);
 void peer_handle_friend_add(peer_handler_ctx_t* ctx, cbor_item_t* frame);
 void peer_handle_friend_remove(peer_handler_ctx_t* ctx, cbor_item_t* frame);
 void peer_handle_friend_list_request(peer_handler_ctx_t* ctx, cbor_item_t* frame);
+void peer_handle_bootstrap_add(peer_handler_ctx_t* ctx, cbor_item_t* frame);
+void peer_handle_bootstrap_remove(peer_handler_ctx_t* ctx, cbor_item_t* frame);
+void peer_handle_bootstrap_list_request(peer_handler_ctx_t* ctx, cbor_item_t* frame);
 
 /* Decode a peer_info payload by wire format byte: 0 = raw CBOR peer_info
    map, 1 = base58 text, 2 = PPM QR image (decoded via src/QR, then parsed
