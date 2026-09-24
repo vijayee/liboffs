@@ -133,6 +133,18 @@ void _server_dispatch(void* state, message_t* msg) {
   }
 }
 
+/* True when the first count octets of a v6 address are all zero. Used to
+   pin the canonical form of loopback prefixes before decoding v4-mapped or
+   ::1 addresses. */
+static bool _inet6_prefix_zero(const uint8_t* octets, int count) {
+  for (int index = 0; index < count; index++) {
+    if (octets[index] != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint16_t port) {
   http_server_t* server = get_clear_memory(sizeof(http_server_t));
   server->pool = pool;
@@ -156,6 +168,7 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
   platform_address_t addr;
   server->listen_sock = platform_listen_socket_create(host, port, &addr);
   if (server->listen_sock == NULL) {
+    log_error("http_server_create: listen socket creation/binding failed");
     /* platform_listen_socket_create already logged the failure. */
     /* actor_init above registered server->actor in the pool's registry; every
        error path must detach it before freeing, or scheduler_pool_destroy will
@@ -183,12 +196,17 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
   bool is_loopback;
   if (addr.family == PLATFORM_AF_INET6) {
     if (addr.inet6.addr[10] == 0xFF && addr.inet6.addr[11] == 0xFF) {
-      /* v4-mapped: decode the last four octets as IPv4 loopback. */
-      is_loopback = addr.inet6.addr[12] == 127 && addr.inet6.addr[13] == 0 &&
+      /* v4-mapped: decode the last four octets as IPv4 loopback, but only
+         when octets 0-9 are zero so the prefix is the canonical
+         ::ffff:0:0/96 form; lookalikes like ::abcd:0:0:1 or
+         ::x:0:ffff:127.0.0.1 must not qualify. */
+      is_loopback = _inet6_prefix_zero(addr.inet6.addr, 10) &&
+                    addr.inet6.addr[12] == 127 && addr.inet6.addr[13] == 0 &&
                     addr.inet6.addr[14] == 0 && addr.inet6.addr[15] == 1;
     } else {
-      /* pure v6: ::1 */
-      is_loopback = addr.inet6.addr[0] == 0 && addr.inet6.addr[15] == 1;
+      /* pure v6: ::1 only, so octets 0-14 must all be zero. */
+      is_loopback = _inet6_prefix_zero(addr.inet6.addr, 15) &&
+                    addr.inet6.addr[15] == 1;
     }
   } else {
     /* IPv4: 127.0.0.1 in network byte order. */

@@ -199,6 +199,24 @@ static platform_socket_t* _connect_to_server(uint16_t port) {
   return sock;
 }
 
+static platform_socket_t* _connect_to_server_v6(uint16_t port) {
+  platform_socket_t* sock = platform_socket_create(PLATFORM_AF_INET6, 1);
+  if (sock == NULL) return NULL;
+
+  platform_address_t addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.family = PLATFORM_AF_INET6;
+  addr.inet6.addr[15] = 1; /* ::1 */
+  addr.inet6.port = port;
+
+  if (platform_socket_connect(sock, &addr) != 0) {
+    platform_socket_destroy(sock);
+    return NULL;
+  }
+  platform_socket_set_nonblocking(sock);
+  return sock;
+}
+
 static int _send_all(platform_socket_t* sock, const char* buf, size_t len) {
   size_t sent_total = 0;
   for (int attempts = 0; attempts < 1000 && sent_total < len; attempts++) {
@@ -830,6 +848,16 @@ public:
     }
     return sock;
   }
+
+  platform_socket_t* connect_v6() {
+    platform_socket_t* sock = NULL;
+    for (int attempts = 0; attempts < 50; attempts++) {
+      platform_usleep(10000);
+      sock = _connect_to_server_v6(port);
+      if (sock != NULL) break;
+    }
+    return sock;
+  }
 };
 
 /* Default (flag=false): no bearer on loopback → 401 from auth middleware. */
@@ -901,6 +929,47 @@ TEST_F(LocalBindingAuth, ConfigGetAllowedOnLoopback) {
   int result = _send_and_recv(sock, request, response, sizeof(response));
   EXPECT_EQ(result, 0);
   EXPECT_NE(strstr(response, "200"), nullptr);
+
+  platform_socket_destroy(sock);
+}
+
+/* IPv6 loopback binding (::1): the local-binding semantics apply, so with
+   the opt-out flag set a no-bearer config PUT succeeds (200). */
+TEST_F(LocalBindingAuth, NoAuthOnIpv6LoopbackBinding) {
+  setup_server("::1", true);
+  platform_socket_t* sock = connect_v6();
+  ASSERT_NE(sock, nullptr);
+
+  char response[4096];
+  const char* request =
+      "PUT /config HTTP/1.1\r\n"
+      "Host: localhost\r\n"
+      "Content-Length: 2\r\n\r\n"
+      "{}";
+  int result = _send_and_recv(sock, request, response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "200"), nullptr);
+
+  platform_socket_destroy(sock);
+}
+
+/* A hostname bind ("localhost") fails literal parsing and binds the
+   wildcard, which is NOT a local binding: even with the opt-out flag set,
+   a no-bearer config PUT is refused (401 from the auth middleware). */
+TEST_F(LocalBindingAuth, HostnameBindIsNotLocalBinding) {
+  setup_server("localhost", true);
+  platform_socket_t* sock = connect();
+  ASSERT_NE(sock, nullptr);
+
+  char response[4096];
+  const char* request =
+      "PUT /config HTTP/1.1\r\n"
+      "Host: localhost\r\n"
+      "Content-Length: 2\r\n\r\n"
+      "{}";
+  int result = _send_and_recv(sock, request, response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "401"), nullptr);
 
   platform_socket_destroy(sock);
 }
