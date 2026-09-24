@@ -15,6 +15,7 @@
 #include "../../ClientAPI/client_api_wire.h"
 #include "../../Network/stream_framer.h"
 #include "../../Network/node_id.h"
+#include "../../Network/endpoint.h"
 #include "../../Util/base58.h"
 #include "../../Buffer/buffer.h"
 #include "../../Util/allocator.h"
@@ -1503,19 +1504,18 @@ static platform_socket_t* _connect_unix(const char* path) {
 }
 
 static platform_socket_t* _connect_tcp(const char* host, uint16_t port) {
-  platform_socket_t* sock = platform_socket_create(PLATFORM_AF_INET, 1);
-  if (sock == NULL) {
-    log_error("_connect_tcp: socket creation failed for %s:%u", host, port);
+  /* Parse first so the socket family matches the address: platform_address_parse
+   * accepts IPv4 and IPv6 literals and fills in the family. */
+  platform_address_t addr;
+  memset(&addr, 0, sizeof(addr));
+  if (platform_address_parse(&addr, host, port) != 0) {
+    log_error("_connect_tcp: address parse failed for %s:%u", host, port);
     return NULL;
   }
 
-  platform_address_t addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.family = PLATFORM_AF_INET;
-  addr.inet.port = port;
-  if (platform_address_parse(&addr, host, port) != 0) {
-    log_error("_connect_tcp: address parse failed for %s:%u", host, port);
-    platform_socket_destroy(sock);
+  platform_socket_t* sock = platform_socket_create(addr.family, 1);
+  if (sock == NULL) {
+    log_error("_connect_tcp: socket creation failed for %s:%u", host, port);
     return NULL;
   }
 
@@ -1710,23 +1710,20 @@ static offs_client_t* _connect_attempt(const char* transport_url, const char* ap
     }
   } else if (strncmp(transport_url, "tcp://", 6) == 0) {
     const char* addr = transport_url + 6;
-    char* host = get_memory(strlen(addr) + 1);
-    memcpy(host, addr, strlen(addr) + 1);
-    char* colon = strrchr(host, ':');
-    if (colon == NULL) {
-      free(host);
+    char host[256];
+    uint16_t port;
+    /* endpoint_parse splits host:port and strips the brackets from a
+     * bracketed v6 literal before it reaches _connect_tcp. */
+    if (endpoint_parse(addr, host, sizeof(host), &port) != 0) {
       stream_framer_destroy(client->framer);
       platform_mutex_destroy(client->lock);
       free(client->api_key);
       free(client);
       return NULL;
     }
-    *colon = '\0';
-    uint16_t port = (uint16_t)atoi(colon + 1);
     client->transport.raw.sock = _connect_tcp(host, port);
     client->transport.raw.is_unix = 0;
     client->transport_type = OFFS_TRANSPORT_TCP;
-    free(host);
     /* See the unix:// branch: the raw read callback's drain loop needs
      * EAGAIN, not a blocking wait, to break out when the kernel buffer
      * is empty. WS reuses _connect_tcp but does not set non-blocking. */
@@ -1743,16 +1740,44 @@ static offs_client_t* _connect_attempt(const char* transport_url, const char* ap
     if (path_start != NULL) {
       *path_start = '\0';
     }
-    /* Extract host and port */
-    char* colon = strrchr(addr_copy, ':');
+    /* Extract host and port. A bracketed v6 literal contains ':' and may omit
+       the port, so the split anchors on ']' when one is present. The brackets
+       are stripped here: connect, SNI and the Host header all need the bare
+       literal. */
     uint16_t port;
     char* ws_host;
-    if (colon != NULL) {
-      *colon = '\0';
-      port = (uint16_t)atoi(colon + 1);
-      ws_host = addr_copy;
+    if (addr_copy[0] == '[') {
+      char* close = strchr(addr_copy, ']');
+      if (close == NULL) {
+        free(addr_copy);
+        stream_framer_destroy(client->framer);
+        platform_mutex_destroy(client->lock);
+        free(client->api_key);
+        free(client);
+        return NULL;
+      }
+      ws_host = addr_copy + 1;
+      *close = '\0';
+      if (close[1] == ':') {
+        port = (uint16_t)atoi(close + 2);
+      } else if (close[1] == '\0') {
+        port = is_ssl ? 443 : 80;
+      } else {
+        free(addr_copy);
+        stream_framer_destroy(client->framer);
+        platform_mutex_destroy(client->lock);
+        free(client->api_key);
+        free(client);
+        return NULL;
+      }
     } else {
-      port = is_ssl ? 443 : 80;
+      char* colon = strrchr(addr_copy, ':');
+      if (colon != NULL) {
+        *colon = '\0';
+        port = (uint16_t)atoi(colon + 1);
+      } else {
+        port = is_ssl ? 443 : 80;
+      }
       ws_host = addr_copy;
     }
 
@@ -1838,16 +1863,43 @@ static offs_client_t* _connect_attempt(const char* transport_url, const char* ap
     char* addr_copy = get_memory(strlen(addr_start) + 1);
     memcpy(addr_copy, addr_start, strlen(addr_start) + 1);
 
-    /* Extract host and port */
-    char* colon = strrchr(addr_copy, ':');
+    /* Extract host and port. A bracketed v6 literal contains ':' and may omit
+       the port, so the split anchors on ']' when one is present. The brackets
+       are stripped before the host reaches ConnectionStart. */
     uint16_t port;
     const char* wt_host;
-    if (colon != NULL) {
-      *colon = '\0';
-      port = (uint16_t)atoi(colon + 1);
-      wt_host = addr_copy;
+    if (addr_copy[0] == '[') {
+      char* close = strchr(addr_copy, ']');
+      if (close == NULL) {
+        free(addr_copy);
+        stream_framer_destroy(client->framer);
+        platform_mutex_destroy(client->lock);
+        free(client->api_key);
+        free(client);
+        return NULL;
+      }
+      wt_host = addr_copy + 1;
+      *close = '\0';
+      if (close[1] == ':') {
+        port = (uint16_t)atoi(close + 2);
+      } else if (close[1] == '\0') {
+        port = 443;
+      } else {
+        free(addr_copy);
+        stream_framer_destroy(client->framer);
+        platform_mutex_destroy(client->lock);
+        free(client->api_key);
+        free(client);
+        return NULL;
+      }
     } else {
-      port = 443;
+      char* colon = strrchr(addr_copy, ':');
+      if (colon != NULL) {
+        *colon = '\0';
+        port = (uint16_t)atoi(colon + 1);
+      } else {
+        port = 443;
+      }
       wt_host = addr_copy;
     }
 
@@ -2937,7 +2989,24 @@ buffer_t* offs_http_get(const char* url) {
   char host[256];
   int port = 80;
 
-  if (host_end && (!port_end || host_end < port_end)) {
+  if (host_start[0] == '[') {
+    /* Bracketed v6 literal: [host][:port][/path]. A literal contains ':', so
+       the generic host:port split below cannot be used; anchor on ']' and
+       strip the brackets before resolution. */
+    const char* close = strchr(host_start, ']');
+    if (close == NULL) return NULL;
+    size_t host_len = (size_t)(close - host_start - 1);
+    if (host_len == 0 || host_len >= sizeof(host)) return NULL;
+    memcpy(host, host_start + 1, host_len);
+    host[host_len] = '\0';
+    const char* after = close + 1;
+    if (*after == ':') {
+      port = (int)strtol(after + 1, NULL, 10);
+      path_start = strchr(after, '/');
+    } else {
+      path_start = (*after == '/') ? after : NULL;
+    }
+  } else if (host_end && (!port_end || host_end < port_end)) {
     /* Has port */
     size_t host_len = (size_t)(host_end - host_start);
     if (host_len >= sizeof(host)) return NULL;
@@ -2964,22 +3033,31 @@ buffer_t* offs_http_get(const char* url) {
   if (port <= 0 || port > 65535) return NULL;
   if (!path_start) path_start = "/";
 
-  /* Resolve hostname to IP address */
-  char ip_str[INET_ADDRSTRLEN];
+  /* Resolve hostname to IP address — v6-capable. AI_ADDRCONFIG avoids
+     picking a v6 address on a v4-only host. */
+  char ip_str[64];
+  platform_address_family_e resolved_family = PLATFORM_AF_INET;
   {
     struct addrinfo hints;
     struct addrinfo* res = NULL;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_flags = AI_ADDRCONFIG;
     hints.ai_socktype = SOCK_STREAM;
     if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) return NULL;
-    struct sockaddr_in* sin = (struct sockaddr_in*)res->ai_addr;
-    inet_ntop(AF_INET, &sin->sin_addr, ip_str, sizeof(ip_str));
+    if (res->ai_family == AF_INET6) {
+      struct sockaddr_in6* sin6 = (struct sockaddr_in6*)res->ai_addr;
+      inet_ntop(AF_INET6, &sin6->sin6_addr, ip_str, sizeof(ip_str));
+      resolved_family = PLATFORM_AF_INET6;
+    } else {
+      struct sockaddr_in* sin = (struct sockaddr_in*)res->ai_addr;
+      inet_ntop(AF_INET, &sin->sin_addr, ip_str, sizeof(ip_str));
+    }
     freeaddrinfo(res);
   }
 
   /* Create socket and resolve address using platform abstractions */
-  platform_socket_t* sock = platform_socket_create(PLATFORM_AF_INET, 1);
+  platform_socket_t* sock = platform_socket_create(resolved_family, 1);
   if (sock == NULL) return NULL;
 
   platform_address_t addr;
