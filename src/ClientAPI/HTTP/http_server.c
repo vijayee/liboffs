@@ -14,6 +14,7 @@
 #include <poll-dancer/poll-dancer.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <errno.h>
 
 static void* _server_thread(void* arg);
@@ -152,10 +153,10 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
   server->hard_timeout_ms = 60000;
   _destroy_stack_init(server);
 
-  server->listen_sock = platform_socket_create(PLATFORM_AF_INET, 1);
+  platform_address_t addr;
+  server->listen_sock = platform_listen_socket_create(host, port, &addr);
   if (server->listen_sock == NULL) {
-    log_error("http_server_create: socket creation failed");
-    perror("socket");
+    /* platform_listen_socket_create already logged the failure. */
     /* actor_init above registered server->actor in the pool's registry; every
        error path must detach it before freeing, or scheduler_pool_destroy will
        later walk a freed actor (use-after-free in the registry linked list). */
@@ -165,24 +166,6 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
   }
 
   platform_socket_set_nonblocking(server->listen_sock);
-  platform_socket_set_reuseaddr(server->listen_sock);
-
-  platform_address_t addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.family = PLATFORM_AF_INET;
-  addr.inet.port = port;
-  if (platform_address_parse(&addr, host, port) != 0) {
-    addr.inet.addr = 0; /* INADDR_ANY */
-  }
-
-  if (platform_socket_bind(server->listen_sock, &addr) < 0) {
-    log_error("http_server_create: bind failed for port %u", port);
-    perror("bind");
-    platform_socket_destroy(server->listen_sock);
-    actor_destroy(&server->actor);
-    free(server);
-    return NULL;
-  }
 
   if (platform_socket_listen(server->listen_sock, 128) < 0) {
     log_error("http_server_create: listen failed");
@@ -193,11 +176,27 @@ http_server_t* http_server_create(scheduler_pool_t* pool, const char* host, uint
     return NULL;
   }
 
-  if (host != NULL) {
-    server->is_local_binding = (strcmp(host, "127.0.0.1") == 0 ||
-                                strcmp(host, "localhost") == 0 ||
-                                strcmp(host, "::1") == 0);
+  /* is_local_binding reflects the BIND ADDRESS (family-aware), not the host
+     string: v4-mapped loopback (::ffff:127.0.0.1), pure ::1, or IPv4
+     127.0.0.1. Plain hostnames now bind the wildcard, which is NOT loopback,
+     so only literal loopback addresses qualify as local. */
+  bool is_loopback;
+  if (addr.family == PLATFORM_AF_INET6) {
+    if (addr.inet6.addr[10] == 0xFF && addr.inet6.addr[11] == 0xFF) {
+      /* v4-mapped: decode the last four octets as IPv4 loopback. */
+      is_loopback = addr.inet6.addr[12] == 127 && addr.inet6.addr[13] == 0 &&
+                    addr.inet6.addr[14] == 0 && addr.inet6.addr[15] == 1;
+    } else {
+      /* pure v6: ::1 */
+      is_loopback = addr.inet6.addr[0] == 0 && addr.inet6.addr[15] == 1;
+    }
+  } else {
+    /* IPv4: 127.0.0.1 in network byte order. */
+    const uint8_t* octets = (const uint8_t*)&addr.inet.addr;
+    is_loopback = octets[0] == 127 && octets[1] == 0 &&
+                  octets[2] == 0 && octets[3] == 1;
   }
+  server->is_local_binding = is_loopback;
 
   return server;
 }

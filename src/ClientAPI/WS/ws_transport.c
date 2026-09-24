@@ -177,9 +177,9 @@ ws_transport_t* ws_transport_create(scheduler_pool_t* pool,
     }
   }
 
-  transport->listen_sock = platform_socket_create(PLATFORM_AF_INET, 1);
+  transport->listen_sock = platform_listen_socket_create(host, port, NULL);
   if (transport->listen_sock == NULL) {
-    perror("socket");
+    /* platform_listen_socket_create already reported the failure. */
     if (transport->ssl_ctx != NULL) {
       SSL_CTX_free(transport->ssl_ctx);
     }
@@ -193,30 +193,6 @@ ws_transport_t* ws_transport_create(scheduler_pool_t* pool,
   }
 
   platform_socket_set_nonblocking(transport->listen_sock);
-  platform_socket_set_reuseaddr(transport->listen_sock);
-
-  platform_address_t addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.family = PLATFORM_AF_INET;
-  addr.inet.port = port;
-  if (platform_address_parse(&addr, host, port) != 0) {
-    addr.inet.addr = 0; /* INADDR_ANY */
-  }
-
-  if (platform_socket_bind(transport->listen_sock, &addr) < 0) {
-    perror("bind");
-    platform_socket_destroy(transport->listen_sock);
-    if (transport->ssl_ctx != NULL) {
-      SSL_CTX_free(transport->ssl_ctx);
-    }
-    pd_loop_destroy(transport->loop);
-    _destroy_stack_destroy(transport);
-    actor_destroy(&transport->actor);
-    free(transport->api_key_hash);
-    free(transport->host);
-    free(transport);
-    return NULL;
-  }
 
   if (platform_socket_listen(transport->listen_sock, 128) < 0) {
     perror("listen");
