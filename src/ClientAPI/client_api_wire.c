@@ -1775,6 +1775,141 @@ int client_api_friend_list_response_decode(cbor_item_t* item, client_api_friend_
   return 0;
 }
 
+// --- Bootstrap Add ---
+// [type, endpoint: string]
+
+cbor_item_t* client_api_bootstrap_add_encode(const client_api_bootstrap_add_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_BOOTSTRAP_ADD);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_string(msg->endpoint);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_bootstrap_add_decode(cbor_item_t* item, client_api_bootstrap_add_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_BOOTSTRAP_ADD) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* endpoint_item = cbor_array_get(item, 1);
+  /* 256 covers the worst-case "host:port" endpoint (bracketed IPv6 literal
+     plus port) with headroom; mirrors the host buffer the parser uses. */
+  msg->endpoint = _decode_string(endpoint_item, 256);
+  cbor_decref(&endpoint_item);
+  return msg->endpoint == NULL ? -1 : 0;
+}
+
+void client_api_bootstrap_add_destroy(client_api_bootstrap_add_t* msg) {
+  if (msg == NULL) return;
+  free(msg->endpoint);
+}
+
+// --- Bootstrap Remove ---
+// [type, endpoint: string]
+
+cbor_item_t* client_api_bootstrap_remove_encode(const client_api_bootstrap_remove_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_BOOTSTRAP_REMOVE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_string(msg->endpoint);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_bootstrap_remove_decode(cbor_item_t* item, client_api_bootstrap_remove_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_BOOTSTRAP_REMOVE) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* endpoint_item = cbor_array_get(item, 1);
+  msg->endpoint = _decode_string(endpoint_item, 256);
+  cbor_decref(&endpoint_item);
+  return msg->endpoint == NULL ? -1 : 0;
+}
+
+void client_api_bootstrap_remove_destroy(client_api_bootstrap_remove_t* msg) {
+  if (msg == NULL) return;
+  free(msg->endpoint);
+}
+
+// --- Bootstrap List Request ---
+// [type] — no payload
+
+cbor_item_t* client_api_bootstrap_list_request_encode(void) {
+  cbor_item_t* array = cbor_new_definite_array(1);
+  cbor_item_t* item = cbor_build_uint8(CLIENT_API_BOOTSTRAP_LIST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+  return array;
+}
+
+// --- Bootstrap List Response ---
+// [type, entries: cbor_array of [host, port, source]]
+
+cbor_item_t* client_api_bootstrap_list_response_encode(const client_api_bootstrap_list_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_BOOTSTRAP_LIST_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  if (msg->entries != NULL) {
+    (void)cbor_array_push(array, msg->entries);
+  } else {
+    item = cbor_new_definite_array(0);
+    (void)cbor_array_push(array, item);
+    cbor_decref(&item);
+  }
+
+  return array;
+}
+
+void client_api_bootstrap_list_response_destroy(client_api_bootstrap_list_response_t* msg) {
+  if (msg == NULL) return;
+  if (msg->entries != NULL) {
+    cbor_decref(&msg->entries);
+  }
+}
+
+int client_api_bootstrap_list_response_decode(cbor_item_t* item, client_api_bootstrap_list_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_BOOTSTRAP_LIST_RESPONSE) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+  msg->entries = cbor_array_get(item, 1);
+  return 0;
+}
+
 // --- Config Show Request ---
 // [type] — no payload
 

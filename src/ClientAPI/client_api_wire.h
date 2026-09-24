@@ -59,6 +59,10 @@
 #define CLIENT_API_REP_UNPIN_RESPONSE            49
 #define CLIENT_API_EPHEMERAL_LIST_REQUEST        50
 #define CLIENT_API_EPHEMERAL_LIST_RESPONSE       51
+#define CLIENT_API_BOOTSTRAP_ADD                 52
+#define CLIENT_API_BOOTSTRAP_REMOVE              53
+#define CLIENT_API_BOOTSTRAP_LIST                54
+#define CLIENT_API_BOOTSTRAP_LIST_RESPONSE       55
 
 /* Representation-op responses are the adjacent pair (request + 1); the
  * transport handler derives the response code arithmetically, so a renumbering
@@ -368,6 +372,31 @@ typedef struct {
   cbor_item_t* friends;  // owned by struct, freed by _destroy
 } client_api_friend_list_response_t;
 
+// --- Bootstrap Add ---
+// [type, endpoint: string]  e.g. "10.0.0.1:8080" or "[2001:db8::1]:8080"
+typedef struct {
+  char* endpoint;  // caller frees via client_api_bootstrap_add_destroy
+} client_api_bootstrap_add_t;
+
+// --- Bootstrap Remove ---
+// [type, endpoint: string]
+typedef struct {
+  char* endpoint;
+} client_api_bootstrap_remove_t;
+
+// --- Bootstrap List Request ---
+// [type] — no payload
+
+// --- Bootstrap List Response ---
+// [type, entries: [ [host: string, port: uint, source: uint], ... ]]
+// source: 0 = config-seeded (immutable), 1 = operator-managed (persisted)
+#define CLIENT_API_BOOTSTRAP_SOURCE_CONFIG  0
+#define CLIENT_API_BOOTSTRAP_SOURCE_MANAGED 1
+
+typedef struct {
+  cbor_item_t* entries;  // owned by struct, freed by _destroy
+} client_api_bootstrap_list_response_t;
+
 // --- Representation op request (mark permanent / delete ephemeral / pin / unpin) ---
 // [type, url] — url is the full OFF URL string of the representation to
 // operate on. The type byte selects the op (42/44/46/48); the layout is
@@ -519,6 +548,19 @@ cbor_item_t* client_api_friend_list_request_encode(void);
 cbor_item_t* client_api_friend_list_response_encode(const client_api_friend_list_response_t* msg);
 int client_api_friend_list_response_decode(cbor_item_t* item, client_api_friend_list_response_t* msg);
 void client_api_friend_list_response_destroy(client_api_friend_list_response_t* msg);
+
+cbor_item_t* client_api_bootstrap_add_encode(const client_api_bootstrap_add_t* msg);
+int client_api_bootstrap_add_decode(cbor_item_t* item, client_api_bootstrap_add_t* msg);
+void client_api_bootstrap_add_destroy(client_api_bootstrap_add_t* msg);
+
+cbor_item_t* client_api_bootstrap_remove_encode(const client_api_bootstrap_remove_t* msg);
+int client_api_bootstrap_remove_decode(cbor_item_t* item, client_api_bootstrap_remove_t* msg);
+void client_api_bootstrap_remove_destroy(client_api_bootstrap_remove_t* msg);
+
+cbor_item_t* client_api_bootstrap_list_request_encode(void);
+cbor_item_t* client_api_bootstrap_list_response_encode(const client_api_bootstrap_list_response_t* msg);
+int client_api_bootstrap_list_response_decode(cbor_item_t* item, client_api_bootstrap_list_response_t* msg);
+void client_api_bootstrap_list_response_destroy(client_api_bootstrap_list_response_t* msg);
 
 // Helper: extract type byte from CBOR item
 uint8_t client_api_wire_get_type(cbor_item_t* item);
