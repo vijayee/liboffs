@@ -12,7 +12,9 @@ extern "C" {
 #include "../src/ClientAPI/HTTP/cors.h"
 #include "../src/ClientAPI/HTTP/auth_middleware.h"
 #include "../src/ClientAPI/HTTP/config_routes.h"
+#include "../src/ClientAPI/HTTP/peer_routes.h"
 #include "../src/Configuration/config.h"
+#include "../src/Network/authority.h"
 #include "../src/Node/node.h"
 #include "../src/Scheduler/scheduler.h"
 #include "../src/Platform/platform.h"
@@ -898,6 +900,156 @@ TEST_F(LocalBindingAuth, ConfigGetAllowedOnLoopback) {
   int result = _send_and_recv(sock, request, response, sizeof(response));
   EXPECT_EQ(result, 0);
   EXPECT_NE(strstr(response, "200"), nullptr);
+
+  platform_socket_destroy(sock);
+}
+
+// --- /bootstrap routes happy path ---
+//
+// A stack offs_node_t with a heap authority and a NULL network: the bootstrap
+// handlers only touch the authority lists, and network_mark_peer_state_dirty
+// / network_connect_peer are NULL-safe no-ops (fire-and-forget connect), so
+// the routes are exercised without a live QUIC stack.
+
+class TestHttpServerBootstrapRoutes : public testing::Test {
+public:
+  scheduler_pool_t* pool;
+  http_server_t* server;
+  uint16_t port;
+  config_t config;
+  offs_node_t node;
+  authority_t* authority;
+
+  void SetUp() override {
+    port = _next_port++ + (uint16_t)((platform_getpid() % 127) * 100);
+    pool = scheduler_pool_create(4);
+    scheduler_pool_start(pool);
+    server = NULL;
+    authority = NULL;
+    memset(&node, 0, sizeof(node));
+    config = config_default();
+    config.api_key_hash = strdup(k_local_auth_test_hash);
+    authority = authority_create(&config);
+    ASSERT_TRUE(authority != NULL);
+    node.config = &config;
+    node.authority = authority;
+    node.network = NULL;
+  }
+
+  void TearDown() override {
+    if (server != NULL) {
+      http_server_stop(server);
+    }
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    if (server != NULL) {
+      http_server_destroy(server);
+    }
+    scheduler_pool_destroy(pool);
+    authority_destroy(authority);
+    free(config.api_key_hash);
+    config.api_key_hash = NULL;
+  }
+
+  void setup_server() {
+    server = http_server_create(pool, "127.0.0.1", port);
+    ASSERT_TRUE(server != NULL);
+
+    auth_middleware_t* auth = auth_middleware_create(config.api_key_hash, false, server);
+    ASSERT_TRUE(auth != NULL);
+    http_server_use(server, auth_middleware_handler(), auth,
+                    (void (*)(void*))auth_middleware_destroy);
+
+    peer_routes_register(server, &node, &config, k_local_auth_test_key);
+    http_server_listen(server);
+  }
+
+  platform_socket_t* connect() {
+    platform_socket_t* sock = NULL;
+    for (int attempts = 0; attempts < 50; attempts++) {
+      platform_usleep(10000);
+      sock = _connect_to_server(port);
+      if (sock != NULL) break;
+    }
+    return sock;
+  }
+};
+
+/* POST /bootstrap → 200 added, duplicate → 409 already_bootstrap, GET shows
+   the entry in the managed list, DELETE → 200 removed, GET shows it gone. */
+TEST_F(TestHttpServerBootstrapRoutes, AddListRemoveHappyPath) {
+  setup_server();
+
+  const std::string endpoint_body = "{\"endpoint\": \"127.0.0.1:9001\"}";
+
+  platform_socket_t* sock = connect();
+  ASSERT_NE(sock, nullptr);
+
+  std::string add_request =
+      std::string("POST /bootstrap HTTP/1.1\r\n") +
+      "Host: localhost\r\n" +
+      "Authorization: Bearer " + k_local_auth_test_key + "\r\n" +
+      "Content-Type: application/json\r\n" +
+      "Content-Length: " + std::to_string(endpoint_body.size()) + "\r\n\r\n" +
+      endpoint_body;
+  char response[8192];
+  int result = _send_and_recv(sock, add_request.c_str(), response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "200"), nullptr);
+  EXPECT_NE(strstr(response, "added"), nullptr);
+
+  platform_socket_destroy(sock);
+
+  /* Duplicate add is a 409, not a new entry. */
+  sock = connect();
+  ASSERT_NE(sock, nullptr);
+  result = _send_and_recv(sock, add_request.c_str(), response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "409"), nullptr);
+  EXPECT_NE(strstr(response, "already_bootstrap"), nullptr);
+
+  platform_socket_destroy(sock);
+
+  /* GET shows the managed entry. */
+  sock = connect();
+  ASSERT_NE(sock, nullptr);
+  std::string list_request =
+      std::string("GET /bootstrap HTTP/1.1\r\n") +
+      "Host: localhost\r\n" +
+      "Authorization: Bearer " + k_local_auth_test_key + "\r\n\r\n";
+  result = _send_and_recv(sock, list_request.c_str(), response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "200"), nullptr);
+  EXPECT_NE(strstr(response, "\"managed\""), nullptr);
+  EXPECT_NE(strstr(response, "127.0.0.1"), nullptr);
+  EXPECT_NE(strstr(response, "9001"), nullptr);
+
+  platform_socket_destroy(sock);
+
+  /* DELETE removes it. */
+  sock = connect();
+  ASSERT_NE(sock, nullptr);
+  std::string remove_request =
+      std::string("DELETE /bootstrap HTTP/1.1\r\n") +
+      "Host: localhost\r\n" +
+      "Authorization: Bearer " + k_local_auth_test_key + "\r\n" +
+      "Content-Type: application/json\r\n" +
+      "Content-Length: " + std::to_string(endpoint_body.size()) + "\r\n\r\n" +
+      endpoint_body;
+  result = _send_and_recv(sock, remove_request.c_str(), response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "200"), nullptr);
+  EXPECT_NE(strstr(response, "removed"), nullptr);
+
+  platform_socket_destroy(sock);
+
+  /* The list no longer contains the endpoint. */
+  sock = connect();
+  ASSERT_NE(sock, nullptr);
+  result = _send_and_recv(sock, list_request.c_str(), response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "200"), nullptr);
+  EXPECT_EQ(strstr(response, "9001"), nullptr);
 
   platform_socket_destroy(sock);
 }

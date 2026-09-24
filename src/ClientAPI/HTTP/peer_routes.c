@@ -9,6 +9,7 @@
 #include "../../Network/peer_info.h"
 #include "../../Network/network.h"
 #include "../../Network/authority.h"
+#include "../../Network/endpoint.h"
 #include "../../Network/connection_manager.h"
 #include "../../Network/node_id.h"
 #include "../../Node/node.h"
@@ -602,6 +603,211 @@ static void _friend_list_handler(http_request_t* request, http_response_t* respo
   free(json_str);
 }
 
+/* --- Bootstrap endpoint body decode helper --- */
+
+/* Extract the "endpoint" string from a JSON body of the form
+   {"endpoint": "host:port or [ipv6]:port"}. The body buffer is not
+   NUL-terminated, so it is size-checked and copied to a stack buffer
+   before cJSON_Parse. On success endpoint_out holds the NUL-terminated
+   endpoint; returns -1 on any missing/invalid input. */
+static int _decode_bootstrap_body(http_request_t* request, char* endpoint_out,
+                                  size_t endpoint_len) {
+  if (request->body == NULL || request->body->data == NULL ||
+      request->body->size == 0 || request->body->size >= endpoint_len) {
+    return -1;
+  }
+
+  memcpy(endpoint_out, request->body->data, request->body->size);
+  endpoint_out[request->body->size] = '\0';
+
+  cJSON* json = cJSON_Parse(endpoint_out);
+  if (json == NULL) return -1;
+
+  int result = -1;
+  cJSON* endpoint = cJSON_GetObjectItem(json, "endpoint");
+  if (cJSON_IsString(endpoint) && endpoint->valuestring != NULL &&
+      endpoint->valuestring[0] != '\0') {
+    size_t length = strlen(endpoint->valuestring);
+    if (length < endpoint_len) {
+      memcpy(endpoint_out, endpoint->valuestring, length + 1);
+      result = 0;
+    }
+  }
+
+  cJSON_Delete(json);
+  return result;
+}
+
+/* --- POST /bootstrap --- */
+
+static void _bootstrap_add_handler(http_request_t* request, http_response_t* response,
+                                    void* user_data) {
+  peer_routes_ctx_t* ctx = (peer_routes_ctx_t*)user_data;
+
+  if (_check_auth(request, response) != 0) return;
+
+  char endpoint[512];
+  if (_decode_bootstrap_body(request, endpoint, sizeof(endpoint)) != 0) {
+    http_response_set_status(response, HTTP_STATUS_BAD_REQUEST);
+    http_response_end(response);
+    return;
+  }
+
+  int add_result = authority_bootstrap_add(ctx->node->authority, endpoint);
+  if (add_result != 0) {
+    if (add_result == -2) {
+      /* Already a bootstrap peer (config or managed list) */
+      cJSON* json = cJSON_CreateObject();
+      cJSON_AddStringToObject(json, "status", "already_bootstrap");
+      char* json_str = cJSON_Print(json);
+      cJSON_Delete(json);
+      http_response_set_status(response, HTTP_STATUS_CONFLICT);
+      http_response_set_header(response, "Content-Type", "application/json");
+      http_response_write(response, json_str, strlen(json_str));
+      http_response_end(response);
+      free(json_str);
+    } else {
+      /* Invalid endpoint or OOM */
+      http_response_set_status(response, HTTP_STATUS_BAD_REQUEST);
+      http_response_end(response);
+    }
+    return;
+  }
+
+  /* The debounced save timer persists the peer store; no synchronous save. */
+  network_mark_peer_state_dirty(ctx->node->network);
+
+  /* Fire-and-forget connect; a failure here is not an HTTP error — the
+     connect loop retries once the peer state heals. */
+  char host[256];
+  uint16_t port = 0;
+  if (endpoint_parse(endpoint, host, sizeof(host), &port) == 0) {
+    network_connect_peer(ctx->node->network, host, port);
+  }
+
+  cJSON* json = cJSON_CreateObject();
+  cJSON_AddStringToObject(json, "status", "added");
+  char* json_str = cJSON_Print(json);
+  cJSON_Delete(json);
+  http_response_set_status(response, HTTP_STATUS_OK);
+  http_response_set_header(response, "Content-Type", "application/json");
+  http_response_write(response, json_str, strlen(json_str));
+  http_response_end(response);
+  free(json_str);
+}
+
+/* --- DELETE /bootstrap --- */
+
+static void _bootstrap_remove_handler(http_request_t* request, http_response_t* response,
+                                       void* user_data) {
+  peer_routes_ctx_t* ctx = (peer_routes_ctx_t*)user_data;
+
+  if (_check_auth(request, response) != 0) return;
+
+  /* Body-based (not path params): endpoints contain ':' and '[]' characters
+     unsuited to path parameters. */
+  char endpoint[512];
+  if (_decode_bootstrap_body(request, endpoint, sizeof(endpoint)) != 0) {
+    http_response_set_status(response, HTTP_STATUS_BAD_REQUEST);
+    http_response_end(response);
+    return;
+  }
+
+  int remove_result = authority_bootstrap_remove(ctx->node->authority, endpoint);
+  if (remove_result == -1) {
+    /* Not found in either list */
+    http_response_set_status(response, HTTP_STATUS_NOT_FOUND);
+    http_response_end(response);
+    return;
+  }
+  if (remove_result == -2) {
+    /* Config-seeded entries are immutable at runtime */
+    cJSON* json = cJSON_CreateObject();
+    cJSON_AddStringToObject(json, "status", "config_immutable");
+    char* json_str = cJSON_Print(json);
+    cJSON_Delete(json);
+    http_response_set_status(response, HTTP_STATUS_CONFLICT);
+    http_response_set_header(response, "Content-Type", "application/json");
+    http_response_write(response, json_str, strlen(json_str));
+    http_response_end(response);
+    free(json_str);
+    return;
+  }
+
+  /* The debounced save timer persists the peer store; no synchronous save. */
+  network_mark_peer_state_dirty(ctx->node->network);
+
+  cJSON* json = cJSON_CreateObject();
+  cJSON_AddStringToObject(json, "status", "removed");
+  char* json_str = cJSON_Print(json);
+  cJSON_Delete(json);
+  http_response_set_status(response, HTTP_STATUS_OK);
+  http_response_set_header(response, "Content-Type", "application/json");
+  http_response_write(response, json_str, strlen(json_str));
+  http_response_end(response);
+  free(json_str);
+}
+
+/* --- GET /bootstrap --- */
+
+static void _bootstrap_list_handler(http_request_t* request, http_response_t* response,
+                                     void* user_data) {
+  peer_routes_ctx_t* ctx = (peer_routes_ctx_t*)user_data;
+
+  if (_check_auth(request, response) != 0) return;
+
+  authority_t* authority = ctx->node->authority;
+
+  cJSON* json = cJSON_CreateObject();
+  cJSON* config_array = cJSON_AddArrayToObject(json, "config");
+  cJSON* managed_array = cJSON_AddArrayToObject(json, "managed");
+  if (config_array == NULL || managed_array == NULL) {
+    cJSON_Delete(json);
+    http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_end(response);
+    return;
+  }
+
+  /* Config-seeded entries first, then operator-added managed entries. */
+  for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
+    char host[256];
+    uint16_t port = 0;
+    if (endpoint_parse(authority->bootstrap_peers[index], host, sizeof(host), &port) != 0) {
+      continue;
+    }
+    cJSON* entry = cJSON_CreateObject();
+    cJSON_AddStringToObject(entry, "host", host);
+    cJSON_AddNumberToObject(entry, "port", (double)port);
+    cJSON_AddItemToArray(config_array, entry);
+  }
+
+  for (size_t index = 0; index < authority->managed_bootstrap_peer_count; index++) {
+    char host[256];
+    uint16_t port = 0;
+    if (endpoint_parse(authority->managed_bootstrap_peers[index], host, sizeof(host), &port) != 0) {
+      continue;
+    }
+    cJSON* entry = cJSON_CreateObject();
+    cJSON_AddStringToObject(entry, "host", host);
+    cJSON_AddNumberToObject(entry, "port", (double)port);
+    cJSON_AddItemToArray(managed_array, entry);
+  }
+
+  char* json_str = cJSON_Print(json);
+  cJSON_Delete(json);
+  if (json_str == NULL) {
+    http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_end(response);
+    return;
+  }
+
+  http_response_set_status(response, HTTP_STATUS_OK);
+  http_response_set_header(response, "Content-Type", "application/json");
+  http_response_write(response, json_str, strlen(json_str));
+  http_response_end(response);
+  free(json_str);
+}
+
 /* --- Registration --- */
 
 void peer_routes_register(http_server_t* server, offs_node_t* node,
@@ -618,4 +824,7 @@ void peer_routes_register(http_server_t* server, offs_node_t* node,
   http_server_post_with_data(server, "/friends", _friend_add_handler, ctx, NULL);
   http_server_delete_with_data(server, "/friends/[^/]+", _friend_remove_handler, ctx, NULL);
   http_server_get_with_data(server, "/friends", _friend_list_handler, ctx, NULL);
+  http_server_post_with_data(server, "/bootstrap", _bootstrap_add_handler, ctx, NULL);
+  http_server_delete_with_data(server, "/bootstrap", _bootstrap_remove_handler, ctx, NULL);
+  http_server_get_with_data(server, "/bootstrap", _bootstrap_list_handler, ctx, NULL);
 }
