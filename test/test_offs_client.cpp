@@ -1197,6 +1197,8 @@ TEST_F(TestOffsClient, ErrorFrameCompletesBootstrapCallbacks) {
     EXPECT_EQ(err_ctx.called.load(), 1);
     EXPECT_EQ(err_ctx.status.load(), CLIENT_API_STATUS_INTERNAL_ERROR);
 
+    result_ctx.called.store(0, std::memory_order_release);
+    result_ctx.status.store(0, std::memory_order_release);
     EXPECT_EQ(offs_client_bootstrap_remove(client, "10.0.0.1:8080",
                                            _peer_connect_callback, &result_ctx), 0);
     for (int attempts = 0; attempts < 200 && !result_ctx.called.load(std::memory_order_acquire);
