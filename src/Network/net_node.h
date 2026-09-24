@@ -9,6 +9,7 @@
 #include "authority.h"
 #include "conn_state.h"
 #include "../Util/atomic_compat.h"
+#include "../Platform/platform_socket.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -19,8 +20,16 @@ typedef enum net_node_flags_e {
 
 typedef struct net_node_t {
   node_id_t id;
-  uint32_t addr;                // IPv4 address, network byte order
+  uint32_t addr;                // IPv4 address, host byte order
   uint16_t port;                // port, network byte order
+  /* v6-aware address fields. The legacy `addr` u32 stays in HOST byte order
+     (matching every existing call site — the old "network byte order"
+     comment was stale) and stays populated for v4/v4-mapped addresses so
+     v4 consumers keep working; it is 0 for pure-v6 nodes. */
+  uint8_t addr_family;          // PLATFORM_AF_INET or PLATFORM_AF_INET6
+  uint8_t addr6[16];            // valid when addr_family == PLATFORM_AF_INET6
+  uint8_t rendv_family;         // rendezvous point family, same values
+  uint8_t rendv6[16];           // valid when rendv_family == PLATFORM_AF_INET6
   uint32_t rendv_addr;         // rendezvous point address (NAT traversal)
   uint16_t rendv_port;         // rendezvous point port
   net_node_flags_e flags;
@@ -55,6 +64,11 @@ net_node_t* net_node_create_rendv(const node_id_t* id, uint32_t addr, uint16_t p
                                    uint32_t rendv_addr, uint16_t rendv_port);
 net_node_t* net_node_create_unidentified(uint32_t addr, uint16_t port);
 void net_node_destroy(net_node_t* node);
+
+void net_node_set_platform_addr(net_node_t* node, const platform_address_t* addr);
+void net_node_get_platform_addr(const net_node_t* node, platform_address_t* out);
+void net_node_set_rendv_platform(net_node_t* node, const platform_address_t* addr);
+int net_node_addr_string(const net_node_t* node, bool bracket, char* buf, size_t len);
 
 bool net_node_equals_by_id(const net_node_t* left, const net_node_t* right);
 bool net_node_id_equals(const node_id_t* left, const node_id_t* right);
