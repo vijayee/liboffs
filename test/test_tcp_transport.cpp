@@ -557,4 +557,67 @@ TEST_F(TestTcpTransport, HealthRequest) {
     tcp_transport_destroy(health_transport);
 }
 
+/* Peer/friend and bootstrap dispatch arms wired into _tcp_dispatch_frame must
+   be reachable on a cache-only transport (no tcp_transport_set_peer_node call
+   in the fixture). The connection starts authenticated (api_key_hash=NULL sets
+   is_authenticated=1 at creation) and peer_ctx borrows NULL network/authority,
+   so each peer handler replies CLIENT_API_STATUS_INTERNAL_ERROR from its NULL
+   guard before touching any borrowed pointer. INTERNAL_ERROR can never come
+   from the dispatch default arm ("Unknown message type" -> BAD_REQUEST), so
+   observing it proves the arm was reached and the NULL guard fired. */
+static void _assert_peer_frame_internal_error(platform_socket_t* sock, cbor_item_t* frame) {
+    ASSERT_NE(frame, nullptr);
+    ASSERT_EQ(_send_frame(sock, frame), 0);
+
+    stream_framer_t* framer = stream_framer_create();
+    cbor_item_t* response = _recv_frame(sock, framer);
+    ASSERT_NE(response, nullptr);
+
+    uint8_t type = client_api_wire_get_type(response);
+    EXPECT_EQ(type, CLIENT_API_ERROR);
+    if (type == CLIENT_API_ERROR) {
+        client_api_error_t err;
+        memset(&err, 0, sizeof(err));
+        int decode_result = client_api_error_decode(response, &err);
+        EXPECT_EQ(decode_result, 0);
+        if (decode_result == 0) {
+            EXPECT_EQ(err.status_code, CLIENT_API_STATUS_INTERNAL_ERROR);
+            client_api_error_destroy(&err);
+        }
+    }
+    cbor_decref(&response);
+    stream_framer_destroy(framer);
+}
+
+TEST_F(TestTcpTransport, PeerOpsDispatchOnUnwiredNode) {
+    platform_socket_t* sock = _connect_with_retry("127.0.0.1", port);
+    ASSERT_NE(sock, nullptr);
+
+    /* api_key_hash is NULL on this transport, so AUTH auto-accepts with no
+       reply frame (the connection is already authenticated at creation). */
+    client_api_auth_request_t auth;
+    memset(&auth, 0, sizeof(auth));
+    auth.api_key = (uint8_t*)"unused";
+    auth.api_key_len = strlen("unused");
+    cbor_item_t* auth_frame = client_api_auth_request_encode(&auth);
+    ASSERT_NE(auth_frame, nullptr);
+    ASSERT_EQ(_send_frame(sock, auth_frame), 0);
+
+    /* FRIEND_ADD: the NULL network/authority guard runs before payload
+       decoding, so a dummy payload still exercises the guard path. */
+    client_api_friend_add_t friend_add;
+    memset(&friend_add, 0, sizeof(friend_add));
+    friend_add.format = 0;
+    friend_add.data = (uint8_t*)"dummy";
+    friend_add.data_size = sizeof("dummy") - 1;
+    _assert_peer_frame_internal_error(sock, client_api_friend_add_encode(&friend_add));
+
+    client_api_bootstrap_add_t bootstrap_add;
+    memset(&bootstrap_add, 0, sizeof(bootstrap_add));
+    bootstrap_add.endpoint = (char*)"10.0.0.1:8080";
+    _assert_peer_frame_internal_error(sock, client_api_bootstrap_add_encode(&bootstrap_add));
+
+    platform_socket_destroy(sock);
+}
+
 } // namespace tcp_transport_test
