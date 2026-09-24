@@ -1556,7 +1556,16 @@ static char* _ws_compute_accept_key(const char* client_key) {
   return accept_key;
 }
 
-static int _ws_upgrade(offs_client_t* client, const char* ws_host) {
+/* RFC 3986: a v6 literal in a Host header keeps its brackets. */
+static void _host_header_value(const char* host, uint16_t port, char* out, size_t out_len) {
+  if (strchr(host, ':') != NULL) {
+    snprintf(out, out_len, "[%s]:%u", host, (unsigned)port);
+  } else {
+    snprintf(out, out_len, "%s:%u", host, (unsigned)port);
+  }
+}
+
+static int _ws_upgrade(offs_client_t* client, const char* ws_host, uint16_t ws_port) {
   /* Generate a 16-byte random key and base64 encode */
   uint8_t raw_key[16];
   if (platform_random_bytes(raw_key, sizeof(raw_key)) != 0) return -1;
@@ -1579,6 +1588,8 @@ static int _ws_upgrade(offs_client_t* client, const char* ws_host) {
   char* expected_accept = _ws_compute_accept_key(client_key);
 
   /* Build and send upgrade request */
+  char host_header[300];
+  _host_header_value(ws_host, ws_port, host_header, sizeof(host_header));
   char request[1024];
   snprintf(request, sizeof(request),
     "GET /offs HTTP/1.1\r\n"
@@ -1587,7 +1598,7 @@ static int _ws_upgrade(offs_client_t* client, const char* ws_host) {
     "Connection: Upgrade\r\n"
     "Sec-WebSocket-Key: %s\r\n"
     "Sec-WebSocket-Version: 13\r\n\r\n",
-    ws_host, client_key);
+    host_header, client_key);
 
   free(client_key);
 
@@ -1829,7 +1840,7 @@ static offs_client_t* _connect_attempt(const char* transport_url, const char* ap
     }
 
     /* addr_copy still alive here — ws_host points into it */
-    if (_ws_upgrade(client, ws_host) != 0) {
+    if (_ws_upgrade(client, ws_host, port) != 0) {
       if (client->transport.ws.ssl != NULL) {
         SSL_free(client->transport.ws.ssl);
       }
@@ -3033,11 +3044,21 @@ buffer_t* offs_http_get(const char* url) {
   if (port <= 0 || port > 65535) return NULL;
   if (!path_start) path_start = "/";
 
-  /* Resolve hostname to IP address — v6-capable. AI_ADDRCONFIG avoids
-     picking a v6 address on a v4-only host. */
+  /* Resolve hostname to IP address — v6-capable. Numeric literals skip DNS
+     entirely: glibc applies AI_ADDRCONFIG to literals too, which would fail
+     on a host with no global v6 configured even though a literal needs no
+     resolution. */
   char ip_str[64];
   platform_address_family_e resolved_family = PLATFORM_AF_INET;
-  {
+  platform_address_t literal_addr;
+  if (platform_address_parse(&literal_addr, host, (uint16_t)port) == 0) {
+    /* A valid literal is at most INET6_ADDRSTRLEN-1 bytes, so this only
+       guards against a truncated copy. */
+    if (strlen(host) >= sizeof(ip_str)) return NULL;
+    resolved_family = literal_addr.family;
+    memcpy(ip_str, host, strlen(host) + 1);
+  } else {
+    /* Hostname. AI_ADDRCONFIG avoids picking a v6 address on a v4-only host. */
     struct addrinfo hints;
     struct addrinfo* res = NULL;
     memset(&hints, 0, sizeof(hints));
@@ -3092,10 +3113,12 @@ buffer_t* offs_http_get(const char* url) {
 
   /* Build and send HTTP GET request */
   {
+    char host_header[300];
+    _host_header_value(host, (uint16_t)port, host_header, sizeof(host_header));
     char request[4096];
     int req_len = snprintf(request, sizeof(request),
       "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
-      path_start, host);
+      path_start, host_header);
     if (req_len < 0 || req_len >= (int)sizeof(request)) {
       platform_socket_destroy(sock);
       return NULL;
