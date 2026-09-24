@@ -520,6 +520,47 @@ TEST(TestWireAddrField, GossipRoundTripV6Rendezvous) {
   cbor_decref(&cbor);
 }
 
+TEST(TestWireAddrField, AddrResponseRoundTripV6) {
+  wire_addr_response_t response;
+  memset(&response, 0, sizeof(response));
+  response.message_id = 7;
+  response.endpoint_id = 99;
+  response.reflexive_addr = 0x01020304;
+  response.reflexive_port = 23401;
+  uint8_t v6[16];
+  memset(v6, 0x33, sizeof(v6));
+  wire_addr_set_v6(&response.reflexive6, v6);
+  cbor_item_t* cbor = wire_addr_response_encode(&response);
+  ASSERT_NE(cbor, nullptr);
+  EXPECT_EQ(cbor_array_size(cbor), (size_t)7);
+  wire_addr_response_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  EXPECT_EQ(wire_addr_response_decode(cbor, &decoded), 0);
+  EXPECT_EQ(decoded.reflexive6.family, WIRE_ADDR_FAMILY_V6);
+  EXPECT_EQ(memcmp(decoded.reflexive6.bytes, v6, 16), 0);
+  cbor_decref(&cbor);
+}
+
+TEST(TestWireAddrField, GossipPullRoundTripV6Rendezvous) {
+  wire_gossip_pull_t pull;
+  memset(&pull, 0, sizeof(pull));
+  pull.message_id = 43;
+  pull.target_count = 0;
+  pull.rendezvous_port = 23401;
+  uint8_t v6[16];
+  memset(v6, 0x2B, sizeof(v6));
+  wire_addr_set_v6(&pull.rendv6, v6);
+  cbor_item_t* cbor = wire_gossip_pull_encode(&pull);
+  ASSERT_NE(cbor, nullptr);
+  EXPECT_EQ(cbor_array_size(cbor), (size_t)9);
+  wire_gossip_pull_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  EXPECT_EQ(wire_gossip_pull_decode(cbor, &decoded), 0);
+  EXPECT_EQ(decoded.rendv6.family, WIRE_ADDR_FAMILY_V6);
+  EXPECT_EQ(memcmp(decoded.rendv6.bytes, v6, 16), 0);
+  cbor_decref(&cbor);
+}
+
 TEST(TestWireAddrField, MalformedTrailingFieldRejected) {
   wire_relay_punch_t punch;
   memset(&punch, 0, sizeof(punch));
