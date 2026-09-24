@@ -21,7 +21,7 @@ typedef enum net_node_flags_e {
 typedef struct net_node_t {
   node_id_t id;
   uint32_t addr;                // IPv4 address, host byte order
-  uint16_t port;                // port, network byte order
+  uint16_t port;                // port, host byte order (platform_socket.c applies htons at conversion)
   /* v6-aware address fields. The legacy `addr` u32 stays in HOST byte order
      (matching every existing call site — the old "network byte order"
      comment was stale) and stays populated for v4/v4-mapped addresses so
