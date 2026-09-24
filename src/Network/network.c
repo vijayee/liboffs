@@ -6076,18 +6076,22 @@ void network_dispatch(void* state, message_t* msg) {
          runs after the pool is stopped, where direct list access is legal
          per the invariant in peer_book.h). */
       if (network->authority != NULL && network->peer_state_dirty) {
-        if (network->peer_book != NULL) {
+        if (network->peer_book == NULL) {
+          /* No peer-book actor (list-only tests on a shell network_t): legacy
+             direct save, legal because no peer-book actor exists to race. */
+          authority_save_peers(network->authority, network);
+          network->peer_state_dirty = 0;
+        } else {
+          /* Send failure (actor already tearing down): leave the flag set and
+             skip the direct save — a concurrent PEER_BOOK_MUTATION could still
+             be draining, and the Phase 8 save covers durability. */
           message_t save_request;
           memset(&save_request, 0, sizeof(save_request));
           save_request.type = PEER_BOOK_SAVE;
           save_request.payload = NULL;
           save_request.payload_destroy = NULL;
-          if (actor_send(&network->peer_book->actor, &save_request)) break;
+          (void)actor_send(&network->peer_book->actor, &save_request);
         }
-        /* No peer-book actor (list-only tests on a shell network_t): legacy
-           direct save, legal because no peer-book actor exists to race. */
-        authority_save_peers(network->authority, network);
-        network->peer_state_dirty = 0;
       }
       break;
     }

@@ -32,6 +32,12 @@
      (c) after the scheduler pool has been stopped (offs_node_stop Phase 8
          final authority_save_peers, offs_node_restart Phase 3 re-seed) — no
          worker can run the actor, so the lists are quiescent.
+   Note (b)/(c): offs_node_stop's HTTP drain phase has a shutdown deadline;
+   if it is exceeded, HTTP workers may still be inside round-trips when the
+   peer-book actor is stopped. Round-trips fail closed (-1) in that window,
+   and callers never dereference the peer_book after sending, so no UAF —
+   but the drain is not a hard barrier; rely on the deadline being generous
+   for admin operations.
    The storage physically stays in authority_t so the authority_save_peers /
    peer_store plumbing is unchanged; its location is an implementation detail
    — the peer-book actor is the synchronization point. The authority_* list
