@@ -88,19 +88,34 @@ void net_node_get_platform_addr(const net_node_t* node, platform_address_t* out)
 
 void net_node_set_rendv_platform(net_node_t* node, const platform_address_t* addr) {
   if (node == NULL || addr == NULL) return;
-  if (addr->family == PLATFORM_AF_INET6 &&
-      memcmp(addr->inet6.addr, _v4_mapped_prefix, 12) != 0) {
-    node->rendv_family = PLATFORM_AF_INET6;
-    memcpy(node->rendv6, addr->inet6.addr, 16);
-  } else {
-    node->rendv_family = PLATFORM_AF_INET;
-    /* Rendezvous u32 follows the same host-byte-order convention as addr. */
-    if (addr->family == PLATFORM_AF_INET) {
+  switch (addr->family) {
+    case PLATFORM_AF_INET:
+      /* Rendezvous u32 follows the same host-byte-order convention as addr. */
+      node->rendv_family = PLATFORM_AF_INET;
       node->rendv_addr = ((uint32_t)(addr->inet.addr & 0xFF) << 24) |
                          ((addr->inet.addr & 0xFF00u) << 8) |
                          ((addr->inet.addr >> 8) & 0xFF00u) |
                          ((addr->inet.addr >> 24) & 0xFFu);
-    }
+      memset(node->rendv6, 0, sizeof(node->rendv6));
+      break;
+    case PLATFORM_AF_INET6:
+      if (memcmp(addr->inet6.addr, _v4_mapped_prefix, 12) == 0) {
+        /* v4-mapped collapses to the u32 fast-path. */
+        platform_address_t v4;
+        memset(&v4, 0, sizeof(v4));
+        v4.family = PLATFORM_AF_INET;
+        v4.inet.addr = ((uint32_t)addr->inet6.addr[12] << 24) |
+                       ((uint32_t)addr->inet6.addr[13] << 16) |
+                       ((uint32_t)addr->inet6.addr[14] << 8) |
+                       (uint32_t)addr->inet6.addr[15];
+        net_node_set_rendv_platform(node, &v4);
+      } else {
+        node->rendv_family = PLATFORM_AF_INET6;
+        memcpy(node->rendv6, addr->inet6.addr, 16);
+      }
+      break;
+    default:
+      break; /* unsupported family — leave the rendezvous unset */
   }
 }
 

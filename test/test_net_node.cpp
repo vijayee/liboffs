@@ -92,6 +92,34 @@ TEST(TestNetNodeAddr, AddrStringV4) {
   net_node_destroy(node);
 }
 
+TEST(TestNetNodeAddr, SetRendvPlatformV4MappedCollapses) {
+  net_node_t* node = net_node_create_unidentified(0, 0);
+  platform_address_t addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.family = PLATFORM_AF_INET6;
+  addr.inet6.addr[10] = 0xFF;
+  addr.inet6.addr[11] = 0xFF;
+  addr.inet6.addr[12] = 192;
+  addr.inet6.addr[15] = 2;
+  net_node_set_rendv_platform(node, &addr);
+  EXPECT_EQ(node->rendv_family, PLATFORM_AF_INET);
+  EXPECT_NE(node->rendv_addr, 0);
+  EXPECT_EQ(node->rendv_addr, 0x020000C0u);  /* 192.0.0.2, byte-swapped per node->addr convention */
+  net_node_destroy(node);
+}
+
+TEST(TestNetNodeAddr, SetRendvPlatformV6StoresBytes) {
+  net_node_t* node = net_node_create_unidentified(0, 0);
+  platform_address_t addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.family = PLATFORM_AF_INET6;
+  for (int i = 0; i < 16; i++) addr.inet6.addr[i] = (uint8_t)(i + 1);
+  net_node_set_rendv_platform(node, &addr);
+  EXPECT_EQ(node->rendv_family, PLATFORM_AF_INET6);
+  EXPECT_EQ(memcmp(node->rendv6, addr.inet6.addr, 16), 0);
+  net_node_destroy(node);
+}
+
 TEST(TestNetNodeAddr, AddrlessNodeStringFails) {
   net_node_t* node = net_node_create_unidentified(0, 0);
   char buf[64];
