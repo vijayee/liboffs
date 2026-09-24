@@ -1054,4 +1054,113 @@ TEST_F(TestHttpServerBootstrapRoutes, AddListRemoveHappyPath) {
   platform_socket_destroy(sock);
 }
 
+/* POST /bootstrap with a body missing the "endpoint" key → 400; a body that
+   is not parseable JSON → 400. The authority list must stay untouched. */
+TEST_F(TestHttpServerBootstrapRoutes, AddRejectsInvalidBody) {
+  setup_server();
+
+  const std::string missing_endpoint_body = "{}";
+  std::string request =
+      std::string("POST /bootstrap HTTP/1.1\r\n") +
+      "Host: localhost\r\n" +
+      "Authorization: Bearer " + k_local_auth_test_key + "\r\n" +
+      "Content-Type: application/json\r\n" +
+      "Content-Length: " + std::to_string(missing_endpoint_body.size()) + "\r\n\r\n" +
+      missing_endpoint_body;
+  char response[8192];
+
+  platform_socket_t* sock = connect();
+  ASSERT_NE(sock, nullptr);
+  int result = _send_and_recv(sock, request.c_str(), response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "400"), nullptr);
+
+  platform_socket_destroy(sock);
+
+  /* Unparseable garbage body is also a 400. */
+  const std::string garbage_body = "not-json{";
+  request =
+      std::string("POST /bootstrap HTTP/1.1\r\n") +
+      "Host: localhost\r\n" +
+      "Authorization: Bearer " + k_local_auth_test_key + "\r\n" +
+      "Content-Type: application/json\r\n" +
+      "Content-Length: " + std::to_string(garbage_body.size()) + "\r\n\r\n" +
+      garbage_body;
+  sock = connect();
+  ASSERT_NE(sock, nullptr);
+  result = _send_and_recv(sock, request.c_str(), response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "400"), nullptr);
+
+  platform_socket_destroy(sock);
+}
+
+/* DELETE /bootstrap of an endpoint that was never added → 404, and it does
+   not disturb the managed entry that does exist. */
+TEST_F(TestHttpServerBootstrapRoutes, RemoveNotFound) {
+  setup_server();
+
+  const std::string endpoint_body = "{\"endpoint\": \"127.0.0.1:9002\"}";
+  const std::string other_body = "{\"endpoint\": \"127.0.0.1:9003\"}";
+
+  platform_socket_t* sock = connect();
+  ASSERT_NE(sock, nullptr);
+  std::string add_request =
+      std::string("POST /bootstrap HTTP/1.1\r\n") +
+      "Host: localhost\r\n" +
+      "Authorization: Bearer " + k_local_auth_test_key + "\r\n" +
+      "Content-Type: application/json\r\n" +
+      "Content-Length: " + std::to_string(endpoint_body.size()) + "\r\n\r\n" +
+      endpoint_body;
+  char response[8192];
+  int result = _send_and_recv(sock, add_request.c_str(), response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "200"), nullptr);
+
+  platform_socket_destroy(sock);
+
+  /* DELETE of a never-added endpoint → 404. */
+  sock = connect();
+  ASSERT_NE(sock, nullptr);
+  std::string remove_request =
+      std::string("DELETE /bootstrap HTTP/1.1\r\n") +
+      "Host: localhost\r\n" +
+      "Authorization: Bearer " + k_local_auth_test_key + "\r\n" +
+      "Content-Type: application/json\r\n" +
+      "Content-Length: " + std::to_string(other_body.size()) + "\r\n\r\n" +
+      other_body;
+  result = _send_and_recv(sock, remove_request.c_str(), response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "404"), nullptr);
+
+  platform_socket_destroy(sock);
+}
+
+/* DELETE of a config-seeded bootstrap peer → 409 config_immutable. The
+   config-seeded list is seeded directly on the fixture's authority the same
+   way test_authority_bootstrap.cpp seeds it. */
+TEST_F(TestHttpServerBootstrapRoutes, RemoveConfigImmutableEntry) {
+  ASSERT_EQ(0, authority_set_bootstrap_peers(authority, "127.0.0.1:9004"));
+  setup_server();
+
+  const std::string config_seeded_body = "{\"endpoint\": \"127.0.0.1:9004\"}";
+
+  platform_socket_t* sock = connect();
+  ASSERT_NE(sock, nullptr);
+  std::string remove_request =
+      std::string("DELETE /bootstrap HTTP/1.1\r\n") +
+      "Host: localhost\r\n" +
+      "Authorization: Bearer " + k_local_auth_test_key + "\r\n" +
+      "Content-Type: application/json\r\n" +
+      "Content-Length: " + std::to_string(config_seeded_body.size()) + "\r\n\r\n" +
+      config_seeded_body;
+  char response[8192];
+  int result = _send_and_recv(sock, remove_request.c_str(), response, sizeof(response));
+  EXPECT_EQ(result, 0);
+  EXPECT_NE(strstr(response, "409"), nullptr);
+  EXPECT_NE(strstr(response, "config_immutable"), nullptr);
+
+  platform_socket_destroy(sock);
+}
+
 } // namespace http_test

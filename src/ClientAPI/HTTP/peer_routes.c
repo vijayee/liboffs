@@ -661,14 +661,22 @@ static void _bootstrap_add_handler(http_request_t* request, http_response_t* res
       cJSON_AddStringToObject(json, "status", "already_bootstrap");
       char* json_str = cJSON_Print(json);
       cJSON_Delete(json);
+      if (json_str == NULL) {
+        http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+        http_response_end(response);
+        return;
+      }
       http_response_set_status(response, HTTP_STATUS_CONFLICT);
       http_response_set_header(response, "Content-Type", "application/json");
       http_response_write(response, json_str, strlen(json_str));
       http_response_end(response);
       free(json_str);
-    } else {
+    } else if (add_result == -1) {
       /* Invalid endpoint or OOM */
       http_response_set_status(response, HTTP_STATUS_BAD_REQUEST);
+      http_response_end(response);
+    } else {
+      http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
       http_response_end(response);
     }
     return;
@@ -689,6 +697,11 @@ static void _bootstrap_add_handler(http_request_t* request, http_response_t* res
   cJSON_AddStringToObject(json, "status", "added");
   char* json_str = cJSON_Print(json);
   cJSON_Delete(json);
+  if (json_str == NULL) {
+    http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_end(response);
+    return;
+  }
   http_response_set_status(response, HTTP_STATUS_OK);
   http_response_set_header(response, "Content-Type", "application/json");
   http_response_write(response, json_str, strlen(json_str));
@@ -726,11 +739,21 @@ static void _bootstrap_remove_handler(http_request_t* request, http_response_t* 
     cJSON_AddStringToObject(json, "status", "config_immutable");
     char* json_str = cJSON_Print(json);
     cJSON_Delete(json);
+    if (json_str == NULL) {
+      http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+      http_response_end(response);
+      return;
+    }
     http_response_set_status(response, HTTP_STATUS_CONFLICT);
     http_response_set_header(response, "Content-Type", "application/json");
     http_response_write(response, json_str, strlen(json_str));
     http_response_end(response);
     free(json_str);
+    return;
+  }
+  if (remove_result != 0) {
+    http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_end(response);
     return;
   }
 
@@ -741,6 +764,11 @@ static void _bootstrap_remove_handler(http_request_t* request, http_response_t* 
   cJSON_AddStringToObject(json, "status", "removed");
   char* json_str = cJSON_Print(json);
   cJSON_Delete(json);
+  if (json_str == NULL) {
+    http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_end(response);
+    return;
+  }
   http_response_set_status(response, HTTP_STATUS_OK);
   http_response_set_header(response, "Content-Type", "application/json");
   http_response_write(response, json_str, strlen(json_str));
