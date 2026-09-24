@@ -83,11 +83,37 @@ hardcodes IPv4.
   display code (logs, `peer info`) formats v6 with brackets via
   `net_node_addr_string()`.
 
+### Peer info / QR (offs)
+
+The QR payload is base58-CBOR (or a QR-rendered PPM) of `peer_info_t`
+(src/ClientAPI/peer_handlers.c, src/QR/*). Candidate addresses are `char* host`
+strings (src/Network/peer_info.h:29), so the payload format itself is already
+v6-compatible — no wire change needed. Conventions:
+
+- v6 addresses are stored **bare** in the `host` field (the CBOR keeps host and
+  port separate); brackets are added only when rendering composite `host:port`
+  strings. `endpoint_parse` accepts both.
+- The dial path works for v6 after the ConnectionStart fix below:
+  `off peer connect` → peer_handlers → network_connect_peer_candidates →
+  network_connect_peer → quic_listener_connect.
+- SRFLX candidates become family-aware via the relay reflexive widening above.
+- Display: `off peer info` prints the base58 blob; `off peer list` prints counts
+  only — no address rendering to change.
+
+**ConnectionStart fix (Phase 1):** quic_listener.c:909 hardcodes
+`QUIC_ADDRESS_FAMILY_INET` in MsQuic's `ConnectionStart`, so v6 candidates fail
+to dial even though the payload decodes. Change to `QUIC_ADDRESS_FAMILY_UNSPEC`
+(resolve by hostname/literal family), matching the listener's existing
+dual-stack posture. Same change for relay_client.c:674,684 (relay outbound).
+
 ### Explicitly out of scope (Phase 2)
 
-HOST-candidate enumeration (peer_info.c:381,410) and mDNSv6 stay IPv4-only in
-Phase 1. A v6 client can still connect via literal addresses and relays; local
-auto-discovery of v6-only peers waits for Phase 2.
+HOST-candidate (LAN) enumeration (peer_info.c:355-450 — AF_INET-only on both
+GetAdaptersAddresses and getifaddrs paths) and mDNSv6 stay IPv4-only in Phase 1,
+per decision. Phase 1 QR payloads for a dual-stack host keep v4-LAN candidates
+plus v6-capable SRFLX/RELAY; a v6-only LAN node's QR gains usable candidates in
+Phase 2. A v6 peer is still connectable in Phase 1 via literal address
+(entrypoint/bootstrap paths) and via SRFLX/RELAY candidates.
 
 ## Section 3 — Error handling + testing
 
@@ -116,6 +142,8 @@ auto-discovery of v6-only peers waits for Phase 2.
 - Listeners: bind tests over `[::1]` plus a v4-mapped connection; fallback-to-v4
   test on a host without v6 (failure injection).
 - C client: getaddrinfo resolution of a v6 literal and a hostname resolving to AAAA.
+- Dial path: quic_listener_connect to a v6 literal (ConnectionStart UNSPEC);
+  peer-info round trip with a pure-v6 SRFLX candidate.
 - OFFS e2e: offsd + offs CLI from ../OFFS against local liboffs master with node
   certs, exercising a v6 loopback connection end to end.
 - Full valgrind pass on all touched suites (zero-leak baseline, `-gdwarf-4`).
