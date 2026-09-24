@@ -101,6 +101,16 @@ typedef void (*offs_peer_list_cb_t)(void* ctx, uint8_t status,
 typedef void (*offs_friend_list_cb_t)(void* ctx, uint8_t status,
     const char* const* friend_ids_b58, size_t count);
 
+/* Bootstrap list entry, delivered by offs_client_bootstrap_list. */
+typedef struct {
+  const char* host;   /* NUL-terminated, held via offs_client_release_payload */
+  uint16_t port;
+  int source;         /* 0 = config, 1 = managed */
+} offs_bootstrap_entry_t;
+
+typedef void (*offs_bootstrap_list_cb_t)(void* ctx, uint8_t status,
+    const offs_bootstrap_entry_t* entries, size_t entry_count);
+
 /* Config set/reload result. status: 0 = accepted, nonzero = rejected
    (daemon-defined). restart_required is 1 when the staged config needs a
    node restart to apply (config_set only; always 0 for config_reload). */
@@ -264,6 +274,29 @@ int offs_client_friend_list(offs_client_t* client, offs_friend_list_cb_t cb, voi
 int offs_client_friend_remove(offs_client_t* client, const char* node_id_b58,
                               offs_peer_connect_cb_t cb, void* ctx);
 
+/* Add a bootstrap peer by "host:port" endpoint (IPv6 as "[host]:port"). The
+   result frame is CLIENT_API_PEER_CONNECT_RESULT, shared with the peer/friend
+   ops above, so the result routes to bootstrap_result_cb when one of these
+   two ops is outstanding and to peer_connect_cb otherwise — under the
+   one-outstanding-op-per-connection rule above the two slots are never
+   registered simultaneously. Error delivery follows the peer operations
+   above (ERROR frames complete the callback with the daemon's error
+   status). */
+int offs_client_bootstrap_add(offs_client_t* client, const char* endpoint,
+                              offs_peer_connect_cb_t callback, void* ctx);
+int offs_client_bootstrap_remove(offs_client_t* client, const char* endpoint,
+                                 offs_peer_connect_cb_t callback, void* ctx);
+
+/* List the daemon's bootstrap peers (config-seeded and operator-managed).
+   Each entry is [host, port, source] from the wire; host is NUL-terminated.
+   Payload ownership follows the rule at the top of this header: every
+   entries[index].host string AND the entries array itself stay valid until
+   released with offs_client_release_payload (count + 1 calls). Error
+   delivery follows the peer operations above (its own slot). Concurrency:
+   one outstanding list per slot (see peer operations above). */
+int offs_client_bootstrap_list(offs_client_t* client,
+                               offs_bootstrap_list_cb_t callback, void* ctx);
+
 /* Register the shared ERROR-frame callback without sending a GET.
    Peer/friend/load daemon-side rejections arrive here.
 
@@ -272,7 +305,8 @@ int offs_client_friend_remove(offs_client_t* client, const char* node_id_b58,
    single-response op callback is completed with the error status so its
    awaiter resolves instead of hanging until its own timeout. Ops whose
    callback carries a status parameter (peer_connect/friend_add/friend_remove,
-   block_*, peer_list, friend_list, config_set/config_reload, load end)
+   bootstrap_add/bootstrap_remove/bootstrap_list, block_*, peer_list,
+   friend_list, config_set/config_reload, load end)
    receive the daemon's status byte; ops without one (put, health, peer_info)
    receive a NULL payload as the failure signal. get() is NOT auto-completed:
    its errors are delivered via the error callback passed to

@@ -191,6 +191,14 @@ struct offs_client_t {
   void* peer_list_cb_ctx;
   offs_friend_list_cb_t friend_list_cb;
   void* friend_list_cb_ctx;
+  /* bootstrap_add/bootstrap_remove result; the wire reply is the shared
+     CLIENT_API_PEER_CONNECT_RESULT frame, so under the one-outstanding-op
+     rule this slot and peer_connect_cb are never registered together (see
+     the header's bootstrap declarations). */
+  offs_peer_connect_cb_t bootstrap_result_cb;
+  void* bootstrap_result_cb_ctx;
+  offs_bootstrap_list_cb_t bootstrap_list_cb;
+  void* bootstrap_list_cb_ctx;
   offs_json_cb_t config_show_cb;
   void* config_show_cb_ctx;
   /* Shared by config_set and config_reload (serialized use by the caller;
@@ -617,6 +625,10 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
   void* peer_list_cb_ctx = client->peer_list_cb_ctx;
   offs_friend_list_cb_t friend_list_cb = client->friend_list_cb;
   void* friend_list_cb_ctx = client->friend_list_cb_ctx;
+  offs_peer_connect_cb_t bootstrap_result_cb = client->bootstrap_result_cb;
+  void* bootstrap_result_cb_ctx = client->bootstrap_result_cb_ctx;
+  offs_bootstrap_list_cb_t bootstrap_list_cb = client->bootstrap_list_cb;
+  void* bootstrap_list_cb_ctx = client->bootstrap_list_cb_ctx;
   offs_json_cb_t config_show_cb = client->config_show_cb;
   void* config_show_cb_ctx = client->config_show_cb_ctx;
   offs_config_set_cb_t config_set_cb = client->config_set_cb;
@@ -710,6 +722,9 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
         if (peer_connect_cb != NULL) {
           peer_connect_cb(peer_connect_cb_ctx, msg.status_code);
         }
+        if (bootstrap_result_cb != NULL) {
+          bootstrap_result_cb(bootstrap_result_cb_ctx, msg.status_code);
+        }
         if (load_end_cb != NULL) {
           load_end_cb(load_end_cb_ctx, msg.status_code, 0, 0);
         }
@@ -718,6 +733,9 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
         }
         if (friend_list_cb != NULL) {
           friend_list_cb(friend_list_cb_ctx, msg.status_code, NULL, 0);
+        }
+        if (bootstrap_list_cb != NULL) {
+          bootstrap_list_cb(bootstrap_list_cb_ctx, msg.status_code, NULL, 0);
         }
         if (config_show_cb != NULL) {
           config_show_cb(config_show_cb_ctx, msg.status_code, NULL);
@@ -750,10 +768,12 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
         _clear_delivered_slot(client, health_cb);
         _clear_delivered_slot(client, peer_info_cb);
         _clear_delivered_slot(client, peer_connect_cb);
+        _clear_delivered_slot(client, bootstrap_result_cb);
         _clear_delivered_slot(client, load_progress_cb);
         _clear_delivered_slot(client, load_end_cb);
         _clear_delivered_slot(client, peer_list_cb);
         _clear_delivered_slot(client, friend_list_cb);
+        _clear_delivered_slot(client, bootstrap_list_cb);
         _clear_delivered_slot(client, config_show_cb);
         _clear_delivered_slot(client, config_set_cb);
         _clear_delivered_slot(client, update_status_cb);
@@ -847,7 +867,16 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
       client_api_peer_connect_result_t msg;
       memset(&msg, 0, sizeof(msg));
       if (client_api_peer_connect_result_decode(frame, &msg) == 0) {
-        if (peer_connect_cb != NULL) {
+        /* The wire reply frame is shared by peer_connect/friend_add/
+           friend_remove (peer_connect_cb) and bootstrap_add/bootstrap_remove
+           (bootstrap_result_cb). Under the one-outstanding-op-per-connection
+           rule (see the header's peer operations note) only one of the two
+           slots is registered when the result arrives; prefer the bootstrap
+           slot and fall back to the peer/friend slot. */
+        if (bootstrap_result_cb != NULL) {
+          bootstrap_result_cb(bootstrap_result_cb_ctx, msg.status);
+          _clear_delivered_slot(client, bootstrap_result_cb);
+        } else if (peer_connect_cb != NULL) {
           peer_connect_cb(peer_connect_cb_ctx, msg.status);
           _clear_delivered_slot(client, peer_connect_cb);
         }
@@ -1006,6 +1035,72 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
           }
         }
         client_api_friend_list_response_destroy(&msg);
+      }
+      break;
+    }
+    case CLIENT_API_BOOTSTRAP_LIST_RESPONSE: {
+      client_api_bootstrap_list_response_t msg;
+      memset(&msg, 0, sizeof(msg));
+      if (client_api_bootstrap_list_response_decode(frame, &msg) == 0) {
+        /* decode accepts non-array payloads; only an array is usable. */
+        if (cbor_isa_array(msg.entries)) {
+          size_t array_size = cbor_array_size(msg.entries);
+          /* Snapshot handed to the callback; held after the callback returns
+             so the consumer can release each entry and the array via
+             offs_client_release_payload. */
+          offs_bootstrap_entry_t* entries =
+              get_clear_memory(array_size * sizeof(offs_bootstrap_entry_t));
+          if (array_size == 0 || entries != NULL) {
+            size_t count = 0;
+            for (size_t index = 0; index < array_size; index++) {
+              cbor_item_t* entry = cbor_array_get(msg.entries, index);
+              /* Each entry is a 3-element [host: string, port: uint16,
+                 source: uint8] array (host NULL-safe: a zero-length CBOR
+                 string may carry a NULL handle). */
+              if (cbor_isa_array(entry) && cbor_array_size(entry) == 3) {
+                cbor_item_t* host_item = cbor_array_get(entry, 0);
+                cbor_item_t* port_item = cbor_array_get(entry, 1);
+                cbor_item_t* source_item = cbor_array_get(entry, 2);
+                if (cbor_isa_string(host_item) && cbor_isa_uint(port_item) &&
+                    cbor_isa_uint(source_item)) {
+                  const char* host = (const char*)cbor_string_handle(host_item);
+                  /* strndup (malloc-backed) returns NULL on allocation
+                     failure; skip the entry like the friend-list case does
+                     for its per-string allocation. */
+                  char* host_copy = strndup(host == NULL ? "" : host,
+                                            cbor_string_length(host_item));
+                  if (host_copy != NULL) {
+                    offs_bootstrap_entry_t* slot = &entries[count++];
+                    slot->host = host_copy;
+                    slot->port = (uint16_t)cbor_get_int(port_item);
+                    slot->source = (int)cbor_get_int(source_item);
+                  }
+                }
+                cbor_decref(&host_item);
+                cbor_decref(&port_item);
+                cbor_decref(&source_item);
+              }
+              cbor_decref(&entry);
+            }
+            if (bootstrap_list_cb != NULL) {
+              bootstrap_list_cb(bootstrap_list_cb_ctx, CLIENT_API_STATUS_OK,
+                                entries, count);
+              /* Each host string AND the array stay alive for the consumer
+                 to release (count + 1 offs_client_release_payload calls). */
+              for (size_t index = 0; index < count; index++) {
+                _hold_payload(client, (void*)entries[index].host);
+              }
+              _hold_payload(client, entries);
+              _clear_delivered_slot(client, bootstrap_list_cb);
+            } else {
+              for (size_t index = 0; index < count; index++) {
+                free(entries[index].host);
+              }
+              free(entries);
+            }
+          }
+        }
+        client_api_bootstrap_list_response_destroy(&msg);
       }
       break;
     }
@@ -2542,6 +2637,64 @@ int offs_client_friend_list(offs_client_t* client,
   platform_mutex_unlock(client->lock);
 
   cbor_item_t* frame = client_api_friend_list_request_encode();
+  _send_frame(client, frame);
+  return 0;
+}
+
+int offs_client_bootstrap_add(offs_client_t* client, const char* endpoint,
+                              offs_peer_connect_cb_t callback, void* ctx) {
+  if (client == NULL || !client->connected || endpoint == NULL ||
+      endpoint[0] == '\0') return -1;
+
+  client_api_bootstrap_add_t msg;
+  memset(&msg, 0, sizeof(msg));
+  /* The wire struct's string field is non-const, but the encoder only reads
+     it (it copies into the frame); cast const away as the CLI does. */
+  msg.endpoint = (char*)endpoint;
+
+  cbor_item_t* frame = client_api_bootstrap_add_encode(&msg);
+  if (frame == NULL) return -1;  /* cbor allocation failure */
+
+  platform_mutex_lock(client->lock);
+  client->bootstrap_result_cb = callback;
+  client->bootstrap_result_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
+  _send_frame(client, frame);
+  return 0;
+}
+
+int offs_client_bootstrap_remove(offs_client_t* client, const char* endpoint,
+                                 offs_peer_connect_cb_t callback, void* ctx) {
+  if (client == NULL || !client->connected || endpoint == NULL ||
+      endpoint[0] == '\0') return -1;
+
+  client_api_bootstrap_remove_t msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.endpoint = (char*)endpoint;
+
+  cbor_item_t* frame = client_api_bootstrap_remove_encode(&msg);
+  if (frame == NULL) return -1;  /* cbor allocation failure */
+
+  platform_mutex_lock(client->lock);
+  client->bootstrap_result_cb = callback;
+  client->bootstrap_result_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
+  _send_frame(client, frame);
+  return 0;
+}
+
+int offs_client_bootstrap_list(offs_client_t* client,
+                               offs_bootstrap_list_cb_t callback, void* ctx) {
+  if (client == NULL || !client->connected) return -1;
+
+  platform_mutex_lock(client->lock);
+  client->bootstrap_list_cb = callback;
+  client->bootstrap_list_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
+  cbor_item_t* frame = client_api_bootstrap_list_request_encode();
   _send_frame(client, frame);
   return 0;
 }

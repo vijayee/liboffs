@@ -1136,6 +1136,81 @@ TEST_F(TestOffsClient, ErrorFrameCompletesConfigCallbacks) {
     offs_client_disconnect(client);
 }
 
+struct BootstrapListCallbackContext {
+    std::atomic<int> called;
+    std::atomic<uint8_t> status;
+    std::atomic<size_t> entry_count;
+    /* Borrowed payload pointers (valid until released via
+       offs_client_release_payload: each host string plus the array itself);
+       NULL on the ERROR path. */
+    const offs_bootstrap_entry_t* entries;
+    BootstrapListCallbackContext()
+        : called(0), status(0), entry_count(0), entries(nullptr) {}
+};
+
+static void _bootstrap_list_callback(void* ctx, uint8_t status,
+                                     const offs_bootstrap_entry_t* entries,
+                                     size_t entry_count) {
+    BootstrapListCallbackContext* bctx = (BootstrapListCallbackContext*)ctx;
+    bctx->status.store(status, std::memory_order_release);
+    bctx->entry_count.store(entry_count, std::memory_order_release);
+    bctx->entries = entries;
+    bctx->called.store(1, std::memory_order_release);
+}
+
+/* The test transport has no peering state (no node borrow), so bootstrap
+   frames are rejected with INTERNAL_ERROR ERROR frames ("Peering unavailable
+   on this transport"). The add/remove result and list callbacks must be
+   completed with the error status (list with a NULL entries array) instead
+   of leaving the slots pending, mirroring the config callbacks test. */
+TEST_F(TestOffsClient, ErrorFrameCompletesBootstrapCallbacks) {
+    offs_client_t* client = offs_client_connect(url, NULL);
+    ASSERT_NE(client, nullptr);
+
+    SharedErrorCallbackContext err_ctx;
+    PeerConnectCallbackContext result_ctx;
+    BootstrapListCallbackContext list_ctx;
+    EXPECT_EQ(offs_client_set_error_cb(client, _shared_error_callback, &err_ctx), 0);
+
+    EXPECT_EQ(offs_client_bootstrap_add(client, "10.0.0.1:8080",
+                                        _peer_connect_callback, &result_ctx), 0);
+    for (int attempts = 0; attempts < 200 &&
+         (!result_ctx.called.load(std::memory_order_acquire) ||
+          !err_ctx.called.load(std::memory_order_acquire)); attempts++) {
+        platform_usleep(10000);
+    }
+    EXPECT_EQ(err_ctx.called.load(), 1);
+    EXPECT_EQ(err_ctx.status.load(), CLIENT_API_STATUS_INTERNAL_ERROR);
+    EXPECT_EQ(result_ctx.called.load(), 1);
+    EXPECT_EQ(result_ctx.status.load(), CLIENT_API_STATUS_INTERNAL_ERROR);
+
+    err_ctx.called.store(0, std::memory_order_release);
+    EXPECT_EQ(offs_client_bootstrap_list(client, _bootstrap_list_callback,
+                                         &list_ctx), 0);
+    for (int attempts = 0; attempts < 200 && !list_ctx.called.load(std::memory_order_acquire);
+         attempts++) {
+        platform_usleep(10000);
+    }
+    EXPECT_EQ(list_ctx.called.load(), 1);
+    EXPECT_EQ(list_ctx.status.load(), CLIENT_API_STATUS_INTERNAL_ERROR);
+    EXPECT_EQ(list_ctx.entries, nullptr);
+    EXPECT_EQ(err_ctx.called.load(), 1);
+    EXPECT_EQ(err_ctx.status.load(), CLIENT_API_STATUS_INTERNAL_ERROR);
+
+    EXPECT_EQ(offs_client_bootstrap_remove(client, "10.0.0.1:8080",
+                                           _peer_connect_callback, &result_ctx), 0);
+    for (int attempts = 0; attempts < 200 && !result_ctx.called.load(std::memory_order_acquire);
+         attempts++) {
+        platform_usleep(10000);
+    }
+    EXPECT_EQ(result_ctx.called.load(), 1);
+    EXPECT_EQ(result_ctx.status.load(), CLIENT_API_STATUS_INTERNAL_ERROR);
+
+    free(err_ctx.message);
+    offs_client_disconnect(client);
+    offs_client_destroy(client);
+}
+
 struct RepOpCallbackContext {
     std::atomic<int> called;
     int status;
