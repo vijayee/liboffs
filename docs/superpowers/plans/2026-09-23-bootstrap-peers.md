@@ -58,7 +58,7 @@ extern "C" {
 TEST(EndpointTest, ParsesHostPort) {
   char host[64];
   uint16_t port = 0;
-  ASSERT_EQ(0, parse_endpoint("10.0.0.1:8080", host, sizeof(host), &port));
+  ASSERT_EQ(0, endpoint_parse("10.0.0.1:8080", host, sizeof(host), &port));
   EXPECT_STREQ("10.0.0.1", host);
   EXPECT_EQ(8080, port);
 }
@@ -66,7 +66,7 @@ TEST(EndpointTest, ParsesHostPort) {
 TEST(EndpointTest, ParsesHostnamePort) {
   char host[256];
   uint16_t port = 0;
-  ASSERT_EQ(0, parse_endpoint("bootstrap.example.com:443", host, sizeof(host), &port));
+  ASSERT_EQ(0, endpoint_parse("bootstrap.example.com:443", host, sizeof(host), &port));
   EXPECT_STREQ("bootstrap.example.com", host);
   EXPECT_EQ(443, port);
 }
@@ -74,7 +74,7 @@ TEST(EndpointTest, ParsesHostnamePort) {
 TEST(EndpointTest, ParsesBracketedIpv6) {
   char host[64];
   uint16_t port = 0;
-  ASSERT_EQ(0, parse_endpoint("[2001:db8::1]:8080", host, sizeof(host), &port));
+  ASSERT_EQ(0, endpoint_parse("[2001:db8::1]:8080", host, sizeof(host), &port));
   EXPECT_STREQ("2001:db8::1", host);
   EXPECT_EQ(8080, port);
 }
@@ -83,40 +83,40 @@ TEST(EndpointTest, RejectsBareIpv6Literal) {
   // Unbracketed IPv6 literals stay unsupported until the IPv6 cycle.
   char host[64];
   uint16_t port = 0;
-  EXPECT_NE(0, parse_endpoint("2001:db8::1:8080", host, sizeof(host), &port));
+  EXPECT_NE(0, endpoint_parse("2001:db8::1:8080", host, sizeof(host), &port));
 }
 
 TEST(EndpointTest, RejectsMissingPort) {
   char host[64];
   uint16_t port = 0;
-  EXPECT_NE(0, parse_endpoint("10.0.0.1", host, sizeof(host), &port));
+  EXPECT_NE(0, endpoint_parse("10.0.0.1", host, sizeof(host), &port));
 }
 
 TEST(EndpointTest, RejectsBracketWithoutPort) {
   char host[64];
   uint16_t port = 0;
-  EXPECT_NE(0, parse_endpoint("[2001:db8::1]", host, sizeof(host), &port));
+  EXPECT_NE(0, endpoint_parse("[2001:db8::1]", host, sizeof(host), &port));
 }
 
 TEST(EndpointTest, RejectsUnclosedBracket) {
   char host[64];
   uint16_t port = 0;
-  EXPECT_NE(0, parse_endpoint("[2001:db8::1:8080", host, sizeof(host), &port));
+  EXPECT_NE(0, endpoint_parse("[2001:db8::1:8080", host, sizeof(host), &port));
 }
 
 TEST(EndpointTest, RejectsEmptyInput) {
   char host[64];
   uint16_t port = 0;
-  EXPECT_NE(0, parse_endpoint("", host, sizeof(host), &port));
-  EXPECT_NE(0, parse_endpoint(NULL, host, sizeof(host), &port));
+  EXPECT_NE(0, endpoint_parse("", host, sizeof(host), &port));
+  EXPECT_NE(0, endpoint_parse(NULL, host, sizeof(host), &port));
 }
 
 TEST(EndpointTest, RejectsBadPort) {
   char host[64];
   uint16_t port = 0;
-  EXPECT_NE(0, parse_endpoint("10.0.0.1:notaport", host, sizeof(host), &port));
-  EXPECT_NE(0, parse_endpoint("10.0.0.1:70000", host, sizeof(host), &port));
-  EXPECT_NE(0, parse_endpoint("10.0.0.1:0", host, sizeof(host), &port));
+  EXPECT_NE(0, endpoint_parse("10.0.0.1:notaport", host, sizeof(host), &port));
+  EXPECT_NE(0, endpoint_parse("10.0.0.1:70000", host, sizeof(host), &port));
+  EXPECT_NE(0, endpoint_parse("10.0.0.1:0", host, sizeof(host), &port));
 }
 ```
 
@@ -146,7 +146,7 @@ Create `src/Network/endpoint.h`:
  *
  * Returns 0 on success and fills host_out (NUL-terminated) + port_out.
  * Returns -1 on malformed input. */
-int parse_endpoint(const char* input, char* host_out, size_t host_len,
+int endpoint_parse(const char* input, char* host_out, size_t host_len,
                    uint16_t* port_out);
 
 #endif
@@ -161,7 +161,7 @@ Create `src/Network/endpoint.c`:
 #include <stdlib.h>
 #include <string.h>
 
-int parse_endpoint(const char* input, char* host_out, size_t host_len,
+int endpoint_parse(const char* input, char* host_out, size_t host_len,
                    uint16_t* port_out) {
   if (input == NULL || host_out == NULL || port_out == NULL) return -1;
 
@@ -675,14 +675,14 @@ In `src/Network/authority.c`:
 static int authority_bootstrap_contains(authority_t* authority, const char* endpoint) {
   char host[256];
   uint16_t port = 0;
-  if (parse_endpoint(endpoint, host, sizeof(host), &port) != 0) return 1;
+  if (endpoint_parse(endpoint, host, sizeof(host), &port) != 0) return 1;
   char canonical[320];
   snprintf(canonical, sizeof(canonical), "%s:%u", host, (unsigned)port);
 
   for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
     char config_host[256];
     uint16_t config_port = 0;
-    if (parse_endpoint(authority->bootstrap_peers[index], config_host,
+    if (endpoint_parse(authority->bootstrap_peers[index], config_host,
                        sizeof(config_host), &config_port) == 0 &&
         strcmp(config_host, host) == 0 && config_port == port) {
       return 1;
@@ -691,7 +691,7 @@ static int authority_bootstrap_contains(authority_t* authority, const char* endp
   for (size_t index = 0; index < authority->managed_bootstrap_peer_count; index++) {
     char managed_host[256];
     uint16_t managed_port = 0;
-    if (parse_endpoint(authority->managed_bootstrap_peers[index], managed_host,
+    if (endpoint_parse(authority->managed_bootstrap_peers[index], managed_host,
                        sizeof(managed_host), &managed_port) == 0 &&
         strcmp(managed_host, host) == 0 && managed_port == port) {
       return 1;
@@ -705,7 +705,7 @@ int authority_bootstrap_add(authority_t* authority, const char* endpoint) {
   if (authority == NULL || endpoint == NULL) return -1;
   char host[256];
   uint16_t port = 0;
-  if (parse_endpoint(endpoint, host, sizeof(host), &port) != 0) return -1;
+  if (endpoint_parse(endpoint, host, sizeof(host), &port) != 0) return -1;
   if (authority_bootstrap_contains(authority, endpoint)) return -2;
 
   char* normalized = get_memory(strlen(host) + 8);
@@ -734,12 +734,12 @@ int authority_bootstrap_remove(authority_t* authority, const char* endpoint) {
 
   char host[256];
   uint16_t port = 0;
-  if (parse_endpoint(endpoint, host, sizeof(host), &port) != 0) return -1;
+  if (endpoint_parse(endpoint, host, sizeof(host), &port) != 0) return -1;
 
   for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
     char config_host[256];
     uint16_t config_port = 0;
-    if (parse_endpoint(authority->bootstrap_peers[index], config_host,
+    if (endpoint_parse(authority->bootstrap_peers[index], config_host,
                        sizeof(config_host), &config_port) == 0 &&
         strcmp(config_host, host) == 0 && config_port == port) {
       return -2;  // config-seeded entries are immutable at runtime
@@ -749,7 +749,7 @@ int authority_bootstrap_remove(authority_t* authority, const char* endpoint) {
   for (size_t index = 0; index < authority->managed_bootstrap_peer_count; index++) {
     char managed_host[256];
     uint16_t managed_port = 0;
-    if (parse_endpoint(authority->managed_bootstrap_peers[index], managed_host,
+    if (endpoint_parse(authority->managed_bootstrap_peers[index], managed_host,
                        sizeof(managed_host), &managed_port) == 0 &&
         strcmp(managed_host, host) == 0 && managed_port == port) {
       free(authority->managed_bootstrap_peers[index]);
@@ -782,7 +782,7 @@ int authority_set_bootstrap_peers(authority_t* authority, const char* csv) {
        token = strtok_r(NULL, ",", &saveptr)) {
     char host[256];
     uint16_t port = 0;
-    if (parse_endpoint(token, host, sizeof(host), &port) != 0) {
+    if (endpoint_parse(token, host, sizeof(host), &port) != 0) {
       free(copy);
       return -1;
     }
@@ -861,7 +861,7 @@ Update the format comment above `authority_save_peers` (line ~278) to add:
               char* stored =
                   strndup((char*)cbor_string_handle(str_item), cbor_string_length(str_item));
               if (stored != NULL &&
-                  parse_endpoint(stored, (char[256]){0}, 256, &(uint16_t){0}) == 0) {
+                  endpoint_parse(stored, (char[256]){0}, 256, &(uint16_t){0}) == 0) {
                 authority->managed_bootstrap_peers[authority->managed_bootstrap_peer_count++] = stored;
               } else {
                 free(stored);
@@ -996,7 +996,7 @@ static void network_connect_bootstrap_lists(network_t* network) {
   for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
     char host[256];
     uint16_t port = 0;
-    if (parse_endpoint(authority->bootstrap_peers[index], host, sizeof(host), &port) == 0) {
+    if (endpoint_parse(authority->bootstrap_peers[index], host, sizeof(host), &port) == 0) {
       network_connect_peer(network, host, port);
     } else {
       /* Config-seeded endpoint failed validation — log and skip. */
@@ -1005,7 +1005,7 @@ static void network_connect_bootstrap_lists(network_t* network) {
   for (size_t index = 0; index < authority->managed_bootstrap_peer_count; index++) {
     char host[256];
     uint16_t port = 0;
-    if (parse_endpoint(authority->managed_bootstrap_peers[index], host, sizeof(host), &port) == 0) {
+    if (endpoint_parse(authority->managed_bootstrap_peers[index], host, sizeof(host), &port) == 0) {
       network_connect_peer(network, host, port);
     }
   }
@@ -1130,7 +1130,7 @@ void peer_handle_bootstrap_add(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     network_mark_peer_state_dirty(ctx->network);
     char host[256];
     uint16_t port = 0;
-    if (parse_endpoint(endpoint_copy, host, sizeof(host), &port) == 0) {
+    if (endpoint_parse(endpoint_copy, host, sizeof(host), &port) == 0) {
       network_connect_peer(ctx->network, host, port);
     }
   }
@@ -1190,7 +1190,7 @@ void peer_handle_bootstrap_list_request(peer_handler_ctx_t* ctx, cbor_item_t* fr
   for (size_t index = 0; index < auth->bootstrap_peer_count; index++) {
     char host[256];
     uint16_t port = 0;
-    if (parse_endpoint(auth->bootstrap_peers[index], host, sizeof(host), &port) != 0) continue;
+    if (endpoint_parse(auth->bootstrap_peers[index], host, sizeof(host), &port) != 0) continue;
     cbor_item_t* entry = cbor_new_definite_array(3);
     cbor_item_t* host_item = cbor_build_string(host);
     cbor_item_t* port_item = cbor_build_uint16(port);
@@ -1207,7 +1207,7 @@ void peer_handle_bootstrap_list_request(peer_handler_ctx_t* ctx, cbor_item_t* fr
   for (size_t index = 0; index < auth->managed_bootstrap_peer_count; index++) {
     char host[256];
     uint16_t port = 0;
-    if (parse_endpoint(auth->managed_bootstrap_peers[index], host, sizeof(host), &port) != 0) continue;
+    if (endpoint_parse(auth->managed_bootstrap_peers[index], host, sizeof(host), &port) != 0) continue;
     cbor_item_t* entry = cbor_new_definite_array(3);
     cbor_item_t* host_item = cbor_build_string(host);
     cbor_item_t* port_item = cbor_build_uint16(port);
@@ -1371,7 +1371,7 @@ static void _bootstrap_add_handler(http_request_t* request, http_response_t* res
   /* Connect immediately (fire-and-forget), mirroring the friend add handler. */
   char host[256];
   uint16_t port = 0;
-  if (parse_endpoint(endpoint_copy, host, sizeof(host), &port) == 0) {
+  if (endpoint_parse(endpoint_copy, host, sizeof(host), &port) == 0) {
     network_connect_peer(ctx->node->network, host, port);
   }
 
@@ -1459,7 +1459,7 @@ static void _bootstrap_list_handler(http_request_t* request, http_response_t* re
   for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
     char host[256];
     uint16_t port = 0;
-    if (parse_endpoint(authority->bootstrap_peers[index], host, sizeof(host), &port) != 0) continue;
+    if (endpoint_parse(authority->bootstrap_peers[index], host, sizeof(host), &port) != 0) continue;
     cJSON* entry = cJSON_CreateObject();
     cJSON_AddStringToObject(entry, "host", host);
     cJSON_AddNumberToObject(entry, "port", port);
@@ -1468,7 +1468,7 @@ static void _bootstrap_list_handler(http_request_t* request, http_response_t* re
   for (size_t index = 0; index < authority->managed_bootstrap_peer_count; index++) {
     char host[256];
     uint16_t port = 0;
-    if (parse_endpoint(authority->managed_bootstrap_peers[index], host, sizeof(host), &port) != 0) continue;
+    if (endpoint_parse(authority->managed_bootstrap_peers[index], host, sizeof(host), &port) != 0) continue;
     cJSON* entry = cJSON_CreateObject();
     cJSON_AddStringToObject(entry, "host", host);
     cJSON_AddNumberToObject(entry, "port", port);
@@ -2180,4 +2180,4 @@ git add -A -- src test docs && git commit -m "chore: bootstrap peers verificatio
 ## Self-review notes
 
 - Spec coverage: data model + index 6 (Task 3), config seed (Task 4), engagement + heal (Task 5), wire ops all four transports (Tasks 2, 6, 7), HTTP (Task 8), CLI/C/JS bindings (Tasks 9, 10, 11, 12), endpoint parser (Task 1), friend-save fix (Task 6), friend parity on TCP/WS/WT (Task 7), errors (Task 3/6/8 status mappings), testing (all tasks + Task 13).
-- Type consistency: `parse_endpoint` (Task 1) is used by Tasks 3, 5, 6, 8; `authority_bootstrap_add/remove` (Task 3) is used by Tasks 6, 8; wire codes 52–55 are consistent across Tasks 2, 6, 7, 9, 10, 12 (JS `MSG` values match the C defines).
+- Type consistency: `endpoint_parse` (Task 1) is used by Tasks 3, 5, 6, 8; `authority_bootstrap_add/remove` (Task 3) is used by Tasks 6, 8; wire codes 52–55 are consistent across Tasks 2, 6, 7, 9, 10, 12 (JS `MSG` values match the C defines).

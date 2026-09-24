@@ -121,7 +121,7 @@ code, so a node cannot use bootstrap peers to enter the network at all.
 One shared helper, e.g.
 
 ```c
-int parse_endpoint(const char* input, char* host_out, size_t host_len,
+int endpoint_parse(const char* input, char* host_out, size_t host_len,
                    uint16_t* port_out);
 ```
 
