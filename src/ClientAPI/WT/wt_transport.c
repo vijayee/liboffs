@@ -797,6 +797,10 @@ void wt_transport_stop(wt_transport_t* transport) {
   }
 }
 
+void wt_transport_set_peer_node(wt_transport_t* transport, offs_node_t* node) {
+  transport->peer_node = node;
+}
+
 #else /* !HAS_MSQUIC */
 
 /* Stubs when MsQuic is not available */
@@ -831,6 +835,11 @@ void wt_transport_start(wt_transport_t* transport) {
 
 void wt_transport_stop(wt_transport_t* transport) {
   (void)transport;
+}
+
+void wt_transport_set_peer_node(wt_transport_t* transport, offs_node_t* node) {
+  (void)transport;
+  (void)node;
 }
 
 #endif /* HAS_MSQUIC */

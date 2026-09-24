@@ -439,3 +439,7 @@ void ws_transport_stop(ws_transport_t* transport) {
   pd_loop_async_send(transport->loop, transport);
   platform_thread_join(transport->thread);
 }
+
+void ws_transport_set_peer_node(ws_transport_t* transport, offs_node_t* node) {
+  transport->peer_node = node;
+}

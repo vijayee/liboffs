@@ -802,6 +802,7 @@ static void _tcp_handle_auth(tcp_connection_t* conn, cbor_item_t* frame) {
   if (conn->transport == NULL || conn->transport->api_key_hash == NULL) {
     conn->is_authenticated = 1;
     conn->block_ctx.is_authenticated = 1;
+    conn->peer_ctx.is_authenticated = 1;
     return;
   }
 
@@ -818,6 +819,7 @@ static void _tcp_handle_auth(tcp_connection_t* conn, cbor_item_t* frame) {
   if (bcrypt_check(key, conn->transport->api_key_hash) == 0) {
     conn->is_authenticated = 1;
     conn->block_ctx.is_authenticated = 1;
+    conn->peer_ctx.is_authenticated = 1;
   } else {
     _tcp_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication failed");
   }
@@ -852,8 +854,10 @@ static void _tcp_dispatch_frame(tcp_connection_t* conn, uint8_t type, cbor_item_
         _tcp_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
         break;
       }
-      /* Cache-only transport: TCP connections have no network actor access,
-         so MARK_PERMANENT's announce is skipped (local-only walk). */
+      /* MARK_PERMANENT's announce is skipped on this transport: rep announce
+         stays Unix/HTTP-only even when a daemon node is wired via
+         tcp_transport_set_peer_node (the node serves the friend and
+         bootstrap handlers only). */
       client_api_representation_handle(conn->bc, conn->pool, NULL,
                                        frame, type, _tcp_rep_send_frame, conn,
                                        _tcp_rep_send_error);
@@ -870,6 +874,24 @@ static void _tcp_dispatch_frame(tcp_connection_t* conn, uint8_t type, cbor_item_
       break;
     case CLIENT_API_BLOCK_DELETE_REQUEST:
       block_handle_delete_request(&conn->block_ctx, frame);
+      break;
+    case CLIENT_API_FRIEND_ADD:
+      peer_handle_friend_add(&conn->peer_ctx, frame);
+      break;
+    case CLIENT_API_FRIEND_REMOVE:
+      peer_handle_friend_remove(&conn->peer_ctx, frame);
+      break;
+    case CLIENT_API_FRIEND_LIST:
+      peer_handle_friend_list_request(&conn->peer_ctx, frame);
+      break;
+    case CLIENT_API_BOOTSTRAP_ADD:
+      peer_handle_bootstrap_add(&conn->peer_ctx, frame);
+      break;
+    case CLIENT_API_BOOTSTRAP_REMOVE:
+      peer_handle_bootstrap_remove(&conn->peer_ctx, frame);
+      break;
+    case CLIENT_API_BOOTSTRAP_LIST:
+      peer_handle_bootstrap_list_request(&conn->peer_ctx, frame);
       break;
     case CLIENT_API_HEALTH_REQUEST: {
       health_data_t data = health_data_collect(conn->transport->health_ctx);
@@ -1683,6 +1705,17 @@ tcp_connection_t* tcp_connection_create(tcp_transport_t* transport, platform_soc
   connection->block_ctx.send_frame = (block_send_frame_fn)_tcp_connection_send_frame;
   connection->block_ctx.send_error = (block_send_error_fn)_tcp_connection_send_error;
   connection->block_ctx.pending_op = BLOCK_OP_NONE;
+
+  /* Peer/friend/bootstrap handlers borrow the daemon's node from the
+     transport; both are NULL when no node was wired via
+     tcp_transport_set_peer_node, and peer ops then reply with an error. */
+  connection->peer_ctx.conn = (block_connection_t*)connection;
+  connection->peer_ctx.network = transport->peer_node ? transport->peer_node->network : NULL;
+  connection->peer_ctx.authority = transport->peer_node ? transport->peer_node->authority : NULL;
+  connection->peer_ctx.actor = &connection->actor;
+  connection->peer_ctx.is_authenticated = connection->is_authenticated;
+  connection->peer_ctx.send_frame = (block_send_frame_fn)_tcp_connection_send_frame;
+  connection->peer_ctx.send_error = (block_send_error_fn)_tcp_connection_send_error;
 
   actor_init(&connection->actor, connection, tcp_connection_dispatch, transport->pool);
 

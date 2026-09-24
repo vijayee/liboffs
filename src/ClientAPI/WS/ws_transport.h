@@ -18,6 +18,7 @@
 #include <poll-dancer/poll-dancer.h>
 #include "ws_connection.h"
 #include "../health_handler.h"
+#include "../../Node/node.h"
 
 typedef vec_t(ws_connection_t*) vec_ws_connection_t;
 
@@ -47,6 +48,10 @@ typedef struct ws_transport_t {
   SSL_CTX* ssl_ctx;
   char* api_key_hash;
   health_context_t* health_ctx;
+  /* Borrowed daemon node supplying network/authority to the peer, friend,
+     and bootstrap handlers. NULL (cache-only) until wired via
+     ws_transport_set_peer_node; peer ops then reply with an error. */
+  offs_node_t* peer_node;
 } ws_transport_t;
 
 ws_transport_t* ws_transport_create(scheduler_pool_t* pool,
@@ -63,5 +68,9 @@ ws_transport_t* ws_transport_create(scheduler_pool_t* pool,
 void ws_transport_destroy(ws_transport_t* transport);
 void ws_transport_start(ws_transport_t* transport);
 void ws_transport_stop(ws_transport_t* transport);
+
+/* Borrow the daemon's node so connections can service friend and bootstrap
+   ops. Call before ws_transport_start. */
+void ws_transport_set_peer_node(ws_transport_t* transport, offs_node_t* node);
 
 #endif // OFFS_WS_TRANSPORT_H

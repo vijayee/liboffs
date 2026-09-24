@@ -15,6 +15,7 @@
 #include <poll-dancer/poll-dancer.h>
 #include "tcp_connection.h"
 #include "../health_handler.h"
+#include "../../Node/node.h"
 
 typedef vec_t(tcp_connection_t*) vec_tcp_connection_t;
 
@@ -44,6 +45,10 @@ typedef struct tcp_transport_t {
   SSL_CTX* ssl_ctx;
   char* api_key_hash;
   health_context_t* health_ctx;
+  /* Borrowed daemon node supplying network/authority to the peer, friend,
+     and bootstrap handlers. NULL (cache-only) until wired via
+     tcp_transport_set_peer_node; peer ops then reply with an error. */
+  offs_node_t* peer_node;
 } tcp_transport_t;
 
 tcp_transport_t* tcp_transport_create(scheduler_pool_t* pool,
@@ -60,5 +65,9 @@ void tcp_transport_destroy(tcp_transport_t* transport);
 void tcp_transport_start(tcp_transport_t* transport);
 void tcp_transport_stop(tcp_transport_t* transport);
 void tcp_transport_set_max_connections(tcp_transport_t* transport, size_t max_connections);
+
+/* Borrow the daemon's node so connections can service friend and bootstrap
+   ops. Call before tcp_transport_start. */
+void tcp_transport_set_peer_node(tcp_transport_t* transport, offs_node_t* node);
 
 #endif // OFFS_TCP_TRANSPORT_H

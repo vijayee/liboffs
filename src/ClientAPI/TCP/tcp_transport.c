@@ -433,3 +433,7 @@ void tcp_transport_stop(tcp_transport_t* transport) {
 void tcp_transport_set_max_connections(tcp_transport_t* transport, size_t max_connections) {
   transport->max_connections = max_connections;
 }
+
+void tcp_transport_set_peer_node(tcp_transport_t* transport, offs_node_t* node) {
+  transport->peer_node = node;
+}

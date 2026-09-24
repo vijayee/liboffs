@@ -230,6 +230,10 @@ int main(int argc, char** argv) {
       scheduler_pool_destroy(pool);
       return 1;
     }
+    /* Wire friend and bootstrap ops onto the WS transport so they mirror
+       the HTTP peer and bootstrap routes (the Unix transport is wired
+       via unix_transport_set_config_ctx below). */
+    ws_transport_set_peer_node(ws_transport, &node_obj);
   }
 
   wt_transport_t* wt_transport = NULL;
@@ -283,6 +287,9 @@ int main(int argc, char** argv) {
     if (peer_verify != NULL) {
       peer_verify_ctx_destroy(peer_verify);
     }
+
+    /* Friend and bootstrap ops, mirroring the WS transport wiring. */
+    wt_transport_set_peer_node(wt_transport, &node_obj);
   }
 
   webtransport_h3_t* wt_h3_transport = NULL;

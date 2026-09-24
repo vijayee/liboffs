@@ -932,6 +932,15 @@ static void _unix_dispatch_frame(unix_connection_t* conn, uint8_t type, cbor_ite
     case CLIENT_API_FRIEND_LIST:
       peer_handle_friend_list_request(&conn->peer_ctx, frame);
       break;
+    case CLIENT_API_BOOTSTRAP_ADD:
+      peer_handle_bootstrap_add(&conn->peer_ctx, frame);
+      break;
+    case CLIENT_API_BOOTSTRAP_REMOVE:
+      peer_handle_bootstrap_remove(&conn->peer_ctx, frame);
+      break;
+    case CLIENT_API_BOOTSTRAP_LIST:
+      peer_handle_bootstrap_list_request(&conn->peer_ctx, frame);
+      break;
     case CLIENT_API_HEALTH_REQUEST: {
       health_data_t data = health_data_collect(conn->transport->health_ctx);
       cJSON* json_obj = health_data_to_json(&data);

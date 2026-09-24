@@ -291,6 +291,14 @@ void peer_handle_friend_add(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     return;
   }
 
+  if (ctx->network == NULL || ctx->authority == NULL) {
+    /* Transports wired without a node borrow (cache-only deployments) have no
+       peering state to mutate; fail cleanly instead of dereferencing NULL. */
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                    "Peering unavailable on this transport");
+    return;
+  }
+
   client_api_friend_add_t msg;
   if (client_api_friend_add_decode(frame, &msg) != 0) {
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_BAD_REQUEST, "Invalid friend add message");
@@ -362,6 +370,12 @@ void peer_handle_friend_remove(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     return;
   }
 
+  if (ctx->network == NULL || ctx->authority == NULL) {
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                    "Peering unavailable on this transport");
+    return;
+  }
+
   client_api_friend_remove_t msg;
   if (client_api_friend_remove_decode(frame, &msg) != 0) {
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_BAD_REQUEST, "Invalid friend remove message");
@@ -424,6 +438,12 @@ void peer_handle_friend_list_request(peer_handler_ctx_t* ctx, cbor_item_t* frame
 
   if (!ctx->is_authenticated) {
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
+
+  if (ctx->network == NULL || ctx->authority == NULL) {
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                    "Peering unavailable on this transport");
     return;
   }
 
@@ -518,6 +538,14 @@ void peer_handle_bootstrap_add(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     return;
   }
 
+  if (ctx->network == NULL || ctx->authority == NULL) {
+    /* Transports wired without a node borrow (cache-only deployments) have no
+       peering state to mutate; fail cleanly instead of dereferencing NULL. */
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                    "Peering unavailable on this transport");
+    return;
+  }
+
   client_api_bootstrap_add_t msg;
   if (client_api_bootstrap_add_decode(frame, &msg) != 0) {
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_BAD_REQUEST,
@@ -571,6 +599,12 @@ void peer_handle_bootstrap_remove(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     return;
   }
 
+  if (ctx->network == NULL || ctx->authority == NULL) {
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                    "Peering unavailable on this transport");
+    return;
+  }
+
   client_api_bootstrap_remove_t msg;
   if (client_api_bootstrap_remove_decode(frame, &msg) != 0) {
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_BAD_REQUEST,
@@ -605,6 +639,12 @@ void peer_handle_bootstrap_list_request(peer_handler_ctx_t* ctx, cbor_item_t* fr
 
   if (!ctx->is_authenticated) {
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
+    return;
+  }
+
+  if (ctx->network == NULL || ctx->authority == NULL) {
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                    "Peering unavailable on this transport");
     return;
   }
 

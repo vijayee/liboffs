@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../../Platform/platform.h"
+#include "../../Node/node.h"
 
 #ifdef HAS_MSQUIC
 #include <msquic.h>
@@ -81,6 +82,10 @@ typedef struct wt_transport_t {
   vec_wt_connection_t connections;
   char* api_key_hash;
   health_context_t* health_ctx;
+  /* Borrowed daemon node supplying network/authority to the peer, friend,
+     and bootstrap handlers. NULL (cache-only) until wired via
+     wt_transport_set_peer_node; peer ops then reply with an error. */
+  offs_node_t* peer_node;
 } wt_transport_t;
 
 wt_transport_t* wt_transport_create(scheduler_pool_t* pool,
@@ -101,4 +106,10 @@ void wt_transport_start(wt_transport_t* transport);
 void wt_transport_stop(wt_transport_t* transport);
 
 #endif /* HAS_MSQUIC */
+
+/* Borrow the daemon's node so connections can service friend and bootstrap
+   ops. Call before wt_transport_start. No-op stub when built without
+   MsQuic. */
+void wt_transport_set_peer_node(wt_transport_t* transport, offs_node_t* node);
+
 #endif /* OFFS_WT_TRANSPORT_H */
