@@ -97,6 +97,11 @@ cJSON* config_to_json(const config_t* config) {
   else
     cJSON_AddNullToObject(root, "api_key_hash");
 
+  if (config->bootstrap_peers)
+    cJSON_AddStringToObject(root, "bootstrap_peers", config->bootstrap_peers);
+  else
+    cJSON_AddNullToObject(root, "bootstrap_peers");
+
   return root;
 }
 

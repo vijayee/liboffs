@@ -18,7 +18,8 @@ extern "C" {
    routes and the Unix config handlers so the two paths agree on validation. */
 typedef enum {
   CONFIG_FIELD_STRING = 0, /* api_key_hash, https_cert_path, https_key_path,
-                              tcp_tls_cert_path, tcp_tls_key_path */
+                              tcp_tls_cert_path, tcp_tls_key_path,
+                              bootstrap_peers */
   CONFIG_FIELD_BOOL = 1,    /* *_enabled, tcp_tls_enabled */
   CONFIG_FIELD_NUMBER = 2   /* ports, sizes, counts */
 } config_field_type_t;

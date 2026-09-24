@@ -297,6 +297,7 @@ fail:
     free(parsed[index]);
   }
   free(parsed);
+  log_error("authority_set_bootstrap_peers: invalid bootstrap_peers CSV: %s", csv);
   return -1;
 }
 

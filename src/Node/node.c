@@ -275,6 +275,11 @@ void offs_node_restart(offs_node_t* node, const char* data_dir) {
   config_free(node->config);
   node->config = new_config;
 
+  /* Re-seed the config-seeded bootstrap list from the restarted config. */
+  if (authority_set_bootstrap_peers(node->authority, node->config->bootstrap_peers) != 0) {
+    log_error("Failed to seed bootstrap peers from config on restart");
+  }
+
   /* Phase 4: Re-create scheduler and timer */
   node->scheduler = scheduler_pool_create(new_config->scheduler_thread_count);
   if (node->scheduler == NULL) {

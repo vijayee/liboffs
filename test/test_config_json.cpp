@@ -86,6 +86,8 @@ TEST(ConfigJson, NumberFieldRejectsNonInteger) {
 
 TEST(ConfigJson, ConfigToJsonSerializesAllFieldGroups) {
   config_t cfg = config_default();
+  char peers_csv[] = "10.0.0.1:8080";
+  cfg.bootstrap_peers = peers_csv;
   cJSON* json = config_to_json(&cfg);
   ASSERT_NE(json, nullptr);
   EXPECT_NE(nullptr, cJSON_GetObjectItem(json, "cache_size"));
@@ -93,13 +95,18 @@ TEST(ConfigJson, ConfigToJsonSerializesAllFieldGroups) {
   EXPECT_NE(nullptr, cJSON_GetObjectItem(json, "http_enabled"));
   EXPECT_NE(nullptr, cJSON_GetObjectItem(json, "api_key_hash"));
   EXPECT_NE(nullptr, cJSON_GetObjectItem(json, "tcp_tls_enabled"));
+  cJSON* peers = cJSON_GetObjectItem(json, "bootstrap_peers");
+  ASSERT_NE(peers, nullptr);
+  EXPECT_TRUE(cJSON_IsString(peers));
+  EXPECT_STREQ("10.0.0.1:8080", peers->valuestring);
   cJSON* port = cJSON_GetObjectItem(json, "http_port");
   ASSERT_NE(port, nullptr);
   EXPECT_TRUE(cJSON_IsNumber(port));
   cJSON_Delete(json);
-  /* config_default() leaves all string fields NULL, so there is nothing
-     heap-allocated to release — config_free() would free() the stack struct,
-     so it must not be called on a value-return config_default(). */
+  /* config_default() leaves all other string fields NULL, and the
+     bootstrap_peers value assigned above is a stack literal, so there is
+     nothing heap-allocated to release — config_free() would free() the stack
+     struct, so it must not be called on a value-return config_default(). */
 }
 
 /* The only JSON->config_t parse entry point is config_pending_load (it reads
