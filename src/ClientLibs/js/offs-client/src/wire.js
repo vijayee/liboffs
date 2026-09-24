@@ -52,7 +52,11 @@ export const MSG = {
   REP_UNPIN_REQUEST: 48,
   REP_UNPIN_RESPONSE: 49,
   EPHEMERAL_LIST_REQUEST: 50,
-  EPHEMERAL_LIST_RESPONSE: 51
+  EPHEMERAL_LIST_RESPONSE: 51,
+  BOOTSTRAP_ADD: 52,
+  BOOTSTRAP_REMOVE: 53,
+  BOOTSTRAP_LIST: 54,
+  BOOTSTRAP_LIST_RESPONSE: 55
 };
 
 /**
@@ -467,6 +471,43 @@ export function encodeFriendListRequest() {
 export function decodeFriendListResponse(bytes) {
   const arr = decode(bytes);
   if (arr[0] !== MSG.FRIEND_LIST_RESPONSE) throw new Error('Not a friend list response');
+  return arr[1];
+}
+
+// --- Bootstrap ---
+
+/**
+ * @param {string} endpoint "host:port" or "[ipv6]:port"
+ * @returns {Uint8Array}
+ */
+export function encodeBootstrapAdd(endpoint) {
+  return encoder.encode([MSG.BOOTSTRAP_ADD, endpoint]);
+}
+
+/**
+ * @param {string} endpoint
+ * @returns {Uint8Array}
+ */
+export function encodeBootstrapRemove(endpoint) {
+  return encoder.encode([MSG.BOOTSTRAP_REMOVE, endpoint]);
+}
+
+/**
+ * @returns {Uint8Array}
+ */
+export function encodeBootstrapListRequest() {
+  return encoder.encode([MSG.BOOTSTRAP_LIST]);
+}
+
+/**
+ * Decode a bootstrap-list response: [type, entries] where each entry is
+ * [host, port, source] (source: 0=config, 1=managed).
+ * @param {Uint8Array} bytes
+ * @returns {any[]} entries of [host, port, source]
+ */
+export function decodeBootstrapListResponse(bytes) {
+  const arr = decode(bytes);
+  if (arr[0] !== MSG.BOOTSTRAP_LIST_RESPONSE) throw new Error('Not a bootstrap list response');
   return arr[1];
 }
 

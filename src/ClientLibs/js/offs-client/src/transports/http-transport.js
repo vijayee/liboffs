@@ -432,6 +432,51 @@ export class HttpTransport {
   }
 
   /**
+   * Add a bootstrap endpoint via POST /bootstrap (JSON body {"endpoint"}).
+   * @param {string} endpoint "host:port" or "[ipv6]:port"
+   * @returns {Promise<void>}
+   */
+  async bootstrapAdd(endpoint) {
+    const response = await fetch(this.url('/bootstrap'), {
+      method: 'POST',
+      headers: { ...this.authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint }),
+      signal: this.abortController?.signal,
+    });
+    if (!response.ok) throw new Error(`Bootstrap add failed: ${response.status}`);
+  }
+
+  /**
+   * Remove a bootstrap endpoint via DELETE /bootstrap (JSON body {"endpoint"}).
+   * @param {string} endpoint
+   * @returns {Promise<void>}
+   */
+  async bootstrapRemove(endpoint) {
+    const response = await fetch(this.url('/bootstrap'), {
+      method: 'DELETE',
+      headers: { ...this.authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint }),
+      signal: this.abortController?.signal,
+    });
+    if (!response.ok) throw new Error(`Bootstrap remove failed: ${response.status}`);
+  }
+
+  /**
+   * List bootstrap endpoints via GET /bootstrap, returning the daemon's
+   * {config: [{host, port}...], managed: [...]} JSON shape.
+   * @returns {Promise<any>}
+   */
+  async bootstrapList() {
+    const response = await fetch(this.url('/bootstrap'), {
+      method: 'GET',
+      headers: this.authHeaders(),
+      signal: this.abortController?.signal,
+    });
+    if (!response.ok) throw new Error(`Bootstrap list failed: ${response.status}`);
+    return response.json();
+  }
+
+  /**
    * @returns {Promise<any>}
    */
   async configShow() {

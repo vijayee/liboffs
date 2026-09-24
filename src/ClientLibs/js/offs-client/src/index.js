@@ -627,6 +627,49 @@ export class OffsClient {
   }
 
   /**
+   * Add a bootstrap endpoint ("host:port" or "[ipv6]:port").
+   * @param {string} endpoint
+   * @returns {Promise<void>}
+   */
+  async bootstrapAdd(endpoint) {
+    if (this.transport instanceof HttpTransport) {
+      return this.transport.bootstrapAdd(endpoint);
+    }
+
+    const requestBytes = wire.encodeBootstrapAdd(endpoint);
+    await this.transport.send(requestBytes);
+  }
+
+  /**
+   * Remove a bootstrap endpoint ("host:port" or "[ipv6]:port").
+   * @param {string} endpoint
+   * @returns {Promise<void>}
+   */
+  async bootstrapRemove(endpoint) {
+    if (this.transport instanceof HttpTransport) {
+      return this.transport.bootstrapRemove(endpoint);
+    }
+
+    const requestBytes = wire.encodeBootstrapRemove(endpoint);
+    await this.transport.send(requestBytes);
+  }
+
+  /**
+   * List configured bootstrap endpoints. Each entry is [host, port, source]
+   * with source 0=config and 1=managed.
+   * @returns {Promise<any[]>} entries of [host, port, source]
+   */
+  async bootstrapList() {
+    if (this.transport instanceof HttpTransport) {
+      return this.transport.bootstrapList();
+    }
+
+    const requestBytes = wire.encodeBootstrapListRequest();
+    const responseBytes = await this._sendAndWait(requestBytes, wire.MSG.BOOTSTRAP_LIST_RESPONSE);
+    return wire.decodeBootstrapListResponse(responseBytes);
+  }
+
+  /**
    * @returns {Promise<any>}
    */
   async configShow() {
