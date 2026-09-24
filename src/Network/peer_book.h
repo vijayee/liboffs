@@ -32,12 +32,25 @@
      (c) after the scheduler pool has been stopped (offs_node_stop Phase 8
          final authority_save_peers, offs_node_restart Phase 3 re-seed) — no
          worker can run the actor, so the lists are quiescent.
-   Note (b)/(c): offs_node_stop's HTTP drain phase has a shutdown deadline;
-   if it is exceeded, HTTP workers may still be inside round-trips when the
-   peer-book actor is stopped. Round-trips fail closed (-1) in that window,
-   and callers never dereference the peer_book after sending, so no UAF —
-   but the drain is not a hard barrier; rely on the deadline being generous
-   for admin operations.
+   What peer_book_stop guarantees for window (b): it clears the started flag
+   (the round-trip helpers refuse to queue new requests, and the dispatch
+   handlers reject any already-queued request instead of touching the lists)
+   and then blocks on scheduler_pool_wait_for_idle, so by the time it returns
+   every request queued when stop ran has been applied or rejected (result
+   -1) and its caller unblocked. Direct list access is therefore safe after
+   peer_book_stop returns. peer_book_stop must only be called from a thread
+   that may block and is never a pool worker (offsd _shutdown,
+   offs_node_stop/restart teardown, tests).
+   Note (c) — requests still in flight when the actor is DESTROY-flagged and
+   torn down: requests sent after the flag is set fail closed immediately
+   (the caller frees its own request shell, -1, never queued); requests
+   already queued at destroy are dropped by actor_destroy (message_queue_destroy
+   frees the queued messages, and the round-trip payloads carry
+   payload_destroy = NULL), so those callers block the full timeout and the
+   request shell is leaked — bounded, shutdown-only, leak-not-UAF. offs_node_stop's
+   HTTP drain phase has a shutdown deadline; if it is exceeded, HTTP workers
+   may still be inside round-trips when the actor is destroyed, and callers
+   never dereference the peer_book after sending, so no UAF.
    The storage physically stays in authority_t so the authority_save_peers /
    peer_store plumbing is unchanged; its location is an implementation detail
    — the peer-book actor is the synchronization point. The authority_* list
@@ -110,6 +123,8 @@ typedef struct peer_book_mutation_t {
 typedef struct peer_book_snapshot_t {
   peer_book_reply_t reply;    /* must stay first (see peer_book_reply_t) */
   peer_book_snapshot_kind_e kind;
+  int result;                 /* actor fills: 0 ok / -1 rejected by a
+                                 stopped actor (peer_book.h invariant (b)) */
   /* reply: peer_book_snapshot_friends */
   peer_info_t** friends;
   size_t friend_count;
@@ -153,6 +168,10 @@ typedef struct peer_book_t {
   timer_actor_t* timer;           /* borrowed; NULL disables the reconnect tick */
   scheduler_pool_t* pool;
   ATOMIC(uint64_t) reconnect_timer_id;  /* armed by peer_book_start */
+  /* Doubles as the stopped flag: cleared by peer_book_stop, checked by the
+     round-trip helpers (refuse to queue) AND by the dispatch handlers
+     (reject instead of touching the authority lists) so a message racing the
+     stop flag is still rejected on the actor side. */
   ATOMIC(uint8_t) started;
 } peer_book_t;
 
@@ -166,8 +185,10 @@ peer_book_t* peer_book_create(authority_t* authority, network_t* network,
    complete. */
 int peer_book_start(peer_book_t* peer_book);
 
-/* Quiesce: external requests start failing and the reconnect tick stops
-   firing. Non-blocking. */
+/* Quiesce: external requests start failing, the reconnect tick stops firing,
+   and already-queued requests are applied or rejected before this returns
+   (blocks on scheduler_pool_wait_for_idle — call only from a non-pool thread
+   that may block, e.g. the shutdown path). */
 void peer_book_stop(peer_book_t* peer_book);
 
 /* Cancel the tick timer and free the actor. NULL-safe. */

@@ -9,6 +9,9 @@
   #include <pthread.h>
   #include <time.h>
   #include <errno.h>
+  /* POSIX branch only: unexpected condvar-wait errors are logged (see
+     platform_condvar_timed_wait). */
+  #include "../Util/log.h"
 #endif
 
 #include "platform_thread.h"
@@ -341,6 +344,13 @@ int platform_condvar_timed_wait(platform_condvar_t* cv, platform_mutex_t* m,
     deadline.tv_nsec -= 1000000000L;
   }
   int rc = pthread_cond_timedwait(&cv->handle, &m->handle, &deadline);
+  if (rc != 0 && rc != ETIMEDOUT) {
+    /* Unexpected error (e.g. EINVAL/EPERM): it is not a timeout, but mapping
+       it to 0 ("signalled") would send callers into a busy re-wait loop —
+       make it visible. */
+    log_error("platform_condvar_timed_wait: pthread_cond_timedwait failed "
+              "with unexpected errno %d", rc);
+  }
   return (rc == ETIMEDOUT) ? -1 : 0;
 }
 

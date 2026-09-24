@@ -59,6 +59,12 @@ public:
     scheduler_pool_start(pool);
     peer_book = peer_book_create(authority, NULL, NULL, pool);
     ASSERT_NE(peer_book, nullptr);
+    /* Tests that need startup-phase direct seeding call
+       authority_set_bootstrap_peers BEFORE Start() — create, seed, then
+       start, mirroring the offsd startup order. */
+  }
+
+  void Start() {
     ASSERT_EQ(peer_book_start(peer_book), 0);
   }
 
@@ -71,6 +77,7 @@ public:
 };
 
 TEST_F(PeerBook, BootstrapMutationRoundTrip) {
+  Start();
   EXPECT_EQ(0, peer_book_bootstrap_add(peer_book, "10.0.0.1:8080",
                                        PEER_BOOK_TIMEOUT_MS));
   EXPECT_EQ(-2, peer_book_bootstrap_add(peer_book, "10.0.0.1:8080",
@@ -107,10 +114,10 @@ TEST_F(PeerBook, BootstrapMutationRoundTrip) {
 }
 
 TEST_F(PeerBook, SnapshotBootstrapReflectsState) {
-  // Startup-phase direct seeding (legal before peer_book_start, exercised
-  // here after start through the round-trip: the actor applies against the
-  // same authority storage).
+  // Startup-phase direct seeding before start: create -> seed -> start,
+  // the same order offsd's startup uses (invariant window (a)).
   ASSERT_EQ(0, authority_set_bootstrap_peers(authority, "10.0.0.3:7070"));
+  Start();
   ASSERT_EQ(0, peer_book_bootstrap_add(peer_book, "10.0.0.4:7071",
                                        PEER_BOOK_TIMEOUT_MS));
 
@@ -132,6 +139,7 @@ TEST_F(PeerBook, SnapshotBootstrapReflectsState) {
 }
 
 TEST_F(PeerBook, FriendAddRemoveSnapshot) {
+  Start();
   peer_info_t* info = make_peer_info(7);
 
   EXPECT_EQ(0, peer_book_friend_add(peer_book, info, PEER_BOOK_TIMEOUT_MS));
@@ -169,6 +177,7 @@ TEST_F(PeerBook, FriendAddRemoveSnapshot) {
 // Race regression: the actor serializes mutations, so concurrent adds with
 // disjoint endpoints must all land without corruption.
 TEST_F(PeerBook, ConcurrentBootstrapAdds) {
+  Start();
   const int k_threads = 4;
   const int k_ops_per_thread = 25;
 
@@ -206,6 +215,7 @@ TEST_F(PeerBook, ConcurrentBootstrapAdds) {
 // After peer_book_stop the round-trips fail closed (-1) instead of blocking
 // or touching the lists.
 TEST_F(PeerBook, MutationsFailClosedAfterStop) {
+  Start();
   peer_book_stop(peer_book);
   EXPECT_EQ(-1, peer_book_bootstrap_add(peer_book, "10.0.0.9:7000",
                                         PEER_BOOK_TIMEOUT_MS));
@@ -214,6 +224,31 @@ TEST_F(PeerBook, MutationsFailClosedAfterStop) {
   EXPECT_EQ(-1, peer_book_snapshot_friends(peer_book, &friends, &friend_count,
                                            PEER_BOOK_TIMEOUT_MS));
   EXPECT_EQ(0u, friend_count);
+}
+
+// Timeout 0 forces the orphan path: the caller gives up immediately and hands
+// the request shell to the actor (peer_book_mutation_t ownership transfer).
+// The op is applied either way — before the caller gave up, or by the actor
+// after the orphan — so the follow-up snapshot must show it in the list.
+TEST_F(PeerBook, TimeoutOrphanStillApplies) {
+  Start();
+  int add_result = peer_book_bootstrap_add(peer_book, "10.0.0.8:7008", 0);
+  EXPECT_TRUE(add_result == 0 || add_result == -1);
+
+  char** config_endpoints = NULL;
+  size_t config_count = 0;
+  char** managed_endpoints = NULL;
+  size_t managed_count = 0;
+  ASSERT_EQ(0, peer_book_snapshot_bootstrap(peer_book, &config_endpoints,
+                                            &config_count, &managed_endpoints,
+                                            &managed_count,
+                                            PEER_BOOK_TIMEOUT_MS));
+  EXPECT_EQ(0u, config_count);
+  ASSERT_EQ(1u, managed_count);
+  EXPECT_STREQ("10.0.0.8:7008", managed_endpoints[0]);
+
+  peer_book_free_string_array(config_endpoints, config_count);
+  peer_book_free_string_array(managed_endpoints, managed_count);
 }
 
 }  // namespace

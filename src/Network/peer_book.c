@@ -55,7 +55,14 @@ static peer_info_t* _peer_book_copy_peer_info(const peer_info_t* source) {
       if (address->host == NULL) continue;
       size_t host_len = strlen(address->host);
       char* host = get_clear_memory(host_len + 1);
-      if (host == NULL) continue;
+      if (host == NULL) {
+        /* OOM: fail the whole copy rather than delivering a peer with
+           silently truncated addresses — the caller reports -1 like the
+           other allocation-failure paths. */
+        peer_info_destroy(copy);
+        free(copy);
+        return NULL;
+      }
       memcpy(host, address->host, host_len);
       copy->addresses[copy->address_count].type = address->type;
       copy->addresses[copy->address_count].port = address->port;
@@ -179,7 +186,8 @@ static void _peer_book_apply_mutation(peer_book_t* peer_book,
 }
 
 /* Frees the whole mutation request (shell + input copies + reply plumbing).
-   Shared by the actor's orphan path and the caller's success path; the apply
+   Shared by the actor's orphan path, the caller's success path, and the
+   caller's send-failure path (the request never reached the actor); the apply
    step nulls copies it consumed into the lists, so e.g. the bootstrap
    endpoint string (which authority_bootstrap_add re-encodes into its own
    storage) is released here on the caller's success path. */
@@ -200,7 +208,14 @@ static void _peer_book_mutation_free(peer_book_mutation_t* request) {
 static void _peer_book_handle_mutation(peer_book_t* peer_book,
                                        peer_book_mutation_t* request) {
   if (request == NULL) return;
-  _peer_book_apply_mutation(peer_book, request);
+  if (atomic_load(&peer_book->started)) {
+    _peer_book_apply_mutation(peer_book, request);
+  } else {
+    /* Stopped after this request was queued (or raced past the caller-side
+       check): reject without touching the authority lists — peer_book.h
+       invariant window (b). */
+    request->result = -1;
+  }
 
   platform_mutex_lock(request->reply.mutex);
   if (request->reply.orphaned) {
@@ -280,10 +295,18 @@ static void _peer_book_handle_snapshot(peer_book_t* peer_book,
     _peer_book_snapshot_free(request);
     return;
   }
-  if (request->kind == peer_book_snapshot_kind_friends) {
-    _peer_book_snapshot_friends_locked(peer_book, request);
+  if (atomic_load(&peer_book->started)) {
+    if (request->kind == peer_book_snapshot_kind_friends) {
+      _peer_book_snapshot_friends_locked(peer_book, request);
+    } else {
+      _peer_book_snapshot_bootstrap_locked(peer_book, request);
+    }
+    request->result = 0;
   } else {
-    _peer_book_snapshot_bootstrap_locked(peer_book, request);
+    /* Stopped after this request was queued (or raced past the caller-side
+       check): reply failed and empty instead of reading the authority lists
+       — peer_book.h invariant window (b). */
+    request->result = -1;
   }
   request->reply.done = 1;
   platform_condvar_signal(request->reply.cv);
@@ -371,6 +394,7 @@ static void _peer_book_handle_reconnect_tick(peer_book_t* peer_book) {
    actor, which calls authority_save_peers_snapshot and clears the dirty
    flag. Neither actor ever blocks. */
 static void _peer_book_handle_save(peer_book_t* peer_book) {
+  if (!atomic_load(&peer_book->started)) return;  /* stopped: do not read the lists */
   if (peer_book->network == NULL || peer_book->authority == NULL) return;
 
   authority_t* authority = peer_book->authority;
@@ -466,7 +490,26 @@ int peer_book_start(peer_book_t* peer_book) {
 
 void peer_book_stop(peer_book_t* peer_book) {
   if (peer_book == NULL) return;
+  /* Flag stop first: the round-trip helpers refuse to queue new requests
+     past this store, and any message whose dispatch reads the flag after it
+     (mutation / snapshot / save) rejects instead of touching the authority
+     lists. */
   ATOMIC_STORE(&peer_book->started, 0);
+  /* Drain barrier. Mechanism: scheduler_pool_wait_for_idle — the scheduler
+     exposes no per-actor mailbox-drain API (message_queue_destroy can only
+     drop messages, not run them), so the pool-level idle barrier is the
+     smallest correct primitive here. It waits until every worker is idle and
+     the pool's pending-message counter is zero, so every request queued
+     before the flag has been dispatched — applied or rejected — before this
+     returns, closing invariant window (b): offsd's _shutdown directly reads
+     the lists for authority_save_peers right after this call. The remaining
+     race (a sender that passed its own started check before the store above
+     and pushes after the barrier's final predicate check) is covered by the
+     dispatch-side started checks in the handlers: such a late message is
+     rejected, never applied. peer_book_stop is only ever called from
+     non-pool threads (offsd _shutdown, offs_node_stop/restart teardown,
+     tests), so the wait cannot self-deadlock on a pool worker. */
+  scheduler_pool_wait_for_idle(peer_book->pool);
 }
 
 void peer_book_destroy(peer_book_t* peer_book) {
@@ -532,20 +575,6 @@ static int _peer_book_round_trip(peer_book_t* peer_book, uint32_t type,
   return 0;
 }
 
-/* Request-shell cleanup used by the caller-side helpers on the send-failure
-   path (the request never reached the actor, so nothing else frees it). */
-static void _peer_book_mutation_request_destroy(peer_book_mutation_t* request) {
-  if (request == NULL) return;
-  if (request->friend_info != NULL) {
-    peer_info_destroy(request->friend_info);
-    free(request->friend_info);
-  }
-  if (request->endpoint != NULL) free(request->endpoint);
-  if (request->reply.mutex != NULL) platform_mutex_destroy(request->reply.mutex);
-  if (request->reply.cv != NULL) platform_condvar_destroy(request->reply.cv);
-  free(request);
-}
-
 static int _peer_book_mutation_round_trip(peer_book_t* peer_book,
                                           peer_book_mutation_t* request,
                                           uint32_t timeout_ms) {
@@ -553,7 +582,7 @@ static int _peer_book_mutation_round_trip(peer_book_t* peer_book,
                                    &request->reply, timeout_ms);
   if (trip == 1) {
     /* Never queued — the actor will never touch it. */
-    _peer_book_mutation_request_destroy(request);
+    _peer_book_mutation_free(request);
     return -1;
   }
   if (trip != 0) return -1;  /* orphaned to the actor; do not free */
@@ -574,13 +603,13 @@ int peer_book_friend_add(peer_book_t* peer_book, const peer_info_t* info,
   request->reply.mutex = platform_mutex_create();
   request->reply.cv = platform_condvar_create();
   if (request->reply.mutex == NULL || request->reply.cv == NULL) {
-    _peer_book_mutation_request_destroy(request);
+    _peer_book_mutation_free(request);
     return -1;
   }
   request->op = peer_book_op_friend_add;
   request->friend_info = _peer_book_copy_peer_info(info);
   if (request->friend_info == NULL) {
-    _peer_book_mutation_request_destroy(request);
+    _peer_book_mutation_free(request);
     return -1;
   }
   return _peer_book_mutation_round_trip(peer_book, request, timeout_ms);
@@ -594,7 +623,7 @@ int peer_book_friend_remove(peer_book_t* peer_book, const node_id_t* target_id,
   request->reply.mutex = platform_mutex_create();
   request->reply.cv = platform_condvar_create();
   if (request->reply.mutex == NULL || request->reply.cv == NULL) {
-    _peer_book_mutation_request_destroy(request);
+    _peer_book_mutation_free(request);
     return -1;
   }
   request->op = peer_book_op_friend_remove;
@@ -610,13 +639,13 @@ int peer_book_bootstrap_add(peer_book_t* peer_book, const char* endpoint,
   request->reply.mutex = platform_mutex_create();
   request->reply.cv = platform_condvar_create();
   if (request->reply.mutex == NULL || request->reply.cv == NULL) {
-    _peer_book_mutation_request_destroy(request);
+    _peer_book_mutation_free(request);
     return -1;
   }
   request->op = peer_book_op_bootstrap_add;
   request->endpoint = strdup(endpoint);
   if (request->endpoint == NULL) {
-    _peer_book_mutation_request_destroy(request);
+    _peer_book_mutation_free(request);
     return -1;
   }
   return _peer_book_mutation_round_trip(peer_book, request, timeout_ms);
@@ -630,13 +659,13 @@ int peer_book_bootstrap_remove(peer_book_t* peer_book, const char* endpoint,
   request->reply.mutex = platform_mutex_create();
   request->reply.cv = platform_condvar_create();
   if (request->reply.mutex == NULL || request->reply.cv == NULL) {
-    _peer_book_mutation_request_destroy(request);
+    _peer_book_mutation_free(request);
     return -1;
   }
   request->op = peer_book_op_bootstrap_remove;
   request->endpoint = strdup(endpoint);
   if (request->endpoint == NULL) {
-    _peer_book_mutation_request_destroy(request);
+    _peer_book_mutation_free(request);
     return -1;
   }
   return _peer_book_mutation_round_trip(peer_book, request, timeout_ms);
@@ -673,6 +702,13 @@ int peer_book_snapshot_bootstrap(peer_book_t* peer_book,
   }
   if (trip != 0) return -1;  /* orphaned to the actor; nothing to free */
 
+  if (request->result != 0) {
+    /* Rejected by a stopped actor (invariant window (b)): reply arrived but
+       the lists were not read — report the failure, nothing to steal. */
+    _peer_book_snapshot_free(request);
+    return -1;
+  }
+
   *config_endpoints = request->config_endpoints;
   *config_count = request->config_count;
   *managed_endpoints = request->managed_endpoints;
@@ -707,6 +743,13 @@ int peer_book_snapshot_friends(peer_book_t* peer_book,
     return -1;
   }
   if (trip != 0) return -1;  /* orphaned to the actor; do not free */
+
+  if (request->result != 0) {
+    /* Rejected by a stopped actor (invariant window (b)): reply arrived but
+       the lists were not read — report the failure, nothing to steal. */
+    _peer_book_snapshot_free(request);
+    return -1;
+  }
 
   *friends = request->friends;
   *friend_count = request->friend_count;

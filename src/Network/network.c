@@ -4598,13 +4598,15 @@ void network_start_connections(network_t* network) {
                                      &managed_count,
                                      PEER_BOOK_TIMEOUT_MS) != 0) {
       log_warn("network_start_connections: bootstrap snapshot timed out — "
-               "skipping the startup connect loop");
+               "skipping the startup connect loop; the node will not "
+               "bootstrap-connect until the next heal tick (up to 5s)");
       return;
     }
     if (peer_book_snapshot_friends(network->peer_book, &friends, &friend_count,
                                    PEER_BOOK_TIMEOUT_MS) != 0) {
       log_warn("network_start_connections: friend snapshot timed out — "
-               "skipping the startup connect loop");
+               "skipping the startup connect loop; the node will not "
+               "reconnect friends until the next heal tick (up to 5s)");
       peer_book_free_string_array(config_endpoints, config_count);
       peer_book_free_string_array(managed_endpoints, managed_count);
       return;
