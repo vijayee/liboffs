@@ -476,9 +476,9 @@ int authority_save_peers(const authority_t* authority, const network_t* network)
   /* Startup/shutdown-phase save: read the friend and managed lists directly
      (legal per the peer_book.h invariant here) and delegate to the snapshot
      variant. */
-  const char** b58_friends = NULL;
+  char** b58_friends = NULL;
   size_t b58_friend_count = 0;
-  const char** managed = NULL;
+  char** managed = NULL;
   size_t managed_count = 0;
   if (authority->friend_peer_count > 0) {
     b58_friends = get_clear_memory(authority->friend_peer_count * sizeof(char*));
@@ -490,7 +490,7 @@ int authority_save_peers(const authority_t* authority, const network_t* network)
       }
     }
   }
-  managed = (const char**)authority->managed_bootstrap_peers;
+  managed = authority->managed_bootstrap_peers;
   managed_count = authority->managed_bootstrap_peer_count;
 
   int rc = authority_save_peers_snapshot(authority, network, b58_friends,
@@ -508,9 +508,9 @@ int authority_save_peers(const authority_t* authority, const network_t* network)
 
 int authority_save_peers_snapshot(const authority_t* authority,
                                   const network_t* network,
-                                  const char** b58_friends,
+                                  char** b58_friends,
                                   size_t b58_friend_count,
-                                  const char** managed_bootstrap,
+                                  char** managed_bootstrap,
                                   size_t managed_count) {
   if (authority == NULL || network == NULL) return -1;
   if (authority->peer_store_path == NULL) return -1;

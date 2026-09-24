@@ -178,9 +178,11 @@ static void _peer_book_apply_mutation(peer_book_t* peer_book,
   }
 }
 
-/* Frees the whole mutation request (shell + any unconsumed input copies +
-   reply plumbing). The apply step nulls consumed input copies, so on the
-   normal free path there is nothing left to release beyond the shell. */
+/* Frees the whole mutation request (shell + input copies + reply plumbing).
+   Shared by the actor's orphan path and the caller's success path; the apply
+   step nulls copies it consumed into the lists, so e.g. the bootstrap
+   endpoint string (which authority_bootstrap_add re-encodes into its own
+   storage) is released here on the caller's success path. */
 static void _peer_book_mutation_free(peer_book_mutation_t* request) {
   if (request == NULL) return;
   if (request->friend_info != NULL) {
@@ -661,7 +663,7 @@ int peer_book_snapshot_bootstrap(peer_book_t* peer_book,
     _peer_book_snapshot_free(request);
     return -1;
   }
-  request->kind = peer_book_snapshot_bootstrap;
+  request->kind = peer_book_snapshot_kind_bootstrap;
 
   int trip = _peer_book_round_trip(peer_book, PEER_BOOK_SNAPSHOT,
                                    &request->reply, timeout_ms);

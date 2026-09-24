@@ -100,12 +100,14 @@ int authority_save_peers(const authority_t* authority, const network_t* network)
 /* Same save, but the friend and managed bootstrap lists are supplied by the
  * caller (the peer-book actor's PEER_BOOK_SAVE_SNAPSHOT payload): b58_friends
  * holds the Base58 peer_info strings for index 5, managed_bootstrap the
- * endpoint strings for index 6. Both arrays are borrowed (not freed here). */
+ * endpoint strings for index 6. Both arrays are borrowed (read-only here;
+ * the char**-not-const-char** signature keeps the C qualifier rules happy
+ * for both the actor's owned char** arrays and this file's local arrays). */
 int authority_save_peers_snapshot(const authority_t* authority,
                                   const network_t* network,
-                                  const char** b58_friends,
+                                  char** b58_friends,
                                   size_t b58_friend_count,
-                                  const char** managed_bootstrap,
+                                  char** managed_bootstrap,
                                   size_t managed_count);
 
 int authority_load_peers(authority_t* authority, network_t* network);
