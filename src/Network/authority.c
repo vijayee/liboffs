@@ -239,18 +239,25 @@ int authority_bootstrap_remove(authority_t* authority, const char* endpoint) {
 
 int authority_set_bootstrap_peers(authority_t* authority, const char* csv) {
   if (authority == NULL) return -1;
-  if (authority->bootstrap_peers != NULL) {
+  if (csv == NULL || csv[0] == '\0') {
+    /* Empty seed clears the list. Parse into temporaries below and swap only
+       on full success so an invalid mid-CSV token can never leave a partial
+       (shrunken) resilience-critical bootstrap list. */
     for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
       free(authority->bootstrap_peers[index]);
     }
     free(authority->bootstrap_peers);
     authority->bootstrap_peers = NULL;
     authority->bootstrap_peer_count = 0;
+    return 0;
   }
-  if (csv == NULL || csv[0] == '\0') return 0;
 
+  /* Pass 1: parse every token into a temporary array; nothing is mutated
+     until the whole CSV validates. */
   char* copy = strdup(csv);
   if (copy == NULL) return -1;
+  char** parsed = NULL;
+  size_t parsed_count = 0;
   char* saveptr = NULL;
   for (char* token = strtok_r(copy, ",", &saveptr); token != NULL;
        token = strtok_r(NULL, ",", &saveptr)) {
@@ -258,26 +265,39 @@ int authority_set_bootstrap_peers(authority_t* authority, const char* csv) {
     uint16_t port = 0;
     if (endpoint_parse(token, host, sizeof(host), &port) != 0) {
       free(copy);
-      return -1;
+      goto fail;
     }
     char* stored = authority_bootstrap_encode(host, port);
     if (stored == NULL) {
       free(copy);
-      return -1;
+      goto fail;
     }
-    size_t new_count = authority->bootstrap_peer_count + 1;
-    char** expanded = realloc(authority->bootstrap_peers, new_count * sizeof(char*));
+    char** expanded = realloc(parsed, (parsed_count + 1) * sizeof(char*));
     if (expanded == NULL) {
       free(stored);
       free(copy);
-      return -1;
+      goto fail;
     }
-    authority->bootstrap_peers = expanded;
-    authority->bootstrap_peers[authority->bootstrap_peer_count] = stored;
-    authority->bootstrap_peer_count = new_count;
+    parsed = expanded;
+    parsed[parsed_count++] = stored;
   }
   free(copy);
+
+  /* Pass 2: swap — free the old list only after full validation. */
+  for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
+    free(authority->bootstrap_peers[index]);
+  }
+  free(authority->bootstrap_peers);
+  authority->bootstrap_peers = parsed;
+  authority->bootstrap_peer_count = parsed_count;
   return 0;
+
+fail:
+  for (size_t index = 0; index < parsed_count; index++) {
+    free(parsed[index]);
+  }
+  free(parsed);
+  return -1;
 }
 
 int authority_sign_nonce(authority_t* authority, const uint8_t nonce[32],

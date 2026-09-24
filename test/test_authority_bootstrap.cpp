@@ -79,6 +79,22 @@ TEST(AuthorityBootstrap, RemoveKnownAndUnknown) {
   authority_destroy(authority);
 }
 
+TEST(AuthorityBootstrap, SetBootstrapPeersFailsAtomicallyOnInvalidCsv) {
+  config_t config;
+  authority_t* authority = make_authority("/tmp/liboffs_test_bootstrap_store.cbor", &config);
+  ASSERT_NE(authority, nullptr);
+  ASSERT_EQ(0, authority_set_bootstrap_peers(authority, "10.0.0.1:8080,10.0.0.2:9090"));
+
+  // An invalid mid-CSV token fails the whole call and leaves the previous
+  // list untouched (no partial seed).
+  EXPECT_EQ(-1, authority_set_bootstrap_peers(authority, "10.0.0.3:7070,garbage"));
+  EXPECT_EQ(2u, authority->bootstrap_peer_count);
+  EXPECT_STREQ("10.0.0.1:8080", authority->bootstrap_peers[0]);
+  EXPECT_STREQ("10.0.0.2:9090", authority->bootstrap_peers[1]);
+
+  authority_destroy(authority);
+}
+
 TEST(AuthorityBootstrap, SetBootstrapPeersParsesCsvAndNormalizes) {
   config_t config;
   authority_t* authority = make_authority("/tmp/liboffs_test_bootstrap_store.cbor", &config);
