@@ -1,6 +1,6 @@
 # OFFS Configurable Settings
 
-The 24 fields that can be set via the `offs` CLI (`offs config set/add/remove`)
+The 25 fields that can be set via the `offs` CLI (`offs config set/add/remove`)
 and `PUT /config`. All go through the same staging path: changes are written to
 `{data_dir}/pending_config.json` and require a daemon restart to apply
 (`POST /config/restart` or `offs config reload` for reloadable fields).
@@ -8,7 +8,7 @@ and `PUT /config`. All go through the same staging path: changes are written to
 Registry: `src/Configuration/config_json.c:15-30`
 CLI help: `OFFS/src/offs/commands/config.c:31-58`
 
-## String (5)
+## String (6)
 
 | Field | Description |
 |---|---|
@@ -17,6 +17,7 @@ CLI help: `OFFS/src/offs/commands/config.c:31-58`
 | `https_key_path` | HTTPS server private key PEM |
 | `tcp_tls_cert_path` | TCP transport TLS certificate PEM |
 | `tcp_tls_key_path` | TCP transport TLS private key PEM |
+| `bootstrap_peers` | CSV of `host:port` network entry points seeded into the authority's bootstrap list at startup (via `authority_set_bootstrap_peers`); immutable at runtime |
 
 ## Bool (9) — accept `true`/`false` or `1`/`0`
 

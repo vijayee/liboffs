@@ -1,12 +1,19 @@
 #include <gtest/gtest.h>
 #include <cJSON.h>
+#include <filesystem>
+#include <fstream>
+#include <string>
 extern "C" {
 #include "../src/Configuration/config_json.h"
+#include "../src/Configuration/config_pending.h"
 #include "../src/Configuration/config.h"
 }
 
+namespace fs = std::filesystem;
+
 TEST(ConfigJson, KnownFields) {
   EXPECT_TRUE(config_is_known_field("api_key_hash"));
+  EXPECT_TRUE(config_is_known_field("bootstrap_peers"));
   EXPECT_TRUE(config_is_known_field("http_port"));
   EXPECT_TRUE(config_is_known_field("tcp_tls_enabled"));
   EXPECT_TRUE(config_is_known_field("https_cert_path"));
@@ -17,6 +24,7 @@ TEST(ConfigJson, KnownFields) {
 
 TEST(ConfigJson, FieldTypeClassification) {
   EXPECT_EQ(CONFIG_FIELD_STRING, config_field_type("api_key_hash"));
+  EXPECT_EQ(CONFIG_FIELD_STRING, config_field_type("bootstrap_peers"));
   EXPECT_EQ(CONFIG_FIELD_STRING, config_field_type("https_cert_path"));
   EXPECT_EQ(CONFIG_FIELD_BOOL, config_field_type("http_enabled"));
   EXPECT_EQ(CONFIG_FIELD_BOOL, config_field_type("tcp_tls_enabled"));
@@ -92,4 +100,26 @@ TEST(ConfigJson, ConfigToJsonSerializesAllFieldGroups) {
   /* config_default() leaves all string fields NULL, so there is nothing
      heap-allocated to release — config_free() would free() the stack struct,
      so it must not be called on a value-return config_default(). */
+}
+
+/* The only JSON->config_t parse entry point is config_pending_load (it reads
+   {data_dir}/pending_config.json), so this test stages a pending file with the
+   CSV and asserts the raw string survives into the field. The CSV is stored
+   verbatim; endpoint validation happens later via
+   authority_set_bootstrap_peers. */
+TEST(ConfigJson, BootstrapPeersFieldParses) {
+  fs::path dir = fs::temp_directory_path() / "liboffs_config_bootstrap_peers_test";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  {
+    std::ofstream out(dir / "pending_config.json");
+    out << "{\"bootstrap_peers\": \"10.0.0.1:8080,[2001:db8::1]:9090\"}";
+  }
+  config_t* config = config_pending_load(dir.string().c_str());
+  std::error_code remove_ec;
+  fs::remove_all(dir, remove_ec);
+  ASSERT_NE(config, nullptr);
+  ASSERT_NE(config->bootstrap_peers, nullptr);
+  EXPECT_STREQ("10.0.0.1:8080,[2001:db8::1]:9090", config->bootstrap_peers);
+  config_free(config);
 }

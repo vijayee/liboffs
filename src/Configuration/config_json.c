@@ -14,7 +14,7 @@
 
 static const char* _string_fields[] = {
   "api_key_hash", "https_cert_path", "https_key_path",
-  "tcp_tls_cert_path", "tcp_tls_key_path", NULL
+  "tcp_tls_cert_path", "tcp_tls_key_path", "bootstrap_peers", NULL
 };
 
 static const char* _bool_fields[] = {

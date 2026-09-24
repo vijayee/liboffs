@@ -56,6 +56,7 @@ typedef struct {
   uint16_t https_port;
   char*    https_cert_path;
   char*    https_key_path;
+  char*    bootstrap_peers;             // CSV of "host:port" network entry points (config-seeded, immutable at runtime)
   bool     unix_enabled;
   bool     tcp_enabled;
   uint16_t tcp_port;
@@ -98,8 +99,9 @@ config_t* config_deep_copy(const config_t* src);
 void config_free(config_t* config);
 
 /* Free only the owning char* members of a config (api_key_hash, https_*_path,
-   tcp_tls_*_path) without freeing the struct itself. For embedded config_t
-   values (e.g. offsd's server->config) where config_free would erroneously
-   free() the surrounding storage. Safe on a default/zeroed config (all NULL). */
+   bootstrap_peers, tcp_tls_*_path) without freeing the struct itself. For
+   embedded config_t values (e.g. offsd's server->config) where config_free
+   would erroneously free() the surrounding storage. Safe on a default/zeroed
+   config (all NULL). */
 void config_free_members(config_t* config);
 #endif //OFFS_CONFIG_H

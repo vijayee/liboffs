@@ -157,6 +157,8 @@ config_t* config_pending_load(const char* data_dir) {
       config->https_cert_path = strdup(item->valuestring);
     else if (strcmp(item->string, "https_key_path") == 0 && cJSON_IsString(item))
       config->https_key_path = strdup(item->valuestring);
+    else if (strcmp(item->string, "bootstrap_peers") == 0 && cJSON_IsString(item))
+      config->bootstrap_peers = strdup(item->valuestring);
     else if (strcmp(item->string, "tcp_tls_cert_path") == 0 && cJSON_IsString(item))
       config->tcp_tls_cert_path = strdup(item->valuestring);
     else if (strcmp(item->string, "tcp_tls_key_path") == 0 && cJSON_IsString(item))
@@ -172,6 +174,7 @@ config_t* config_pending_load(const char* data_dir) {
     free(config->api_key_hash);
     free(config->https_cert_path);
     free(config->https_key_path);
+    free(config->bootstrap_peers);
     free(config->tcp_tls_cert_path);
     free(config->tcp_tls_key_path);
     free(config);

@@ -55,6 +55,7 @@ config_t config_default() {
   config.https_port = 443;
   config.https_cert_path = NULL;
   config.https_key_path = NULL;
+  config.bootstrap_peers = NULL;
   config.unix_enabled = false;
   config.tcp_enabled = false;
   config.tcp_port = 9000;
@@ -287,6 +288,8 @@ config_t* config_deep_copy(const config_t* src) {
     copy->https_cert_path = strdup(src->https_cert_path);
   if (src->https_key_path)
     copy->https_key_path = strdup(src->https_key_path);
+  if (src->bootstrap_peers)
+    copy->bootstrap_peers = strdup(src->bootstrap_peers);
   if (src->tcp_tls_cert_path)
     copy->tcp_tls_cert_path = strdup(src->tcp_tls_cert_path);
   if (src->tcp_tls_key_path)
@@ -299,6 +302,7 @@ void config_free(config_t* config) {
   free(config->api_key_hash);
   free(config->https_cert_path);
   free(config->https_key_path);
+  free(config->bootstrap_peers);
   free(config->tcp_tls_cert_path);
   free(config->tcp_tls_key_path);
   free(config);
@@ -312,6 +316,8 @@ void config_free_members(config_t* config) {
   config->https_cert_path = NULL;
   free(config->https_key_path);
   config->https_key_path = NULL;
+  free(config->bootstrap_peers);
+  config->bootstrap_peers = NULL;
   free(config->tcp_tls_cert_path);
   config->tcp_tls_cert_path = NULL;
   free(config->tcp_tls_key_path);
