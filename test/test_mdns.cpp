@@ -238,3 +238,15 @@ TEST_F(TestMdns, DualFamilyResponseParsesBoth) {
   EXPECT_EQ(memcmp(addr6, expected_v6, 16), 0);
   EXPECT_EQ(port, expected_port);
 }
+
+/* The live responder joins and announces to this group; a wrong constant
+   fails IPV6_JOIN_GROUP with EINVAL on every interface and sends announces
+   to a non-multicast address (regression: group was ::fb, missing ff02). */
+TEST_F(TestMdns, V6MulticastGroupIsFf02Fb) {
+  const uint8_t* group = mdns_multicast_group_v6_for_test();
+  ASSERT_NE(group, nullptr);
+  /* ff02::fb: 0xFF 0x02, then thirteen zero bytes, then 0xFB. */
+  const uint8_t expected_ff02_fb[16] = {0xFF, 0x02, 0, 0, 0, 0, 0, 0,
+                                        0,    0,    0, 0, 0, 0, 0, 0xFB};
+  EXPECT_EQ(memcmp(group, expected_ff02_fb, 16), 0);
+}

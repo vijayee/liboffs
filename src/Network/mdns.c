@@ -52,7 +52,7 @@
 
 /* ff02::fb — the mDNS multicast group for IPv6 (RFC 6762). */
 static const uint8_t _mdns_multicast_v6[16] = {
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFB
+  0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFB
 };
 
 /* Build a DNS name encoding: <label_len><label_bytes> ... 0x00. Writes to
@@ -469,10 +469,15 @@ static void _mdns_admit_peer(mdns_t* responder, const char* peer_b58,
   /* Ignore our own broadcasts. */
   if (responder->network->authority != NULL) {
     char self_b58[256];
-    if (base58_encode(responder->network->authority->local_id.hash,
-                      NODE_ID_HASH_SIZE, self_b58, sizeof(self_b58)) == 0 &&
-        strcmp(self_b58, peer_b58) == 0) {
-      return;
+    int self_len = base58_encode(responder->network->authority->local_id.hash,
+                                 NODE_ID_HASH_SIZE, self_b58, sizeof(self_b58));
+    /* base58_encode writes exactly self_len characters without a
+       terminator — terminate before the strcmp. */
+    if (self_len > 0) {
+      self_b58[self_len] = '\0';
+      if (strcmp(self_b58, peer_b58) == 0) {
+        return;
+      }
     }
   }
 
@@ -585,10 +590,15 @@ static void* _mdns_thread_fn(void* arg) {
       if (responder->network != NULL &&
           responder->network->authority != NULL &&
           responder->network->quic_listener != NULL) {
-        /* Format the node_id_base58 from the local node_id. */
+        /* Format the node_id_base58 from the local node_id. base58_encode
+           returns the character count without terminating — terminate so
+           the announce name encoder reads a clean string. */
         char node_id_b58[256];
-        if (base58_encode(responder->network->authority->local_id.hash,
-                          NODE_ID_HASH_SIZE, node_id_b58, sizeof(node_id_b58)) == 0) {
+        int node_id_len = base58_encode(responder->network->authority->local_id.hash,
+                                        NODE_ID_HASH_SIZE, node_id_b58,
+                                        sizeof(node_id_b58));
+        if (node_id_len > 0) {
+          node_id_b58[node_id_len] = '\0';
           uint16_t quic_port = responder->network->quic_listener->listen_port;
           uint32_t lan_ip = _find_lan_ipv4();
           if (lan_ip != 0) {
@@ -920,6 +930,10 @@ int mdns_parse_response_for_test(const uint8_t* pkt, size_t pkt_len,
                               lan_ip, quic_port, addr6_out, have_v6);
 }
 
+const uint8_t* mdns_multicast_group_v6_for_test(void) {
+  return _mdns_multicast_v6;
+}
+
 #else /* _WIN32 — stubbed, see mdns.h for the rationale. */
 
 struct mdns_t {
@@ -987,6 +1001,10 @@ int mdns_parse_response_for_test(const uint8_t* pkt, size_t pkt_len,
   (void)addr6_out;
   (void)have_v6;
   return -1;
+}
+
+const uint8_t* mdns_multicast_group_v6_for_test(void) {
+  return NULL;
 }
 
 #endif /* _WIN32 */

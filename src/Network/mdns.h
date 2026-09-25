@@ -71,4 +71,8 @@ int mdns_parse_response_for_test(const uint8_t* pkt, size_t pkt_len,
                                  uint32_t* lan_ip, uint16_t* quic_port,
                                  uint8_t addr6_out[16], int* have_v6);
 
+/* The IPv6 mDNS multicast group bytes (ff02::fb) the live responder joins and
+   announces to. Returns NULL on Windows (mdns stubbed). */
+const uint8_t* mdns_multicast_group_v6_for_test(void);
+
 #endif // OFFS_MDNS_H
