@@ -2,7 +2,6 @@
 // Created by victor on 5/7/26.
 //
 
-#include <stdio.h>
 #include "readable_off_stream.h"
 #include "../Util/allocator.h"
 #include "../Util/error.h"
@@ -276,7 +275,6 @@ static void _start_block_fetches(readable_off_stream_t* stream) {
 }
 
 static void _start_tuple_cache_lookup(readable_off_stream_t* stream, tuple_t* tuple) {
-  fprintf(stderr, "TC-TRACE: tuple lookup started, tc=%d, state=%d\n", stream->tc != NULL, stream->state);
   stream->pending_tuple = (tuple_t*)refcounter_reference((refcounter_t*)tuple);
   if (stream->tc != NULL) {
     tuple_cache_get(stream->tc, tuple, &stream->stream.actor);
@@ -394,7 +392,6 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
 
       if (result->block == NULL) {
         /* Block not found in cache */
-        fprintf(stderr, "RS-TRACE: block miss for tuple, network-aware=%d\n", stream->network != NULL);
         if (stream->network != NULL) {
           /* Network-aware: send NETWORK_LOCAL_FIND_BLOCK for this specific hash.
            * Use result->hash directly — the network's wanted_list deduplicates. */
