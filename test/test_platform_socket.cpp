@@ -495,6 +495,20 @@ TEST(TestPlatformScope, EmptyAndZeroScopeRejected) {
   EXPECT_NE(platform_address_parse(&addr, "fe80::1%0", 5353), 0);
 }
 
+TEST(TestPlatformScope, OverflowingNumericScopeRejected) {
+  platform_address_t addr;
+  EXPECT_NE(platform_address_parse(&addr, "fe80::1%4294967296", 5353), 0);
+  EXPECT_NE(platform_address_parse(&addr, "fe80::1%99999999999999999999", 5353), 0);
+}
+
+TEST(TestPlatformScope, TruncatedToStringRejected) {
+  platform_address_t addr;
+  ASSERT_EQ(platform_address_parse(&addr, "fe80::1%5", 5353), 0);
+  /* A scoped address never fits in 8 bytes, whatever emission form is used. */
+  char tiny[8];
+  EXPECT_NE(platform_address_to_string(&addr, tiny, sizeof(tiny)), 0);
+}
+
 TEST(TestPlatformScope, UnknownInterfaceNameRejected) {
   platform_address_t addr;
   EXPECT_NE(platform_address_parse(&addr, "fe80::1%nosuchif98765", 5353), 0);
