@@ -291,11 +291,15 @@ static QUIC_STATUS QUIC_API _relay_client_connection_callback(
                "status=0x%x, error_code=0x%lx",
                shutdown_status,
                (unsigned long)event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode);
-      // Schedule a retry if the error is UNREACHABLE and we haven't exhausted retries.
-      // MsQuic can return UNREACHABLE transiently on localhost when multiple QUIC
-      // connections start concurrently.
-      if (shutdown_status == QUIC_STATUS_UNREACHABLE &&
-          !client->shutdown_pending &&
+      // Schedule a retry for ANY transport-initiated shutdown (not one we
+      // requested ourselves). UNREACHABLE is transient (MsQuic returns it on
+      // localhost when multiple QUIC connections start concurrently), but a
+      // bounced relay server surfaces as a different status (e.g. 0x6e on
+      // container restart) — without this, clients stayed orphaned until
+      // process restart. The retry budget (max_retries + exponential backoff,
+      // reset on successful connect) bounds the loop for permanently-gone
+      // relays; app-initiated shutdowns (shutdown_pending) never retry.
+      if (!client->shutdown_pending &&
           client->retry_count < client->max_retries) {
         client->retry_count++;
         log_info("relay_client: scheduling retry %u/%u",
