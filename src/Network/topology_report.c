@@ -12,6 +12,7 @@
 
 #ifdef _WIN32
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 #define CLOSE_SOCKET closesocket
 #else
@@ -307,32 +308,40 @@ int topology_report_post(const char* url, cbor_item_t* report) {
   cbor_serialize(report, cbor_buf, cbor_size);
 
   /* Resolve hostname */
-  struct hostent* server_host = gethostbyname(host);
-  if (server_host == NULL) {
-    log_error("topology_report_post: gethostbyname failed for %s", host);
+  struct addrinfo hints;
+  struct addrinfo* resolution = NULL;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_flags = AI_ADDRCONFIG;
+  hints.ai_socktype = SOCK_STREAM;
+  if (getaddrinfo(host, NULL, &hints, &resolution) != 0 || resolution == NULL) {
+    log_error("topology_report_post: getaddrinfo failed for %s", host);
     free(cbor_buf);
     return -1;
   }
 
-  int sock = socket(AF_INET, SOCK_STREAM, 0);
+  int sock = socket(resolution->ai_family, SOCK_STREAM, 0);
   if (sock < 0) {
     log_error("topology_report_post: socket creation failed");
+    freeaddrinfo(resolution);
     free(cbor_buf);
     return -1;
   }
 
-  struct sockaddr_in server_addr;
-  memset(&server_addr, 0, sizeof(server_addr));
-  server_addr.sin_family = AF_INET;
-  memcpy(&server_addr.sin_addr.s_addr, server_host->h_addr, (size_t)server_host->h_length);
-  server_addr.sin_port = htons(port);
+  if (resolution->ai_family == AF_INET6) {
+    ((struct sockaddr_in6*)resolution->ai_addr)->sin6_port = htons(port);
+  } else {
+    ((struct sockaddr_in*)resolution->ai_addr)->sin_port = htons(port);
+  }
 
-  if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-    log_error("topology_report_post: connect to %s:%u failed", host, port);
+  if (connect(sock, resolution->ai_addr, (socklen_t)resolution->ai_addrlen) < 0) {
+    log_error("topology_report_post: connect to %s:%u failed", host, (unsigned)port);
     CLOSE_SOCKET(sock);
+    freeaddrinfo(resolution);
     free(cbor_buf);
     return -1;
   }
+  freeaddrinfo(resolution);
 
   /* Build HTTP/1.1 POST request */
   char request[2048];
