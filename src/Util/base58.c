@@ -28,7 +28,13 @@ static const int8_t BASE58_MAP[256] = {
     -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
 };
 
-#define BIGINT_SIZE 1024
+/* Workspace for the big-number arithmetic: the bigint holds the value in
+   base-256 and the digits buffer holds the base-58 digits, so an input of
+   up to BIGINT_SIZE/2 bytes is encodable (the /2 guard below). 1024 capped
+   inputs at 512 bytes — IPv6-era peer_info CBOR with v6 candidates + SRFLX +
+   RELAY reaches ~514+ bytes and broke /peer/info with a 500. 4096 supports
+   2048-byte inputs. */
+#define BIGINT_SIZE 4096
 
 static void bigint_reverse(uint8_t* data, size_t len) {
     for (size_t i = 0, j = len - 1; i < j; i++, j--) {
