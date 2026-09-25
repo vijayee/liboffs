@@ -2,6 +2,7 @@
 // Created by victor on 5/7/26.
 //
 
+#include <stdio.h>
 #include "readable_off_stream.h"
 #include "../Util/allocator.h"
 #include "../Util/error.h"
@@ -391,6 +392,7 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
       }
 
       if (result->block == NULL) {
+        fprintf(stderr, "RS-TRACE: block miss, network=%d\n", stream->network != NULL);
         /* Block not found in cache */
         if (stream->network != NULL) {
           /* Network-aware: send NETWORK_LOCAL_FIND_BLOCK for this specific hash.
