@@ -68,8 +68,15 @@ declare -A REGION_STORAGE_ACCOUNT
 declare -A REGION_STORAGE_KEY
 for region in "${REGIONS[@]}"; do
   ACCOUNT="offstest$(echo "${region}" | tr -d '-')"
+  # Region-restricted locations (e.g. westeurope for this subscription) hang
+  # the account creation — cap it and skip the region (its containers fail
+  # to deploy anyway).
   az storage account show -n "${ACCOUNT}" >/dev/null 2>&1 || \
-    az storage account create -n "${ACCOUNT}" -g "${STORAGE_RG}" -l "${region}" --sku Standard_LRS --kind StorageV2 --enable-large-file-share -o table 2>&1 | tail -1
+    timeout 60 az storage account create -n "${ACCOUNT}" -g "${STORAGE_RG}" -l "${region}" --sku Standard_LRS --kind StorageV2 --enable-large-file-share -o table 2>&1 | tail -1 || true
+  az storage account show -n "${ACCOUNT}" >/dev/null 2>&1 || {
+    log "  ⚠️  Storage account unavailable in ${region} — volume-less deploys there"
+    continue
+  }
   REGION_STORAGE_ACCOUNT["${region}"]="${ACCOUNT}"
   REGION_STORAGE_KEY[${region}]=$(az storage account keys list -n "${ACCOUNT}" -g "${STORAGE_RG}" --query "[0].value" -o tsv 2>/dev/null)
   az storage share delete --name offs-test-data --account-name "${ACCOUNT}" 2>/dev/null || true
