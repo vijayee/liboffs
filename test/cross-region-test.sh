@@ -61,6 +61,10 @@ az group create --name "${NODE_RG}" --location eastus -o table 2>&1 | tail -2
 # share root, so state stays isolated per node). Shares from previous runs
 # are deleted first — a stale peer_store with old identities would corrupt
 # the reconnection test.
+STORAGE_RG="${STORAGE_RG:-offs-relay-rg2}"
+STORAGE_ACCOUNT="${STORAGE_ACCOUNT:-offsteststore0306}"
+STORAGE_KEY="${STORAGE_KEY:-$(az storage account keys list -n "${STORAGE_ACCOUNT}" -g "${STORAGE_RG}" --query "[0].value" -o tsv 2>/dev/null)}"
+
 log "=== Creating Azure File Shares (per region) ==="
 for region in "${REGIONS[@]}"; do
   az storage share delete --name "offs-test-${region}" --account-name "${STORAGE_ACCOUNT}" 2>/dev/null || true
@@ -75,10 +79,6 @@ done
 # volume, the peer-reconnection test's premise fails. The share must live
 # in the SAME region as the container (ACI volume mount restriction), so
 # one share is created per region.
-STORAGE_RG="${STORAGE_RG:-offs-relay-rg2}"
-STORAGE_ACCOUNT="${STORAGE_ACCOUNT:-offsteststore0306}"
-STORAGE_KEY="${STORAGE_KEY:-$(az storage account keys list -n "${STORAGE_ACCOUNT}" -g "${STORAGE_RG}" --query "[0].value" -o tsv 2>/dev/null)}"
-
 log "=== Deploying 10 offsd containers across 5 regions ==="
 NODE_IDX=0
 for region in "${REGIONS[@]}"; do
