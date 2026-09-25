@@ -2,6 +2,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <net/if.h>
+#include <ifaddrs.h>
+#include <arpa/inet.h>
 
 extern "C" {
 #include "../src/Platform/platform.h"
@@ -439,4 +442,74 @@ TEST(TestPlatformSocket, TcpLoopbackExchange) {
   platform_socket_destroy(server);
   platform_socket_destroy(client);
   platform_socket_destroy(listener);
+}
+
+/* ================================================================
+ * scoped IPv6 addresses (RFC 6874 zone suffix)
+ * ================================================================ */
+
+TEST(TestPlatformScope, NumericScopeAcceptedAndEmitted) {
+  platform_address_t addr;
+  ASSERT_EQ(platform_address_parse(&addr, "fe80::1%5", 5353), 0);
+  EXPECT_EQ(addr.family, PLATFORM_AF_INET6);
+  EXPECT_EQ(addr.inet6.scope_id, 5u);
+  /* Output falls back to the numeric form when if_indextoname fails. */
+  char out[128];
+  ASSERT_EQ(platform_address_to_string(&addr, out, sizeof(out)), 0);
+  EXPECT_EQ(strncmp(out, "fe80::1%", 8), 0);
+}
+
+TEST(TestPlatformScope, ScopedLiteralByNameRoundTrips) {
+  /* Find a real link-local v6 interface on this host via getifaddrs. */
+  struct ifaddrs* ifaces = NULL;
+  ASSERT_EQ(getifaddrs(&ifaces), 0);
+  char scoped[128] = {0};
+  for (struct ifaddrs* ifa = ifaces; ifa != NULL; ifa = ifa->ifa_next) {
+    if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET6) continue;
+    struct sockaddr_in6* sin6 = (struct sockaddr_in6*)ifa->ifa_addr;
+    unsigned char bytes[16];
+    memcpy(bytes, &sin6->sin6_addr, 16);
+    if ((bytes[0] == 0xFE) && ((bytes[1] & 0xC0) == 0x80) && sin6->sin6_scope_id != 0) {
+      char ip[64];
+      if (inet_ntop(AF_INET6, bytes, ip, sizeof(ip)) == NULL) continue;
+      snprintf(scoped, sizeof(scoped), "%s%%%s", ip, ifa->ifa_name);
+      break;
+    }
+  }
+  freeifaddrs(ifaces);
+  if (scoped[0] == '\0') {
+    GTEST_SKIP() << "no link-local v6 interface on this host";
+  }
+  platform_address_t addr;
+  ASSERT_EQ(platform_address_parse(&addr, scoped, 5353), 0);
+  EXPECT_EQ(addr.family, PLATFORM_AF_INET6);
+  EXPECT_NE(addr.inet6.scope_id, 0u);
+  char out[128];
+  ASSERT_EQ(platform_address_to_string(&addr, out, sizeof(out)), 0);
+  EXPECT_STREQ(out, scoped);
+}
+
+TEST(TestPlatformScope, EmptyAndZeroScopeRejected) {
+  platform_address_t addr;
+  EXPECT_NE(platform_address_parse(&addr, "fe80::1%", 5353), 0);
+  EXPECT_NE(platform_address_parse(&addr, "fe80::1%0", 5353), 0);
+}
+
+TEST(TestPlatformScope, UnknownInterfaceNameRejected) {
+  platform_address_t addr;
+  EXPECT_NE(platform_address_parse(&addr, "fe80::1%nosuchif98765", 5353), 0);
+}
+
+TEST(TestPlatformScope, V4WithZoneRejected) {
+  platform_address_t addr;
+  EXPECT_NE(platform_address_parse(&addr, "127.0.0.1%eth0", 5353), 0);
+}
+
+TEST(TestPlatformScope, UnscopedStillWorks) {
+  platform_address_t addr;
+  ASSERT_EQ(platform_address_parse(&addr, "::1", 5353), 0);
+  EXPECT_EQ(addr.inet6.scope_id, 0u);
+  char out[128];
+  ASSERT_EQ(platform_address_to_string(&addr, out, sizeof(out)), 0);
+  EXPECT_STREQ(out, "::1");
 }

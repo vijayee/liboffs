@@ -25,7 +25,7 @@ typedef struct {
   platform_address_family_e family;
   union {
     struct { uint32_t addr; uint16_t port; } inet;
-    struct { uint8_t addr[16]; uint16_t port; } inet6;
+    struct { uint8_t addr[16]; uint16_t port; uint32_t scope_id; } inet6;
     struct { char path[256]; } local;
   };
 } platform_address_t;

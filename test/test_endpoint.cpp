@@ -125,3 +125,11 @@ TEST(TestEndpointHostHeader, OversizedHostRejected) {
   big[sizeof(big) - 1] = '\0';
   EXPECT_NE(endpoint_host_header(big, 8080, buf, sizeof(buf)), 0);
 }
+
+TEST(EndpointTest, AcceptsScopedV6Literal) {
+  char host[256];
+  uint16_t port = 0;
+  EXPECT_EQ(endpoint_parse("[fe80::1%eth0]:5353", host, sizeof(host), &port), 0);
+  EXPECT_STREQ(host, "fe80::1%eth0");
+  EXPECT_EQ(port, 5353);
+}

@@ -13,6 +13,8 @@
   #include <netinet/in.h>
   #include <netinet/tcp.h>
   #include <arpa/inet.h>
+  #include <net/if.h>
+  #include <ctype.h>
   #include <fcntl.h>
   #include <errno.h>
 
@@ -88,6 +90,7 @@
         sin6->sin6_family = AF_INET6;
         sin6->sin6_port = htons(addr->inet6.port);
         memcpy(&sin6->sin6_addr, addr->inet6.addr, 16);
+        sin6->sin6_scope_id = addr->inet6.scope_id;
         *addrlen = sizeof(*sin6);
         return 0;
       }
@@ -289,11 +292,39 @@
       addr->inet.port = port;
       return 0;
     }
+    /* Optional RFC 6874-style zone on a v6 literal: %ifname or %index.
+     * inet_pton rejects the suffix, so split it off before parsing. */
+    const char* zone = strchr(host, '%');
+    size_t literal_len = (zone != NULL) ? (size_t)(zone - host) : strlen(host);
+    if (literal_len == 0 || literal_len >= 64) return -1;
+    char literal[64];
+    memcpy(literal, host, literal_len);
+    literal[literal_len] = '\0';
     struct in6_addr in6;
-    if (inet_pton(AF_INET6, host, &in6) == 1) {
+    if (inet_pton(AF_INET6, literal, &in6) == 1) {
       addr->family = PLATFORM_AF_INET6;
       memcpy(addr->inet6.addr, &in6, 16);
       addr->inet6.port = port;
+      if (zone != NULL) {
+        const char* zone_text = zone + 1;
+        if (*zone_text == '\0') return -1;
+        int numeric = 1;
+        for (const char* scan = zone_text; *scan != '\0'; scan++) {
+          if (!isdigit((unsigned char)*scan)) {
+            numeric = 0;
+            break;
+          }
+        }
+        if (numeric) {
+          unsigned long index = strtoul(zone_text, NULL, 10);
+          if (index == 0 || index > 0xFFFFFFFFul) return -1;
+          addr->inet6.scope_id = (uint32_t)index;
+        } else {
+          unsigned int index = if_nametoindex(zone_text);
+          if (index == 0) return -1;
+          addr->inet6.scope_id = (uint32_t)index;
+        }
+      }
       return 0;
     }
     return -1;
@@ -306,11 +337,25 @@
           return -1;
         }
         return 0;
-      case PLATFORM_AF_INET6:
-        if (inet_ntop(AF_INET6, addr->inet6.addr, buf, (socklen_t)len) == NULL) {
+      case PLATFORM_AF_INET6: {
+        char ip[64];
+        if (inet_ntop(AF_INET6, addr->inet6.addr, ip, sizeof(ip)) == NULL) {
           return -1;
         }
-        return 0;
+        if (addr->inet6.scope_id == 0) {
+          int written = snprintf(buf, len, "%s", ip);
+          return (written > 0 && (size_t)written < len) ? 0 : -1;
+        }
+        char ifname[64];
+        int written;
+        if (if_indextoname(addr->inet6.scope_id, ifname) != NULL) {
+          written = snprintf(buf, len, "%s%%%s", ip, ifname);
+        } else {
+          written = snprintf(buf, len, "%s%%%u", ip,
+                             (unsigned)addr->inet6.scope_id);
+        }
+        return (written > 0 && (size_t)written < len) ? 0 : -1;
+      }
       case PLATFORM_AF_LOCAL:
         strncpy(buf, addr->local.path, len);
         if (len > 0) {
@@ -329,6 +374,7 @@
   #include <stdlib.h>
   #include <stdio.h>
   #include <string.h>
+  #include <ctype.h>
   #include <errno.h>
 
   #include "platform_internal.h"
@@ -435,6 +481,7 @@
         sin6->sin6_family = AF_INET6;
         sin6->sin6_port = htons(addr->inet6.port);
         memcpy(&sin6->sin6_addr, addr->inet6.addr, 16);
+        sin6->sin6_scope_id = addr->inet6.scope_id;
         *addrlen = sizeof(*sin6);
         return 0;
       }
@@ -755,11 +802,42 @@
       addr->inet.port = port;
       return 0;
     }
+    /* Optional RFC 6874-style zone on a v6 literal: %ifname or %index.
+     * inet_pton rejects the suffix, so split it off before parsing. */
+    const char* zone = strchr(host, '%');
+    size_t literal_len = (zone != NULL) ? (size_t)(zone - host) : strlen(host);
+    if (literal_len == 0 || literal_len >= 64) return -1;
+    char literal[64];
+    memcpy(literal, host, literal_len);
+    literal[literal_len] = '\0';
     struct in6_addr in6;
-    if (inet_pton(AF_INET6, host, &in6) == 1) {
+    if (inet_pton(AF_INET6, literal, &in6) == 1) {
       addr->family = PLATFORM_AF_INET6;
       memcpy(addr->inet6.addr, &in6, 16);
       addr->inet6.port = port;
+      if (zone != NULL) {
+        const char* zone_text = zone + 1;
+        if (*zone_text == '\0') return -1;
+        int numeric = 1;
+        for (const char* scan = zone_text; *scan != '\0'; scan++) {
+          if (!isdigit((unsigned char)*scan)) {
+            numeric = 0;
+            break;
+          }
+        }
+        if (numeric) {
+          unsigned long index = strtoul(zone_text, NULL, 10);
+          if (index == 0 || index > 0xFFFFFFFFul) return -1;
+          addr->inet6.scope_id = (uint32_t)index;
+        } else {
+          /* IF_NAMETOINDEX/IF_INDEXTONAME come from netioapi.h, pulled in
+           * by ws2tcpip.h on Vista+ SDKs; they map to if_nametoindex /
+           * if_indextoname. */
+          unsigned long index = (unsigned long)IF_NAMETOINDEX(zone_text);
+          if (index == 0) return -1;
+          addr->inet6.scope_id = (uint32_t)index;
+        }
+      }
       return 0;
     }
     return -1;
@@ -772,11 +850,27 @@
           return -1;
         }
         return 0;
-      case PLATFORM_AF_INET6:
-        if (inet_ntop(AF_INET6, addr->inet6.addr, buf, (socklen_t)len) == NULL) {
+      case PLATFORM_AF_INET6: {
+        char ip[64];
+        if (inet_ntop(AF_INET6, addr->inet6.addr, ip, sizeof(ip)) == NULL) {
           return -1;
         }
-        return 0;
+        if (addr->inet6.scope_id == 0) {
+          int written = snprintf(buf, len, "%s", ip);
+          return (written > 0 && (size_t)written < len) ? 0 : -1;
+        }
+        /* IF_NAMESIZE is 256 on Windows (16 on POSIX); the buffer must be
+         * large enough or if_indextoname fails and we fall back to numeric. */
+        char ifname[IF_NAMESIZE];
+        int written;
+        if (IF_INDEXTONAME(addr->inet6.scope_id, ifname) != NULL) {
+          written = snprintf(buf, len, "%s%%%s", ip, ifname);
+        } else {
+          written = snprintf(buf, len, "%s%%%u", ip,
+                             (unsigned)addr->inet6.scope_id);
+        }
+        return (written > 0 && (size_t)written < len) ? 0 : -1;
+      }
       case PLATFORM_AF_LOCAL:
         strncpy(buf, addr->local.path, len);
         if (len > 0) {
