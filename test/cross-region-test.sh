@@ -61,20 +61,25 @@ az group create --name "${NODE_RG}" --location eastus -o table 2>&1 | tail -2
 # share root, so state stays isolated per node). Shares from previous runs
 # are deleted first — a stale peer_store with old identities would corrupt
 # the reconnection test.
-STORAGE_RG="${STORAGE_RG:-offs-relay-rg2}"
-STORAGE_ACCOUNT="${STORAGE_ACCOUNT:-offsteststore0306}"
-STORAGE_KEY="${STORAGE_KEY:-$(az storage account keys list -n "${STORAGE_ACCOUNT}" -g "${STORAGE_RG}" --query "[0].value" -o tsv 2>/dev/null)}"
-
-log "=== Creating Azure File Shares (per region) ==="
+# ACI volume mounts require the storage account in the SAME region as the
+# container group — one storage account + one share per test region.
+log "=== Creating per-region storage accounts and shares ==="
+declare -A REGION_STORAGE_ACCOUNT
+declare -A REGION_STORAGE_KEY
 for region in "${REGIONS[@]}"; do
-  az storage share delete --name "offs-test-${region}" --account-name "${STORAGE_ACCOUNT}" 2>/dev/null || true
+  ACCOUNT="offstest$(echo "${region}" | tr -d '-')"
+  az storage account show -n "${ACCOUNT}" >/dev/null 2>&1 || \
+    az storage account create -n "${ACCOUNT}" -g "${STORAGE_RG}" -l "${region}" --sku Standard_LRS --kind StorageV2 --enable-large-file-share -o table 2>&1 | tail -1
+  REGION_STORAGE_ACCOUNT["${region}"]="${ACCOUNT}"
+  REGION_STORAGE_KEY[${region}]=$(az storage account keys list -n "${ACCOUNT}" -g "${STORAGE_RG}" --query "[0].value" -o tsv 2>/dev/null)
+  az storage share delete --name offs-test-data --account-name "${ACCOUNT}" 2>/dev/null || true
   # Share deletion is async — creating immediately hits ShareBeingDeleted.
   for attempt in $(seq 1 30); do
-    EXISTS=$(az storage share exists --name "offs-test-${region}" --account-name "${STORAGE_ACCOUNT}" --query exists -o tsv 2>/dev/null || echo "false")
+    EXISTS=$(az storage share exists --name offs-test-data --account-name "${ACCOUNT}" --query exists -o tsv 2>/dev/null || echo "false")
     [ "${EXISTS}" != "true" ] && break
     sleep 5
   done
-  az storage share create --name "offs-test-${region}" --account-name "${STORAGE_ACCOUNT}" --quota 5 -o table 2>&1 | tail -1 || log "  ⚠️  Share creation failed for ${region}"
+  az storage share create --name offs-test-data --account-name "${ACCOUNT}" --quota 5 -o table 2>&1 | tail -1 || log "  ⚠️  Share creation failed for ${region}"
 done
 
 # ─── 2. Deploy 10 ACI containers (2 per region) ───────────────────────────
@@ -92,7 +97,7 @@ for region in "${REGIONS[@]}"; do
     NODE_NAME="offs-test-${region}-${replica}"
     NODE_NAMES+=("${NODE_NAME}")
     log "  Deploying ${NODE_NAME} in ${region}..."
-    az container create --resource-group "${NODE_RG}" --name "${NODE_NAME}" --image "${IMAGE}" --registry-login-server "${ACR_NAME}.azurecr.io" --registry-username "${ACR_USER}" --registry-password "${ACR_PW}" --location "${region}" --os-type Linux --cpu 1.0 --memory 1.0 --ip-address Public --ports 23402 --azure-file-volume-account-name "${STORAGE_ACCOUNT}" --azure-file-volume-account-key "${STORAGE_KEY}" --azure-file-volume-share-name "offs-test-${region}" --azure-file-volume-mount-path "/data" --environment-variables RELAY_URL=${RELAY_IP}:${RELAY_PORT} MAX_CAPACITY_BYTES=1073741824 -o table 2>&1 | tail -2 || log "  ⚠️  Deploy failed for ${NODE_NAME}, skipping"
+    az container create --resource-group "${NODE_RG}" --name "${NODE_NAME}" --image "${IMAGE}" --registry-login-server "${ACR_NAME}.azurecr.io" --registry-username "${ACR_USER}" --registry-password "${ACR_PW}" --location "${region}" --os-type Linux --cpu 1.0 --memory 1.0 --ip-address Public --ports 23402 --azure-file-volume-account-name "${REGION_STORAGE_ACCOUNT[${region}]}" --azure-file-volume-account-key "${REGION_STORAGE_KEY[${region}]}" --azure-file-volume-share-name offs-test-data --azure-file-volume-mount-path "/data" --environment-variables RELAY_URL=${RELAY_IP}:${RELAY_PORT} MAX_CAPACITY_BYTES=1073741824 -o table 2>&1 | tail -2 || log "  ⚠️  Deploy failed for ${NODE_NAME}, skipping"
 
     # Get IP
     NODE_IP=$(az container show --resource-group "${NODE_RG}" --name "${NODE_NAME}" \
