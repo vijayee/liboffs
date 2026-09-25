@@ -362,7 +362,6 @@ static QUIC_STATUS QUIC_API quic_stream_callback(
 
 // Build and send a salutation frame on an already-opened stream
 static void _send_salutation_on_stream(quic_listener_t* listener, HQUIC stream) {
-  fprintf(stderr, "SALSND-TRACE: salutation send armed on stream %p\n", (void*)stream);
   authority_t* authority = listener->network->authority;
   if (authority == NULL || authority->public_key == NULL) return;
 
@@ -395,10 +394,8 @@ static void _send_salutation_on_stream(quic_listener_t* listener, HQUIC stream) 
   send_ctx->frame = frame;
   send_ctx->buf.Buffer = frame;
   send_ctx->buf.Length = (uint32_t)frame_len;
-  fprintf(stderr, "SALSND-TRACE: about to StreamSend, frame_len=%u\n", (unsigned)frame_len);
   QUIC_STATUS status = listener->msquic->StreamSend(
       stream, &send_ctx->buf, 1, QUIC_SEND_FLAG_NONE, send_ctx);
-  fprintf(stderr, "SALSND-TRACE: StreamSend status=0x%x\n", status);
   if (QUIC_FAILED(status)) {
     log_error("quic_listener: salutation StreamSend failed: 0x%x", status);
     free(frame);
