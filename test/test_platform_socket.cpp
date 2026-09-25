@@ -346,6 +346,18 @@ TEST(TestPlatformListenSocket, UnparsableHostBindsWildcard) {
   platform_socket_destroy(sock);
 }
 
+TEST(TestPlatformListenSocket, V6BindFailureFallsBackThenRejectsUnparseable) {
+  /* "::99" is a valid but unassigned v6 literal (verified: bind fails with
+   * EADDRNOTAVAIL on a normal host), exercising the v6-bind-failure fallback
+   * branch. The fallback re-parse also yields INET6, which a v4 socket cannot
+   * serve, so the helper fails cleanly with NULL rather than crashing or
+   * half-binding. (The successful v4 fallback — a v6-less host — cannot be
+   * simulated on this dual-stack host.) */
+  platform_address_t addr;
+  platform_socket_t* sock = platform_listen_socket_create("::99", 24816, &addr);
+  EXPECT_EQ(sock, (platform_socket_t*)NULL);
+}
+
 /* ================================================================
  * platform_socket TCP loopback test
  * ================================================================ */

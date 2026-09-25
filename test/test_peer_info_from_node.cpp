@@ -214,3 +214,74 @@ TEST(TestPeerInfoFromNode, NullInputsRejected) {
   EXPECT_EQ(peer_info_from_node(NULL, &fake->net, false), -1);
   _free_fake_network(fake);
 }
+
+/* v6 SRFLX: when the relay's reflexive6 is V6, the SRFLX candidates carry the
+ * bare (never v4-mapped) v6 string — one on the reflexive port and, when the
+ * listener port differs, a second on the listener port. */
+TEST(TestPeerInfoFromNode, V6ReflexiveEmitsBareV6SrflxCandidates) {
+  fake_network_t* fake = _make_network_with_relay(
+      /*listen_port=*/4242, /*reflexive_addr=*/0xC0A80101u,
+      /*reflexive_port=*/7777, /*endpoint_id=*/42,
+      /*relay_host=*/"relay.example.com", /*relay_port=*/443);
+  ASSERT_NE(fake, (fake_network_t*)NULL);
+  const uint8_t v6_bytes[16] = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+                                0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f};
+  wire_addr_set_v6(&fake->relay.reflexive6, v6_bytes);
+
+  peer_info_t info;
+  memset(&info, 0, sizeof(info));
+  int rc = peer_info_from_node(&info, &fake->net, /*include_lan=*/false);
+  EXPECT_EQ(rc, 0);
+
+  static const char* kExpectedV6 =
+      "2021:2223:2425:2627:2829:2a2b:2c2d:2e2f";
+  size_t srflx_count = 0;
+  bool reflexive_port_found = false;
+  bool listener_port_found = false;
+  for (size_t index = 0; index < info.address_count; index++) {
+    if (info.addresses[index].type != PEER_ADDR_SRFLX) continue;
+    srflx_count++;
+    EXPECT_STREQ(info.addresses[index].host, kExpectedV6);
+    if (info.addresses[index].port == 7777u) reflexive_port_found = true;
+    if (info.addresses[index].port == 4242u) listener_port_found = true;
+  }
+  EXPECT_EQ(srflx_count, 2u);
+  EXPECT_TRUE(reflexive_port_found);
+  EXPECT_TRUE(listener_port_found);
+
+  peer_info_destroy(&info);
+  _free_fake_network(fake);
+}
+
+/* reflexive6.family != V6 (here explicitly V4): the legacy u32 reflexive
+ * address wins and the SRFLX host is the dotted-quad string, never a v6
+ * literal. */
+TEST(TestPeerInfoFromNode, V4ReflexiveFamilyWinsOverV6) {
+  uint32_t reflexive_addr = 0xC0A80101u;  /* 192.168.1.1 host byte order */
+  fake_network_t* fake = _make_network_with_relay(
+      /*listen_port=*/4242, reflexive_addr, /*reflexive_port=*/7777,
+      /*endpoint_id=*/42, /*relay_host=*/"relay.example.com",
+      /*relay_port=*/443);
+  ASSERT_NE(fake, (fake_network_t*)NULL);
+  wire_addr_set_v4(&fake->relay.reflexive6, reflexive_addr);
+
+  peer_info_t info;
+  memset(&info, 0, sizeof(info));
+  int rc = peer_info_from_node(&info, &fake->net, /*include_lan=*/false);
+  EXPECT_EQ(rc, 0);
+
+  bool dotted_quad_found = false;
+  for (size_t index = 0; index < info.address_count; index++) {
+    if (info.addresses[index].type != PEER_ADDR_SRFLX) continue;
+    ASSERT_NE(info.addresses[index].host, (char*)NULL);
+    EXPECT_STRNE(info.addresses[index].host, "");
+    EXPECT_EQ(strchr(info.addresses[index].host, ':'), (char*)NULL);
+    if (strcmp(info.addresses[index].host, "192.168.1.1") == 0) {
+      dotted_quad_found = true;
+    }
+  }
+  EXPECT_TRUE(dotted_quad_found);
+
+  peer_info_destroy(&info);
+  _free_fake_network(fake);
+}
