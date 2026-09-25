@@ -66,17 +66,15 @@ az group create --name "${NODE_RG}" --location eastus -o table 2>&1 | tail -2
 log "=== Creating per-region storage accounts and shares ==="
 declare -A REGION_STORAGE_ACCOUNT
 declare -A REGION_STORAGE_KEY
-# Pre-provisioned per-region accounts (global names, created manually via
-# az storage account create — region-restricted locations hang the create).
-REGION_ACCOUNT_NAME_eastus="offstest0306east"
-REGION_ACCOUNT_NAME_westeurope=""
-REGION_ACCOUNT_NAME_brazilsouth="offstest0306braz"
-REGION_ACCOUNT_NAME_eastasia="offstest0306east2"
-REGION_ACCOUNT_NAME_centralus="offstest0306cent"
 for region in "${REGIONS[@]}"; do
   # Short, globally-unique names (created out-of-band; see the ticket).
-  declare -n ACCOUNT_REF=REGION_ACCOUNT_NAME_${region}
-  ACCOUNT="${ACCOUNT_REF}"
+  case "${region}" in
+    eastus)      ACCOUNT="offstest0306east" ;;
+    brazilsouth) ACCOUNT="offstest0306braz" ;;
+    eastasia)    ACCOUNT="offstest0306east2" ;;
+    centralus)   ACCOUNT="offstest0306cent" ;;
+    *)           ACCOUNT="" ;;
+  esac
   if [ -z "${ACCOUNT}" ]; then
     log "  ⚠️  No storage account for ${region} — volume-less deploy there"
     continue
