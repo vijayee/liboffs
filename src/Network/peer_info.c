@@ -333,6 +333,13 @@ static int _peer_info_append_address(peer_info_t* info, peer_addr_type_e type,
   return 0;
 }
 
+/* HOST candidates must never crowd out the SRFLX (up to 2) and RELAY (1)
+   candidates that peer_info_from_node appends after collection — those carry
+   NAT traversal and relay routing. On hosts with many interfaces (e.g. docker
+   bridges each contributing a link-local v6), the LAN list would otherwise
+   fill PEER_INFO_MAX_ADDRESSES and drop them. */
+#define _PEER_INFO_HOST_RESERVE 3
+
 /* Return true if the IPv4 octets describe a private/link-local address worth
    advertising as a HOST candidate: RFC1918 (10.x, 172.16-31.x, 192.168.x) or
    link-local (169.254.x). Loopback (127.x) is excluded. */
@@ -341,6 +348,17 @@ static bool _peer_info_is_lan_ipv4(uint8_t octet0, uint8_t octet1) {
   if (octet0 == 172 && (octet1 >= 16 && octet1 <= 31)) return true;
   if (octet0 == 192 && octet1 == 168) return true;
   if (octet0 == 169 && octet1 == 254) return true;
+  return false;
+}
+
+/* v6 LAN filter: global-unicast 2000::/3, ULA fc00::/7, and link-local
+   fe80::/10 are LAN-relevant; loopback/multicast are filtered by the
+   caller, v4-mapped by the caller (the v4 loop owns those). */
+static bool _peer_info_is_lan_v6(const uint8_t bytes[16]) {
+  if (bytes[0] == 0xFF) return false;              /* multicast */
+  if ((bytes[0] & 0xE0) == 0x20) return true;      /* global unicast */
+  if ((bytes[0] & 0xFE) == 0xFC) return true;      /* ULA */
+  if (bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0x80) return true;  /* link-local */
   return false;
 }
 
@@ -361,12 +379,12 @@ static int _peer_info_collect_host_addresses(peer_info_t* info, uint16_t port) {
   PIP_ADAPTER_ADDRESSES adapters = (PIP_ADAPTER_ADDRESSES)get_clear_memory(buffer_size);
   if (adapters == NULL) return -1;
 
-  DWORD rc = GetAdaptersAddresses(AF_INET, flags, NULL, adapters, &buffer_size);
+  DWORD rc = GetAdaptersAddresses(AF_UNSPEC, flags, NULL, adapters, &buffer_size);
   if (rc == ERROR_BUFFER_OVERFLOW) {
     free(adapters);
     adapters = (PIP_ADAPTER_ADDRESSES)get_clear_memory(buffer_size);
     if (adapters == NULL) return -1;
-    rc = GetAdaptersAddresses(AF_INET, flags, NULL, adapters, &buffer_size);
+    rc = GetAdaptersAddresses(AF_UNSPEC, flags, NULL, adapters, &buffer_size);
   }
   if (rc != NO_ERROR) {
     free(adapters);
@@ -380,7 +398,26 @@ static int _peer_info_collect_host_addresses(peer_info_t* info, uint16_t port) {
     for (PIP_ADAPTER_UNICAST_ADDRESS_LH addr = adapter->FirstUnicastAddress;
          addr != NULL; addr = addr->Next) {
       SOCKADDR* sock_addr = addr->Address.lpSockaddr;
-      if (sock_addr == NULL || sock_addr->sa_family != AF_INET) continue;
+      if (sock_addr == NULL) continue;
+      if (info->address_count >= PEER_INFO_MAX_ADDRESSES - _PEER_INFO_HOST_RESERVE) break;
+      if (sock_addr->sa_family == AF_INET6) {
+        struct sockaddr_in6* sin6 = (struct sockaddr_in6*)sock_addr;
+        if (IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr)) continue;
+        if (IN6_IS_ADDR_V4MAPPED(&sin6->sin6_addr)) continue;
+        if (!_peer_info_is_lan_v6(sin6->sin6_addr.s6_addr)) continue;
+        platform_address_t v6;
+        memset(&v6, 0, sizeof(v6));
+        v6.family = PLATFORM_AF_INET6;
+        memcpy(v6.inet6.addr, sin6->sin6_addr.s6_addr, 16);
+        v6.inet6.scope_id = sin6->sin6_scope_id;
+        char ip_str[128];
+        if (platform_address_to_string(&v6, ip_str, sizeof(ip_str)) != 0) continue;
+        if (_peer_info_append_address(info, PEER_ADDR_HOST, ip_str, port, 0) == 0) {
+          added++;
+        }
+        continue;
+      }
+      if (sock_addr->sa_family != AF_INET) continue;
       struct sockaddr_in* sin = (struct sockaddr_in*)sock_addr;
       uint32_t ip_host = ntohl(sin->sin_addr.s_addr);
       uint8_t octet0 = (uint8_t)((ip_host >> 24) & 0xFF);
@@ -393,6 +430,7 @@ static int _peer_info_collect_host_addresses(peer_info_t* info, uint16_t port) {
         added++;
       }
     }
+    if (info->address_count >= PEER_INFO_MAX_ADDRESSES - _PEER_INFO_HOST_RESERVE) break;
   }
   free(adapters);
   return added;
@@ -409,6 +447,24 @@ static int _peer_info_collect_host_addresses(peer_info_t* info, uint16_t port) {
   for (struct ifaddrs* interface = interfaces; interface != NULL;
        interface = interface->ifa_next) {
     if (interface->ifa_addr == NULL) continue;
+    if (info->address_count >= PEER_INFO_MAX_ADDRESSES - _PEER_INFO_HOST_RESERVE) break;
+    if (interface->ifa_addr->sa_family == AF_INET6) {
+      struct sockaddr_in6* sin6 = (struct sockaddr_in6*)interface->ifa_addr;
+      if (IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr)) continue;
+      if (IN6_IS_ADDR_V4MAPPED(&sin6->sin6_addr)) continue;
+      if (!_peer_info_is_lan_v6(sin6->sin6_addr.s6_addr)) continue;
+      platform_address_t v6;
+      memset(&v6, 0, sizeof(v6));
+      v6.family = PLATFORM_AF_INET6;
+      memcpy(v6.inet6.addr, sin6->sin6_addr.s6_addr, 16);
+      v6.inet6.scope_id = sin6->sin6_scope_id;
+      char ip_str[128];
+      if (platform_address_to_string(&v6, ip_str, sizeof(ip_str)) != 0) continue;
+      if (_peer_info_append_address(info, PEER_ADDR_HOST, ip_str, port, 0) == 0) {
+        added++;
+      }
+      continue;
+    }
     if (interface->ifa_addr->sa_family != AF_INET) continue;
     if ((interface->ifa_flags & IFF_UP) == 0) continue;
     if ((interface->ifa_flags & IFF_LOOPBACK) != 0) continue;

@@ -17,9 +17,12 @@ extern "C" {
 #include "../src/Network/network.h"
 #include "../src/Network/quic_listener.h"
 #include "../src/Network/relay_client.h"
+#include "../src/Platform/platform_socket.h"
 #include "../src/Util/allocator.h"
 #include <string.h>
 #include <stdlib.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
 }
 
 namespace {
@@ -282,6 +285,51 @@ TEST(TestPeerInfoFromNode, V4ReflexiveFamilyWinsOverV6) {
   }
   EXPECT_TRUE(dotted_quad_found);
 
+  peer_info_destroy(&info);
+  _free_fake_network(fake);
+}
+
+/* HOST-candidate enumeration with a live listener: every HOST candidate must
+ * be a well-formed address literal (+ optional %zone), and when this host has
+ * any v6 LAN address (global/ULA/link-local, non-loopback, non-mapped) the
+ * candidates must include at least one v6 literal. The v6 presence check is
+ * environment-dependent, so the v6 assertion only fires when the machine
+ * actually has such an address. */
+TEST(TestPeerInfoLanV6, HostCandidatesParseAndIncludeV6WhenPresent) {
+  /* Does this host have any v6 LAN address (non-loopback, non-mapped,
+     matching the spec filter)? */
+  struct ifaddrs* ifaces = NULL;
+  ASSERT_EQ(getifaddrs(&ifaces), 0);
+  bool have_v6 = false;
+  for (struct ifaddrs* ifa = ifaces; ifa != NULL; ifa = ifa->ifa_next) {
+    if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET6) continue;
+    struct sockaddr_in6* sin6 = (struct sockaddr_in6*)ifa->ifa_addr;
+    unsigned char b[16];
+    memcpy(b, &sin6->sin6_addr, 16);
+    if (IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr)) continue;
+    if (b[0] == 0xFF) continue;                     /* multicast */
+    if ((b[0] & 0xE0) == 0x20) { have_v6 = true; break; }  /* global */
+    if ((b[0] & 0xFE) == 0xFC) { have_v6 = true; break; }  /* ULA */
+    if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) { have_v6 = true; break; }  /* link-local */
+  }
+  freeifaddrs(ifaces);
+
+  fake_network_t* fake = _make_network_no_relay(23401);
+  ASSERT_NE(fake, (fake_network_t*)NULL);
+  peer_info_t info;
+  memset(&info, 0, sizeof(info));
+  ASSERT_EQ(peer_info_from_node(&info, &fake->net, true), 0);
+
+  bool saw_v6 = false;
+  for (size_t i = 0; i < info.address_count; i++) {
+    if (info.addresses[i].type != PEER_ADDR_HOST) continue;
+    platform_address_t parsed;
+    /* Every HOST candidate must be a well-formed literal (+ optional %zone). */
+    EXPECT_EQ(platform_address_parse(&parsed, info.addresses[i].host, 0), 0)
+        << "candidate: " << info.addresses[i].host;
+    if (strchr(info.addresses[i].host, ':') != NULL) saw_v6 = true;
+  }
+  if (have_v6) EXPECT_TRUE(saw_v6);
   peer_info_destroy(&info);
   _free_fake_network(fake);
 }

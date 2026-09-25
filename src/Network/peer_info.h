@@ -20,7 +20,7 @@ struct network_t;
 typedef enum {
   PEER_ADDR_DIRECT = 0,  // Direct QUIC connection (back-compat: treated as HOST)
   PEER_ADDR_RELAY   = 1,  // Relay-mediated connection
-  PEER_ADDR_HOST    = 2,  // Private/LAN address (RFC1918 or link-local)
+  PEER_ADDR_HOST    = 2,  // Private/LAN address (RFC1918, v6 link-local/ULA/global-LAN)
   PEER_ADDR_SRFLX   = 3,  // Server-reflexive address (learned from relay)
 } peer_addr_type_e;
 
