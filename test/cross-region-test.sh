@@ -68,6 +68,12 @@ STORAGE_KEY="${STORAGE_KEY:-$(az storage account keys list -n "${STORAGE_ACCOUNT
 log "=== Creating Azure File Shares (per region) ==="
 for region in "${REGIONS[@]}"; do
   az storage share delete --name "offs-test-${region}" --account-name "${STORAGE_ACCOUNT}" 2>/dev/null || true
+  # Share deletion is async — creating immediately hits ShareBeingDeleted.
+  for attempt in $(seq 1 30); do
+    EXISTS=$(az storage share exists --name "offs-test-${region}" --account-name "${STORAGE_ACCOUNT}" --query exists -o tsv 2>/dev/null || echo "false")
+    [ "${EXISTS}" != "true" ] && break
+    sleep 5
+  done
   az storage share create --name "offs-test-${region}" --account-name "${STORAGE_ACCOUNT}" --quota 5 -o table 2>&1 | tail -1 || log "  ⚠️  Share creation failed for ${region}"
 done
 
