@@ -3,6 +3,7 @@
  */
 
 #include "topology_report.h"
+#include "endpoint.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include "../Platform/platform_posix_compat.h"
@@ -245,7 +246,23 @@ int topology_report_decode(cbor_item_t* item,
   return 0;
 }
 
-/* Parse a URL like "http://host:port/path" into host, port, path components.
+/* Parse a port digit run between text and text_end (1..65535).
+ * Returns 0 on success, -1 on malformed or out-of-range ports. */
+static int _parse_port(const char* text, const char* text_end, uint16_t* port) {
+  if (text >= text_end) return -1;
+  long value = 0;
+  for (const char* digit = text; digit != text_end; digit++) {
+    if (*digit < '0' || *digit > '9') return -1;
+    value = value * 10 + (*digit - '0');
+    if (value > 65535) return -1;
+  }
+  if (value < 1) return -1;
+  *port = (uint16_t)value;
+  return 0;
+}
+
+/* Parse a URL like "http://host:port/path" or "http://[ipv6-literal]:port/path"
+ * into host (brackets stripped), port, path components.
  * Returns 0 on success, -1 on parse failure. */
 static int _parse_url(const char* url, char* host, size_t host_size,
                        uint16_t* port, char* path, size_t path_size) {
@@ -257,23 +274,53 @@ static int _parse_url(const char* url, char* host, size_t host_size,
   } else {
     return -1; /* only http supported */
   }
-  const char* colon = strchr(start, ':');
   const char* slash = strchr(start, '/');
-  if (colon != NULL && slash != NULL && colon < slash) {
-    size_t host_len = (size_t)(colon - start);
-    if (host_len >= host_size) host_len = host_size - 1;
-    memcpy(host, start, host_len);
-    host[host_len] = '\0';
-    *port = (uint16_t)atoi(colon + 1);
+  const char* host_start = start;
+  size_t host_len;
+  const char* port_start = NULL;
+
+  /* Bracketed IPv6 literal: the host text sits between '[' and ']' and must
+   * be taken whole, or the first ':' inside the literal would be misread as
+   * a port separator. */
+  if (*start == '[') {
+    const char* closing = strchr(start, ']');
+    if (closing == NULL) return -1; /* unclosed '[' */
+    host_start = start + 1;
+    host_len = (size_t)(closing - host_start);
+    if (host_len == 0) return -1;
+    const char* authority_end = closing + 1;
+    if (*authority_end == ':') {
+      port_start = authority_end + 1;
+    } else if (*authority_end != '\0' && *authority_end != '/') {
+      return -1;
+    }
   } else if (slash != NULL) {
-    size_t host_len = (size_t)(slash - start);
-    if (host_len >= host_size) host_len = host_size - 1;
-    memcpy(host, start, host_len);
-    host[host_len] = '\0';
+    const char* colon = strchr(start, ':');
+    if (colon != NULL && colon < slash) {
+      host_len = (size_t)(colon - start);
+      port_start = colon + 1;
+    } else {
+      host_len = (size_t)(slash - start);
+    }
   } else {
-    strncpy(host, start, host_size - 1);
-    host[host_size - 1] = '\0';
+    const char* colon = strchr(start, ':');
+    if (colon != NULL) {
+      host_len = (size_t)(colon - start);
+      port_start = colon + 1;
+    } else {
+      host_len = strlen(start);
+    }
   }
+
+  if (port_start != NULL) {
+    const char* port_end = strchr(port_start, '\0');
+    if (slash != NULL && slash > port_start) port_end = slash;
+    if (_parse_port(port_start, port_end, port) != 0) return -1;
+  }
+
+  if (host_len >= host_size) return -1;
+  memcpy(host, host_start, host_len);
+  host[host_len] = '\0';
   if (slash != NULL) {
     strncpy(path, slash, path_size - 1);
     path[path_size - 1] = '\0';
@@ -344,6 +391,11 @@ int topology_report_post(const char* url, cbor_item_t* report) {
   freeaddrinfo(resolution);
 
   /* Build HTTP/1.1 POST request */
+  char host_header[300];
+  if (endpoint_host_header(host, port, host_header, sizeof(host_header)) != 0) {
+    log_error("topology_report_post: failed to build Host header for %s", host);
+    return -1;
+  }
   char request[2048];
   int req_len = snprintf(request, sizeof(request),
     "POST %s HTTP/1.1\r\n"
@@ -352,7 +404,7 @@ int topology_report_post(const char* url, cbor_item_t* report) {
     "Content-Length: %zu\r\n"
     "Connection: close\r\n"
     "\r\n",
-    path, host, cbor_size);
+    path, host_header, cbor_size);
 
   if (send(sock, request, (size_t)req_len, 0) != req_len) {
     log_error("topology_report_post: send headers failed");
