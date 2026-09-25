@@ -15,6 +15,7 @@
 /* Forward declaration — network_t is defined in network.h. Avoids a circular
    include (network.h pulls in many headers; mdns.h stays lightweight). */
 struct network_t;
+struct connection_manager_t;
 
 /* mDNS responder for same-LAN auto-discovery. Broadcasts the node's
    presence on the 224.0.0.251:5353 multicast group so other liboffs nodes
@@ -74,5 +75,13 @@ int mdns_parse_response_for_test(const uint8_t* pkt, size_t pkt_len,
 /* The IPv6 mDNS multicast group bytes (ff02::fb) the live responder joins and
    announces to. Returns NULL on Windows (mdns stubbed). */
 const uint8_t* mdns_multicast_group_v6_for_test(void);
+
+/* Test-only wrapper around the static admission dedup check: returns true
+   when the peer is absent from the manager or known-but-disconnected (so the
+   announce should trigger admission), false when the peer is already
+   connected (the announce is skipped). Returns true on Windows (stubbed,
+   pre-dedup behavior). */
+bool mdns_peer_needs_admit_for_test(const struct connection_manager_t* conn_mgr,
+                                    const node_id_t* peer_id);
 
 #endif // OFFS_MDNS_H

@@ -3,14 +3,15 @@
 //
 
 // Tests for the mDNS packet layer (src/Network/mdns.c): the A/AAAA announce
-// builders and the dual-family response parser, exercised through the
-// test-only wrappers declared in mdns.h.
+// builders, the dual-family response parser, and the admission dedup
+// predicate, exercised through the test-only wrappers declared in mdns.h.
 #include <gtest/gtest.h>
 #include <string.h>
 
 extern "C" {
 #include "../src/Network/mdns.h"
 #include "../src/Network/node_id.h"
+#include "../src/Network/connection_manager.h"
 }
 
 class TestMdns : public ::testing::Test {
@@ -249,4 +250,33 @@ TEST_F(TestMdns, V6MulticastGroupIsFf02Fb) {
   const uint8_t expected_ff02_fb[16] = {0xFF, 0x02, 0, 0, 0, 0, 0, 0,
                                         0,    0,    0, 0, 0, 0, 0, 0xFB};
   EXPECT_EQ(memcmp(group, expected_ff02_fb, 16), 0);
+}
+
+/* The admission dedup: a peer already in the connection manager AND
+   connected is skipped (the 5s announce cadence would otherwise re-log and
+   re-dial every tick); a known-but-disconnected peer and an unknown peer
+   both still need admission. */
+TEST_F(TestMdns, DedupSkipsOnlyConnectedPeers) {
+  connection_manager_t mgr;
+  connection_manager_init(&mgr, 0, NULL);
+
+  node_id_t connected_id;
+  node_id_generate(&connected_id);
+  ASSERT_NE(connection_manager_add(&mgr, &connected_id, NULL, NULL), nullptr);
+
+  node_id_t dropped_id;
+  node_id_generate(&dropped_id);
+  peer_connection_t* dropped = connection_manager_add(&mgr, &dropped_id,
+                                                      NULL, NULL);
+  ASSERT_NE(dropped, nullptr);
+  dropped->connected = false;
+
+  node_id_t unknown_id;
+  node_id_generate(&unknown_id);
+
+  EXPECT_FALSE(mdns_peer_needs_admit_for_test(&mgr, &connected_id));
+  EXPECT_TRUE(mdns_peer_needs_admit_for_test(&mgr, &dropped_id));
+  EXPECT_TRUE(mdns_peer_needs_admit_for_test(&mgr, &unknown_id));
+
+  connection_manager_deinit(&mgr);
 }

@@ -461,6 +461,16 @@ static ssize_t _mdns_recv(int fd, uint8_t* buf, size_t buf_len,
   return recvfrom(fd, buf, buf_len, 0, (struct sockaddr*)src, &src_len);
 }
 
+/* Admission dedup check: a peer already in the connection manager AND
+   currently connected does not need admitting — the 5s announce cadence
+   would otherwise re-log and re-dial every tick. A known-but-disconnected
+   peer still needs admission (the manager owns retries after a drop). */
+static bool _mdns_peer_needs_admit(const connection_manager_t* conn_mgr,
+                                   const node_id_t* peer_id) {
+  peer_connection_t* peer = connection_manager_lookup(conn_mgr, peer_id);
+  return peer == NULL || !peer->connected;
+}
+
 /* Shared admission tail for v4/v6 discovery: self-filter, decode the node
    id, build the single-candidate peer_info, connect, destroy. */
 static void _mdns_admit_peer(mdns_t* responder, const char* peer_b58,
@@ -484,6 +494,15 @@ static void _mdns_admit_peer(mdns_t* responder, const char* peer_b58,
   node_id_t peer_id;
   memset(&peer_id, 0, sizeof(peer_id));
   if (node_id_from_string(peer_b58, &peer_id) != 0) return;
+
+  /* Already admitted (and currently connected): skip — the 5s announce
+     cadence would otherwise re-log and re-dial every tick. A known-but-
+     disconnected peer still gets a re-attempt (the manager owns retries). */
+  if (!_mdns_peer_needs_admit(&responder->network->conn_mgr, &peer_id)) {
+    log_debug("mdns: peer %s already connected — skipping re-admission",
+              peer_b58);
+    return;
+  }
 
   /* If the announce didn't carry an SRV port, fall back to our own QUIC
      listener port (same-LAN peers are likely on the same port). */
@@ -934,6 +953,11 @@ const uint8_t* mdns_multicast_group_v6_for_test(void) {
   return _mdns_multicast_v6;
 }
 
+bool mdns_peer_needs_admit_for_test(const connection_manager_t* conn_mgr,
+                                    const node_id_t* peer_id) {
+  return _mdns_peer_needs_admit(conn_mgr, peer_id);
+}
+
 #else /* _WIN32 — stubbed, see mdns.h for the rationale. */
 
 struct mdns_t {
@@ -1005,6 +1029,15 @@ int mdns_parse_response_for_test(const uint8_t* pkt, size_t pkt_len,
 
 const uint8_t* mdns_multicast_group_v6_for_test(void) {
   return NULL;
+}
+
+/* No connection manager on the Windows stub — always admit (preserves the
+   pre-dedup behavior on stubbed platforms). */
+bool mdns_peer_needs_admit_for_test(const connection_manager_t* conn_mgr,
+                                    const node_id_t* peer_id) {
+  (void)conn_mgr;
+  (void)peer_id;
+  return true;
 }
 
 #endif /* _WIN32 */
