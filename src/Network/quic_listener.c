@@ -411,6 +411,7 @@ static void _send_salutation_on_stream(quic_listener_t* listener, HQUIC stream) 
 // StreamSend in the same callback as StreamStart (which crashes msquic).
 static HQUIC _open_persistent_stream(quic_listener_t* listener, HQUIC connection,
                                       const QUIC_ADDR* peer_addr) {
+  fprintf(stderr, "PS-TRACE: open persistent stream\n");
   // Allocate context before StreamOpen so we can pass it directly as the callback context
   quic_stream_context_t* stream_ctx = get_clear_memory(sizeof(quic_stream_context_t));
   if (stream_ctx == NULL) return NULL;
@@ -496,6 +497,7 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
       break;
     }
     case QUIC_CONNECTION_EVENT_CONNECTED: {
+      fprintf(stderr, "CONN-TRACE: CONNECTED event\n");
       log_info("quic_listener: connection CONNECTED");
       _conn_track_add(listener, connection);
 
