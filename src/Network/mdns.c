@@ -467,8 +467,20 @@ static ssize_t _mdns_recv(int fd, uint8_t* buf, size_t buf_len,
    peer still needs admission (the manager owns retries after a drop). */
 static bool _mdns_peer_needs_admit(const connection_manager_t* conn_mgr,
                                    const node_id_t* peer_id) {
+  /* A pre-admitted peer reports connected=true from creation (peer_connection.c)
+     even though no QUIC connection was ever established — trusting the flag
+     alone skipped re-admission forever for peers whose direct connect failed
+     or was still in flight. Require a live QUIC connection handle: mDNS
+     re-admission retries until the direct connection is actually up. */
   peer_connection_t* peer = connection_manager_lookup(conn_mgr, peer_id);
-  return peer == NULL || !peer->connected;
+  if (peer == NULL) return true;
+  if (!peer->connected) return true;
+#ifdef HAS_MSQUIC
+  /* HAS_MSQUIC build: require the live QUIC handle (peer_connection.h
+     declares the field only under this guard). */
+  if (peer->quic_connection == NULL) return true;
+#endif
+  return false;
 }
 
 /* Shared admission tail for v4/v6 discovery: self-filter, decode the node
