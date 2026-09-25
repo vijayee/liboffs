@@ -2909,6 +2909,7 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
       next_hops,
       &next_hop_count,
       network_secure_mode(network));
+  fprintf(stderr, "FB-TRACE: execute result=%d hops=%zu\n", result, next_hop_count);
 
   switch (result) {
     case FIND_BLOCK_FOUND:
