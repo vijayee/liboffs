@@ -316,8 +316,9 @@
           }
         }
         if (numeric) {
+          errno = 0;
           unsigned long index = strtoul(zone_text, NULL, 10);
-          if (index == 0 || index > 0xFFFFFFFFul) return -1;
+          if (errno == ERANGE || index == 0 || index > 0xFFFFFFFFul) return -1;
           addr->inet6.scope_id = (uint32_t)index;
         } else {
           unsigned int index = if_nametoindex(zone_text);
@@ -370,7 +371,10 @@
   #include <winsock2.h>
   #include <windows.h>
   #include <ws2tcpip.h>
+  #include <iphlpapi.h>
   #include <afunix.h>
+
+  #pragma comment(lib, "iphlpapi.lib")
   #include <stdlib.h>
   #include <stdio.h>
   #include <string.h>
@@ -826,13 +830,14 @@
           }
         }
         if (numeric) {
+          errno = 0;
           unsigned long index = strtoul(zone_text, NULL, 10);
-          if (index == 0 || index > 0xFFFFFFFFul) return -1;
+          if (errno == ERANGE || index == 0 || index > 0xFFFFFFFFul) return -1;
           addr->inet6.scope_id = (uint32_t)index;
         } else {
-          /* IF_NAMETOINDEX/IF_INDEXTONAME come from netioapi.h, pulled in
-           * by ws2tcpip.h on Vista+ SDKs; they map to if_nametoindex /
-           * if_indextoname. */
+          /* IF_NAMETOINDEX/IF_INDEXTONAME/IF_NAMESIZE come from netioapi.h,
+           * which is auto-included by iphlpapi.h (not ws2tcpip.h); they map
+           * to if_nametoindex / if_indextoname. */
           unsigned long index = (unsigned long)IF_NAMETOINDEX(zone_text);
           if (index == 0) return -1;
           addr->inet6.scope_id = (uint32_t)index;
