@@ -169,6 +169,8 @@ static void _fetch_descriptor_block(readable_descriptor_t* desc, buffer_t* hash)
 
 void readable_descriptor_dispatch(void* state, message_t* msg) {
   readable_descriptor_t* desc = (readable_descriptor_t*)state;
+  fprintf(stderr, "RD-TRACE-DISP: msg=%d desc_hash=%s\n", msg->type,
+          (desc->ori && desc->ori->descriptor_hash) ? "set" : "NULL");
   switch (msg->type) {
     case READABLE_PUSH: {
       if (desc->stream.is_deactivated) {
@@ -228,6 +230,7 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
         if (desc->network != NULL) {
           /* Network-aware: send NETWORK_LOCAL_FIND_BLOCK.
            * Use result->hash directly — the network's wanted_list deduplicates. */
+          fprintf(stderr, "RD-TRACE: descriptor miss, network-aware, sending LOCAL_FIND_BLOCK\n");
           desc->state = DESCRIPTOR_AWAITING_NETWORK;
           network_local_find_block_payload_t* payload = get_clear_memory(sizeof(network_local_find_block_payload_t));
           payload->hash = REFERENCE(result->hash, buffer_t);
@@ -243,6 +246,7 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
           }
         } else {
           /* Local-only: deactivate */
+          fprintf(stderr, "RD-TRACE: descriptor miss, network==NULL — local-only 404\n");
           if (result->hash != NULL) {
             DESTROY(result->hash, buffer);
             result->hash = NULL;
@@ -369,6 +373,7 @@ void readable_descriptor_destroy(readable_descriptor_t* desc) {
 }
 
 void readable_descriptor_push(readable_descriptor_t* desc) {
+  fprintf(stderr, "RD-TRACE-PUSH: pushed, desc_hash=%s\n", (desc && desc->ori && desc->ori->descriptor_hash) ? "set" : "NULL");
   message_t msg;
   msg.type = READABLE_PUSH;
   msg.payload = NULL;

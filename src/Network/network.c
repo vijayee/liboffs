@@ -4298,6 +4298,7 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
       (network_local_find_block_payload_t*)msg->payload;
   if (payload == NULL || payload->hash == NULL) return;
 
+  fprintf(stderr, "NET-TRACE: LOCAL_FIND_BLOCK received, hash=%s\n", payload->hash ? "set" : "NULL");
   // Step 1: Check local block_cache first
   index_entry_t* entry = index_peek(network->block_cache->index, payload->hash);
   if (entry != NULL) {
