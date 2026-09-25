@@ -141,3 +141,54 @@ TEST(TestNetNodeAddr, V4MappedRoundTripsToCorrectString) {
   EXPECT_STREQ(buf, "192.0.0.2");
   net_node_destroy(node);
 }
+
+TEST(TestNetNodeAddr, ScopedV6AddressCarriesScope) {
+  net_node_t* node = net_node_create_unidentified(0, 0);
+  platform_address_t in;
+  memset(&in, 0, sizeof(in));
+  in.family = PLATFORM_AF_INET6;
+  in.inet6.addr[0] = 0xFE;
+  in.inet6.addr[1] = 0x80;
+  in.inet6.addr[15] = 1;
+  in.inet6.scope_id = 7;
+  net_node_set_platform_addr(node, &in);
+  EXPECT_EQ(node->scope_valid, 1);
+  EXPECT_EQ(node->scope_id, in.inet6.scope_id);
+  platform_address_t out;
+  net_node_get_platform_addr(node, &out);
+  EXPECT_EQ(out.inet6.scope_id, in.inet6.scope_id);
+  char buf[128];
+  EXPECT_EQ(net_node_addr_string(node, false, buf, sizeof(buf)), 0);
+  /* Emission carries the %zone (name or numeric fallback). */
+  EXPECT_EQ(strncmp(buf, "fe80::1%", 8), 0);
+  net_node_destroy(node);
+}
+
+TEST(TestNetNodeAddr, UnscopedV6HasNoScope) {
+  net_node_t* node = net_node_create_unidentified(0, 0);
+  platform_address_t in;
+  memset(&in, 0, sizeof(in));
+  in.family = PLATFORM_AF_INET6;
+  in.inet6.addr[15] = 1;  /* ::1 */
+  net_node_set_platform_addr(node, &in);
+  EXPECT_EQ(node->scope_valid, 0);
+  EXPECT_EQ(node->scope_id, 0u);
+  char buf[64];
+  EXPECT_EQ(net_node_addr_string(node, false, buf, sizeof(buf)), 0);
+  EXPECT_STREQ(buf, "::1");
+  net_node_destroy(node);
+}
+
+TEST(TestNetNodeAddr, RendvScopeStored) {
+  net_node_t* node = net_node_create_unidentified(0, 0);
+  platform_address_t in;
+  memset(&in, 0, sizeof(in));
+  in.family = PLATFORM_AF_INET6;
+  in.inet6.addr[0] = 0xFE;
+  in.inet6.addr[1] = 0x80;
+  in.inet6.scope_id = 7;
+  net_node_set_rendv_platform(node, &in);
+  EXPECT_EQ(node->rendv_scope_valid, 1);
+  EXPECT_EQ(node->rendv_scope_id, 7u);
+  net_node_destroy(node);
+}

@@ -28,8 +28,12 @@ typedef struct net_node_t {
      v4 consumers keep working; it is 0 for pure-v6 nodes. */
   uint8_t addr_family;          // PLATFORM_AF_INET or PLATFORM_AF_INET6
   uint8_t addr6[16];            // valid when addr_family == PLATFORM_AF_INET6
+  uint8_t scope_valid;          // v6 scope present (link-local and friends)
+  uint32_t scope_id;            // valid when scope_valid != 0
   uint8_t rendv_family;         // rendezvous point family, same values
   uint8_t rendv6[16];           // valid when rendv_family == PLATFORM_AF_INET6
+  uint8_t rendv_scope_valid;    // rendezvous scope, same semantics
+  uint32_t rendv_scope_id;
   uint32_t rendv_addr;         // rendezvous point address (NAT traversal)
   uint16_t rendv_port;         // rendezvous point port
   net_node_flags_e flags;

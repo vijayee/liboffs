@@ -47,6 +47,8 @@ void net_node_set_platform_addr(net_node_t* node, const platform_address_t* addr
                    ((addr->inet.addr >> 8) & 0xFF00u) |
                    ((addr->inet.addr >> 24) & 0xFFu);
       memset(node->addr6, 0, sizeof(node->addr6));
+      node->scope_valid = 0;
+      node->scope_id = 0;
       break;
     case PLATFORM_AF_INET6:
       if (memcmp(addr->inet6.addr, _v4_mapped_prefix, 12) == 0) {
@@ -58,10 +60,14 @@ void net_node_set_platform_addr(net_node_t* node, const platform_address_t* addr
                      ((uint32_t)addr->inet6.addr[14] << 8) |
                      (uint32_t)addr->inet6.addr[15];
         memset(node->addr6, 0, sizeof(node->addr6));
+        node->scope_valid = 0;
+        node->scope_id = 0;
       } else {
         node->addr_family = PLATFORM_AF_INET6;
         node->addr = 0;
         memcpy(node->addr6, addr->inet6.addr, 16);
+        node->scope_valid = (addr->inet6.scope_id != 0) ? 1 : 0;
+        node->scope_id = addr->inet6.scope_id;
       }
       break;
     default:
@@ -76,6 +82,7 @@ void net_node_get_platform_addr(const net_node_t* node, platform_address_t* out)
   if (node->addr_family == PLATFORM_AF_INET6) {
     out->family = PLATFORM_AF_INET6;
     memcpy(out->inet6.addr, node->addr6, 16);
+    out->inet6.scope_id = (node->scope_valid != 0) ? node->scope_id : 0;
     return;
   }
   out->family = PLATFORM_AF_INET;
@@ -96,6 +103,8 @@ void net_node_set_rendv_platform(net_node_t* node, const platform_address_t* add
                          ((addr->inet.addr >> 8) & 0xFF00u) |
                          ((addr->inet.addr >> 24) & 0xFFu);
       memset(node->rendv6, 0, sizeof(node->rendv6));
+      node->rendv_scope_valid = 0;
+      node->rendv_scope_id = 0;
       break;
     case PLATFORM_AF_INET6:
       if (memcmp(addr->inet6.addr, _v4_mapped_prefix, 12) == 0) {
@@ -105,9 +114,13 @@ void net_node_set_rendv_platform(net_node_t* node, const platform_address_t* add
                            ((uint32_t)addr->inet6.addr[14] << 8) |
                            (uint32_t)addr->inet6.addr[15];
         memset(node->rendv6, 0, sizeof(node->rendv6));
+        node->rendv_scope_valid = 0;
+        node->rendv_scope_id = 0;
       } else {
         node->rendv_family = PLATFORM_AF_INET6;
         memcpy(node->rendv6, addr->inet6.addr, 16);
+        node->rendv_scope_valid = (addr->inet6.scope_id != 0) ? 1 : 0;
+        node->rendv_scope_id = addr->inet6.scope_id;
       }
       break;
     default:
@@ -122,7 +135,9 @@ int net_node_addr_string(const net_node_t* node, bool bracket, char* buf, size_t
   }
   platform_address_t addr;
   net_node_get_platform_addr(node, &addr);
-  char ip[64];
+  /* A scoped Windows v6 literal can reach ~301 chars (45 IP + '%' + 255-byte
+     interface name), so the intermediate must be well past 64. */
+  char ip[320];
   if (platform_address_to_string(&addr, ip, sizeof(ip)) != 0) return -1;
   if (node->addr_family == PLATFORM_AF_INET6 && bracket) {
     int written = snprintf(buf, len, "[%s]", ip);
