@@ -473,6 +473,12 @@ static void* _mdns_thread_fn(void* arg) {
       continue;  /* not a liboffs announce, or malformed */
     }
 
+    /* A v6-only announce carries no A record, so peer_ip is 0 — the v4
+       connect path below has no address to format. Skip candidate
+       construction; wiring the AAAA into a v6 candidate on the v6 socket is
+       deferred (see the parse above). */
+    if (peer_ip == 0) continue;
+
     /* Ignore our own broadcasts. */
     if (responder->network != NULL && responder->network->authority != NULL) {
       char self_b58[256];

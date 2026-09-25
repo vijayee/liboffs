@@ -62,8 +62,10 @@ int mdns_build_announce_v6_for_test(const char* node_id_b58,
 
 /* Parse a response packet: fills node_id_b58, lan_ip (host byte order, 0 for
    AAAA-only announces), quic_port, and — when an AAAA record is present —
-   addr6_out with *have_v6 set to 1. Returns 0 on success, -1 on no match /
-   malformed input / no usable address record. */
+   addr6_out with *have_v6 set to 1. have_v6 is required and must not be NULL;
+   addr6_out may be NULL when the caller doesn't want the address copied
+   (have_v6 still reports AAAA presence). Returns 0 on success, -1 on no
+   match / malformed input / no usable address record. */
 int mdns_parse_response_for_test(const uint8_t* pkt, size_t pkt_len,
                                  char* node_id_b58, size_t node_id_b58_len,
                                  uint32_t* lan_ip, uint16_t* quic_port,
