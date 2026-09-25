@@ -26,6 +26,11 @@ extern "C" {
 int endpoint_parse(const char* input, char* host_out, size_t host_len,
                    uint16_t* port_out);
 
+/* RFC 3986 Host-header value: brackets retained for v6 literals.
+ * Returns 0 on success, -1 on truncation or bad input. */
+int endpoint_host_header(const char* host, uint16_t port, char* out,
+                         size_t out_len);
+
 #ifdef __cplusplus
 }
 #endif

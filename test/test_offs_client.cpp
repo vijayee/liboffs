@@ -197,6 +197,11 @@ static void _health_callback(void* ctx, const char* json_response) {
     }
 }
 
+/* offs_http_get rejects a malformed URL before any network I/O. */
+TEST(TestOffsClientHttp, RejectsUnclosedBracketUrl) {
+    EXPECT_EQ(offs_http_get("http://[::1"), nullptr);
+}
+
 namespace offs_client_test {
 
 class TestOffsClient : public testing::Test {

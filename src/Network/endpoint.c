@@ -5,6 +5,7 @@
 #include "endpoint.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -60,5 +61,19 @@ int endpoint_parse(const char* input, char* host_out, size_t host_len,
   memcpy(host_out, host_start, host_length);
   host_out[host_length] = '\0';
   *port_out = (uint16_t)port;
+  return 0;
+}
+
+int endpoint_host_header(const char* host, uint16_t port, char* out,
+                         size_t out_len) {
+  if (host == NULL || out == NULL || out_len == 0) return -1;
+  /* RFC 3986: a v6 literal in a Host header keeps its brackets. */
+  int written;
+  if (strchr(host, ':') != NULL) {
+    written = snprintf(out, out_len, "[%s]:%u", host, (unsigned)port);
+  } else {
+    written = snprintf(out, out_len, "%s:%u", host, (unsigned)port);
+  }
+  if (written < 0 || (size_t)written >= out_len) return -1;
   return 0;
 }

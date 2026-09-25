@@ -1556,13 +1556,66 @@ static char* _ws_compute_accept_key(const char* client_key) {
   return accept_key;
 }
 
-/* RFC 3986: a v6 literal in a Host header keeps its brackets. */
-static void _host_header_value(const char* host, uint16_t port, char* out, size_t out_len) {
-  if (strchr(host, ':') != NULL) {
-    snprintf(out, out_len, "[%s]:%u", host, (unsigned)port);
-  } else {
-    snprintf(out, out_len, "%s:%u", host, (unsigned)port);
+/* Split "[host]:port", "host:port", or "host" (→ default_port) from a
+ * mutable NUL-terminated copy, stripping brackets from v6 literals.
+ * *host_out points into buf. Port must be digits in 1..65535.
+ * Returns 0 on success, -1 on any malformation. */
+static int _split_url_host(char* buf, uint16_t default_port,
+                           char** host_out, uint16_t* port_out) {
+  if (buf == NULL || buf[0] == '\0' || host_out == NULL || port_out == NULL) {
+    return -1;
   }
+
+  char* host;
+  uint16_t port;
+
+  if (buf[0] == '[') {
+    char* close = strchr(buf, ']');
+    if (close == NULL) return -1;
+    size_t host_len = (size_t)(close - (buf + 1));
+    if (host_len == 0) return -1;
+    host = buf + 1;
+    *close = '\0';
+    if (close[1] == ':') {
+      char* port_start = close + 2;
+      for (char* digit = port_start; *digit != '\0'; digit++) {
+        if (*digit < '0' || *digit > '9') return -1;
+      }
+      char* end = NULL;
+      long parsed = strtol(port_start, &end, 10);
+      if (end == port_start || *end != '\0' || parsed < 1 || parsed > 65535) {
+        return -1;
+      }
+      port = (uint16_t)parsed;
+    } else if (close[1] == '\0') {
+      port = default_port;
+    } else {
+      return -1;
+    }
+  } else {
+    char* colon = strrchr(buf, ':');
+    if (colon != NULL) {
+      if (colon == buf) return -1;
+      *colon = '\0';
+      char* port_start = colon + 1;
+      for (char* digit = port_start; *digit != '\0'; digit++) {
+        if (*digit < '0' || *digit > '9') return -1;
+      }
+      char* end = NULL;
+      long parsed = strtol(port_start, &end, 10);
+      if (end == port_start || *end != '\0' || parsed < 1 || parsed > 65535) {
+        return -1;
+      }
+      port = (uint16_t)parsed;
+    } else {
+      port = default_port;
+    }
+    host = buf;
+  }
+
+  *host_out = host;
+  *port_out = port;
+  return 0;
 }
 
 static int _ws_upgrade(offs_client_t* client, const char* ws_host, uint16_t ws_port) {
@@ -1589,7 +1642,11 @@ static int _ws_upgrade(offs_client_t* client, const char* ws_host, uint16_t ws_p
 
   /* Build and send upgrade request */
   char host_header[300];
-  _host_header_value(ws_host, ws_port, host_header, sizeof(host_header));
+  if (endpoint_host_header(ws_host, ws_port, host_header, sizeof(host_header)) != 0) {
+    free(expected_accept);
+    free(client_key);
+    return -1;
+  }
   char request[1024];
   snprintf(request, sizeof(request),
     "GET /offs HTTP/1.1\r\n"
@@ -1751,45 +1808,18 @@ static offs_client_t* _connect_attempt(const char* transport_url, const char* ap
     if (path_start != NULL) {
       *path_start = '\0';
     }
-    /* Extract host and port. A bracketed v6 literal contains ':' and may omit
-       the port, so the split anchors on ']' when one is present. The brackets
-       are stripped here: connect, SNI and the Host header all need the bare
-       literal. */
+    /* Extract host and port. _split_url_host strips the brackets from a
+       bracketed v6 literal: connect, SNI and the Host header all need the
+       bare literal. */
     uint16_t port;
     char* ws_host;
-    if (addr_copy[0] == '[') {
-      char* close = strchr(addr_copy, ']');
-      if (close == NULL) {
-        free(addr_copy);
-        stream_framer_destroy(client->framer);
-        platform_mutex_destroy(client->lock);
-        free(client->api_key);
-        free(client);
-        return NULL;
-      }
-      ws_host = addr_copy + 1;
-      *close = '\0';
-      if (close[1] == ':') {
-        port = (uint16_t)atoi(close + 2);
-      } else if (close[1] == '\0') {
-        port = is_ssl ? 443 : 80;
-      } else {
-        free(addr_copy);
-        stream_framer_destroy(client->framer);
-        platform_mutex_destroy(client->lock);
-        free(client->api_key);
-        free(client);
-        return NULL;
-      }
-    } else {
-      char* colon = strrchr(addr_copy, ':');
-      if (colon != NULL) {
-        *colon = '\0';
-        port = (uint16_t)atoi(colon + 1);
-      } else {
-        port = is_ssl ? 443 : 80;
-      }
-      ws_host = addr_copy;
+    if (_split_url_host(addr_copy, is_ssl ? 443 : 80, &ws_host, &port) != 0) {
+      free(addr_copy);
+      stream_framer_destroy(client->framer);
+      platform_mutex_destroy(client->lock);
+      free(client->api_key);
+      free(client);
+      return NULL;
     }
 
     client->transport.ws.sock = _connect_tcp(ws_host, port);
@@ -1874,44 +1904,17 @@ static offs_client_t* _connect_attempt(const char* transport_url, const char* ap
     char* addr_copy = get_memory(strlen(addr_start) + 1);
     memcpy(addr_copy, addr_start, strlen(addr_start) + 1);
 
-    /* Extract host and port. A bracketed v6 literal contains ':' and may omit
-       the port, so the split anchors on ']' when one is present. The brackets
-       are stripped before the host reaches ConnectionStart. */
+    /* Extract host and port. _split_url_host strips the brackets from a
+       bracketed v6 literal before the host reaches ConnectionStart. */
     uint16_t port;
-    const char* wt_host;
-    if (addr_copy[0] == '[') {
-      char* close = strchr(addr_copy, ']');
-      if (close == NULL) {
-        free(addr_copy);
-        stream_framer_destroy(client->framer);
-        platform_mutex_destroy(client->lock);
-        free(client->api_key);
-        free(client);
-        return NULL;
-      }
-      wt_host = addr_copy + 1;
-      *close = '\0';
-      if (close[1] == ':') {
-        port = (uint16_t)atoi(close + 2);
-      } else if (close[1] == '\0') {
-        port = 443;
-      } else {
-        free(addr_copy);
-        stream_framer_destroy(client->framer);
-        platform_mutex_destroy(client->lock);
-        free(client->api_key);
-        free(client);
-        return NULL;
-      }
-    } else {
-      char* colon = strrchr(addr_copy, ':');
-      if (colon != NULL) {
-        *colon = '\0';
-        port = (uint16_t)atoi(colon + 1);
-      } else {
-        port = 443;
-      }
-      wt_host = addr_copy;
+    char* wt_host;
+    if (_split_url_host(addr_copy, 443, &wt_host, &port) != 0) {
+      free(addr_copy);
+      stream_framer_destroy(client->framer);
+      platform_mutex_destroy(client->lock);
+      free(client->api_key);
+      free(client);
+      return NULL;
     }
 
     const struct QUIC_API_TABLE* msquic = offs_msquic_open();
@@ -3114,7 +3117,10 @@ buffer_t* offs_http_get(const char* url) {
   /* Build and send HTTP GET request */
   {
     char host_header[300];
-    _host_header_value(host, (uint16_t)port, host_header, sizeof(host_header));
+    if (endpoint_host_header(host, (uint16_t)port, host_header, sizeof(host_header)) != 0) {
+      platform_socket_destroy(sock);
+      return NULL;
+    }
     char request[4096];
     int req_len = snprintf(request, sizeof(request),
       "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",

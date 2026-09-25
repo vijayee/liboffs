@@ -105,3 +105,23 @@ TEST(EndpointTest, RejectsSignedAndSpacePrefixedPort) {
   EXPECT_NE(0, endpoint_parse("10.0.0.1:+8080", host, sizeof(host), &port));
   EXPECT_NE(0, endpoint_parse("10.0.0.1: 8080", host, sizeof(host), &port));
 }
+
+TEST(TestEndpointHostHeader, V4HostFormattedPlain) {
+  char buf[64];
+  EXPECT_EQ(endpoint_host_header("127.0.0.1", 8080, buf, sizeof(buf)), 0);
+  EXPECT_STREQ(buf, "127.0.0.1:8080");
+}
+
+TEST(TestEndpointHostHeader, V6LiteralBracketed) {
+  char buf[64];
+  EXPECT_EQ(endpoint_host_header("::1", 8080, buf, sizeof(buf)), 0);
+  EXPECT_STREQ(buf, "[::1]:8080");
+}
+
+TEST(TestEndpointHostHeader, OversizedHostRejected) {
+  char buf[16];
+  char big[256];
+  memset(big, 'a', sizeof(big) - 1);
+  big[sizeof(big) - 1] = '\0';
+  EXPECT_NE(endpoint_host_header(big, 8080, buf, sizeof(buf)), 0);
+}
