@@ -2,7 +2,6 @@
 // Created by victor on 5/7/26.
 //
 
-#include <stdio.h>
 #include "readable_descriptor.h"
 #include "../Util/allocator.h"
 #include "../Util/error.h"
@@ -225,7 +224,6 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
       }
 
       if (result->block == NULL) {
-        fprintf(stderr, "RD-TRACE: descriptor miss, network=%d\n", desc->network != NULL);
         /* Block not found */
         if (desc->network != NULL) {
           /* Network-aware: send NETWORK_LOCAL_FIND_BLOCK.
