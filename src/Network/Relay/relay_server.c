@@ -18,8 +18,10 @@
 #include <poll-dancer/poll-dancer.h>
 #ifdef _WIN32
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #endif
 
 // --- Stream context: wraps server + client pointers for QUIC callbacks ---
@@ -143,6 +145,39 @@ static QUIC_STATUS _relay_send_on_stream(
     free(send_ctx);
   }
   return status;
+}
+
+// --- Address formatting for logging ---
+
+/* Format a QUIC_ADDR as "ip:port" for logging. v4-mapped v6 collapses to
+   dotted-quad so both families read naturally. */
+static void _format_quic_addr(const QUIC_ADDR* addr, char* buf, size_t buf_len) {
+  if (buf == NULL || buf_len == 0) return;
+  buf[0] = '\0';
+  if (addr == NULL) return;
+  QUIC_ADDRESS_FAMILY family = QuicAddrGetFamily(addr);
+  if (family == QUIC_ADDRESS_FAMILY_INET) {
+    uint8_t* ip = (uint8_t*)&addr->Ipv4.sin_addr.s_addr;
+    snprintf(buf, buf_len, "%u.%u.%u.%u:%u",
+             ip[0], ip[1], ip[2], ip[3], (unsigned)ntohs(addr->Ipv4.sin_port));
+  } else if (family == QUIC_ADDRESS_FAMILY_INET6) {
+    /* v4-mapped collapses to the dotted-quad form. */
+    if (IN6_IS_ADDR_V4MAPPED(&addr->Ipv6.sin6_addr)) {
+      uint8_t* ip = &addr->Ipv6.sin6_addr.s6_addr[12];
+      snprintf(buf, buf_len, "%u.%u.%u.%u:%u",
+               ip[0], ip[1], ip[2], ip[3], (unsigned)ntohs(addr->Ipv6.sin6_port));
+    } else {
+      char ip[INET6_ADDRSTRLEN];
+      if (inet_ntop(AF_INET6, addr->Ipv6.sin6_addr.s6_addr, ip, sizeof(ip)) != NULL) {
+        snprintf(buf, buf_len, "[%s]:%u", ip, (unsigned)ntohs(addr->Ipv6.sin6_port));
+      } else {
+        snprintf(buf, buf_len, "[ipv6-unparseable]:%u",
+                 (unsigned)ntohs(addr->Ipv6.sin6_port));
+      }
+    }
+  } else {
+    snprintf(buf, buf_len, "<unknown-family>:%u", (unsigned)ntohs(addr->Ipv6.sin6_port));
+  }
 }
 
 // --- Handle ADDR_REQUEST from a client ---
@@ -405,18 +440,10 @@ static QUIC_STATUS QUIC_API _relay_connection_callback(
       if (QUIC_SUCCEEDED(server->msquic->GetParam(
               connection, QUIC_PARAM_CONN_REMOTE_ADDRESS,
               &peer_addr_len, &peer_addr))) {
-        QUIC_ADDRESS_FAMILY fam = QuicAddrGetFamily(&peer_addr);
-        if (fam == QUIC_ADDRESS_FAMILY_INET) {
-          uint8_t* ip = (uint8_t*)&peer_addr.Ipv4.sin_addr.s_addr;
-          uint16_t port = ntohs(peer_addr.Ipv4.sin_port);
-          log_info("relay: client connected with endpoint_id=%u, peer=%u.%u.%u.%u:%u, stream pending",
-                   endpoint_id, ip[0], ip[1], ip[2], ip[3], port);
-        } else if (fam == QUIC_ADDRESS_FAMILY_INET6) {
-          log_info("relay: client connected with endpoint_id=%u, peer=[ipv6], stream pending",
-                   endpoint_id);
-        } else {
-          log_info("relay: client connected with endpoint_id=%u, stream pending", endpoint_id);
-        }
+        char peer_str[80];
+        _format_quic_addr(&peer_addr, peer_str, sizeof(peer_str));
+        log_info("relay: client connected with endpoint_id=%u, peer=%s, stream pending",
+                 endpoint_id, peer_str);
       } else {
         log_info("relay: client connected with endpoint_id=%u, stream pending", endpoint_id);
       }
