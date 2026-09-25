@@ -44,4 +44,29 @@ int mdns_start(mdns_t* responder);
 /* Stop broadcasting and listening. Joins the thread. Idempotent. */
 void mdns_stop(mdns_t* responder);
 
+/* Test-only wrappers around the static packet helpers in mdns.c (see
+   test_mdns.cpp). Declared on every platform so the test binary links
+   everywhere; on Windows the definitions are stubs that return -1. */
+
+/* Build an A-record announce packet (same bytes the live broadcaster sends).
+   Returns packet size, -1 on error. */
+int mdns_build_announce_v4_for_test(const char* node_id_b58, uint32_t lan_ip,
+                                    uint16_t quic_port, uint8_t* out_buf,
+                                    size_t out_len);
+
+/* Build an AAAA-record announce packet. Returns packet size, -1 on error. */
+int mdns_build_announce_v6_for_test(const char* node_id_b58,
+                                    const uint8_t addr6[16],
+                                    uint16_t quic_port, uint8_t* out_buf,
+                                    size_t out_len);
+
+/* Parse a response packet: fills node_id_b58, lan_ip (host byte order, 0 for
+   AAAA-only announces), quic_port, and — when an AAAA record is present —
+   addr6_out with *have_v6 set to 1. Returns 0 on success, -1 on no match /
+   malformed input / no usable address record. */
+int mdns_parse_response_for_test(const uint8_t* pkt, size_t pkt_len,
+                                 char* node_id_b58, size_t node_id_b58_len,
+                                 uint32_t* lan_ip, uint16_t* quic_port,
+                                 uint8_t addr6_out[16], int* have_v6);
+
 #endif // OFFS_MDNS_H

@@ -35,6 +35,7 @@
 
 /* DNS record types we use. */
 #define DNS_TYPE_A     1
+#define DNS_TYPE_AAAA  28
 #define DNS_TYPE_SRV   33
 #define DNS_CLASS_IN   1
 #define DNS_CACHE_FLUSH 0x8000  /* high bit of CLASS — mDNS cache-flush bit */
@@ -183,24 +184,25 @@ static uint32_t _find_lan_ipv4(void) {
   return result;
 }
 
-/* Build a DNS response packet announcing our node. Layout:
-   header(12) + A_record(name + type + class + ttl + rdlength + rdata)
+/* Build a DNS response announcing our node. Layout:
+   header(12) + <addr record>(name + type + class + ttl + rdlength + rdata)
                 + SRV_record(name + type + class + ttl + rdlength + rdata)
-   The name is <node_id_base58>.offs._tcp.local. Returns packet size, -1 on
-   error. */
-static int _mdns_build_announce(const char* node_id_b58, uint32_t lan_ip,
-                                 uint16_t quic_port, uint8_t* out_buf,
-                                 size_t out_len) {
+   The name is <node_id_base58>.offs._tcp.local. is_v6 selects AAAA (16-byte
+   rdata) vs A (4-byte rdata). Returns packet size, -1 on error. */
+static int _mdns_build_announce_generic(const char* node_id_b58,
+                                        int is_v6,
+                                        const uint8_t* rdata,
+                                        uint16_t quic_port,
+                                        uint8_t* out_buf, size_t out_len) {
   if (out_buf == NULL || out_len < 64) return -1;
   memset(out_buf, 0, out_len);
 
-  /* Build the full name once into a stack buffer; reuse it for both
-     records. */
   char name[256];
   int written = snprintf(name, sizeof(name), "%s%s",
                          node_id_b58, MDNS_SERVICE_SUFFIX);
   if (written <= 0 || (size_t)written >= sizeof(name)) return -1;
 
+  uint16_t rdata_len = is_v6 ? 16 : 4;
   size_t offset = 0;
 
   /* Header (12 bytes). ID=0 (mDNS). Flags: QR=1 (response), AA=1.
@@ -209,26 +211,25 @@ static int _mdns_build_announce(const char* node_id_b58, uint32_t lan_ip,
   _write_u16_be(out_buf + 0, 0);          /* ID */
   _write_u16_be(out_buf + 2, 0x8400);     /* flags: QR=1, AA=1 */
   _write_u16_be(out_buf + 4, 0);          /* QDCOUNT */
-  _write_u16_be(out_buf + 6, 2);          /* ANCOUNT — A + SRV */
+  _write_u16_be(out_buf + 6, 2);          /* ANCOUNT — A/AAAA + SRV */
   _write_u16_be(out_buf + 8, 0);          /* NSCOUNT */
   _write_u16_be(out_buf + 10, 0);         /* ARCOUNT */
   offset = 12;
 
-  /* A record: name + TYPE(1) + CLASS(IN|cache-flush) + TTL(120) + RDLENGTH(4) + RDATA(4) */
+  /* Address record: name + TYPE + CLASS(IN|cache-flush) + TTL(120) +
+     RDLENGTH + RDATA (4-byte IPv4 or 16-byte IPv6 in network byte order). */
   if (_dns_encode_name(name, out_buf, out_len, &offset) != 0) return -1;
-  if (offset + 10 > out_len) return -1;
-  _write_u16_be(out_buf + offset, DNS_TYPE_A);
+  if (offset + 10 + rdata_len > out_len) return -1;
+  _write_u16_be(out_buf + offset, is_v6 ? DNS_TYPE_AAAA : DNS_TYPE_A);
   offset += 2;
   _write_u16_be(out_buf + offset, DNS_CLASS_IN | DNS_CACHE_FLUSH);
   offset += 2;
   _write_u32_be(out_buf + offset, MDNS_TTL_S);
   offset += 4;
-  _write_u16_be(out_buf + offset, 4);  /* RDLENGTH */
+  _write_u16_be(out_buf + offset, rdata_len);
   offset += 2;
-  if (offset + 4 > out_len) return -1;
-  /* RDATA: 4-byte IPv4 in network byte order. */
-  _write_u32_be(out_buf + offset, lan_ip);
-  offset += 4;
+  memcpy(out_buf + offset, rdata, rdata_len);
+  offset += rdata_len;
 
   /* SRV record: name + TYPE(33) + CLASS(IN|cache-flush) + TTL + RDLENGTH + RDATA.
      RDATA: priority(2) + weight(2) + port(2) + target(name). */
@@ -253,21 +254,45 @@ static int _mdns_build_announce(const char* node_id_b58, uint32_t lan_ip,
   offset += 2;
   size_t target_start = offset;
   if (_dns_encode_name(name, out_buf, out_len, &offset) != 0) return -1;
-  size_t rdata_len = offset - target_start + 6;  /* +6 for priority+weight+port */
-  _write_u16_be(out_buf + rdlength_offset, (uint16_t)rdata_len);
+  size_t srv_rdata_len = offset - target_start + 6;  /* +6 for priority+weight+port */
+  _write_u16_be(out_buf + rdlength_offset, (uint16_t)srv_rdata_len);
 
   return (int)offset;
 }
 
-/* Parse an incoming DNS response packet. Looks for A and SRV records in the
-   answer section matching <node_id>.offs._tcp.local. On success, fills out
-   node_id_b58 (NODE_ID_STRING_SIZE bytes), lan_ip (host byte order), and
-   quic_port. Returns 0 on success, -1 on no match / malformed input. */
+static int _mdns_build_announce(const char* node_id_b58, uint32_t lan_ip,
+                                 uint16_t quic_port, uint8_t* out_buf,
+                                 size_t out_len) {
+  uint8_t v4_rdata[4];
+  v4_rdata[0] = (uint8_t)((lan_ip >> 24) & 0xFF);
+  v4_rdata[1] = (uint8_t)((lan_ip >> 16) & 0xFF);
+  v4_rdata[2] = (uint8_t)((lan_ip >> 8) & 0xFF);
+  v4_rdata[3] = (uint8_t)(lan_ip & 0xFF);
+  return _mdns_build_announce_generic(node_id_b58, 0, v4_rdata, quic_port,
+                                      out_buf, out_len);
+}
+
+static int _mdns_build_announce_v6(const char* node_id_b58,
+                                    const uint8_t addr6[16],
+                                    uint16_t quic_port, uint8_t* out_buf,
+                                    size_t out_len) {
+  return _mdns_build_announce_generic(node_id_b58, 1, addr6, quic_port,
+                                      out_buf, out_len);
+}
+
+/* Parse an incoming DNS response packet. Looks for A/AAAA and SRV records in
+   the answer section matching <node_id>.offs._tcp.local. On success, fills
+   out node_id_b58 (NODE_ID_STRING_SIZE bytes), lan_ip (host byte order, 0 if
+   the announce carried only an AAAA record), quic_port, and — when the
+   announce carried an AAAA record — addr6_out (16 bytes, network byte order)
+   with *have_v6 set to 1. Returns 0 on success, -1 on no match / malformed
+   input / no usable address record. */
 static int _mdns_parse_response(const uint8_t* pkt, size_t pkt_len,
                                  char* node_id_b58, size_t node_id_b58_len,
-                                 uint32_t* lan_ip, uint16_t* quic_port) {
+                                 uint32_t* lan_ip, uint16_t* quic_port,
+                                 uint8_t addr6_out[16], int* have_v6_out) {
   if (pkt == NULL || pkt_len < 12 || node_id_b58 == NULL ||
-      lan_ip == NULL || quic_port == NULL) {
+      lan_ip == NULL || quic_port == NULL || have_v6_out == NULL) {
     return -1;
   }
   /* Only parse responses (QR=1) — queries are ignored (we don't respond to
@@ -285,6 +310,8 @@ static int _mdns_parse_response(const uint8_t* pkt, size_t pkt_len,
   uint16_t found_port = 0;
   int have_a = 0;
   int have_srv = 0;
+  uint8_t found_addr6[16];
+  int have_aaaa = 0;
 
   for (uint16_t i = 0; i < ancount; i++) {
     char name[256];
@@ -324,6 +351,9 @@ static int _mdns_parse_response(const uint8_t* pkt, size_t pkt_len,
                      ((uint32_t)pkt[offset + 2] << 8) |
                      (uint32_t)pkt[offset + 3];
           have_a = 1;
+        } else if (rtype == DNS_TYPE_AAAA && rdlength == 16) {
+          memcpy(found_addr6, pkt + offset, 16);
+          have_aaaa = 1;
         } else if (rtype == DNS_TYPE_SRV) {
           if (rdlength >= 6) {
             found_port = _read_u16_be(pkt + offset + 4);  /* after priority+weight */
@@ -335,13 +365,15 @@ static int _mdns_parse_response(const uint8_t* pkt, size_t pkt_len,
     offset += rdlength;
   }
 
-  if (!have_a) return -1;  /* no A record — can't connect without an IP */
+  if (!have_a && !have_aaaa) return -1;  /* no usable address record */
 
   /* Copy out the node_id_base58. If we have no SRV record, fall back to
      the default QUIC listener port (network->quic_listener->listen_port). */
   if (node_id_b58_len < strlen(found_name) + 1) return -1;
   strcpy(node_id_b58, found_name);
   *lan_ip = found_ip;
+  if (have_aaaa && addr6_out != NULL) memcpy(addr6_out, found_addr6, 16);
+  *have_v6_out = have_aaaa;
   *quic_port = have_srv ? found_port : 0;
   return 0;
 }
@@ -430,9 +462,14 @@ static void* _mdns_thread_fn(void* arg) {
     char peer_b58[256];
     uint32_t peer_ip = 0;
     uint16_t peer_port = 0;
+    /* AAAA payload is parsed out here; wiring it into a v6 candidate is the
+       next step (the v4 path below is unchanged). */
+    uint8_t peer_addr6[16];
+    int peer_have_v6 = 0;
     if (_mdns_parse_response((const uint8_t*)recv_buf, (size_t)recv_len,
                               peer_b58, sizeof(peer_b58),
-                              &peer_ip, &peer_port) != 0) {
+                              &peer_ip, &peer_port,
+                              peer_addr6, &peer_have_v6) != 0) {
       continue;  /* not a liboffs announce, or malformed */
     }
 
@@ -597,6 +634,28 @@ void mdns_stop(mdns_t* responder) {
   }
 }
 
+/* Test-only wrappers around static packet helpers (see test_mdns.cpp). */
+int mdns_build_announce_v4_for_test(const char* node_id_b58, uint32_t lan_ip,
+                                    uint16_t quic_port, uint8_t* out_buf,
+                                    size_t out_len) {
+  return _mdns_build_announce(node_id_b58, lan_ip, quic_port, out_buf, out_len);
+}
+
+int mdns_build_announce_v6_for_test(const char* node_id_b58,
+                                    const uint8_t addr6[16],
+                                    uint16_t quic_port, uint8_t* out_buf,
+                                    size_t out_len) {
+  return _mdns_build_announce_v6(node_id_b58, addr6, quic_port, out_buf, out_len);
+}
+
+int mdns_parse_response_for_test(const uint8_t* pkt, size_t pkt_len,
+                                 char* node_id_b58, size_t node_id_b58_len,
+                                 uint32_t* lan_ip, uint16_t* quic_port,
+                                 uint8_t addr6_out[16], int* have_v6) {
+  return _mdns_parse_response(pkt, pkt_len, node_id_b58, node_id_b58_len,
+                              lan_ip, quic_port, addr6_out, have_v6);
+}
+
 #else /* _WIN32 — stubbed, see mdns.h for the rationale. */
 
 struct mdns_t {
@@ -622,6 +681,48 @@ int mdns_start(mdns_t* responder) {
 
 void mdns_stop(mdns_t* responder) {
   (void)responder;
+}
+
+/* The packet-layer test wrappers are declared in mdns.h unconditionally (the
+   test binary builds on every platform), so the Windows stub section must
+   provide definitions. The POSIX packet helpers don't exist here, so the
+   stubs just fail. */
+int mdns_build_announce_v4_for_test(const char* node_id_b58, uint32_t lan_ip,
+                                    uint16_t quic_port, uint8_t* out_buf,
+                                    size_t out_len) {
+  (void)node_id_b58;
+  (void)lan_ip;
+  (void)quic_port;
+  (void)out_buf;
+  (void)out_len;
+  return -1;
+}
+
+int mdns_build_announce_v6_for_test(const char* node_id_b58,
+                                    const uint8_t addr6[16],
+                                    uint16_t quic_port, uint8_t* out_buf,
+                                    size_t out_len) {
+  (void)node_id_b58;
+  (void)addr6;
+  (void)quic_port;
+  (void)out_buf;
+  (void)out_len;
+  return -1;
+}
+
+int mdns_parse_response_for_test(const uint8_t* pkt, size_t pkt_len,
+                                 char* node_id_b58, size_t node_id_b58_len,
+                                 uint32_t* lan_ip, uint16_t* quic_port,
+                                 uint8_t addr6_out[16], int* have_v6) {
+  (void)pkt;
+  (void)pkt_len;
+  (void)node_id_b58;
+  (void)node_id_b58_len;
+  (void)lan_ip;
+  (void)quic_port;
+  (void)addr6_out;
+  (void)have_v6;
+  return -1;
 }
 
 #endif /* _WIN32 */

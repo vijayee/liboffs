@@ -72,6 +72,7 @@ if (BUILD_TESTING)
             test_stream_network.cpp
             test_stream_framer.cpp
             test_nat_detect.cpp
+            test_mdns.cpp
             test_conn_state.cpp
             test_quic_integration.cpp
             test_peer_verify.cpp
