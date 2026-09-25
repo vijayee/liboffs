@@ -50,6 +50,11 @@
    bytes; we cap at 1452 (typical Ethernet MTU minus IP+UDP headers). */
 #define MDNS_MAX_PACKET 1452
 
+/* ff02::fb — the mDNS multicast group for IPv6 (RFC 6762). */
+static const uint8_t _mdns_multicast_v6[16] = {
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFB
+};
+
 /* Build a DNS name encoding: <label_len><label_bytes> ... 0x00. Writes to
    out_buf starting at *offset, advances *offset. Returns 0 on success,
    -1 if the name doesn't fit in out_len bytes. */
@@ -456,11 +461,10 @@ static ssize_t _mdns_recv(int fd, uint8_t* buf, size_t buf_len,
   return recvfrom(fd, buf, buf_len, 0, (struct sockaddr*)src, &src_len);
 }
 
-/* Admit a v6-discovered peer: link-local addresses get the arriving
-   interface's scope (AAAA rdata carries none); global/ULA are taken as-is. */
-static void _mdns_admit_v6_peer(mdns_t* responder, const char* peer_b58,
-                                const uint8_t addr6[16], uint16_t peer_port,
-                                unsigned arriving_if) {
+/* Shared admission tail for v4/v6 discovery: self-filter, decode the node
+   id, build the single-candidate peer_info, connect, destroy. */
+static void _mdns_admit_peer(mdns_t* responder, const char* peer_b58,
+                             const char* peer_host, uint16_t peer_port) {
   if (responder->network == NULL) return;
   /* Ignore our own broadcasts. */
   if (responder->network->authority != NULL) {
@@ -471,10 +475,49 @@ static void _mdns_admit_v6_peer(mdns_t* responder, const char* peer_b58,
       return;
     }
   }
+
   node_id_t peer_id;
   memset(&peer_id, 0, sizeof(peer_id));
   if (node_id_from_string(peer_b58, &peer_id) != 0) return;
 
+  /* If the announce didn't carry an SRV port, fall back to our own QUIC
+     listener port (same-LAN peers are likely on the same port). */
+  uint16_t connect_port = peer_port;
+  if (connect_port == 0 && responder->network->quic_listener != NULL) {
+    connect_port = responder->network->quic_listener->listen_port;
+  }
+  if (connect_port == 0) return;  /* nothing to connect to */
+
+  /* Build a single-address peer_info and call
+     network_connect_peer_candidates. The peer_address_t host string is
+     heap-allocated (strdup) and freed via peer_address_destroy. */
+  peer_info_t info;
+  memset(&info, 0, sizeof(info));
+  info.node_id = peer_id;
+  info.addresses = get_clear_memory(sizeof(peer_address_t));
+  if (info.addresses == NULL) return;
+  info.address_count = 1;
+  info.addresses[0].type = PEER_ADDR_HOST;
+  info.addresses[0].port = connect_port;
+  info.addresses[0].host = strdup(peer_host);
+  if (info.addresses[0].host == NULL) {
+    free(info.addresses);
+    return;
+  }
+
+  log_info("mdns: discovered peer %s at %s:%u via mDNS",
+           peer_b58, peer_host, connect_port);
+  (void)network_connect_peer_candidates(responder->network, &peer_id,
+                                        info.addresses, info.address_count,
+                                        false);
+  peer_info_destroy(&info);
+}
+
+/* Admit a v6-discovered peer: link-local addresses get the arriving
+   interface's scope (AAAA rdata carries none); global/ULA are taken as-is. */
+static void _mdns_admit_v6_peer(mdns_t* responder, const char* peer_b58,
+                                const uint8_t addr6[16], uint16_t peer_port,
+                                unsigned arriving_if) {
   bool is_link_local = (addr6[0] == 0xFE) && ((addr6[1] & 0xC0) == 0x80);
   platform_address_t peer_addr;
   memset(&peer_addr, 0, sizeof(peer_addr));
@@ -491,33 +534,7 @@ static void _mdns_admit_v6_peer(mdns_t* responder, const char* peer_b58,
   if (platform_address_to_string(&peer_addr, peer_host, sizeof(peer_host)) != 0) {
     return;
   }
-
-  uint16_t connect_port = peer_port;
-  if (connect_port == 0 && responder->network->quic_listener != NULL) {
-    connect_port = responder->network->quic_listener->listen_port;
-  }
-  if (connect_port == 0) return;
-
-  peer_info_t info;
-  memset(&info, 0, sizeof(info));
-  info.node_id = peer_id;
-  info.addresses = get_clear_memory(sizeof(peer_address_t));
-  if (info.addresses == NULL) return;
-  info.address_count = 1;
-  info.addresses[0].type = PEER_ADDR_HOST;
-  info.addresses[0].port = connect_port;
-  info.addresses[0].host = strdup(peer_host);
-  if (info.addresses[0].host == NULL) {
-    free(info.addresses);
-    return;
-  }
-
-  log_info("mdns: discovered peer %s at %s:%u via mDNS v6",
-           peer_b58, peer_host, connect_port);
-  (void)network_connect_peer_candidates(responder->network, &peer_id,
-                                        info.addresses, info.address_count,
-                                        false);
-  peer_info_destroy(&info);
+  _mdns_admit_peer(responder, peer_b58, peer_host, peer_port);
 }
 
 /* Broadcast thread: periodically send an announce packet and listen for
@@ -552,10 +569,7 @@ static void* _mdns_thread_fn(void* arg) {
   memset(&multicast_addr6, 0, sizeof(multicast_addr6));
   multicast_addr6.sin6_family = AF_INET6;
   multicast_addr6.sin6_port = htons(MDNS_MULTICAST_PORT);
-  {
-    static const uint8_t ff02_fb[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0xFB};
-    memcpy(&multicast_addr6.sin6_addr, ff02_fb, 16);
-  }
+  memcpy(&multicast_addr6.sin6_addr, _mdns_multicast_v6, 16);
 
   uint8_t recv_buf[MDNS_MAX_PACKET];
   uint8_t send_buf[MDNS_MAX_PACKET];
@@ -594,6 +608,9 @@ static void* _mdns_thread_fn(void* arg) {
           uint32_t lan_v6_scope = 0;
           if (responder->sock6_fd >= 0 &&
               _find_lan_v6(lan_v6, &lan_v6_scope) == 0) {
+            /* ff02::fb is link-scoped — pin the send to the interface owning
+               the announced address rather than the kernel default. */
+            multicast_addr6.sin6_scope_id = lan_v6_scope;
             int pkt_len = _mdns_build_announce_v6(node_id_b58, lan_v6,
                                                   quic_port, send_buf,
                                                   sizeof(send_buf));
@@ -616,94 +633,49 @@ static void* _mdns_thread_fn(void* arg) {
        below is serviced every iteration; the v4 handling itself is
        unchanged. */
     do {
-    struct sockaddr_storage src_addr;
-    socklen_t src_len = sizeof(src_addr);
-    ssize_t recv_len = recvfrom(responder->sock_fd, recv_buf, sizeof(recv_buf),
-                                 0, (struct sockaddr*)&src_addr, &src_len);
-    if (recv_len < 0) {
-      if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-        log_error("mdns: recvfrom failed: %s", strerror(errno));
+      struct sockaddr_storage src_addr;
+      socklen_t src_len = sizeof(src_addr);
+      ssize_t recv_len = recvfrom(responder->sock_fd, recv_buf, sizeof(recv_buf),
+                                  0, (struct sockaddr*)&src_addr, &src_len);
+      if (recv_len < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+          log_error("mdns: recvfrom failed: %s", strerror(errno));
+        }
+        break;
       }
-      break;
-    }
-    if (recv_len < 12 || (size_t)recv_len > sizeof(recv_buf)) break;
+      if (recv_len < 12 || (size_t)recv_len > sizeof(recv_buf)) break;
 
-    char peer_b58[256];
-    uint32_t peer_ip = 0;
-    uint16_t peer_port = 0;
-    /* AAAA payload is parsed out here; wiring it into a v6 candidate is the
-       next step (the v4 path below is unchanged). */
-    uint8_t peer_addr6[16];
-    int peer_have_v6 = 0;
-    if (_mdns_parse_response((const uint8_t*)recv_buf, (size_t)recv_len,
-                              peer_b58, sizeof(peer_b58),
-                              &peer_ip, &peer_port,
-                              peer_addr6, &peer_have_v6) != 0) {
-      break;  /* not a liboffs announce, or malformed */
-    }
-
-    /* A v6-only announce carries no A record, so peer_ip is 0 — the v4
-       connect path below has no address to format. Skip candidate
-       construction; wiring the AAAA into a v6 candidate on the v6 socket is
-       deferred (see the parse above). */
-    if (peer_ip == 0) break;
-
-    /* Ignore our own broadcasts. */
-    if (responder->network != NULL && responder->network->authority != NULL) {
-      char self_b58[256];
-      if (base58_encode(responder->network->authority->local_id.hash,
-                        NODE_ID_HASH_SIZE, self_b58, sizeof(self_b58)) == 0) {
-        if (strcmp(self_b58, peer_b58) == 0) break;
+      char peer_b58[256];
+      uint32_t peer_ip = 0;
+      uint16_t peer_port = 0;
+      /* AAAA payload is parsed out here; wiring it into a v6 candidate is the
+         next step (the v4 path below is unchanged). */
+      uint8_t peer_addr6[16];
+      int peer_have_v6 = 0;
+      if (_mdns_parse_response((const uint8_t*)recv_buf, (size_t)recv_len,
+                                peer_b58, sizeof(peer_b58),
+                                &peer_ip, &peer_port,
+                                peer_addr6, &peer_have_v6) != 0) {
+        break;  /* not a liboffs announce, or malformed */
       }
-    }
 
-    /* Decode the peer's node_id from base58, then admit via
-       network_connect_peer_candidates with a HOST candidate. */
-    node_id_t peer_id;
-    memset(&peer_id, 0, sizeof(peer_id));
-    if (node_id_from_string(peer_b58, &peer_id) != 0) break;
+      /* A v6-only announce carries no A record, so peer_ip is 0 — the v4
+         connect path below has no address to format. Skip candidate
+         construction; wiring the AAAA into a v6 candidate on the v6 socket is
+         deferred (see the parse above). */
+      if (peer_ip == 0) break;
 
-    /* Format the peer's IP as a dotted-quad string. */
-    char peer_host[16];
-    uint8_t ip_bytes[4];
-    ip_bytes[0] = (uint8_t)((peer_ip >> 24) & 0xFF);
-    ip_bytes[1] = (uint8_t)((peer_ip >> 16) & 0xFF);
-    ip_bytes[2] = (uint8_t)((peer_ip >> 8) & 0xFF);
-    ip_bytes[3] = (uint8_t)(peer_ip & 0xFF);
-    snprintf(peer_host, sizeof(peer_host), "%u.%u.%u.%u",
-             ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
+      /* Format the peer's IP as a dotted-quad string. */
+      char peer_host[16];
+      uint8_t ip_bytes[4];
+      ip_bytes[0] = (uint8_t)((peer_ip >> 24) & 0xFF);
+      ip_bytes[1] = (uint8_t)((peer_ip >> 16) & 0xFF);
+      ip_bytes[2] = (uint8_t)((peer_ip >> 8) & 0xFF);
+      ip_bytes[3] = (uint8_t)(peer_ip & 0xFF);
+      snprintf(peer_host, sizeof(peer_host), "%u.%u.%u.%u",
+               ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
 
-    /* If the announce didn't carry an SRV port, fall back to our own QUIC
-       listener port (same-LAN peers are likely on the same port). */
-    uint16_t connect_port = peer_port;
-    if (connect_port == 0 && responder->network->quic_listener != NULL) {
-      connect_port = responder->network->quic_listener->listen_port;
-    }
-    if (connect_port == 0) break;  /* nothing to connect to */
-
-    /* Build a single-address peer_info and call
-       network_connect_peer_candidates. The peer_address_t host string is
-       heap-allocated (strdup) and freed via peer_address_destroy. */
-    peer_info_t info;
-    memset(&info, 0, sizeof(info));
-    info.node_id = peer_id;
-    info.addresses = get_clear_memory(sizeof(peer_address_t));
-    if (info.addresses == NULL) break;
-    info.address_count = 1;
-    info.addresses[0].type = PEER_ADDR_HOST;
-    info.addresses[0].port = connect_port;
-    info.addresses[0].host = strdup(peer_host);
-    if (info.addresses[0].host == NULL) {
-      free(info.addresses);
-      break;
-    }
-
-    log_info("mdns: discovered peer %s at %s:%u via mDNS",
-             peer_b58, peer_host, connect_port);
-    (void)network_connect_peer_candidates(responder->network, &peer_id,
-                                          info.addresses, info.address_count,
-                                          false);
-    peer_info_destroy(&info);
+      _mdns_admit_peer(responder, peer_b58, peer_host, peer_port);
     } while (0);
 
     /* v6 socket: parse AAAA announces and apply scope to link-locals. */
@@ -714,7 +686,11 @@ static void* _mdns_thread_fn(void* arg) {
       unsigned arriving_if = 0;
       ssize_t recv6_len = _mdns_recv(responder->sock6_fd, recv_buf,
                                      sizeof(recv_buf), &src6, &arriving_if);
-      if (recv6_len >= 12 && (size_t)recv6_len <= sizeof(recv_buf)) {
+      if (recv6_len < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+          log_error("mdns: v6 recvmsg failed: %s", strerror(errno));
+        }
+      } else if (recv6_len >= 12 && (size_t)recv6_len <= sizeof(recv_buf)) {
         char peer_b58_v6[256];
         uint32_t peer_ip = 0;
         uint16_t peer_port = 0;
@@ -829,19 +805,21 @@ int mdns_start(mdns_t* responder) {
         log_warn("mdns: IPv6 bind failed: %s", strerror(errno));
         close(sock6);
       } else {
-        /* Join ff02::fb on every IPv6-capable interface. */
-        static const uint8_t ff02_fb[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0xFB};
+        /* Join ff02::fb on every IPv6-capable interface. The kernel fills
+           sin6_scope_id with the owning interface's index on getifaddrs
+           results, so no if_nametoindex call is needed. */
         struct ifaddrs* join_ifaces = NULL;
         unsigned joined[64];
         size_t joined_count = 0;
         int join_failures = 0;
+        int successful_joins = 0;
         if (getifaddrs(&join_ifaces) == 0) {
           for (struct ifaddrs* jifa = join_ifaces; jifa != NULL;
                jifa = jifa->ifa_next) {
             if (jifa->ifa_addr == NULL ||
                 jifa->ifa_addr->sa_family != AF_INET6) continue;
-            unsigned ifindex = if_nametoindex(jifa->ifa_name);
-            if (ifindex == 0) continue;
+            unsigned ifindex =
+                ((struct sockaddr_in6*)jifa->ifa_addr)->sin6_scope_id;
             bool seen = false;
             for (size_t j = 0; j < joined_count; j++) {
               if (joined[j] == ifindex) { seen = true; break; }
@@ -849,23 +827,28 @@ int mdns_start(mdns_t* responder) {
             if (seen) continue;
             struct ipv6_mreq mreq6;
             memset(&mreq6, 0, sizeof(mreq6));
-            memcpy(&mreq6.ipv6mr_multiaddr, ff02_fb, 16);
+            memcpy(&mreq6.ipv6mr_multiaddr, _mdns_multicast_v6, 16);
             mreq6.ipv6mr_interface = ifindex;
             if (setsockopt(sock6, IPPROTO_IPV6, IPV6_JOIN_GROUP,
                            &mreq6, sizeof(mreq6)) < 0) {
               join_failures++;
               log_warn("mdns: IPV6_JOIN_GROUP on %s failed: %s",
                        jifa->ifa_name, strerror(errno));
-            } else if (joined_count < 64) {
-              joined[joined_count++] = ifindex;
+            } else {
+              successful_joins++;
+              if (joined_count < 64) {
+                joined[joined_count++] = ifindex;
+              }
             }
           }
           freeifaddrs(join_ifaces);
         }
-        if (joined_count == 0 && join_failures == 0) {
+        if (successful_joins == 0 && join_failures == 0) {
           log_warn("mdns: no IPv6 interfaces to join — v6 announce disabled");
           close(sock6);
         } else {
+          /* All joins failed keeps the socket in announce-only mode (our
+             announces still send; other peers' announces won't arrive). */
           /* Receiver scope resolution: need the arriving interface. */
           int pktinfo = 1;
           (void)setsockopt(sock6, IPPROTO_IPV6, IPV6_RECVPKTINFO,
