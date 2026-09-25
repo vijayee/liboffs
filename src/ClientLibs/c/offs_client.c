@@ -9,6 +9,9 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <ws2tcpip.h>
+/* iphlpapi.h (not ws2tcpip.h) provides IF_INDEXTONAME/IF_NAMESIZE used to
+ * carry the zone of a scoped DNS result into the address string. */
+#include <iphlpapi.h>
 #endif
 
 #include "offs_client.h"
@@ -31,6 +34,7 @@
 #include <sys/time.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <net/if.h>
 #include <poll.h>
 #include <errno.h>
 #endif
@@ -3072,6 +3076,20 @@ buffer_t* offs_http_get(const char* url) {
     if (res->ai_family == AF_INET6) {
       struct sockaddr_in6* sin6 = (struct sockaddr_in6*)res->ai_addr;
       inet_ntop(AF_INET6, &sin6->sin6_addr, ip_str, sizeof(ip_str));
+      if (sin6->sin6_scope_id != 0) {
+        /* Scoped DNS result (zone-attached AAAA answer): re-attach the zone
+           so platform_address_parse below restores it. Same convention as
+           platform_address_to_string — interface name, numeric fallback. */
+        char ifname[IF_NAMESIZE];
+        size_t used = strlen(ip_str);
+        if (used + 1 + (IF_NAMESIZE - 1) < sizeof(ip_str) &&
+            if_indextoname(sin6->sin6_scope_id, ifname) != NULL) {
+          snprintf(ip_str + used, sizeof(ip_str) - used, "%%%s", ifname);
+        } else {
+          snprintf(ip_str + used, sizeof(ip_str) - used, "%%%u",
+                   (unsigned)sin6->sin6_scope_id);
+        }
+      }
       resolved_family = PLATFORM_AF_INET6;
     } else {
       struct sockaddr_in* sin = (struct sockaddr_in*)res->ai_addr;
