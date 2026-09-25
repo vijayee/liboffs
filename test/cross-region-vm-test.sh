@@ -84,7 +84,7 @@ for i in "${!NODE_NAMES[@]}"; do
   for attempt in $(seq 1 60); do
     if curl -sf "http://${IP}:23402/health" -o /dev/null 2>/dev/null; then
       KEY=$(az vm run-command invoke --resource-group "${NODE_RG}" --name "${NODE_NAMES[$i]}" \
-        --command-id RunShellScript --scripts "docker logs offs-offsd 2>&1 | grep 'Generated API key' | head -1 | sed 's/.*: //'" 2>/dev/null | \
+        --command-id RunShellScript --scripts "docker logs offs-offsd 2>&1 | grep 'Generated API key' | head -1" 2>/dev/null | \
         python3 -c "import json,sys; d=json.load(sys.stdin); m=d['value'][0]['message']; lines=[l for l in m.split(chr(10)) if 'Generated' in l]; print(lines[0].split(': ')[-1].strip() if lines else '')" 2>/dev/null)
       NODE_KEYS[$i]="${KEY}"
       log "  ${NODE_NAMES[$i]} (${IP}): ready, key=${KEY:0:16}..."
@@ -180,7 +180,7 @@ done
 log "  Waiting 90s for reconnection from persisted peer_store..."
 sleep 90
 NEW_KEY=$(az vm run-command invoke --resource-group "${NODE_RG}" --name "${NODE_NAMES[0]}" --command-id RunShellScript \
-  --scripts "docker logs offs-offsd 2>&1 | grep 'Generated API key' | tail -1 | sed 's/.*: //'" 2>/dev/null | \
+  --scripts "docker logs offs-offsd 2>&1 | grep 'Generated API key' | tail -1" 2>/dev/null | \
   python3 -c "import json,sys; d=json.load(sys.stdin); m=d['value'][0]['message']; lines=[l for l in m.split(chr(10)) if 'Generated' in l]; print(lines[0].split(': ')[-1].strip() if lines else '')" 2>/dev/null)
 PEERS_AFTER=$(curl -s -H "Authorization: Bearer ${NEW_KEY}" "http://${RESTART_IP}:23402/peers" 2>/dev/null | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
 log "  ${NODE_NAMES[0]}: ${PEERS_AFTER} peers after restart"

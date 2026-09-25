@@ -38,7 +38,7 @@ fail() { log "  ❌ FAIL: $1"; FAIL=$((FAIL+1)); TOTAL=$((TOTAL+1)); }
 BOOTSTRAP_KEY="${BOOTSTRAP_KEY:-}"
 if [ -z "${BOOTSTRAP_KEY}" ]; then
   BOOTSTRAP_KEY=$(az vm run-command invoke --resource-group offs-relay-rg2 --name offs-bootstrap-vm \
-    --command-id RunShellScript --scripts "docker logs offs-offsd 2>&1 | grep 'Generated API key' | tail -1 | sed 's/.*: //'" 2>/dev/null | \
+    --command-id RunShellScript --scripts "docker logs offs-offsd 2>&1 | grep 'Generated API key' | tail -1" 2>/dev/null | \
     python3 -c "import json,sys; d=json.load(sys.stdin); m=d['value'][0]['message']; [print(l.split(': ')[-1].strip()) for l in m.split(chr(10)) if 'Generated API key' in l]" 2>/dev/null || echo "")
 fi
 log "  Bootstrap API key: ${BOOTSTRAP_KEY:0:16}..."
