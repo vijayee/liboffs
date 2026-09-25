@@ -285,6 +285,9 @@ static int _parse_url(const char* url, char* host, size_t host_size,
   if (*start == '[') {
     const char* closing = strchr(start, ']');
     if (closing == NULL) return -1; /* unclosed '[' */
+    /* The end-of-authority '/' must come after the closing ']'; a '/' inside
+     * the literal (e.g. "http://[::1/]/") means the '[' was never closed. */
+    if (slash != NULL && slash < closing) return -1;
     host_start = start + 1;
     host_len = (size_t)(closing - host_start);
     if (host_len == 0) return -1;
@@ -313,7 +316,7 @@ static int _parse_url(const char* url, char* host, size_t host_size,
   }
 
   if (port_start != NULL) {
-    const char* port_end = strchr(port_start, '\0');
+    const char* port_end = port_start + strlen(port_start);
     if (slash != NULL && slash > port_start) port_end = slash;
     if (_parse_port(port_start, port_end, port) != 0) return -1;
   }
