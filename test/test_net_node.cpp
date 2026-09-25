@@ -179,6 +179,37 @@ TEST(TestNetNodeAddr, UnscopedV6HasNoScope) {
   net_node_destroy(node);
 }
 
+TEST(TestNetNodeAddr, ScopedThenUnscopedClearsScope) {
+  net_node_t* node = net_node_create_unidentified(0, 0);
+  platform_address_t scoped;
+  memset(&scoped, 0, sizeof(scoped));
+  scoped.family = PLATFORM_AF_INET6;
+  scoped.inet6.addr[0] = 0xFE;
+  scoped.inet6.addr[1] = 0x80;
+  scoped.inet6.addr[15] = 1;
+  scoped.inet6.scope_id = 7;
+  net_node_set_platform_addr(node, &scoped);
+  ASSERT_EQ(node->scope_valid, 1);
+
+  platform_address_t unscoped;
+  memset(&unscoped, 0, sizeof(unscoped));
+  unscoped.family = PLATFORM_AF_INET6;
+  unscoped.inet6.addr[15] = 1;  /* ::1 */
+  net_node_set_platform_addr(node, &unscoped);
+  EXPECT_EQ(node->scope_valid, 0);
+  EXPECT_EQ(node->scope_id, 0u);
+
+  /* And a switch back to v4 also clears. */
+  platform_address_t v4;
+  memset(&v4, 0, sizeof(v4));
+  v4.family = PLATFORM_AF_INET;
+  v4.inet.addr = 0x0100007F;
+  net_node_set_platform_addr(node, &v4);
+  EXPECT_EQ(node->scope_valid, 0);
+  EXPECT_EQ(node->scope_id, 0u);
+  net_node_destroy(node);
+}
+
 TEST(TestNetNodeAddr, RendvScopeStored) {
   net_node_t* node = net_node_create_unidentified(0, 0);
   platform_address_t in;
