@@ -330,6 +330,9 @@ TEST(TestPeerInfoLanV6, HostCandidatesParseAndIncludeV6WhenPresent) {
     if (strchr(info.addresses[i].host, ':') != NULL) saw_v6 = true;
   }
   if (have_v6) EXPECT_TRUE(saw_v6);
+  /* Note: enumeration stops at the HOST reserve; if getifaddrs ordered >=5
+     v4 LAN addresses before any v6 one, this could false-fail on exotic
+     hosts. Not observed on CI hosts. */
   peer_info_destroy(&info);
   _free_fake_network(fake);
 }

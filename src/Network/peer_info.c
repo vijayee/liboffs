@@ -371,6 +371,25 @@ static void _peer_info_ipv4_to_string(uint32_t addr_host_order, char* out, size_
   snprintf(out, out_size, "%u.%u.%u.%u", octet0, octet1, octet2, octet3);
 }
 
+/* Append a scoped v6 LAN candidate from a sockaddr_in6. Skips loopback,
+   v4-mapped, and non-LAN addresses; formats with the %zone suffix.
+   Returns 1 when the address is skipped (not an error), otherwise the
+   _peer_info_append_address result (0 appended, -1 failed). */
+static int _peer_info_append_v6_host(peer_info_t* info, uint16_t port,
+                                     const struct sockaddr_in6* sin6) {
+  if (IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr)) return 1;   /* skip */
+  if (IN6_IS_ADDR_V4MAPPED(&sin6->sin6_addr)) return 1;   /* skip */
+  if (!_peer_info_is_lan_v6(sin6->sin6_addr.s6_addr)) return 1;
+  platform_address_t v6;
+  memset(&v6, 0, sizeof(v6));
+  v6.family = PLATFORM_AF_INET6;
+  memcpy(v6.inet6.addr, sin6->sin6_addr.s6_addr, 16);
+  v6.inet6.scope_id = sin6->sin6_scope_id;
+  char ip_str[128];
+  if (platform_address_to_string(&v6, ip_str, sizeof(ip_str)) != 0) return 1;
+  return _peer_info_append_address(info, PEER_ADDR_HOST, ip_str, port, 0);
+}
+
 #ifdef _WIN32
 static int _peer_info_collect_host_addresses(peer_info_t* info, uint16_t port) {
   ULONG buffer_size = 15000;
@@ -402,17 +421,7 @@ static int _peer_info_collect_host_addresses(peer_info_t* info, uint16_t port) {
       if (info->address_count >= PEER_INFO_MAX_ADDRESSES - _PEER_INFO_HOST_RESERVE) break;
       if (sock_addr->sa_family == AF_INET6) {
         struct sockaddr_in6* sin6 = (struct sockaddr_in6*)sock_addr;
-        if (IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr)) continue;
-        if (IN6_IS_ADDR_V4MAPPED(&sin6->sin6_addr)) continue;
-        if (!_peer_info_is_lan_v6(sin6->sin6_addr.s6_addr)) continue;
-        platform_address_t v6;
-        memset(&v6, 0, sizeof(v6));
-        v6.family = PLATFORM_AF_INET6;
-        memcpy(v6.inet6.addr, sin6->sin6_addr.s6_addr, 16);
-        v6.inet6.scope_id = sin6->sin6_scope_id;
-        char ip_str[128];
-        if (platform_address_to_string(&v6, ip_str, sizeof(ip_str)) != 0) continue;
-        if (_peer_info_append_address(info, PEER_ADDR_HOST, ip_str, port, 0) == 0) {
+        if (_peer_info_append_v6_host(info, port, sin6) == 0) {
           added++;
         }
         continue;
@@ -447,26 +456,18 @@ static int _peer_info_collect_host_addresses(peer_info_t* info, uint16_t port) {
   for (struct ifaddrs* interface = interfaces; interface != NULL;
        interface = interface->ifa_next) {
     if (interface->ifa_addr == NULL) continue;
+    /* Skip downed interfaces entirely — a downed interface can still carry
+       a stale global v6 (and its v4 LAN addresses are equally unusable). */
+    if ((interface->ifa_flags & IFF_UP) == 0) continue;
     if (info->address_count >= PEER_INFO_MAX_ADDRESSES - _PEER_INFO_HOST_RESERVE) break;
     if (interface->ifa_addr->sa_family == AF_INET6) {
       struct sockaddr_in6* sin6 = (struct sockaddr_in6*)interface->ifa_addr;
-      if (IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr)) continue;
-      if (IN6_IS_ADDR_V4MAPPED(&sin6->sin6_addr)) continue;
-      if (!_peer_info_is_lan_v6(sin6->sin6_addr.s6_addr)) continue;
-      platform_address_t v6;
-      memset(&v6, 0, sizeof(v6));
-      v6.family = PLATFORM_AF_INET6;
-      memcpy(v6.inet6.addr, sin6->sin6_addr.s6_addr, 16);
-      v6.inet6.scope_id = sin6->sin6_scope_id;
-      char ip_str[128];
-      if (platform_address_to_string(&v6, ip_str, sizeof(ip_str)) != 0) continue;
-      if (_peer_info_append_address(info, PEER_ADDR_HOST, ip_str, port, 0) == 0) {
+      if (_peer_info_append_v6_host(info, port, sin6) == 0) {
         added++;
       }
       continue;
     }
     if (interface->ifa_addr->sa_family != AF_INET) continue;
-    if ((interface->ifa_flags & IFF_UP) == 0) continue;
     if ((interface->ifa_flags & IFF_LOOPBACK) != 0) continue;
 
     struct sockaddr_in* sin = (struct sockaddr_in*)interface->ifa_addr;
