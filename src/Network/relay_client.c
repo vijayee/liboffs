@@ -311,6 +311,16 @@ static QUIC_STATUS QUIC_API _relay_client_connection_callback(
       log_error("relay_client: connection shutdown by peer, "
                "error_code=0x%lx",
                (unsigned long)event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode);
+      // A relay restart surfaces as a graceful peer-initiated close (the
+      // server never gets to send a transport error) — schedule the same
+      // bounded retry as the transport-initiated path, or a bounced relay
+      // orphans the client until process restart.
+      if (!client->shutdown_pending &&
+          client->retry_count < client->max_retries) {
+        client->retry_count++;
+        log_info("relay_client: scheduling retry %u/%u",
+                 client->retry_count, client->max_retries);
+      }
       break;
     }
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
