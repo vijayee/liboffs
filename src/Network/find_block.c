@@ -375,6 +375,12 @@ find_block_result_e find_block_execute(
   // the query dying unrouted. Cycle-safety comes from the path/visited
   // dedup; the TTL bounds the flood.
   if (conn_mgr != NULL && state->ttl > 0) {
+    size_t flood_connected = 0;
+    for (size_t idx = 0; idx < conn_mgr->peer_count; idx++) {
+      peer_connection_t* peer = conn_mgr->peers[idx];
+      if (peer != NULL && peer->connected) flood_connected++;
+    }
+    fprintf(stderr, "FB-TRACE: flood entered, connected=%zu ttl=%d\n", flood_connected, state->ttl);
     size_t flood_count = 0;
     for (size_t index = 0;
          index < conn_mgr->peer_count && flood_count < FIND_BLOCK_FORWARD_FANOUT;
@@ -401,6 +407,7 @@ find_block_result_e find_block_execute(
       // peer without a ring entry has no shell — skip it (its ring insert
       // happens on the next salutation exchange).
       net_node_t* flood_hop = ring_set_find_by_id(rings, &peer->remote_node_id);
+      fprintf(stderr, "FB-TRACE: flood candidate, ring=%d\n", flood_hop != NULL);
       if (flood_hop == NULL) continue;
       next_hops[flood_count++] = flood_hop;
     }
