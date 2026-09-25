@@ -203,9 +203,12 @@ int topology_report_decode(cbor_item_t* item,
     if (key_len == 7 && strncmp(key, "node_id", 7) == 0) {
       _cbor_to_node_id(pairs[index].value, reporter_id_out);
     } else if (key_len == 12 && strncmp(key, "timestamp_ms", 12) == 0) {
-      *timestamp_ms_out = cbor_get_uint64(pairs[index].value);
+      *timestamp_ms_out = cbor_isa_uint(pairs[index].value)
+                            ? cbor_get_int(pairs[index].value) : 0;
     } else if (key_len == 17 && strncmp(key, "total_connections", 17) == 0) {
-      metrics_out->total_connections = (size_t)cbor_get_uint64(pairs[index].value);
+      metrics_out->total_connections = cbor_isa_uint(pairs[index].value)
+                                         ? (size_t)cbor_get_int(pairs[index].value)
+                                         : 0;
     } else if (key_len == 18 && strncmp(key, "avg_hebbian_weight", 18) == 0) {
       metrics_out->avg_hebbian_weight = (float)cbor_float_get_float8(pairs[index].value);
     } else if (key_len == 5 && strncmp(key, "peers", 5) == 0) {
@@ -235,7 +238,9 @@ int topology_report_decode(cbor_item_t* item,
               } else if (pklen == 9 && strncmp(pkey, "connected", 9) == 0) {
                 snap->connected = cbor_get_bool(ppairs[pidx].value);
               } else if (pklen == 15 && strncmp(pkey, "connected_at_ms", 15) == 0) {
-                snap->connected_at_ms = (int64_t)cbor_get_uint64(ppairs[pidx].value);
+                snap->connected_at_ms = cbor_isa_uint(ppairs[pidx].value)
+                                          ? (int64_t)cbor_get_int(ppairs[pidx].value)
+                                          : 0;
               }
             }
           }
