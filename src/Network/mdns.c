@@ -12,10 +12,12 @@
 #include "../Util/log.h"
 #include "../Util/base58.h"
 #include "../Platform/platform_thread.h"
+#include "../Platform/platform_socket.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <time.h>
+#include <stdbool.h>
 
 #ifndef _WIN32
 
@@ -25,6 +27,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <ifaddrs.h>
+#include <net/if.h>
 
 /* mDNS multicast group + port (RFC 6762). */
 #define MDNS_MULTICAST_ADDR  "224.0.0.251"
@@ -179,6 +182,37 @@ static uint32_t _find_lan_ipv4(void) {
     if ((addr >> 16) == 0xA9FE) continue;
     result = addr;
     break;
+  }
+  freeifaddrs(ifaces);
+  return result;
+}
+
+/* Find the best v6 LAN address: global-unicast 2000::/3, then ULA fc00::/7,
+   then link-local fe80::/10. Returns the 16 address bytes plus the owning
+   interface's scope/index. Returns 0 on success, -1 if none found. */
+static int _find_lan_v6(uint8_t out_addr[16], uint32_t* out_scope) {
+  struct ifaddrs* ifaces = NULL;
+  if (getifaddrs(&ifaces) != 0) return -1;
+  int best_class = -1;  /* 0=global 1=ula 2=link-local */
+  int result = -1;
+  for (struct ifaddrs* ifa = ifaces; ifa != NULL; ifa = ifa->ifa_next) {
+    if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET6) continue;
+    struct sockaddr_in6* sa = (struct sockaddr_in6*)ifa->ifa_addr;
+    if (IN6_IS_ADDR_LOOPBACK(&sa->sin6_addr)) continue;
+    if (IN6_IS_ADDR_V4MAPPED(&sa->sin6_addr)) continue;
+    const uint8_t* b = sa->sin6_addr.s6_addr;
+    int class;
+    if ((b[0] & 0xE0) == 0x20) class = 0;
+    else if ((b[0] & 0xFE) == 0xFC) class = 1;
+    else if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) class = 2;
+    else continue;  /* multicast / reserved */
+    if (best_class == -1 || class < best_class) {
+      best_class = class;
+      memcpy(out_addr, b, 16);
+      *out_scope = sa->sin6_scope_id;
+      result = 0;
+      if (best_class == 0) break;  /* global wins immediately */
+    }
   }
   freeifaddrs(ifaces);
   return result;
@@ -384,7 +418,107 @@ struct mdns_t {
   platform_thread_t* thread;
   ATOMIC(uint8_t) running;
   int sock_fd;
+  int sock6_fd;  /* AF_INET6 mDNS socket; -1 when unavailable */
 };
+
+/* Receive one packet on an mDNS socket. On the v6 socket, extracts the
+   arriving interface index from IPV6_PKTINFO. Returns the byte count or -1
+   (with *arriving_if set when available). The caller must set
+   src->ss_family = AF_INET6 before the call to select the recvmsg path. */
+static ssize_t _mdns_recv(int fd, uint8_t* buf, size_t buf_len,
+                          struct sockaddr_storage* src, unsigned* arriving_if) {
+  *arriving_if = 0;
+  if (src->ss_family == AF_INET6) {
+    struct iovec iov;
+    iov.iov_base = buf;
+    iov.iov_len = buf_len;
+    char cmsg_buf[256];
+    struct msghdr mh;
+    memset(&mh, 0, sizeof(mh));
+    mh.msg_name = src;
+    mh.msg_namelen = sizeof(*src);
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    mh.msg_control = cmsg_buf;
+    mh.msg_controllen = sizeof(cmsg_buf);
+    ssize_t received = recvmsg(fd, &mh, 0);
+    if (received < 0) return -1;
+    for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(&mh); cmsg != NULL;
+         cmsg = CMSG_NXTHDR(&mh, cmsg)) {
+      if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_PKTINFO) {
+        struct in6_pktinfo* pktinfo = (struct in6_pktinfo*)CMSG_DATA(cmsg);
+        *arriving_if = pktinfo->ipi6_ifindex;
+      }
+    }
+    return received;
+  }
+  socklen_t src_len = sizeof(*src);
+  return recvfrom(fd, buf, buf_len, 0, (struct sockaddr*)src, &src_len);
+}
+
+/* Admit a v6-discovered peer: link-local addresses get the arriving
+   interface's scope (AAAA rdata carries none); global/ULA are taken as-is. */
+static void _mdns_admit_v6_peer(mdns_t* responder, const char* peer_b58,
+                                const uint8_t addr6[16], uint16_t peer_port,
+                                unsigned arriving_if) {
+  if (responder->network == NULL) return;
+  /* Ignore our own broadcasts. */
+  if (responder->network->authority != NULL) {
+    char self_b58[256];
+    if (base58_encode(responder->network->authority->local_id.hash,
+                      NODE_ID_HASH_SIZE, self_b58, sizeof(self_b58)) == 0 &&
+        strcmp(self_b58, peer_b58) == 0) {
+      return;
+    }
+  }
+  node_id_t peer_id;
+  memset(&peer_id, 0, sizeof(peer_id));
+  if (node_id_from_string(peer_b58, &peer_id) != 0) return;
+
+  bool is_link_local = (addr6[0] == 0xFE) && ((addr6[1] & 0xC0) == 0x80);
+  platform_address_t peer_addr;
+  memset(&peer_addr, 0, sizeof(peer_addr));
+  peer_addr.family = PLATFORM_AF_INET6;
+  memcpy(peer_addr.inet6.addr, addr6, 16);
+  if (is_link_local) {
+    if (arriving_if == 0) {
+      log_debug("mdns: dropping link-local AAAA without scope knowledge");
+      return;
+    }
+    peer_addr.inet6.scope_id = arriving_if;
+  }
+  char peer_host[128];
+  if (platform_address_to_string(&peer_addr, peer_host, sizeof(peer_host)) != 0) {
+    return;
+  }
+
+  uint16_t connect_port = peer_port;
+  if (connect_port == 0 && responder->network->quic_listener != NULL) {
+    connect_port = responder->network->quic_listener->listen_port;
+  }
+  if (connect_port == 0) return;
+
+  peer_info_t info;
+  memset(&info, 0, sizeof(info));
+  info.node_id = peer_id;
+  info.addresses = get_clear_memory(sizeof(peer_address_t));
+  if (info.addresses == NULL) return;
+  info.address_count = 1;
+  info.addresses[0].type = PEER_ADDR_HOST;
+  info.addresses[0].port = connect_port;
+  info.addresses[0].host = strdup(peer_host);
+  if (info.addresses[0].host == NULL) {
+    free(info.addresses);
+    return;
+  }
+
+  log_info("mdns: discovered peer %s at %s:%u via mDNS v6",
+           peer_b58, peer_host, connect_port);
+  (void)network_connect_peer_candidates(responder->network, &peer_id,
+                                        info.addresses, info.address_count,
+                                        false);
+  peer_info_destroy(&info);
+}
 
 /* Broadcast thread: periodically send an announce packet and listen for
    other nodes' broadcasts. Loops until running is cleared. */
@@ -400,6 +534,10 @@ static void* _mdns_thread_fn(void* arg) {
   recv_timeout.tv_usec = 0;
   setsockopt(responder->sock_fd, SOL_SOCKET, SO_RCVTIMEO,
             &recv_timeout, sizeof(recv_timeout));
+  if (responder->sock6_fd >= 0) {
+    setsockopt(responder->sock6_fd, SOL_SOCKET, SO_RCVTIMEO,
+               &recv_timeout, sizeof(recv_timeout));
+  }
 
   struct sockaddr_in multicast_addr;
   memset(&multicast_addr, 0, sizeof(multicast_addr));
@@ -408,6 +546,15 @@ static void* _mdns_thread_fn(void* arg) {
   if (inet_pton(AF_INET, MDNS_MULTICAST_ADDR, &multicast_addr.sin_addr) != 1) {
     log_error("mdns: inet_pton failed for multicast group");
     return NULL;
+  }
+
+  struct sockaddr_in6 multicast_addr6;
+  memset(&multicast_addr6, 0, sizeof(multicast_addr6));
+  multicast_addr6.sin6_family = AF_INET6;
+  multicast_addr6.sin6_port = htons(MDNS_MULTICAST_PORT);
+  {
+    static const uint8_t ff02_fb[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0xFB};
+    memcpy(&multicast_addr6.sin6_addr, ff02_fb, 16);
   }
 
   uint8_t recv_buf[MDNS_MAX_PACKET];
@@ -428,9 +575,9 @@ static void* _mdns_thread_fn(void* arg) {
         char node_id_b58[256];
         if (base58_encode(responder->network->authority->local_id.hash,
                           NODE_ID_HASH_SIZE, node_id_b58, sizeof(node_id_b58)) == 0) {
+          uint16_t quic_port = responder->network->quic_listener->listen_port;
           uint32_t lan_ip = _find_lan_ipv4();
           if (lan_ip != 0) {
-            uint16_t quic_port = responder->network->quic_listener->listen_port;
             int pkt_len = _mdns_build_announce(node_id_b58, lan_ip, quic_port,
                                                 send_buf, sizeof(send_buf));
             if (pkt_len > 0) {
@@ -442,11 +589,33 @@ static void* _mdns_thread_fn(void* arg) {
               }
             }
           }
+
+          uint8_t lan_v6[16];
+          uint32_t lan_v6_scope = 0;
+          if (responder->sock6_fd >= 0 &&
+              _find_lan_v6(lan_v6, &lan_v6_scope) == 0) {
+            int pkt_len = _mdns_build_announce_v6(node_id_b58, lan_v6,
+                                                  quic_port, send_buf,
+                                                  sizeof(send_buf));
+            if (pkt_len > 0) {
+              ssize_t sent = sendto(responder->sock6_fd, send_buf,
+                                    (size_t)pkt_len, 0,
+                                    (struct sockaddr*)&multicast_addr6,
+                                    sizeof(multicast_addr6));
+              if (sent < 0) {
+                log_error("mdns: v6 sendto failed: %s", strerror(errno));
+              }
+            }
+          }
         }
       }
     }
 
-    /* Listen for incoming mDNS packets. */
+    /* Listen for incoming mDNS packets on the v4 socket. The do/while(0)
+       turns each per-packet skip path into a fall-through so the v6 socket
+       below is serviced every iteration; the v4 handling itself is
+       unchanged. */
+    do {
     struct sockaddr_storage src_addr;
     socklen_t src_len = sizeof(src_addr);
     ssize_t recv_len = recvfrom(responder->sock_fd, recv_buf, sizeof(recv_buf),
@@ -455,9 +624,9 @@ static void* _mdns_thread_fn(void* arg) {
       if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
         log_error("mdns: recvfrom failed: %s", strerror(errno));
       }
-      continue;
+      break;
     }
-    if (recv_len < 12 || (size_t)recv_len > sizeof(recv_buf)) continue;
+    if (recv_len < 12 || (size_t)recv_len > sizeof(recv_buf)) break;
 
     char peer_b58[256];
     uint32_t peer_ip = 0;
@@ -470,21 +639,21 @@ static void* _mdns_thread_fn(void* arg) {
                               peer_b58, sizeof(peer_b58),
                               &peer_ip, &peer_port,
                               peer_addr6, &peer_have_v6) != 0) {
-      continue;  /* not a liboffs announce, or malformed */
+      break;  /* not a liboffs announce, or malformed */
     }
 
     /* A v6-only announce carries no A record, so peer_ip is 0 — the v4
        connect path below has no address to format. Skip candidate
        construction; wiring the AAAA into a v6 candidate on the v6 socket is
        deferred (see the parse above). */
-    if (peer_ip == 0) continue;
+    if (peer_ip == 0) break;
 
     /* Ignore our own broadcasts. */
     if (responder->network != NULL && responder->network->authority != NULL) {
       char self_b58[256];
       if (base58_encode(responder->network->authority->local_id.hash,
                         NODE_ID_HASH_SIZE, self_b58, sizeof(self_b58)) == 0) {
-        if (strcmp(self_b58, peer_b58) == 0) continue;
+        if (strcmp(self_b58, peer_b58) == 0) break;
       }
     }
 
@@ -492,7 +661,7 @@ static void* _mdns_thread_fn(void* arg) {
        network_connect_peer_candidates with a HOST candidate. */
     node_id_t peer_id;
     memset(&peer_id, 0, sizeof(peer_id));
-    if (node_id_from_string(peer_b58, &peer_id) != 0) continue;
+    if (node_id_from_string(peer_b58, &peer_id) != 0) break;
 
     /* Format the peer's IP as a dotted-quad string. */
     char peer_host[16];
@@ -510,7 +679,7 @@ static void* _mdns_thread_fn(void* arg) {
     if (connect_port == 0 && responder->network->quic_listener != NULL) {
       connect_port = responder->network->quic_listener->listen_port;
     }
-    if (connect_port == 0) continue;  /* nothing to connect to */
+    if (connect_port == 0) break;  /* nothing to connect to */
 
     /* Build a single-address peer_info and call
        network_connect_peer_candidates. The peer_address_t host string is
@@ -519,14 +688,14 @@ static void* _mdns_thread_fn(void* arg) {
     memset(&info, 0, sizeof(info));
     info.node_id = peer_id;
     info.addresses = get_clear_memory(sizeof(peer_address_t));
-    if (info.addresses == NULL) continue;
+    if (info.addresses == NULL) break;
     info.address_count = 1;
     info.addresses[0].type = PEER_ADDR_HOST;
     info.addresses[0].port = connect_port;
     info.addresses[0].host = strdup(peer_host);
     if (info.addresses[0].host == NULL) {
       free(info.addresses);
-      continue;
+      break;
     }
 
     log_info("mdns: discovered peer %s at %s:%u via mDNS",
@@ -535,6 +704,32 @@ static void* _mdns_thread_fn(void* arg) {
                                           info.addresses, info.address_count,
                                           false);
     peer_info_destroy(&info);
+    } while (0);
+
+    /* v6 socket: parse AAAA announces and apply scope to link-locals. */
+    if (responder->sock6_fd >= 0) {
+      struct sockaddr_storage src6;
+      memset(&src6, 0, sizeof(src6));
+      src6.ss_family = AF_INET6;  /* selects the recvmsg path in _mdns_recv */
+      unsigned arriving_if = 0;
+      ssize_t recv6_len = _mdns_recv(responder->sock6_fd, recv_buf,
+                                     sizeof(recv_buf), &src6, &arriving_if);
+      if (recv6_len >= 12 && (size_t)recv6_len <= sizeof(recv_buf)) {
+        char peer_b58_v6[256];
+        uint32_t peer_ip = 0;
+        uint16_t peer_port = 0;
+        uint8_t peer_v6[16];
+        int peer_has_v6 = 0;
+        if (_mdns_parse_response((const uint8_t*)recv_buf, (size_t)recv6_len,
+                                  peer_b58_v6, sizeof(peer_b58_v6), &peer_ip,
+                                  &peer_port, peer_v6,
+                                  &peer_has_v6) == 0 &&
+            peer_has_v6) {
+          _mdns_admit_v6_peer(responder, peer_b58_v6, peer_v6, peer_port,
+                              arriving_if);
+        }
+      }
+    }
   }
   return NULL;
 }
@@ -545,6 +740,7 @@ mdns_t* mdns_create(struct network_t* network, scheduler_pool_t* pool) {
   if (responder == NULL) return NULL;
   responder->network = network;
   responder->sock_fd = -1;
+  responder->sock6_fd = -1;
   atomic_store(&responder->running, 0);
   return responder;
 }
@@ -613,6 +809,77 @@ int mdns_start(mdns_t* responder) {
     log_warn("mdns: IP_MULTICAST_LOOP failed: %s", strerror(errno));
   }
 
+  /* v6 socket — non-fatal on failure: log once and stay v4-only. */
+  responder->sock6_fd = -1;
+  {
+    int sock6 = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (sock6 < 0) {
+      log_warn("mdns: IPv6 socket unavailable (%s) — staying v4-only",
+               strerror(errno));
+    } else {
+      int v6only = 1;
+      (void)setsockopt(sock6, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+      int reuse6 = 1;
+      (void)setsockopt(sock6, SOL_SOCKET, SO_REUSEADDR, &reuse6, sizeof(reuse6));
+      struct sockaddr_in6 bind6;
+      memset(&bind6, 0, sizeof(bind6));
+      bind6.sin6_family = AF_INET6;
+      bind6.sin6_port = htons(MDNS_MULTICAST_PORT);
+      if (bind(sock6, (struct sockaddr*)&bind6, sizeof(bind6)) < 0) {
+        log_warn("mdns: IPv6 bind failed: %s", strerror(errno));
+        close(sock6);
+      } else {
+        /* Join ff02::fb on every IPv6-capable interface. */
+        static const uint8_t ff02_fb[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0xFB};
+        struct ifaddrs* join_ifaces = NULL;
+        unsigned joined[64];
+        size_t joined_count = 0;
+        int join_failures = 0;
+        if (getifaddrs(&join_ifaces) == 0) {
+          for (struct ifaddrs* jifa = join_ifaces; jifa != NULL;
+               jifa = jifa->ifa_next) {
+            if (jifa->ifa_addr == NULL ||
+                jifa->ifa_addr->sa_family != AF_INET6) continue;
+            unsigned ifindex = if_nametoindex(jifa->ifa_name);
+            if (ifindex == 0) continue;
+            bool seen = false;
+            for (size_t j = 0; j < joined_count; j++) {
+              if (joined[j] == ifindex) { seen = true; break; }
+            }
+            if (seen) continue;
+            struct ipv6_mreq mreq6;
+            memset(&mreq6, 0, sizeof(mreq6));
+            memcpy(&mreq6.ipv6mr_multiaddr, ff02_fb, 16);
+            mreq6.ipv6mr_interface = ifindex;
+            if (setsockopt(sock6, IPPROTO_IPV6, IPV6_JOIN_GROUP,
+                           &mreq6, sizeof(mreq6)) < 0) {
+              join_failures++;
+              log_warn("mdns: IPV6_JOIN_GROUP on %s failed: %s",
+                       jifa->ifa_name, strerror(errno));
+            } else if (joined_count < 64) {
+              joined[joined_count++] = ifindex;
+            }
+          }
+          freeifaddrs(join_ifaces);
+        }
+        if (joined_count == 0 && join_failures == 0) {
+          log_warn("mdns: no IPv6 interfaces to join — v6 announce disabled");
+          close(sock6);
+        } else {
+          /* Receiver scope resolution: need the arriving interface. */
+          int pktinfo = 1;
+          (void)setsockopt(sock6, IPPROTO_IPV6, IPV6_RECVPKTINFO,
+                           &pktinfo, sizeof(pktinfo));
+          /* Multicast loop for the single-node round trip, as on v4. */
+          int loop6 = 1;
+          (void)setsockopt(sock6, IPPROTO_IPV6, IPV6_MULTICAST_LOOP,
+                           &loop6, sizeof(loop6));
+          responder->sock6_fd = sock6;
+        }
+      }
+    }
+  }
+
   responder->sock_fd = sock;
   atomic_store(&responder->running, 1);
   responder->thread = platform_thread_create(_mdns_thread_fn, responder);
@@ -621,6 +888,10 @@ int mdns_start(mdns_t* responder) {
     atomic_store(&responder->running, 0);
     close(sock);
     responder->sock_fd = -1;
+    if (responder->sock6_fd >= 0) {
+      close(responder->sock6_fd);
+      responder->sock6_fd = -1;
+    }
     return -1;
   }
   return 0;
@@ -637,6 +908,10 @@ void mdns_stop(mdns_t* responder) {
   if (responder->sock_fd >= 0) {
     close(responder->sock_fd);
     responder->sock_fd = -1;
+  }
+  if (responder->sock6_fd >= 0) {
+    close(responder->sock6_fd);
+    responder->sock6_fd = -1;
   }
 }
 
