@@ -66,17 +66,21 @@ az group create --name "${NODE_RG}" --location eastus -o table 2>&1 | tail -2
 log "=== Creating per-region storage accounts and shares ==="
 declare -A REGION_STORAGE_ACCOUNT
 declare -A REGION_STORAGE_KEY
+# Pre-provisioned per-region accounts (global names, created manually via
+# az storage account create — region-restricted locations hang the create).
+REGION_ACCOUNT_NAME_eastus="offstest0306east"
+REGION_ACCOUNT_NAME_westeurope=""
+REGION_ACCOUNT_NAME_brazilsouth="offstest0306braz"
+REGION_ACCOUNT_NAME_eastasia="offstest0306east2"
+REGION_ACCOUNT_NAME_centralus="offstest0306cent"
 for region in "${REGIONS[@]}"; do
-  ACCOUNT="offstest$(echo "${region}" | tr -d '-')"
-  # Region-restricted locations (e.g. westeurope for this subscription) hang
-  # the account creation — cap it and skip the region (its containers fail
-  # to deploy anyway).
-  az storage account show -n "${ACCOUNT}" >/dev/null 2>&1 || \
-    timeout 60 az storage account create -n "${ACCOUNT}" -g "${STORAGE_RG}" -l "${region}" --sku Standard_LRS --kind StorageV2 --enable-large-file-share -o table 2>&1 | tail -1 || true
-  az storage account show -n "${ACCOUNT}" >/dev/null 2>&1 || {
-    log "  ⚠️  Storage account unavailable in ${region} — volume-less deploys there"
+  # Short, globally-unique names (created out-of-band; see the ticket).
+  declare -n ACCOUNT_REF=REGION_ACCOUNT_NAME_${region}
+  ACCOUNT="${ACCOUNT_REF}"
+  if [ -z "${ACCOUNT}" ]; then
+    log "  ⚠️  No storage account for ${region} — volume-less deploy there"
     continue
-  }
+  fi
   REGION_STORAGE_ACCOUNT["${region}"]="${ACCOUNT}"
   REGION_STORAGE_KEY[${region}]=$(az storage account keys list -n "${ACCOUNT}" -g "${STORAGE_RG}" --query "[0].value" -o tsv 2>/dev/null)
   az storage share delete --name offs-test-data --account-name "${ACCOUNT}" 2>/dev/null || true
