@@ -868,7 +868,6 @@ static pending_quic_t* pending_quic_remove(network_t* network, void* quic_connec
 static void network_handle_salutation(network_t* network, message_t* msg,
                                        void* quic_connection) {
   wire_salutation_t* salut = (wire_salutation_t*)msg->payload;
-  fprintf(stderr, "SAL-TRACE: salutation received, payload=%d\n", salut != NULL);
   if (salut == NULL) return;
 
   /* NOTE: do NOT call wire_salutation_destroy(salut) here — the synchronous
