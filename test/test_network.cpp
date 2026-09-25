@@ -959,6 +959,49 @@ TEST_F(FindBlockTest, NoPeersReturnsNotFound) {
   EXPECT_EQ(result, FIND_BLOCK_NOT_FOUND);
 }
 
+TEST_F(FindBlockTest, ZeroWeightConnectedPeerFloodFallback) {
+  /* Cross-region retrieval: the only connected peer is relay-admitted at
+     Hebbian weight 0.0 (below the FIND_BLOCK_MIN_WEIGHT gate) and no EABF
+     knows the block (it was stored moments ago — no advertisement has
+     propagated). Every knowledge-based routing stage skips it, so before
+     the connected-peer flood fallback the query died with NOT_FOUND and
+     cross-node retrieval structurally failed (cross-region test, 2026-09). */
+  connection_manager_t mgr;
+  connection_manager_init(&mgr, 0, NULL);
+
+  node_id_t peer_id = {};
+  memset(peer_id.hash, 0x02, NODE_ID_HASH_SIZE);
+  peer_connection_t* peer = connection_manager_add(&mgr, &peer_id, NULL, NULL);
+  ASSERT_NE(peer, (peer_connection_t*)NULL);
+  peer->connected = 1;  // live connection, EABF knows nothing
+
+  net_node_t* node = net_node_create(&peer_id, 0x0A000001, 23401);
+  node->weight = 0.0f;  // relay-admitted: below the min-weight gate
+  ring_set_insert(rings, node, 1000);
+
+  find_block_state_t state = {};
+  memset(state.block_hash, 0xBB, 32);
+  state.ttl = 6;
+
+  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  find_block_result_e result = find_block_execute(
+      &eabf_table, &eabf_ttl, &mgr, rings, &local_id, &state,
+      next_hops, &next_hop_count, false);
+
+  /* The flood fallback must route to the live connected peer even though
+     its weight is below the gate. */
+  EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
+  EXPECT_EQ(next_hop_count, 1u);
+  if (next_hop_count > 0) {
+    EXPECT_TRUE(node_id_equals(&next_hops[0]->id, &peer_id));
+  }
+
+  net_node_destroy(node);
+  connection_manager_deinit(&mgr);
+}
+
 TEST_F(FindBlockTest, WithRingMembersForwards) {
   // Create ring members with weights above minimum
   node_id_t id_a = {};

@@ -363,6 +363,52 @@ find_block_result_e find_block_execute(
     }
   }
 
-  // Step 7: No candidates — same as TTL=0 failure
+  // Step 7: No candidates — fall through to the connected-peer flood.
+
+  // Step 8: Connected-peer flood fallback. All knowledge-based routing
+  // (EABF gravity wells, min-weight ring walk) can be blind to a freshly
+  // stored block: the holder may be relay-admitted at Hebbian weight 0.0
+  // (below the gate) and the block's EABF advertisement has not propagated
+  // yet. Before giving up, flood the query to live connected peers — they
+  // are reachable right now (direct QUIC or via the relay), so a holder
+  // reachable through the connected graph is found immediately instead of
+  // the query dying unrouted. Cycle-safety comes from the path/visited
+  // dedup; the TTL bounds the flood.
+  if (conn_mgr != NULL && state->ttl > 0) {
+    size_t flood_count = 0;
+    for (size_t index = 0;
+         index < conn_mgr->peer_count && flood_count < FIND_BLOCK_FORWARD_FANOUT;
+         index++) {
+      peer_connection_t* peer = conn_mgr->peers[index];
+      if (peer == NULL || !peer->connected) continue;
+
+      // Skip peers already in the path or visited (cycle detection)
+      bool in_path = false;
+      for (uint8_t path_index = 0; path_index < state->path_len; path_index++) {
+        if (node_id_equals(&state->path[path_index], &peer->remote_node_id)) {
+          in_path = true;
+          break;
+        }
+      }
+      if (in_path) continue;
+      if (find_block_is_visited(state->visited_bloom, state->visited_count,
+                                peer->remote_node_id.hash)) {
+        continue;
+      }
+
+      // The caller resolves next-hops back to live connections by node id,
+      // so the net_node is a routing shell carrying the id; a connected
+      // peer without a ring entry has no shell — skip it (its ring insert
+      // happens on the next salutation exchange).
+      net_node_t* flood_hop = ring_set_find_by_id(rings, &peer->remote_node_id);
+      if (flood_hop == NULL) continue;
+      next_hops[flood_count++] = flood_hop;
+    }
+    if (flood_count > 0) {
+      *next_hop_count = flood_count;
+      return FIND_BLOCK_FORWARDING;
+    }
+  }
+
   return FIND_BLOCK_NOT_FOUND;
 }
