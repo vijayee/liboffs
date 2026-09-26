@@ -2,6 +2,7 @@
 // Created by victor on 5/6/25.
 //
 
+#include <stdio.h>
 #include "timer_actor.h"
 #include "../Actor/message.h"
 #include "../Util/allocator.h"
@@ -182,6 +183,8 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
   switch (msg->type) {
     case TIMER_DEBOUNCE: {
       timer_debounce_payload_t* payload = (timer_debounce_payload_t*)msg->payload;
+      fprintf(stderr, "TIMER-TRACE: debounce armed, timeout=%llu ms, type=%u\n",
+              (unsigned long long)payload->timeout_ms, payload->completion_type);
       debounce_entry_t* entry = _timer_actor_find_debounce(
           timer_actor, payload->target, payload->completion_type);
       platform_mutex_lock(timer_actor->loop_lock);
@@ -293,6 +296,7 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
     }
     case TIMER_COMPLETION: {
       timer_completion_payload_t* completion = (timer_completion_payload_t*)msg->payload;
+      fprintf(stderr, "TIMER-TRACE: completion fired, type=%u\n", completion->completion_type);
       /* F8 re-check: before actor_send-ing to completion->target, confirm
          the target is still tracked in the debounce_map or active_timers.
          timer_actor_cancel_target removes the target from both BEFORE the
