@@ -21,8 +21,14 @@ extern "C" {
 #include "../src/Util/allocator.h"
 #include <string.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
+#else
 #include <ifaddrs.h>
 #include <netinet/in.h>
+#endif
 }
 
 namespace {
@@ -298,9 +304,39 @@ TEST(TestPeerInfoFromNode, V4ReflexiveFamilyWinsOverV6) {
 TEST(TestPeerInfoLanV6, HostCandidatesParseAndIncludeV6WhenPresent) {
   /* Does this host have any v6 LAN address (non-loopback, non-mapped,
      matching the spec filter)? */
+  bool have_v6 = false;
+#if defined(_WIN32)
+  /* Windows: enumerate v6 unicast addresses with GetAdaptersAddresses. */
+  ULONG size = 0;
+  IP_ADAPTER_ADDRESSES* adapters = NULL;
+  ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                GAA_FLAG_SKIP_DNS_SERVER;
+  ASSERT_EQ(GetAdaptersAddresses(AF_INET6, flags, NULL, NULL, &size),
+            ERROR_BUFFER_OVERFLOW);
+  adapters = (IP_ADAPTER_ADDRESSES*)malloc(size);
+  ASSERT_NE(adapters, (IP_ADAPTER_ADDRESSES*)NULL);
+  if (GetAdaptersAddresses(AF_INET6, flags, NULL, adapters, &size) == NO_ERROR) {
+    for (IP_ADAPTER_ADDRESSES* a = adapters; a != NULL && !have_v6; a = a->Next) {
+      for (IP_ADAPTER_UNICAST_ADDRESS* u = a->FirstUnicastAddress; u != NULL;
+           u = u->Next) {
+        if (u->Address.lpSockaddr == NULL ||
+            u->Address.lpSockaddr->sa_family != AF_INET6)
+          continue;
+        struct sockaddr_in6* sin6 = (struct sockaddr_in6*)u->Address.lpSockaddr;
+        if (IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr)) continue;
+        unsigned char b[16];
+        memcpy(b, &sin6->sin6_addr, 16);
+        if (b[0] == 0xFF) continue;                     /* multicast */
+        if ((b[0] & 0xE0) == 0x20) { have_v6 = true; break; }  /* global */
+        if ((b[0] & 0xFE) == 0xFC) { have_v6 = true; break; }  /* ULA */
+        if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) { have_v6 = true; break; }  /* link-local */
+      }
+    }
+  }
+  free(adapters);
+#else
   struct ifaddrs* ifaces = NULL;
   ASSERT_EQ(getifaddrs(&ifaces), 0);
-  bool have_v6 = false;
   for (struct ifaddrs* ifa = ifaces; ifa != NULL; ifa = ifa->ifa_next) {
     if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET6) continue;
     struct sockaddr_in6* sin6 = (struct sockaddr_in6*)ifa->ifa_addr;
@@ -313,6 +349,7 @@ TEST(TestPeerInfoLanV6, HostCandidatesParseAndIncludeV6WhenPresent) {
     if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) { have_v6 = true; break; }  /* link-local */
   }
   freeifaddrs(ifaces);
+#endif
 
   fake_network_t* fake = _make_network_no_relay(23401);
   ASSERT_NE(fake, (fake_network_t*)NULL);
