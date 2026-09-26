@@ -55,19 +55,29 @@ log "  Bootstrap peer info: ${#BOOTSTRAP_PEER} chars"
 log "=== Creating resource group ${NODE_RG} ==="
 az group create --name "${NODE_RG}" --location eastus -o table 2>&1 | tail -2
 
-# ─── 1b. Create per-region Azure File Shares for /data ────────────────────
-# One share per test region; both replicas in a region mount the same share
-# via distinct ACI volume mounts (each container gets its own view of the
-# share root, so state stays isolated per node). Shares from previous runs
-# are deleted first — a stale peer_store with old identities would corrupt
-# the reconnection test.
-# ACI volume mounts require the storage account in the SAME region as the
-# container group — one storage account + one share per test region.
+# ─── 1b. Create per-node Azure File Shares for /data ──────────────────────
+# Each node mounts its OWN Azure File Share at /data so peer_store.cbor, node
+# identity, and the block cache persist across in-container restarts — ACI
+# wipes the container's writable layer whenever the process restarts
+# (verified 2026-09-25: certs regenerated, peer_store lost). Without the
+# volume, the peer-reconnection test's premise fails. Two shares per region
+# (one per replica): sharing one peer_store/node.pem between two containers
+# gives both the same node identity — the bootstrap treats them as one peer
+# and the -1 replicas lose gossip (run 15). Constraints:
+#   - ACI volume mounts require the storage account in the SAME region as
+#     the container group → one account + two shares per test region.
+#   - Region-restricted locations (westeurope) deploy volume-less.
+#   - Share names carry a per-run suffix: share deletion is async in Azure
+#     and recreating a just-deleted name hits ShareBeingDeleted for minutes.
+# The per-region accounts are pre-provisioned (global names; region-restricted
+# locations hang az storage account create).
+RUN_ID="${RUN_ID:-$(date +%H%M%S)}"
+STORAGE_RG="${STORAGE_RG:-offs-relay-rg2}"
+
 log "=== Creating per-region storage accounts and shares ==="
 declare -A REGION_STORAGE_ACCOUNT
 declare -A REGION_STORAGE_KEY
 for region in "${REGIONS[@]}"; do
-  # Short, globally-unique names (created out-of-band; see the ticket).
   case "${region}" in
     eastus)      ACCOUNT="offstest0306east" ;;
     brazilsouth) ACCOUNT="offstest0306braz" ;;
@@ -76,9 +86,13 @@ for region in "${REGIONS[@]}"; do
     *)           ACCOUNT="" ;;
   esac
   if [ -z "${ACCOUNT}" ]; then
-    log "  ⚠️  No storage account for ${region} — volume-less deploy there"
+    log "  ⚠️  No storage account for ${region} — volume-less deploys there"
     continue
   fi
+  az storage account show -n "${ACCOUNT}" >/dev/null 2>&1 || {
+    log "  ⚠️  Storage account ${ACCOUNT} missing — volume-less deploys in ${region}"
+    continue
+  }
   REGION_STORAGE_ACCOUNT["${region}"]="${ACCOUNT}"
   REGION_STORAGE_KEY[${region}]=$(az storage account keys list -n "${ACCOUNT}" -g "${STORAGE_RG}" --query "[0].value" -o tsv 2>/dev/null)
   for replica in 1 2; do
@@ -88,13 +102,6 @@ for region in "${REGIONS[@]}"; do
 done
 
 # ─── 2. Deploy 10 ACI containers (2 per region) ───────────────────────────
-# Each node mounts an Azure File Share at /data so peer_store.cbor, node
-# identity, and the block cache persist across in-container restarts — ACI
-# wipes the container's writable layer whenever the process restarts
-# (verified 2026-09-25: certs regenerated, peer_store lost). Without the
-# volume, the peer-reconnection test's premise fails. The share must live
-# in the SAME region as the container (ACI volume mount restriction), so
-# one share is created per region.
 log "=== Deploying 10 offsd containers across 5 regions ==="
 NODE_IDX=0
 for region in "${REGIONS[@]}"; do
