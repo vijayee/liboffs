@@ -770,11 +770,15 @@ static void _bootstrap_list_handler(http_request_t* request, http_response_t* re
      endpoint strings for both lists). */
   char** config_endpoints = NULL;
   size_t config_count = 0;
+  peer_info_t** config_infos = NULL;
+  uint8_t* config_pinned = NULL;
+  size_t config_info_count = 0;
   char** managed_endpoints = NULL;
   size_t managed_count = 0;
   if (peer_book_snapshot_bootstrap(_peer_book_of(ctx), &config_endpoints,
-                                   &config_count, &managed_endpoints,
-                                   &managed_count,
+                                   &config_count, &config_infos,
+                                   &config_pinned, &config_info_count,
+                                   &managed_endpoints, &managed_count,
                                    PEER_BOOK_TIMEOUT_MS) != 0) {
     http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
     http_response_end(response);
@@ -785,6 +789,8 @@ static void _bootstrap_list_handler(http_request_t* request, http_response_t* re
   cJSON* config_array = cJSON_AddArrayToObject(json, "config");
   cJSON* managed_array = cJSON_AddArrayToObject(json, "managed");
   if (config_array == NULL || managed_array == NULL) {
+    peer_book_free_peer_info_array(config_infos, config_info_count);
+    free(config_pinned);
     peer_book_free_string_array(config_endpoints, config_count);
     peer_book_free_string_array(managed_endpoints, managed_count);
     cJSON_Delete(json);
@@ -817,6 +823,8 @@ static void _bootstrap_list_handler(http_request_t* request, http_response_t* re
     cJSON_AddNumberToObject(entry, "port", (double)port);
     cJSON_AddItemToArray(managed_array, entry);
   }
+  peer_book_free_peer_info_array(config_infos, config_info_count);
+  free(config_pinned);
   peer_book_free_string_array(config_endpoints, config_count);
   peer_book_free_string_array(managed_endpoints, managed_count);
 

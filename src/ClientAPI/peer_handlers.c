@@ -653,9 +653,13 @@ void peer_handle_bootstrap_list_request(peer_handler_ctx_t* ctx, cbor_item_t* fr
   size_t config_count = 0;
   char** managed_endpoints = NULL;
   size_t managed_count = 0;
+  peer_info_t** config_infos = NULL;
+  uint8_t* config_pinned = NULL;
+  size_t config_info_count = 0;
   if (peer_book_snapshot_bootstrap(ctx->network->peer_book, &config_endpoints,
-                                   &config_count, &managed_endpoints,
-                                   &managed_count,
+                                   &config_count, &config_infos,
+                                   &config_pinned, &config_info_count,
+                                   &managed_endpoints, &managed_count,
                                    PEER_BOOK_TIMEOUT_MS) != 0) {
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
                     "Bootstrap list snapshot failed");
@@ -664,6 +668,8 @@ void peer_handle_bootstrap_list_request(peer_handler_ctx_t* ctx, cbor_item_t* fr
 
   cbor_item_t* entries = cbor_new_definite_array(config_count + managed_count);
   if (entries == NULL) {
+    peer_book_free_peer_info_array(config_infos, config_info_count);
+    free(config_pinned);
     peer_book_free_string_array(config_endpoints, config_count);
     peer_book_free_string_array(managed_endpoints, managed_count);
     ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR, "Memory allocation failed");
@@ -678,6 +684,8 @@ void peer_handle_bootstrap_list_request(peer_handler_ctx_t* ctx, cbor_item_t* fr
     _push_bootstrap_entry(entries, managed_endpoints[index],
                           CLIENT_API_BOOTSTRAP_SOURCE_MANAGED);
   }
+  peer_book_free_peer_info_array(config_infos, config_info_count);
+  free(config_pinned);
   peer_book_free_string_array(config_endpoints, config_count);
   peer_book_free_string_array(managed_endpoints, managed_count);
 

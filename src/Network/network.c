@@ -847,6 +847,70 @@ int network_connect_peer_candidates(network_t* network, const node_id_t* remote_
 
 static pending_quic_t* pending_quic_find(network_t* network, void* quic_connection);
 
+/* Bootstrap identity expectations: armed per dialed candidate address of a
+   pinned config-seeded bootstrap entry; consumed by the salutation handler.
+   Bounded by the config entry count — no expiry needed. */
+
+static void network_arm_bootstrap_expect(network_t* network, node_id_t expected,
+                                         const char* host, uint16_t port) {
+  if (network == NULL || host == NULL) return;
+  struct sockaddr_storage addr;
+  memset(&addr, 0, sizeof(addr));
+  platform_address_t paddr;
+  memset(&paddr, 0, sizeof(paddr));
+  if (strchr(host, ':') != NULL) {
+    paddr.family = PLATFORM_AF_INET6;
+    if (platform_address_parse(&paddr, host, port) != 0) return;
+  } else {
+    paddr.family = PLATFORM_AF_INET;
+    if (platform_address_parse(&paddr, host, port) != 0) return;
+  }
+  /* Convert to the native socket form so the comparison against
+     pending->peer_addr is byte-faithful. */
+  if (paddr.family == PLATFORM_AF_INET) {
+    struct sockaddr_in* sin = (struct sockaddr_in*)&addr;
+    sin->sin_family = AF_INET;
+    sin->sin_port = htons(port);
+    sin->sin_addr.s_addr = paddr.inet.addr;
+  } else {
+    struct sockaddr_in6* sin6 = (struct sockaddr_in6*)&addr;
+    sin6->sin6_family = AF_INET6;
+    sin6->sin6_port = htons(port);
+    memcpy(&sin6->sin6_addr, paddr.inet6.addr, 16);
+    sin6->sin6_scope_id = paddr.inet6.scope_id;
+  }
+
+  /* Re-arming replaces any prior expectation for the same address. */
+  for (bootstrap_expect_t* cur = network->bootstrap_expects; cur != NULL;
+       cur = cur->next) {
+    if (cur->addr.ss_family == addr.ss_family &&
+        memcmp(&cur->addr, &addr, sizeof(addr)) == 0) {
+      cur->expected_id = expected;
+      return;
+    }
+  }
+  bootstrap_expect_t* entry = get_clear_memory(sizeof(bootstrap_expect_t));
+  if (entry == NULL) return;
+  entry->addr = addr;
+  entry->expected_id = expected;
+  entry->next = network->bootstrap_expects;
+  network->bootstrap_expects = entry;
+}
+
+/* Returns the expected bootstrap identity for a connection to `addr`, or
+   NULL when the address is not a pinned bootstrap target. */
+static const node_id_t* network_bootstrap_expect_for(
+    network_t* network, const struct sockaddr_storage* addr) {
+  for (bootstrap_expect_t* cur = network->bootstrap_expects; cur != NULL;
+       cur = cur->next) {
+    if (cur->addr.ss_family == addr->ss_family &&
+        memcmp(&cur->addr, addr, sizeof(struct sockaddr_storage)) == 0) {
+      return &cur->expected_id;
+    }
+  }
+  return NULL;
+}
+
 static void pending_quic_add(network_t* network, void* quic_connection,
                              void* quic_stream,
                              const struct sockaddr_storage* peer_addr,
@@ -868,6 +932,13 @@ static void pending_quic_add(network_t* network, void* quic_connection,
   }
   entry->peer_cert_der = peer_cert_der;
   entry->peer_cert_der_len = peer_cert_der_len;
+  const node_id_t* expected =
+      network_bootstrap_expect_for(network, peer_addr != NULL ? peer_addr
+                                                              : &entry->peer_addr);
+  if (expected != NULL) {
+    entry->has_expected_id = 1;
+    entry->expected_id = *expected;
+  }
   entry->next = network->pending_connections;
   network->pending_connections = entry;
 }
@@ -929,6 +1000,33 @@ static void network_handle_salutation(network_t* network, message_t* msg,
   pending_quic_t* pending = pending_quic_remove(network, quic_connection);
   if (pending == NULL) {
     log_error("salutation: no pending connection for quic handle");
+    return;
+  }
+
+  // Pinned bootstrap verification: a connection dialed to a pinned
+  // config-seeded bootstrap entry must confirm the configured identity. A
+  // mismatch means someone else answers at the bootstrap address — drop the
+  // connection without inserting anything (eclipse protection).
+  if (pending->has_expected_id &&
+      !node_id_equals(&computed_id, &pending->expected_id)) {
+    char expected_b58[NODE_ID_STRING_SIZE];
+    char confirmed_b58[NODE_ID_STRING_SIZE];
+    if (base58_encode(pending->expected_id.hash, NODE_ID_HASH_SIZE,
+                      expected_b58, sizeof(expected_b58)) > 0 &&
+        base58_encode(computed_id.hash, NODE_ID_HASH_SIZE,
+                      confirmed_b58, sizeof(confirmed_b58)) > 0) {
+      log_error("salutation: bootstrap identity mismatch — expected %s, "
+                "got %s; dropping the connection", expected_b58, confirmed_b58);
+    }
+#ifdef HAS_MSQUIC
+    if (network->quic_listener != NULL &&
+        network->quic_listener->msquic != NULL) {
+      network->quic_listener->msquic->ConnectionShutdown(
+          (HQUIC)quic_connection, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, 0);
+    }
+#endif
+    free(pending->peer_cert_der);
+    free(pending);
     return;
   }
 
@@ -4559,8 +4657,24 @@ static void network_handle_peer_book_reconnect(
       (snapshot->config_count > 0 || snapshot->managed_count > 0)) {
     uint64_t now_ms = platform_monotonic_ns() / 1000000u;
     if (now_ms >= network->bootstrap_next_attempt_ms) {
-      network_connect_endpoint_list(network, snapshot->config_endpoints,
-                                    snapshot->config_count, "config bootstrap");
+      for (size_t index = 0; index < snapshot->config_info_count; index++) {
+        peer_info_t* entry_info = snapshot->config_infos[index];
+        if (entry_info == NULL) continue;
+        if (snapshot->config_pinned[index]) {
+          for (size_t addr_idx = 0; addr_idx < entry_info->address_count;
+               addr_idx++) {
+            if (entry_info->addresses[addr_idx].host != NULL) {
+              network_arm_bootstrap_expect(
+                  network, entry_info->node_id,
+                  entry_info->addresses[addr_idx].host,
+                  entry_info->addresses[addr_idx].port);
+            }
+          }
+        }
+        (void)network_connect_peer_candidates(network, &entry_info->node_id,
+                                              entry_info->addresses,
+                                              entry_info->address_count, false);
+      }
       network_connect_endpoint_list(network, snapshot->managed_endpoints,
                                     snapshot->managed_count, "managed bootstrap");
       network->bootstrap_backoff_ms =
@@ -4681,14 +4795,18 @@ void network_start_connections(network_t* network) {
      the startup-phase direct read allowed by the peer_book.h invariant. */
   char** config_endpoints = NULL;
   size_t config_count = 0;
+  peer_info_t** config_infos = NULL;
+  uint8_t* config_pinned = NULL;
+  size_t config_info_count = 0;
   char** managed_endpoints = NULL;
   size_t managed_count = 0;
   peer_info_t** friends = NULL;
   size_t friend_count = 0;
   if (network->peer_book != NULL) {
     if (peer_book_snapshot_bootstrap(network->peer_book, &config_endpoints,
-                                     &config_count, &managed_endpoints,
-                                     &managed_count,
+                                     &config_count, &config_infos,
+                                     &config_pinned, &config_info_count,
+                                     &managed_endpoints, &managed_count,
                                      PEER_BOOK_TIMEOUT_MS) != 0) {
       log_warn("network_start_connections: bootstrap snapshot timed out — "
                "skipping the startup connect loop; the node will not "
@@ -4700,22 +4818,39 @@ void network_start_connections(network_t* network) {
       log_warn("network_start_connections: friend snapshot timed out — "
                "skipping the startup connect loop; the node will not "
                "reconnect friends until the next heal tick (up to 5s)");
+      peer_book_free_peer_info_array(config_infos, config_info_count);
+      free(config_pinned);
       peer_book_free_string_array(config_endpoints, config_count);
       peer_book_free_string_array(managed_endpoints, managed_count);
       return;
     }
   } else if (network->authority != NULL) {
-    config_endpoints = network->authority->bootstrap_peers;
-    config_count = network->authority->bootstrap_peer_count;
     managed_endpoints = network->authority->managed_bootstrap_peers;
     managed_count = network->authority->managed_bootstrap_peer_count;
     friends = network->authority->friend_peers;
     friend_count = network->authority->friend_peer_count;
   }
 
-  // Connect to bootstrap peers (fire-and-forget)
-  network_connect_endpoint_list(network, config_endpoints, config_count,
-                                "config bootstrap");
+  // Connect to bootstrap peers (fire-and-forget). Entries with full
+  // peer_infos dial their candidate address lists; entries with a pinned
+  // identity arm the salutation verification for the dialed addresses.
+  for (size_t index = 0; index < config_info_count; index++) {
+    peer_info_t* entry_info = config_infos[index];
+    if (entry_info == NULL || entry_info->node_id.hash == NULL) continue;
+    if (config_pinned[index] &&
+        entry_info->address_count > 0) {
+      for (size_t addr_idx = 0; addr_idx < entry_info->address_count; addr_idx++) {
+        if (entry_info->addresses[addr_idx].host != NULL) {
+          network_arm_bootstrap_expect(network, entry_info->node_id,
+                                       entry_info->addresses[addr_idx].host,
+                                       entry_info->addresses[addr_idx].port);
+        }
+      }
+    }
+    (void)network_connect_peer_candidates(network, &entry_info->node_id,
+                                          entry_info->addresses,
+                                          entry_info->address_count, false);
+  }
   network_connect_endpoint_list(network, managed_endpoints, managed_count,
                                 "managed bootstrap");
 
@@ -4735,6 +4870,8 @@ void network_start_connections(network_t* network) {
      authority arrays (NULL entries) — free only owned copies. */
   if (network->peer_book != NULL) {
     peer_book_free_peer_info_array(friends, friend_count);
+    peer_book_free_peer_info_array(config_infos, config_info_count);
+    free(config_pinned);
     peer_book_free_string_array(config_endpoints, config_count);
     peer_book_free_string_array(managed_endpoints, managed_count);
   }

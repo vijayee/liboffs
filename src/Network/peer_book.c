@@ -254,13 +254,32 @@ static void _peer_book_snapshot_bootstrap_locked(peer_book_t* peer_book,
   if (authority->bootstrap_peer_count > 0) {
     request->config_endpoints = get_clear_memory(authority->bootstrap_peer_count *
                                                  sizeof(char*));
-    if (request->config_endpoints != NULL) {
+    request->config_infos = get_clear_memory(authority->bootstrap_peer_count *
+                                             sizeof(peer_info_t*));
+    request->config_pinned = get_clear_memory(authority->bootstrap_peer_count *
+                                              sizeof(uint8_t));
+    if (request->config_endpoints != NULL && request->config_infos != NULL &&
+        request->config_pinned != NULL) {
       for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
-        char* copy = strdup(authority->bootstrap_peers[index].info != NULL &&
-                                authority->bootstrap_peers[index].info->address_count > 0
-                            ? "" : "");
+        peer_info_t* copy =
+            _peer_book_copy_peer_info(authority->bootstrap_peers[index].info);
         if (copy == NULL) continue;
-        request->config_endpoints[request->config_count++] = copy;
+        request->config_infos[request->config_info_count] = copy;
+        request->config_pinned[request->config_info_count] =
+            authority->bootstrap_peers[index].pinned;
+        /* Endpoint string for display routes: host:port of the first
+           candidate, re-encoded in the normalized form. */
+        if (copy->address_count > 0 && copy->addresses[0].host != NULL) {
+          char* normalized = authority_bootstrap_encode(copy->addresses[0].host,
+                                                        copy->addresses[0].port);
+          if (normalized != NULL) {
+            request->config_endpoints[request->config_count++] = normalized;
+          }
+        } else {
+          char* placeholder = get_clear_memory(1);
+          request->config_endpoints[request->config_count++] = placeholder;
+        }
+        request->config_info_count++;
       }
     }
   }
@@ -280,7 +299,8 @@ static void _peer_book_snapshot_bootstrap_locked(peer_book_t* peer_book,
 static void _peer_book_snapshot_free(peer_book_snapshot_t* request) {
   if (request == NULL) return;
   _peer_book_destroy_peer_info_array(request->friends, request->friend_count);
-  _peer_book_destroy_string_array(request->config_endpoints, request->config_count);
+  _peer_book_destroy_peer_info_array(request->config_infos, request->config_info_count);
+  free(request->config_pinned);
   _peer_book_destroy_string_array(request->managed_endpoints, request->managed_count);
   if (request->reply.mutex != NULL) platform_mutex_destroy(request->reply.mutex);
   if (request->reply.cv != NULL) platform_condvar_destroy(request->reply.cv);
@@ -321,7 +341,8 @@ void peer_book_reconnect_payload_destroy(void* ptr) {
   peer_book_reconnect_payload_t* payload = (peer_book_reconnect_payload_t*)ptr;
   if (payload == NULL) return;
   _peer_book_destroy_peer_info_array(payload->friends, payload->friend_count);
-  _peer_book_destroy_string_array(payload->config_endpoints, payload->config_count);
+  _peer_book_destroy_peer_info_array(payload->config_infos, payload->config_info_count);
+  free(payload->config_pinned);
   _peer_book_destroy_string_array(payload->managed_endpoints, payload->managed_count);
   free(payload);
 }
@@ -358,13 +379,19 @@ static void _peer_book_handle_reconnect_tick(peer_book_t* peer_book) {
     }
   }
   if (authority->bootstrap_peer_count > 0) {
-    payload->config_endpoints = get_clear_memory(authority->bootstrap_peer_count *
-                                                 sizeof(char*));
-    if (payload->config_endpoints != NULL) {
+    payload->config_infos = get_clear_memory(authority->bootstrap_peer_count *
+                                             sizeof(peer_info_t*));
+    payload->config_pinned = get_clear_memory(authority->bootstrap_peer_count *
+                                              sizeof(uint8_t));
+    if (payload->config_infos != NULL && payload->config_pinned != NULL) {
       for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
-        char* copy = strdup(authority->bootstrap_peers[index]);
+        peer_info_t* copy =
+            _peer_book_copy_peer_info(authority->bootstrap_peers[index].info);
         if (copy == NULL) continue;
-        payload->config_endpoints[payload->config_count++] = copy;
+        payload->config_infos[payload->config_info_count] = copy;
+        payload->config_pinned[payload->config_info_count] =
+            authority->bootstrap_peers[index].pinned;
+        payload->config_info_count++;
       }
     }
   }
@@ -675,14 +702,22 @@ int peer_book_bootstrap_remove(peer_book_t* peer_book, const char* endpoint,
 
 int peer_book_snapshot_bootstrap(peer_book_t* peer_book,
                                  char*** config_endpoints, size_t* config_count,
+                                 peer_info_t*** config_infos,
+                                 uint8_t** config_pinned,
+                                 size_t* config_info_count,
                                  char*** managed_endpoints, size_t* managed_count,
                                  uint32_t timeout_ms) {
   if (peer_book == NULL || config_endpoints == NULL || config_count == NULL ||
+      config_infos == NULL || config_pinned == NULL ||
+      config_info_count == NULL ||
       managed_endpoints == NULL || managed_count == NULL) {
     return -1;
   }
   *config_endpoints = NULL;
   *config_count = 0;
+  *config_infos = NULL;
+  *config_pinned = NULL;
+  *config_info_count = 0;
   *managed_endpoints = NULL;
   *managed_count = 0;
 
@@ -713,6 +748,9 @@ int peer_book_snapshot_bootstrap(peer_book_t* peer_book,
 
   *config_endpoints = request->config_endpoints;
   *config_count = request->config_count;
+  *config_infos = request->config_infos;
+  *config_pinned = request->config_pinned;
+  *config_info_count = request->config_info_count;
   *managed_endpoints = request->managed_endpoints;
   *managed_count = request->managed_count;
   platform_mutex_destroy(request->reply.mutex);

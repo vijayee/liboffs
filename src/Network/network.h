@@ -62,6 +62,16 @@ typedef struct store_pending_t {
   uint64_t deadline_ms;    /* 0 = no deadline (back-compat; never swept) */
 } store_pending_t;
 
+// Bootstrap identity expectation: armed when a pinned config-seeded
+// bootstrap entry is dialed (keyed by the dialed candidate address). The
+// salutation exchange on a connection to that address must confirm the
+// expected node_id — a mismatch drops the connection (eclipse protection).
+typedef struct bootstrap_expect_t {
+  struct sockaddr_storage addr;   /* the dialed candidate address */
+  node_id_t expected_id;          /* the configured bootstrap node identity */
+  struct bootstrap_expect_t* next;
+} bootstrap_expect_t;
+
 // Pending QUIC connections awaiting salutation identity handshake
 typedef struct pending_quic_t {
   void* quic_connection;           // HQUIC handle
@@ -69,6 +79,8 @@ typedef struct pending_quic_t {
   struct sockaddr_storage peer_addr;
   uint8_t* peer_cert_der;          // peer's leaf cert (DER), extracted at CONNECTED; NULL if none
   size_t   peer_cert_der_len;
+  uint8_t   has_expected_id;       // 1 = connection to a pinned bootstrap entry
+  node_id_t expected_id;           // the pinned identity to confirm
   struct pending_quic_t* next;
 } pending_quic_t;
 
@@ -138,6 +150,7 @@ typedef struct network_t {
   mdns_t* mdns;                    /* mDNS responder (NULL if not started) */
 
   pending_quic_t* pending_connections;  /* QUIC connections awaiting salutation */
+  bootstrap_expect_t* bootstrap_expects; /* pinned bootstrap dialed addresses */
 
   /* Peer-book actor: owns and serializes authority->friend_peers /
      bootstrap_peers / managed_bootstrap_peers after peer_book_start. Created

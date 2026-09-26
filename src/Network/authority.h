@@ -149,6 +149,8 @@ int authority_bootstrap_remove(authority_t* authority, const char* endpoint);
 int authority_set_bootstrap_peers(authority_t* authority, const char* csv);
 /* Structured seed: full peer_info entries (the bootstrap's /peer/info blob)
  * with optional identity pinning. Deep-copies the infos. */
+peer_info_t* authority_copy_peer_info(const peer_info_t* source);
+char* authority_bootstrap_encode(const char* host, uint16_t port);
 int authority_set_bootstrap_entries(authority_t* authority,
                                     peer_info_t* const* infos,
                                     const uint8_t* pinned,

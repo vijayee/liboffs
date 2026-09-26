@@ -89,8 +89,10 @@ TEST(AuthorityBootstrap, SetBootstrapPeersFailsAtomicallyOnInvalidCsv) {
   // list untouched (no partial seed).
   EXPECT_EQ(-1, authority_set_bootstrap_peers(authority, "10.0.0.3:7070,garbage"));
   EXPECT_EQ(2u, authority->bootstrap_peer_count);
-  EXPECT_STREQ("10.0.0.1:8080", authority->bootstrap_peers[0]);
-  EXPECT_STREQ("10.0.0.2:9090", authority->bootstrap_peers[1]);
+  EXPECT_STREQ("10.0.0.1", authority->bootstrap_peers[0].info->addresses[0].host);
+  EXPECT_EQ(8080, authority->bootstrap_peers[0].info->addresses[0].port);
+  EXPECT_STREQ("10.0.0.2", authority->bootstrap_peers[1].info->addresses[0].host);
+  EXPECT_EQ(9090, authority->bootstrap_peers[1].info->addresses[0].port);
 
   authority_destroy(authority);
 }
@@ -101,8 +103,9 @@ TEST(AuthorityBootstrap, SetBootstrapPeersParsesCsvAndNormalizes) {
   ASSERT_NE(authority, nullptr);
   ASSERT_EQ(0, authority_set_bootstrap_peers(authority, "10.0.0.1:8080,[2001:db8::1]:9090"));
   ASSERT_EQ(2u, authority->bootstrap_peer_count);
-  EXPECT_STREQ("10.0.0.1:8080", authority->bootstrap_peers[0]);
-  EXPECT_STREQ("[2001:db8::1]:9090", authority->bootstrap_peers[1]);
+  EXPECT_STREQ("10.0.0.1", authority->bootstrap_peers[0].info->addresses[0].host);
+  EXPECT_EQ(8080, authority->bootstrap_peers[0].info->addresses[0].port);
+  EXPECT_STREQ("2001:db8::1", authority->bootstrap_peers[1].info->addresses[0].host);
 
   // Whitespace tolerated (endpoint_parse trims).
   ASSERT_EQ(0, authority_set_bootstrap_peers(authority, " 10.0.0.2:8080 , 10.0.0.3:9090"));
@@ -111,7 +114,7 @@ TEST(AuthorityBootstrap, SetBootstrapPeersParsesCsvAndNormalizes) {
   // 5-digit port on an IPv6 literal must not be truncated by normalization.
   ASSERT_EQ(0, authority_set_bootstrap_peers(authority, "[::1]:65535"));
   ASSERT_EQ(1u, authority->bootstrap_peer_count);
-  EXPECT_STREQ("[::1]:65535", authority->bootstrap_peers[0]);
+  EXPECT_STREQ("::1", authority->bootstrap_peers[0].info->addresses[0].host);
 
   EXPECT_EQ(-1, authority_set_bootstrap_peers(authority, "10.0.0.1:8080,garbage"));
   EXPECT_EQ(0, authority_set_bootstrap_peers(authority, NULL));
@@ -167,7 +170,8 @@ TEST(AuthorityBootstrap, PeerStoreRoundTripIndex6) {
   EXPECT_STREQ("[2001:db8::1]:9090", loaded->managed_bootstrap_peers[1]);
   // Config-seeded list is NOT loaded from the store — stays as seeded above.
   ASSERT_EQ(1u, loaded->bootstrap_peer_count);
-  EXPECT_STREQ("9.9.9.9:1", loaded->bootstrap_peers[0]);
+  EXPECT_STREQ("9.9.9.9", loaded->bootstrap_peers[0].info->addresses[0].host);
+  EXPECT_EQ(1, loaded->bootstrap_peers[0].info->addresses[0].port);
 
   authority_destroy(loaded);
   authority_destroy(authority);

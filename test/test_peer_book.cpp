@@ -90,11 +90,15 @@ TEST_F(PeerBook, BootstrapMutationRoundTrip) {
   // Snapshot: config list empty, managed list holds both normalized entries.
   char** config_endpoints = NULL;
   size_t config_count = 0;
+  peer_info_t** config_infos = NULL;
+  uint8_t* config_pinned = NULL;
+  size_t config_info_count = 0;
   char** managed_endpoints = NULL;
   size_t managed_count = 0;
   ASSERT_EQ(0, peer_book_snapshot_bootstrap(peer_book, &config_endpoints,
-                                            &config_count, &managed_endpoints,
-                                            &managed_count,
+                                            &config_count, &config_infos,
+                                            &config_pinned, &config_info_count,
+                                            &managed_endpoints, &managed_count,
                                             PEER_BOOK_TIMEOUT_MS));
   EXPECT_EQ(0u, config_count);
   ASSERT_EQ(2u, managed_count);
@@ -109,6 +113,8 @@ TEST_F(PeerBook, BootstrapMutationRoundTrip) {
   EXPECT_EQ(0, peer_book_bootstrap_remove(peer_book, "[2001:db8::1]:9090",
                                           PEER_BOOK_TIMEOUT_MS));
 
+  peer_book_free_peer_info_array(config_infos, config_info_count);
+  free(config_pinned);
   peer_book_free_string_array(config_endpoints, config_count);
   peer_book_free_string_array(managed_endpoints, managed_count);
 }
@@ -123,17 +129,23 @@ TEST_F(PeerBook, SnapshotBootstrapReflectsState) {
 
   char** config_endpoints = NULL;
   size_t config_count = 0;
+  peer_info_t** config_infos = NULL;
+  uint8_t* config_pinned = NULL;
+  size_t config_info_count = 0;
   char** managed_endpoints = NULL;
   size_t managed_count = 0;
   ASSERT_EQ(0, peer_book_snapshot_bootstrap(peer_book, &config_endpoints,
-                                            &config_count, &managed_endpoints,
-                                            &managed_count,
+                                            &config_count, &config_infos,
+                                            &config_pinned, &config_info_count,
+                                            &managed_endpoints, &managed_count,
                                             PEER_BOOK_TIMEOUT_MS));
   ASSERT_EQ(1u, config_count);
   EXPECT_STREQ("10.0.0.3:7070", config_endpoints[0]);
   ASSERT_EQ(1u, managed_count);
   EXPECT_STREQ("10.0.0.4:7071", managed_endpoints[0]);
 
+  peer_book_free_peer_info_array(config_infos, config_info_count);
+  free(config_pinned);
   peer_book_free_string_array(config_endpoints, config_count);
   peer_book_free_string_array(managed_endpoints, managed_count);
 }
@@ -199,15 +211,21 @@ TEST_F(PeerBook, ConcurrentBootstrapAdds) {
 
   char** config_endpoints = NULL;
   size_t config_count = 0;
+  peer_info_t** config_infos = NULL;
+  uint8_t* config_pinned = NULL;
+  size_t config_info_count = 0;
   char** managed_endpoints = NULL;
   size_t managed_count = 0;
   ASSERT_EQ(0, peer_book_snapshot_bootstrap(peer_book, &config_endpoints,
-                                            &config_count, &managed_endpoints,
-                                            &managed_count,
+                                            &config_count, &config_infos,
+                                            &config_pinned, &config_info_count,
+                                            &managed_endpoints, &managed_count,
                                             PEER_BOOK_TIMEOUT_MS));
   EXPECT_EQ(0u, config_count);
   EXPECT_EQ((size_t)(k_threads * k_ops_per_thread), managed_count);
 
+  peer_book_free_peer_info_array(config_infos, config_info_count);
+  free(config_pinned);
   peer_book_free_string_array(config_endpoints, config_count);
   peer_book_free_string_array(managed_endpoints, managed_count);
 }
@@ -237,16 +255,22 @@ TEST_F(PeerBook, TimeoutOrphanStillApplies) {
 
   char** config_endpoints = NULL;
   size_t config_count = 0;
+  peer_info_t** config_infos = NULL;
+  uint8_t* config_pinned = NULL;
+  size_t config_info_count = 0;
   char** managed_endpoints = NULL;
   size_t managed_count = 0;
   ASSERT_EQ(0, peer_book_snapshot_bootstrap(peer_book, &config_endpoints,
-                                            &config_count, &managed_endpoints,
-                                            &managed_count,
+                                            &config_count, &config_infos,
+                                            &config_pinned, &config_info_count,
+                                            &managed_endpoints, &managed_count,
                                             PEER_BOOK_TIMEOUT_MS));
   EXPECT_EQ(0u, config_count);
   ASSERT_EQ(1u, managed_count);
   EXPECT_STREQ("10.0.0.8:7008", managed_endpoints[0]);
 
+  peer_book_free_peer_info_array(config_infos, config_info_count);
+  free(config_pinned);
   peer_book_free_string_array(config_endpoints, config_count);
   peer_book_free_string_array(managed_endpoints, managed_count);
 }

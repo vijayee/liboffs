@@ -241,6 +241,9 @@ int peer_book_bootstrap_remove(peer_book_t* peer_book, const char* endpoint,
    On timeout nothing is returned (arrays stay with the actor). */
 int peer_book_snapshot_bootstrap(peer_book_t* peer_book,
                                  char*** config_endpoints, size_t* config_count,
+                                 peer_info_t*** config_infos,
+                                 uint8_t** config_pinned,
+                                 size_t* config_info_count,
                                  char*** managed_endpoints, size_t* managed_count,
                                  uint32_t timeout_ms);
 /* Snapshot the friend list as deep-copied peer_info_t entries. On success

@@ -15,6 +15,51 @@
 #include "../Util/base58.h"
 #include "../Platform/platform_atomic.h"
 #include "peer_info.h"
+
+peer_info_t* authority_copy_peer_info(const peer_info_t* source) {
+  if (source == NULL) return NULL;
+
+  peer_info_t* copy = get_clear_memory(sizeof(peer_info_t));
+  if (copy == NULL) return NULL;
+  memcpy(&copy->node_id, &source->node_id, sizeof(node_id_t));
+
+  if (source->public_key != NULL && source->public_key_len > 0) {
+    copy->public_key = get_clear_memory(source->public_key_len);
+    if (copy->public_key == NULL) {
+      free(copy);
+      return NULL;
+    }
+    memcpy(copy->public_key, source->public_key, source->public_key_len);
+    copy->public_key_len = source->public_key_len;
+  }
+
+  if (source->addresses != NULL && source->address_count > 0) {
+    copy->addresses = get_clear_memory(source->address_count * sizeof(peer_address_t));
+    if (copy->addresses == NULL) {
+      peer_info_destroy(copy);
+      free(copy);
+      return NULL;
+    }
+    for (size_t index = 0; index < source->address_count; index++) {
+      const peer_address_t* address = &source->addresses[index];
+      size_t host_len = strlen(address->host);
+      char* host = get_clear_memory(host_len + 1);
+      if (host == NULL) {
+        peer_info_destroy(copy);
+        free(copy);
+        return NULL;
+      }
+      memcpy(host, address->host, host_len);
+      copy->addresses[copy->address_count].type = address->type;
+      copy->addresses[copy->address_count].port = address->port;
+      copy->addresses[copy->address_count].relay_id = address->relay_id;
+      copy->addresses[copy->address_count].host = host;
+      copy->address_count++;
+    }
+  }
+  return copy;
+}
+
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
@@ -168,7 +213,7 @@ static int authority_bootstrap_contains(authority_t* authority, const char* endp
 /* Re-encode a parsed endpoint so stored strings are normalized
  * ("host:port", or "[ipv6]:port" when the host contains ':'). The buffer
  * holds the worst case "[host]:65535" + NUL: brackets, colon, 5 digits. */
-static char* authority_bootstrap_encode(const char* host, uint16_t port) {
+char* authority_bootstrap_encode(const char* host, uint16_t port) {
   size_t length = strlen(host) + 12;
   char* stored = get_memory(length);
   if (stored == NULL) return NULL;
@@ -282,8 +327,9 @@ int authority_set_bootstrap_peers(authority_t* authority, const char* csv) {
     info->addresses = get_clear_memory(sizeof(peer_address_t));
     if (info->addresses == NULL) { peer_info_destroy(info); free(copy); goto fail; }
     info->addresses[0].type = PEER_ADDR_HOST;
-    info->addresses[0].host = authority_bootstrap_encode(host, port);
+    info->addresses[0].host = get_clear_memory(strlen(host) + 1);
     if (info->addresses[0].host == NULL) { peer_info_destroy(info); free(copy); goto fail; }
+    memcpy(info->addresses[0].host, host, strlen(host));
     info->addresses[0].port = port;
     info->address_count = 1;
 
@@ -355,7 +401,7 @@ int authority_set_bootstrap_entries(authority_t* authority,
       log_error("authority_set_bootstrap_entries: NULL peer_info at %zu", index);
       return -1;
     }
-    peer_info_t* copy = _peer_book_copy_peer_info(infos[index]);
+    peer_info_t* copy = authority_copy_peer_info(infos[index]);
     if (copy == NULL) {
       for (size_t prior = 0; prior < index; prior++) {
         peer_info_destroy(parsed[prior]);
