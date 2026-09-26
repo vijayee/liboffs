@@ -22,7 +22,6 @@ extern "C" {
 #include "../src/Platform/platform_socket.h"
 #include <string.h>
 #include <stdlib.h>
-#include <unistd.h>
 
 /* usleep is POSIX-only; platform_sleep_ms is the cross-platform equivalent.
  * Call sites pass microsecond values (e.g. 10000 == 10ms), so divide by 1000.

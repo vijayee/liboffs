@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 #include <future>
+#include <mutex>
 #include <vector>
 #include <cstring>
 #include <cstdlib>
@@ -37,7 +38,7 @@ struct LoadEntry {
 };
 
 struct LoadRecorder {
-  pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+  std::mutex mutex;
   std::vector<LoadEntry> entries;
   std::promise<void> done_promise;
   size_t expected;
@@ -52,7 +53,7 @@ struct LoadRecorder {
         close_before_loads(0), close_seen(0) {}
 
   void record(size_t tuples_loaded, size_t tuples_skipped) {
-    pthread_mutex_lock(&mutex);
+    std::lock_guard<std::mutex> lock(mutex);
     entries.push_back(LoadEntry{tuples_loaded, tuples_skipped});
     if (tuples_skipped > 0 && !skip_seen) {
       skip_seen = 1;
@@ -62,18 +63,16 @@ struct LoadRecorder {
       done_seen = 1;
       done_promise.set_value();
     }
-    pthread_mutex_unlock(&mutex);
   }
 
   /* Close handler: load_mode counts a tuple before it renders, so by the time
    * close fires every load event must already have been observed. */
   void note_close() {
-    pthread_mutex_lock(&mutex);
+    std::lock_guard<std::mutex> lock(mutex);
     close_seen = 1;
     if (entries.size() < expected) {
       close_before_loads = 1;
     }
-    pthread_mutex_unlock(&mutex);
   }
 };
 

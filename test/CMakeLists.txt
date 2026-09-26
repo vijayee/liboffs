@@ -30,6 +30,14 @@ if (BUILD_TESTING)
 
     set(GTEST_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../deps/googletest/googletest/include)
     set(GMOCK_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../deps/googletest/googlemock/include)
+    # The Update module is excluded from the library on WIN32 (its standalone-
+    # updater spawn path uses fork()/execlp()), so its tests can't link there.
+    set(UPDATE_TEST_SOURCES test_update_verify.cpp
+            test_update_manifest.cpp
+            test_update_extract.cpp)
+    if(WIN32)
+      set(UPDATE_TEST_SOURCES "")
+    endif()
     message(STATUS "${C_INC}")
     add_executable(testliboffs test_main.cpp
             test_buffer.cpp
@@ -108,9 +116,7 @@ if (BUILD_TESTING)
             test_ws_transport_ssl.cpp
             test_offs_client.cpp
             test_peer_state.cpp
-            test_update_verify.cpp
-            test_update_manifest.cpp
-            test_update_extract.cpp
+            ${UPDATE_TEST_SOURCES}
             # test_peer_verify generates its own CA certificate in SetUp via
             # ca_generate (same routine the offs-ca tool exposes), so the suite
             # is self-contained and no longer depends on a stale gitignored

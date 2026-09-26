@@ -12,7 +12,9 @@ extern "C" {
 #include <vector>
 #include <filesystem>
 #include <fstream>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -133,7 +135,7 @@ TEST_F(UpdateExtract, ExtractsValidTarball) {
       {"foo.txt", '0', std::string("hello"), ""},
       {"bar/baz.txt", '0', std::string("world"), ""},
   });
-  ASSERT_EQ(update_extract(tar_path.c_str(), dest_dir.c_str(),
+  ASSERT_EQ(update_extract(tar_path.string().c_str(), dest_dir.string().c_str(),
                            1ULL * 1024 * 1024 * 1024), 0);
   ASSERT_TRUE(fs::exists(dest_dir / "foo.txt"));
   ASSERT_TRUE(fs::exists(dest_dir / "bar" / "baz.txt"));
@@ -155,7 +157,7 @@ TEST_F(UpdateExtract, RejectsAbsolutePath) {
   write_tar(tar_path, {
       {"/etc/passwd", '0', std::string("evil"), ""},
   });
-  ASSERT_EQ(update_extract(tar_path.c_str(), dest_dir.c_str(),
+  ASSERT_EQ(update_extract(tar_path.string().c_str(), dest_dir.string().c_str(),
                            1ULL * 1024 * 1024 * 1024), -1);
   /* dest_dir should remain unchanged — no file written. */
   EXPECT_FALSE(fs::exists(dest_dir / "etc"));
@@ -165,7 +167,7 @@ TEST_F(UpdateExtract, RejectsDotDot) {
   write_tar(tar_path, {
       {"../../etc/passwd", '0', std::string("evil"), ""},
   });
-  ASSERT_EQ(update_extract(tar_path.c_str(), dest_dir.c_str(),
+  ASSERT_EQ(update_extract(tar_path.string().c_str(), dest_dir.string().c_str(),
                            1ULL * 1024 * 1024 * 1024), -1);
   EXPECT_FALSE(fs::exists(dest_dir / ".." / ".." / "etc"));
 }
@@ -177,7 +179,7 @@ TEST_F(UpdateExtract, RejectsSymlinkEscape) {
   write_tar(tar_path, {
       {"evil", '2', std::string(""), "../../etc/passwd"},
   });
-  ASSERT_EQ(update_extract(tar_path.c_str(), dest_dir.c_str(),
+  ASSERT_EQ(update_extract(tar_path.string().c_str(), dest_dir.string().c_str(),
                            1ULL * 1024 * 1024 * 1024), -1);
   EXPECT_FALSE(fs::exists(dest_dir / "evil"));
 }
@@ -187,7 +189,7 @@ TEST_F(UpdateExtract, RejectsHardlink) {
       {"original.txt", '0', std::string("data"), ""},
       {"link.txt", '1', std::string(""), "original.txt"},
   });
-  ASSERT_EQ(update_extract(tar_path.c_str(), dest_dir.c_str(),
+  ASSERT_EQ(update_extract(tar_path.string().c_str(), dest_dir.string().c_str(),
                            1ULL * 1024 * 1024 * 1024), -1);
 }
 
@@ -197,7 +199,7 @@ TEST_F(UpdateExtract, RejectsOversized) {
   write_tar(tar_path, {
       {"big.txt", '0', big, ""},
   });
-  ASSERT_EQ(update_extract(tar_path.c_str(), dest_dir.c_str(), 100), -1);
+  ASSERT_EQ(update_extract(tar_path.string().c_str(), dest_dir.string().c_str(), 100), -1);
   EXPECT_FALSE(fs::exists(dest_dir / "big.txt"));
 }
 
@@ -205,7 +207,7 @@ TEST_F(UpdateExtract, ExtractsDirectory) {
   write_tar(tar_path, {
       {"subdir/", '5', std::string(""), ""},
   });
-  ASSERT_EQ(update_extract(tar_path.c_str(), dest_dir.c_str(),
+  ASSERT_EQ(update_extract(tar_path.string().c_str(), dest_dir.string().c_str(),
                            1ULL * 1024 * 1024 * 1024), 0);
   EXPECT_TRUE(fs::is_directory(dest_dir / "subdir"));
 }

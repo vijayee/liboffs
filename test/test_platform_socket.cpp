@@ -2,9 +2,15 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
+#else
 #include <net/if.h>
 #include <ifaddrs.h>
 #include <arpa/inet.h>
+#endif
 
 extern "C" {
 #include "../src/Platform/platform.h"
@@ -460,11 +466,49 @@ TEST(TestPlatformScope, NumericScopeAcceptedAndEmitted) {
 }
 
 TEST(TestPlatformScope, ScopedLiteralByNameRoundTrips) {
-  /* Find a real link-local v6 interface on this host via getifaddrs. */
+  /* Find a real link-local v6 interface on this host. */
+  char scoped[IF_NAMESIZE + 64] = {0};
+#if defined(_WIN32)
+  /* Windows: enumerate adapters with GetAdaptersAddresses, then take the
+   * interface name from if_indextoname — the same name form the platform
+   * layer's IF_NAMETOINDEX path accepts back. */
+  ULONG size = 0;
+  IP_ADAPTER_ADDRESSES* adapters = NULL;
+  ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                GAA_FLAG_SKIP_DNS_SERVER;
+  ASSERT_EQ(GetAdaptersAddresses(AF_INET6, flags, NULL, NULL, &size),
+            ERROR_BUFFER_OVERFLOW);
+  adapters = (IP_ADAPTER_ADDRESSES*)malloc(size);
+  ASSERT_NE(adapters, (IP_ADAPTER_ADDRESSES*)NULL);
+  ULONG ret = GetAdaptersAddresses(AF_INET6, flags, NULL, adapters, &size);
+  if (ret == NO_ERROR) {
+    for (IP_ADAPTER_ADDRESSES* a = adapters; a != NULL && scoped[0] == '\0';
+         a = a->Next) {
+      for (IP_ADAPTER_UNICAST_ADDRESS* u = a->FirstUnicastAddress; u != NULL;
+           u = u->Next) {
+        if (u->Address.lpSockaddr == NULL ||
+            u->Address.lpSockaddr->sa_family != AF_INET6)
+          continue;
+        struct sockaddr_in6* sin6 = (struct sockaddr_in6*)u->Address.lpSockaddr;
+        if (!IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr) ||
+            sin6->sin6_scope_id == 0)
+          continue;
+        char ifname[IF_NAMESIZE];
+        if (if_indextoname(sin6->sin6_scope_id, ifname) == NULL) continue;
+        char ip[64];
+        if (inet_ntop(AF_INET6, &sin6->sin6_addr, ip, sizeof(ip)) == NULL)
+          continue;
+        snprintf(scoped, sizeof(scoped), "%s%%%s", ip, ifname);
+        break;
+      }
+    }
+  }
+  free(adapters);
+#else
   struct ifaddrs* ifaces = NULL;
   ASSERT_EQ(getifaddrs(&ifaces), 0);
-  char scoped[128] = {0};
-  for (struct ifaddrs* ifa = ifaces; ifa != NULL; ifa = ifa->ifa_next) {
+  for (struct ifaddrs* ifa = ifaces; ifa != NULL && scoped[0] == '\0';
+       ifa = ifa->ifa_next) {
     if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET6) continue;
     struct sockaddr_in6* sin6 = (struct sockaddr_in6*)ifa->ifa_addr;
     unsigned char bytes[16];
@@ -477,6 +521,7 @@ TEST(TestPlatformScope, ScopedLiteralByNameRoundTrips) {
     }
   }
   freeifaddrs(ifaces);
+#endif
   if (scoped[0] == '\0') {
     GTEST_SKIP() << "no link-local v6 interface on this host";
   }
