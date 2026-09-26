@@ -102,7 +102,11 @@ for region in "${REGIONS[@]}"; do
     NODE_NAME="offs-test-${region}-${replica}"
     NODE_NAMES+=("${NODE_NAME}")
     log "  Deploying ${NODE_NAME} in ${region}..."
-    az container create --resource-group "${NODE_RG}" --name "${NODE_NAME}" --image "${IMAGE}" --registry-login-server "${ACR_NAME}.azurecr.io" --registry-username "${ACR_USER}" --registry-password "${ACR_PW}" --location "${region}" --os-type Linux --cpu 1.0 --memory 1.0 --ip-address Public --ports 23402 --azure-file-volume-account-name "${REGION_STORAGE_ACCOUNT[${region}]}" --azure-file-volume-account-key "${REGION_STORAGE_KEY[${region}]}" --azure-file-volume-share-name "offs-${RUN_ID}-${region}-${replica}" --azure-file-volume-mount-path "/data" --environment-variables RELAY_URL=${RELAY_IP}:${RELAY_PORT} MAX_CAPACITY_BYTES=1073741824 -o table 2>&1 | tail -2 || log "  ⚠️  Deploy failed for ${NODE_NAME}, skipping"
+    VOLUME_ARGS=""
+    if [ -n "${REGION_STORAGE_ACCOUNT[${region}]}" ]; then
+      VOLUME_ARGS="--azure-file-volume-account-name ${REGION_STORAGE_ACCOUNT[${region}]} --azure-file-volume-account-key ${REGION_STORAGE_KEY[${region}]} --azure-file-volume-share-name offs-${RUN_ID}-${region}-${replica} --azure-file-volume-mount-path /data"
+    fi
+    az container create --resource-group "${NODE_RG}" --name "${NODE_NAME}" --image "${IMAGE}" --registry-login-server "${ACR_NAME}.azurecr.io" --registry-username "${ACR_USER}" --registry-password "${ACR_PW}" --location "${region}" --os-type Linux --cpu 1.0 --memory 1.0 --ip-address Public --ports 23402 ${VOLUME_ARGS} --environment-variables RELAY_URL=${RELAY_IP}:${RELAY_PORT} MAX_CAPACITY_BYTES=1073741824 -o table 2>&1 | tail -2 || log "  ⚠️  Deploy failed for ${NODE_NAME}, skipping"
 
     # Get IP
     NODE_IP=$(az container show --resource-group "${NODE_RG}" --name "${NODE_NAME}" \
