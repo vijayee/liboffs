@@ -353,7 +353,8 @@ int main(int argc, char** argv) {
 #else
   signal(SIGINT, _signal_handler);
   signal(SIGTERM, _signal_handler);
-  signal(SIGPIPE, SIG_IGN);
+  /* No SIGPIPE on Windows: Winsock reports broken pipes as errors on the
+   * socket calls themselves, not as a process signal. */
 #endif
 
   http_server_listen(server);
