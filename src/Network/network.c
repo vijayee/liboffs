@@ -1009,8 +1009,8 @@ static void network_handle_salutation(network_t* network, message_t* msg,
   // connection without inserting anything (eclipse protection).
   if (pending->has_expected_id &&
       !node_id_equals(&computed_id, &pending->expected_id)) {
-    char expected_b58[NODE_ID_STRING_SIZE];
-    char confirmed_b58[NODE_ID_STRING_SIZE];
+    char expected_b58[NODE_ID_STRING_SIZE] = {0};
+    char confirmed_b58[NODE_ID_STRING_SIZE] = {0};
     if (base58_encode(pending->expected_id.hash, NODE_ID_HASH_SIZE,
                       expected_b58, sizeof(expected_b58)) > 0 &&
         base58_encode(computed_id.hash, NODE_ID_HASH_SIZE,

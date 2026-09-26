@@ -39,6 +39,8 @@ void quic_send_payload_destroy(quic_send_payload_t* payload) {
 #include "stream_framer.h"
 #include <msquic.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <cbor.h>
 #include "peer_verify.h"
 
@@ -500,11 +502,17 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
       uint32_t connected_peer_len = sizeof(connected_peer_addr);
       listener->msquic->GetParam(connection, QUIC_PARAM_CONN_REMOTE_ADDRESS,
                                  &connected_peer_len, &connected_peer_addr);
-      char connected_peer_str[80];
-      platform_address_to_string((const platform_address_t*)&connected_peer_addr,
-                                 connected_peer_str, sizeof(connected_peer_str));
-      log_info("quic_listener: connection CONNECTED (peer %s)",
-               connected_peer_str);
+      char connected_peer_str[INET6_ADDRSTRLEN + 8] = {0};
+      if (connected_peer_addr.Ip.sa_family == AF_INET6) {
+        inet_ntop(AF_INET6, &connected_peer_addr.Ipv6.sin6_addr,
+                  connected_peer_str, sizeof(connected_peer_str));
+      } else if (connected_peer_addr.Ip.sa_family == AF_INET) {
+        inet_ntop(AF_INET, &connected_peer_addr.Ipv4.sin_addr,
+                  connected_peer_str, sizeof(connected_peer_str));
+      }
+      log_info("quic_listener: connection CONNECTED (peer %s:%u)",
+               connected_peer_str,
+               (unsigned)ntohs(connected_peer_addr.Ipv4.sin_port));
       _conn_track_add(listener, connection);
 
       // Extract peer address from the connection
