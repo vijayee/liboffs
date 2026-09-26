@@ -183,3 +183,60 @@ TEST(AuthorityBootstrap, PeerStoreRoundTripIndex6) {
   connection_manager_deinit(&net2.conn_mgr);
   fs::remove(tmp);
 }
+
+// A config token that is not an endpoint is accepted as a base58 peer_info
+// (the /peer/info interchange form): the entry carries the full candidate
+// list and a pinned node_id, unlike endpoint tokens (trust-on-first-use).
+TEST(AuthorityBootstrap, SetBootstrapPeersAcceptsBase58PeerInfo) {
+  config_t config;
+  authority_t* authority = make_authority("/tmp/liboffs_test_bootstrap_store.cbor", &config);
+  ASSERT_NE(authority, nullptr);
+
+  peer_info_t original;
+  memset(&original, 0, sizeof(original));
+  node_id_generate(&original.node_id);
+  original.public_key = static_cast<uint8_t*>(malloc(32));
+  ASSERT_NE(original.public_key, nullptr);
+  for (size_t index = 0; index < 32; index++) original.public_key[index] = (uint8_t)index;
+  original.public_key_len = 32;
+  original.addresses = static_cast<peer_address_t*>(calloc(2, sizeof(peer_address_t)));
+  ASSERT_NE(original.addresses, nullptr);
+  original.addresses[0].type = PEER_ADDR_HOST;
+  original.addresses[0].host = strdup("172.178.8.253");
+  original.addresses[0].port = 23401;
+  original.addresses[1].type = PEER_ADDR_HOST;
+  original.addresses[1].host = strdup("[2001:db8::9]");
+  original.addresses[1].port = 23401;
+  original.address_count = 2;
+
+  char* b58 = peer_info_to_base58(&original);
+  ASSERT_NE(b58, nullptr);
+
+  char csv[2048];
+  snprintf(csv, sizeof(csv), "%s", b58);
+  ASSERT_EQ(0, authority_set_bootstrap_peers(authority, csv));
+  ASSERT_EQ(1u, authority->bootstrap_peer_count);
+
+  peer_info_t* entry = authority->bootstrap_peers[0].info;
+  EXPECT_TRUE(node_id_equals(&entry->node_id, &original.node_id));
+  ASSERT_EQ(2u, entry->address_count);
+  EXPECT_STREQ("172.178.8.253", entry->addresses[0].host);
+  EXPECT_EQ(23401, entry->addresses[0].port);
+  EXPECT_STREQ("[2001:db8::9]", entry->addresses[1].host);
+  // Pinned — the salutation must confirm this node_id.
+  EXPECT_EQ(1, authority->bootstrap_peers[0].pinned);
+
+  // Mixed CSV: base58 peer_info and endpoint token coexist.
+  ASSERT_EQ(0, authority_set_bootstrap_peers(authority, "10.0.0.5:7070"));
+  EXPECT_EQ(1u, authority->bootstrap_peer_count);  // peer_info replaced
+  snprintf(csv, sizeof(csv), "%s,10.0.0.5:7070", b58);
+  ASSERT_EQ(0, authority_set_bootstrap_peers(authority, csv));
+  ASSERT_EQ(2u, authority->bootstrap_peer_count);
+  EXPECT_EQ(1, authority->bootstrap_peers[0].pinned);
+  EXPECT_EQ(0, authority->bootstrap_peers[1].pinned);
+  EXPECT_STREQ("10.0.0.5", authority->bootstrap_peers[1].info->addresses[0].host);
+
+  free(b58);
+  peer_info_destroy(&original);
+  authority_destroy(authority);
+}

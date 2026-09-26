@@ -306,8 +306,31 @@ int authority_set_bootstrap_peers(authority_t* authority, const char* csv) {
     char host[256];
     uint16_t port = 0;
     if (endpoint_parse(token, host, sizeof(host), &port) != 0) {
-      free(copy);
-      goto fail;
+      /* Not an endpoint — accept a base58 peer_info (the /peer/info
+         interchange form) so a config can pin the bootstrap's full identity
+         and candidate list. Pinned: the salutation must confirm node_id. */
+      peer_info_t decoded;
+      memset(&decoded, 0, sizeof(decoded));
+      if (peer_info_from_base58(token, &decoded) != 0 ||
+          decoded.node_id.hash == NULL) {
+        peer_info_destroy(&decoded);
+        free(copy);
+        goto fail;
+      }
+      peer_info_t** expanded = realloc(parsed, (parsed_count + 1) * sizeof(peer_info_t*));
+      if (expanded == NULL) { peer_info_destroy(&decoded); free(copy); goto fail; }
+      parsed = expanded;
+      uint8_t* expanded_pinned =
+          realloc(parsed_pinned, (parsed_count + 1) * sizeof(uint8_t));
+      if (expanded_pinned == NULL) { peer_info_destroy(&decoded); free(copy); goto fail; }
+      parsed_pinned = expanded_pinned;
+      peer_info_t* stored = get_clear_memory(sizeof(peer_info_t));
+      if (stored == NULL) { peer_info_destroy(&decoded); free(copy); goto fail; }
+      memcpy(stored, &decoded, sizeof(*stored));
+      parsed[parsed_count] = stored;
+      parsed_pinned[parsed_count] = 1;
+      parsed_count++;
+      continue;
     }
     bool duplicate = false;
     for (size_t prior = 0; prior < parsed_count && !duplicate; prior++) {
