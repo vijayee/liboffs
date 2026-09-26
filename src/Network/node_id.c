@@ -11,6 +11,7 @@
 #include <stdlib.h>
 
 int node_id_from_public_key(const uint8_t* public_key, size_t key_len, node_id_t* result) {
+  memset(result, 0, sizeof(*result));
   blake3_hasher hasher;
   blake3_hasher_init(&hasher);
   blake3_hasher_update(&hasher, public_key, key_len);
@@ -60,6 +61,7 @@ uint64_t node_id_hash(const node_id_t* node_id) {
 }
 
 void node_id_generate(node_id_t* result) {
+  memset(result->str, 0, NODE_ID_STRING_SIZE);
   blake3_hasher hasher;
   blake3_hasher_init(&hasher);
   uint64_t randomness[4];
@@ -72,5 +74,6 @@ void node_id_generate(node_id_t* result) {
   }
   blake3_hasher_update(&hasher, randomness, sizeof(randomness));
   blake3_hasher_finalize(&hasher, result->hash, NODE_ID_HASH_SIZE);
+  memset(result->str, 0, NODE_ID_STRING_SIZE);
   base58_encode(result->hash, NODE_ID_HASH_SIZE, result->str, NODE_ID_STRING_SIZE);
 }
