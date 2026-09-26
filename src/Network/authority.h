@@ -20,12 +20,28 @@ typedef enum node_phase_e {
   NODE_PHASE_EXHALE = 2
 } node_phase_e;
 
+/* A bootstrap entry: the bootstrap node's full peer_info (identity + all
+ * advertised addresses) plus a pin flag. The peer-book reconnect tick dials
+ * the entry's candidate addresses like a friend's; when pinned, the
+ * salutation exchange must confirm info->node_id — a mismatch drops the
+ * connection, so a rogue node at the bootstrap address cannot poison a
+ * joining node's ring view (eclipse protection). Unpinned entries behave
+ * trust-on-first-use (the BLAKE3 pubkey + cert-pin checks still apply). */
+typedef struct bootstrap_entry_t {
+  peer_info_t* info;
+  uint8_t pinned;
+} bootstrap_entry_t;
+
 typedef struct authority_t {
   config_t* config;
 
-  char** bootstrap_peers;
+  /* Config-seeded entries (optionally identity-pinned) — replaced on each
+     set, immutable at runtime after the peer-book starts. */
+  bootstrap_entry_t* bootstrap_peers;
   size_t bootstrap_peer_count;
 
+  /* Operator-managed entries (runtime adds), persisted in peer-store index 6
+     (endpoint strings; ids are config-scoped only). */
   char** managed_bootstrap_peers;
   size_t managed_bootstrap_peer_count;
 
@@ -131,6 +147,12 @@ int authority_load_peers(authority_t* authority, network_t* network);
 int authority_bootstrap_add(authority_t* authority, const char* endpoint);
 int authority_bootstrap_remove(authority_t* authority, const char* endpoint);
 int authority_set_bootstrap_peers(authority_t* authority, const char* csv);
+/* Structured seed: full peer_info entries (the bootstrap's /peer/info blob)
+ * with optional identity pinning. Deep-copies the infos. */
+int authority_set_bootstrap_entries(authority_t* authority,
+                                    peer_info_t* const* infos,
+                                    const uint8_t* pinned,
+                                    size_t count);
 
 void authority_update_capacity(authority_t* authority, float capacity);
 void authority_update_phase(authority_t* authority, float capacity);

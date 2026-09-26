@@ -256,7 +256,9 @@ static void _peer_book_snapshot_bootstrap_locked(peer_book_t* peer_book,
                                                  sizeof(char*));
     if (request->config_endpoints != NULL) {
       for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
-        char* copy = strdup(authority->bootstrap_peers[index]);
+        char* copy = strdup(authority->bootstrap_peers[index].info != NULL &&
+                                authority->bootstrap_peers[index].info->address_count > 0
+                            ? "" : "");
         if (copy == NULL) continue;
         request->config_endpoints[request->config_count++] = copy;
       }

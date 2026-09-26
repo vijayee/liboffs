@@ -131,6 +131,11 @@ typedef struct peer_book_snapshot_t {
   /* reply: peer_book_snapshot_bootstrap */
   char** config_endpoints;
   size_t config_count;
+  /* reply: config-seeded bootstrap entries as full peer_infos (identity +
+     candidate addresses) with per-entry identity pin flags. */
+  peer_info_t** config_infos;
+  uint8_t* config_pinned;
+  size_t config_info_count;
   char** managed_endpoints;
   size_t managed_count;
 } peer_book_snapshot_t;
@@ -145,6 +150,12 @@ typedef struct peer_book_reconnect_payload_t {
   size_t friend_count;
   char** config_endpoints;
   size_t config_count;
+  /* config-seeded bootstrap entries as full peer_infos with per-entry pin
+     flags — the heal dials their candidates and the salutation verifies
+     pinned identities. */
+  peer_info_t** config_infos;
+  uint8_t* config_pinned;
+  size_t config_info_count;
   char** managed_endpoints;
   size_t managed_count;
 } peer_book_reconnect_payload_t;

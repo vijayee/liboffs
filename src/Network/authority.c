@@ -46,7 +46,8 @@ void authority_destroy(authority_t* authority) {
   }
   if (authority->bootstrap_peers != NULL) {
     for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
-      free(authority->bootstrap_peers[index]);
+      peer_info_destroy(authority->bootstrap_peers[index].info);
+      free(authority->bootstrap_peers[index].info);
     }
     free(authority->bootstrap_peers);
   }
@@ -144,11 +145,11 @@ static int authority_bootstrap_contains(authority_t* authority, const char* endp
   if (endpoint_parse(endpoint, host, sizeof(host), &port) != 0) return 1;
 
   for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
-    char config_host[256];
-    uint16_t config_port = 0;
-    if (endpoint_parse(authority->bootstrap_peers[index], config_host,
-                       sizeof(config_host), &config_port) == 0 &&
-        strcmp(config_host, host) == 0 && config_port == port) {
+    const bootstrap_entry_t* entry = &authority->bootstrap_peers[index];
+    if (entry->info == NULL || entry->info->address_count == 0 ||
+        entry->info->addresses[0].host == NULL) continue;
+    if (strcmp(entry->info->addresses[0].host, host) == 0 &&
+        entry->info->addresses[0].port == port) {
       return 1;
     }
   }
@@ -212,9 +213,11 @@ int authority_bootstrap_remove(authority_t* authority, const char* endpoint) {
   for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
     char config_host[256];
     uint16_t config_port = 0;
-    if (endpoint_parse(authority->bootstrap_peers[index], config_host,
-                       sizeof(config_host), &config_port) == 0 &&
-        strcmp(config_host, host) == 0 && config_port == port) {
+    const bootstrap_entry_t* entry = &authority->bootstrap_peers[index];
+    if (entry->info != NULL && entry->info->address_count > 0 &&
+        entry->info->addresses[0].host != NULL &&
+        strcmp(entry->info->addresses[0].host, host) == 0 &&
+        entry->info->addresses[0].port == port) {
       return -2;  // config-seeded entries are immutable at runtime
     }
   }
@@ -241,20 +244,16 @@ int authority_set_bootstrap_peers(authority_t* authority, const char* csv) {
   if (authority == NULL) return -1;
   if (csv == NULL || csv[0] == '\0') {
     /* Empty seed clears the list unconditionally. */
-    for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
-      free(authority->bootstrap_peers[index]);
-    }
-    free(authority->bootstrap_peers);
-    authority->bootstrap_peers = NULL;
-    authority->bootstrap_peer_count = 0;
-    return 0;
+    return authority_set_bootstrap_entries(authority, NULL, NULL, 0);
   }
 
-  /* Pass 1: parse every token into a temporary array; nothing is mutated
-     until the whole CSV validates. */
+  /* Pass 1: parse every token into a temporary peer_info entry — endpoint
+     only (single HOST-candidate address at host:port), unpinned
+     (trust-on-first-use); nothing is mutated until the whole CSV validates. */
   char* copy = strdup(csv);
   if (copy == NULL) return -1;
-  char** parsed = NULL;
+  peer_info_t** parsed = NULL;
+  uint8_t* parsed_pinned = NULL;
   size_t parsed_count = 0;
   char* saveptr = NULL;
   for (char* token = strtok_r(copy, ",", &saveptr); token != NULL;
@@ -265,52 +264,138 @@ int authority_set_bootstrap_peers(authority_t* authority, const char* csv) {
       free(copy);
       goto fail;
     }
-    /* Skip tokens whose parsed host:port duplicates an earlier token in the
-       same CSV (same comparison rule as authority_bootstrap_contains, but
-       over the temporaries being built here). */
     bool duplicate = false;
     for (size_t prior = 0; prior < parsed_count && !duplicate; prior++) {
       char prior_host[256];
       uint16_t prior_port = 0;
-      if (endpoint_parse(parsed[prior], prior_host, sizeof(prior_host),
-                         &prior_port) == 0 &&
-          strcmp(prior_host, host) == 0 && prior_port == port) {
+      if (parsed[prior]->addresses != NULL && parsed[prior]->address_count > 0 &&
+          parsed[prior]->addresses[0].host != NULL &&
+          strcmp(parsed[prior]->addresses[0].host, host) == 0 &&
+          parsed[prior]->addresses[0].port == port) {
         duplicate = true;
       }
     }
     if (duplicate) continue;
-    char* stored = authority_bootstrap_encode(host, port);
-    if (stored == NULL) {
-      free(copy);
-      goto fail;
-    }
-    char** expanded = realloc(parsed, (parsed_count + 1) * sizeof(char*));
-    if (expanded == NULL) {
-      free(stored);
-      free(copy);
-      goto fail;
-    }
+
+    peer_info_t* info = get_clear_memory(sizeof(peer_info_t));
+    if (info == NULL) { free(copy); goto fail; }
+    info->addresses = get_clear_memory(sizeof(peer_address_t));
+    if (info->addresses == NULL) { peer_info_destroy(info); free(copy); goto fail; }
+    info->addresses[0].type = PEER_ADDR_HOST;
+    info->addresses[0].host = authority_bootstrap_encode(host, port);
+    if (info->addresses[0].host == NULL) { peer_info_destroy(info); free(copy); goto fail; }
+    info->addresses[0].port = port;
+    info->address_count = 1;
+
+    peer_info_t** expanded =
+        realloc(parsed, (parsed_count + 1) * sizeof(peer_info_t*));
+    if (expanded == NULL) { peer_info_destroy(info); free(copy); goto fail; }
     parsed = expanded;
-    parsed[parsed_count++] = stored;
+    uint8_t* expanded_pinned =
+        realloc(parsed_pinned, (parsed_count + 1) * sizeof(uint8_t));
+    if (expanded_pinned == NULL) { peer_info_destroy(info); free(copy); goto fail; }
+    parsed_pinned = expanded_pinned;
+    parsed[parsed_count] = info;
+    parsed_pinned[parsed_count] = 0;
+    parsed_count++;
   }
   free(copy);
 
   /* Pass 2: swap — free the old list only after full validation. */
-  for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
-    free(authority->bootstrap_peers[index]);
+  int rc = authority_set_bootstrap_entries(authority, parsed, parsed_pinned,
+                                           parsed_count);
+  for (size_t index = 0; index < parsed_count; index++) {
+    peer_info_destroy(parsed[index]);
+    free(parsed[index]);
   }
-  free(authority->bootstrap_peers);
-  authority->bootstrap_peers = parsed;
-  authority->bootstrap_peer_count = parsed_count;
-  return 0;
+  free(parsed_pinned);
+  free(parsed);
+  if (rc != 0) {
+    log_error("authority_set_bootstrap_peers: invalid bootstrap_peers CSV: %s", csv);
+  }
+  return rc;
 
 fail:
   for (size_t index = 0; index < parsed_count; index++) {
+    peer_info_destroy(parsed[index]);
     free(parsed[index]);
   }
+  free(parsed_pinned);
   free(parsed);
   log_error("authority_set_bootstrap_peers: invalid bootstrap_peers CSV: %s", csv);
   return -1;
+}
+
+int authority_set_bootstrap_entries(authority_t* authority,
+                                    peer_info_t* const* infos,
+                                    const uint8_t* pinned,
+                                    size_t count) {
+  if (authority == NULL) return -1;
+  if (count > 0 && (infos == NULL || pinned == NULL)) return -1;
+
+  /* Pass 1: deep-copy every entry into a temporary array; nothing is
+     mutated until the whole set validates. */
+  peer_info_t** parsed = NULL;
+  uint8_t* parsed_pinned = NULL;
+  if (count > 0) {
+    parsed = get_clear_memory(count * sizeof(peer_info_t*));
+    parsed_pinned = get_clear_memory(count * sizeof(uint8_t));
+    if (parsed == NULL || parsed_pinned == NULL) {
+      free(parsed); free(parsed_pinned);
+      return -1;
+    }
+  }
+  for (size_t index = 0; index < count; index++) {
+    if (infos[index] == NULL) {
+      for (size_t prior = 0; prior < index; prior++) {
+        peer_info_destroy(parsed[prior]);
+        free(parsed[prior]);
+      }
+      free(parsed_pinned); free(parsed);
+      log_error("authority_set_bootstrap_entries: NULL peer_info at %zu", index);
+      return -1;
+    }
+    peer_info_t* copy = _peer_book_copy_peer_info(infos[index]);
+    if (copy == NULL) {
+      for (size_t prior = 0; prior < index; prior++) {
+        peer_info_destroy(parsed[prior]);
+        free(parsed[prior]);
+      }
+      free(parsed_pinned); free(parsed);
+      log_error("authority_set_bootstrap_entries: copy failed at %zu", index);
+      return -1;
+    }
+    parsed[index] = copy;
+    parsed_pinned[index] = pinned[index] ? 1 : 0;
+  }
+
+  /* Pass 2: swap — free the old list only after full validation. */
+  for (size_t index = 0; index < authority->bootstrap_peer_count; index++) {
+    peer_info_destroy(authority->bootstrap_peers[index].info);
+    free(authority->bootstrap_peers[index].info);
+  }
+  free(authority->bootstrap_peers);
+  authority->bootstrap_peers = NULL;
+  authority->bootstrap_peer_count = 0;
+  if (count > 0) {
+    authority->bootstrap_peers = get_clear_memory(count * sizeof(bootstrap_entry_t));
+    if (authority->bootstrap_peers == NULL) {
+      for (size_t index = 0; index < count; index++) {
+        peer_info_destroy(parsed[index]);
+        free(parsed[index]);
+      }
+      free(parsed_pinned); free(parsed);
+      return -1;
+    }
+    for (size_t index = 0; index < count; index++) {
+      authority->bootstrap_peers[index].info = parsed[index];
+      authority->bootstrap_peers[index].pinned = parsed_pinned[index];
+      parsed[index] = NULL;
+    }
+    authority->bootstrap_peer_count = count;
+  }
+  free(parsed_pinned); free(parsed);
+  return 0;
 }
 
 int authority_sign_nonce(authority_t* authority, const uint8_t nonce[32],
