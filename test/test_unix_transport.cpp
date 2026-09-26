@@ -1338,11 +1338,7 @@ protected:
            cache's respiration pointer); authority_destroy last. Mirrors the
            proven test_quic_integration + off_server teardown order. */
         if (network != nullptr) {
-            /* network_create opens a QUIC listener it never destroys (the
-               listener is torn down by its owner in the node lifecycle, which
-               this fixture does not run) — destroy the never-started listener
-               here so the suite stays valgrind-clean. */
-            quic_listener_destroy(network->quic_listener);
+            /* network_destroy tears down the QUIC listener it created. */
             network_destroy(network);
         }
         block_cache_destroy(bc);
