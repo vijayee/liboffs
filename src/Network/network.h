@@ -115,7 +115,10 @@ typedef struct network_t {
   uint32_t request_timeout_ms;        /* per-pending-request deadline; default 30s */
   ATOMIC(uint8_t) running;
   uint8_t peer_state_dirty;              /* set when hebbian/peers change; cleared on save */
-  uint32_t peer_state_save_interval_ms;  /* debounced peer-state save cadence (from config) */
+  uint32_t peer_state_save_interval_ms;  /* recurring peer-state save cadence (from config) */
+  ATOMIC(uint64_t) peer_state_save_timer_id;  /* recurring save tick; NOT a debounce —
+    a debounce re-armed on every gossip tick (hebbian decay marks dirty each tick)
+    is postponed indefinitely and never fires (found in cross-region testing) */
   uint32_t peer_state_ttl_ms;            /* drop persisted peers not seen for this long on load (0 = never expire) */
   uint32_t gossip_init_interval_s;
   size_t gossip_init_count;

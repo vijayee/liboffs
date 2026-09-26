@@ -82,17 +82,15 @@ uint64_t network_bad_blocks_received_value(void) {
 void network_mark_peer_state_dirty(network_t* network) {
   if (network == NULL) return;
   network->peer_state_dirty = 1;
-  /* Arm a one-shot debounced save. Repeated ticks coalesce — the timer
-     cancels the previous pending save before starting a new one, so only
-     the last tick within the interval window fires. Guarded: tests and
-     early-init paths may call this with no timer / zero interval; the
-     dirty flag is still set so the next authority_save_peers (either the
-     debounced fire or the Phase 8 final save) will persist the state. */
-  if (network->timer != NULL && network->peer_state_save_interval_ms > 0) {
-    timer_actor_debounce(network->timer,
-                         (uint64_t)network->peer_state_save_interval_ms,
-                         0, &network->actor, NETWORK_PEER_STATE_SAVE);
-  }
+  /* No timer arming here. The save fires on the recurring
+     NETWORK_PEER_STATE_SAVE timer (armed in network_create with
+     peer_state_save_interval_ms). The earlier implementation armed a
+     DEBOUNCE here — but the gossip tick calls this every tick (Hebbian
+     decay), and a debounce re-armed faster than its timeout is postponed
+     indefinitely: 1099 re-arms, zero fires in a traced run, so the
+     peer_store was only ever written by the shutdown save and friend
+     persistence broke wherever connections churned. The dirty flag is
+     still set for the Phase 8 final save. */
 }
 
 bool network_secure_mode(const network_t* network) {
@@ -334,6 +332,7 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   }
   connection_manager_init(&network->conn_mgr, 16, &hebbian_cfg);
   network->hebbian_decay_timer_id = 0;
+  atomic_store(&network->peer_state_save_timer_id, 0);
   network->metrics_push_timer_id = 0;
   network->ping_capacity_timer_id = 0;
   /* Partition heal state: backoff starts disarmed (first tick attempts
@@ -401,6 +400,21 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
       &network->actor,
       NETWORK_GOSSIP_TICK,
       &network->gossip_timer_id);
+
+  // Start the recurring peer-state save tick. NOT a debounce: the gossip
+  // tick marks peer state dirty every cycle (Hebbian decay), which
+  // postponed a debounced save indefinitely. This recurring timer fires
+  // every peer_state_save_interval_ms regardless; the handler saves only
+  // when the dirty flag is set.
+  atomic_store(&network->peer_state_save_timer_id, 0);
+  if (network->peer_state_save_interval_ms > 0) {
+    timer_actor_set(timer,
+        (uint64_t)network->peer_state_save_interval_ms,
+        (uint64_t)network->peer_state_save_interval_ms,
+        &network->actor,
+        NETWORK_PEER_STATE_SAVE,
+        &network->peer_state_save_timer_id);
+  }
 
   // Start EABF maintenance sweep
   network->eabf_maintenance_timer_id = 0;
@@ -523,6 +537,9 @@ void network_destroy(network_t* network) {
   connection_manager_deinit(&network->conn_mgr);
   if (network->hebbian_decay_timer_id != 0) {
     timer_actor_cancel(network->timer, network->hebbian_decay_timer_id);
+  }
+  if (atomic_load(&network->peer_state_save_timer_id) != 0) {
+    timer_actor_cancel(network->timer, atomic_load(&network->peer_state_save_timer_id));
   }
   if (atomic_load(&network->metrics_push_timer_id) != 0) {
     timer_actor_cancel(network->timer, atomic_load(&network->metrics_push_timer_id));
@@ -6130,12 +6147,13 @@ void network_dispatch(void* state, message_t* msg) {
       break;
     }
     case NETWORK_PEER_STATE_SAVE: {
-      /* Debounced mid-run save fired by network_mark_peer_state_dirty after
-         the Hebbian decay tick. The friend/managed lists live on the
-         peer-book actor: ask it (fire-and-forget PEER_BOOK_SAVE) for the
-         snapshot and clear the dirty flag only when the
-         PEER_BOOK_SAVE_SNAPSHOT reply has been saved. A dropped request
-         leaves the flag set, so the next debounce retries; the Phase 8
+      /* Recurring mid-run save tick (peer_state_save_interval_ms). Marks from
+         the gossip tick (Hebbian decay) and explicit mutations (friend adds)
+         set peer_state_dirty; the save only runs when dirty. The friend/
+         managed lists live on the peer-book actor: ask it (fire-and-forget
+         PEER_BOOK_SAVE) for the snapshot and clear the dirty flag only when
+         the PEER_BOOK_SAVE_SNAPSHOT reply has been saved. A dropped request
+         leaves the flag set, so the next tick retries; the Phase 8
          authority_save_peers in offs_node_stop remains authoritative (it
          runs after the pool is stopped, where direct list access is legal
          per the invariant in peer_book.h). */
