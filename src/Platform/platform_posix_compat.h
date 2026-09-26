@@ -44,6 +44,15 @@
   #ifndef unlink
     #define unlink _unlink
   #endif
+  /* POSIX mkdir takes a mode argument; _mkdir does not. */
+  #ifndef mkdir
+    #define mkdir(path, mode) _mkdir(path)
+  #endif
+  #ifndef chmod
+    #define chmod _chmod
+  #endif
+  #include <direct.h>   /* _mkdir */
+  #include <io.h>       /* _chmod, _unlink, _access */
   #ifndef fileno
     #define fileno _fileno
   #endif

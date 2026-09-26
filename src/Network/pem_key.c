@@ -13,7 +13,7 @@
 #include <errno.h>
 #include <time.h>
 #include <sys/stat.h>
-#include <unistd.h>
+#include "../Platform/platform_posix_compat.h"
 
 uint8_t* pem_extract_public_key(const char* cert_path, size_t* out_len) {
   if (cert_path == NULL || out_len == NULL) return NULL;
@@ -300,7 +300,11 @@ int pem_generate_self_signed_cert(const char* cert_path, const char* key_path,
     FILE* key_file = fopen(key_path, "wb");
     if (key_file != NULL) {
       /* 0600 — the private key must not be readable by other users. */
+#ifdef _WIN32
+      chmod(key_path, _S_IREAD | _S_IWRITE);
+#else
       chmod(key_path, S_IRUSR | S_IWUSR);
+#endif
       int wrote_key = PEM_write_PrivateKey(key_file, pkey, NULL, NULL, 0,
                                            NULL, NULL) == 1;
       fclose(key_file);
