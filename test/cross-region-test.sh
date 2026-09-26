@@ -82,14 +82,7 @@ for region in "${REGIONS[@]}"; do
   REGION_STORAGE_ACCOUNT["${region}"]="${ACCOUNT}"
   REGION_STORAGE_KEY[${region}]=$(az storage account keys list -n "${ACCOUNT}" -g "${STORAGE_RG}" --query "[0].value" -o tsv 2>/dev/null)
   for replica in 1 2; do
-    SHARE="offs-test-${region}-${replica}"
-    az storage share delete --name "${SHARE}" --account-name "${ACCOUNT}" 2>/dev/null || true
-    # Share deletion is async — creating immediately hits ShareBeingDeleted.
-    for attempt in $(seq 1 30); do
-      EXISTS=$(az storage share exists --name "${SHARE}" --account-name "${ACCOUNT}" --query exists -o tsv 2>/dev/null || echo "false")
-      [ "${EXISTS}" != "true" ] && break
-      sleep 5
-    done
+    SHARE="offs-${RUN_ID}-${region}-${replica}"
     az storage share create --name "${SHARE}" --account-name "${ACCOUNT}" --quota 5 -o table 2>&1 | tail -1 || log "  ⚠️  Share creation failed for ${region}-${replica}"
   done
 done
@@ -109,7 +102,7 @@ for region in "${REGIONS[@]}"; do
     NODE_NAME="offs-test-${region}-${replica}"
     NODE_NAMES+=("${NODE_NAME}")
     log "  Deploying ${NODE_NAME} in ${region}..."
-    az container create --resource-group "${NODE_RG}" --name "${NODE_NAME}" --image "${IMAGE}" --registry-login-server "${ACR_NAME}.azurecr.io" --registry-username "${ACR_USER}" --registry-password "${ACR_PW}" --location "${region}" --os-type Linux --cpu 1.0 --memory 1.0 --ip-address Public --ports 23402 --azure-file-volume-account-name "${REGION_STORAGE_ACCOUNT[${region}]}" --azure-file-volume-account-key "${REGION_STORAGE_KEY[${region}]}" --azure-file-volume-share-name "offs-test-${region}-${replica}" --azure-file-volume-mount-path "/data" --environment-variables RELAY_URL=${RELAY_IP}:${RELAY_PORT} MAX_CAPACITY_BYTES=1073741824 -o table 2>&1 | tail -2 || log "  ⚠️  Deploy failed for ${NODE_NAME}, skipping"
+    az container create --resource-group "${NODE_RG}" --name "${NODE_NAME}" --image "${IMAGE}" --registry-login-server "${ACR_NAME}.azurecr.io" --registry-username "${ACR_USER}" --registry-password "${ACR_PW}" --location "${region}" --os-type Linux --cpu 1.0 --memory 1.0 --ip-address Public --ports 23402 --azure-file-volume-account-name "${REGION_STORAGE_ACCOUNT[${region}]}" --azure-file-volume-account-key "${REGION_STORAGE_KEY[${region}]}" --azure-file-volume-share-name "offs-${RUN_ID}-${region}-${replica}" --azure-file-volume-mount-path "/data" --environment-variables RELAY_URL=${RELAY_IP}:${RELAY_PORT} MAX_CAPACITY_BYTES=1073741824 -o table 2>&1 | tail -2 || log "  ⚠️  Deploy failed for ${NODE_NAME}, skipping"
 
     # Get IP
     NODE_IP=$(az container show --resource-group "${NODE_RG}" --name "${NODE_NAME}" \
@@ -410,5 +403,22 @@ log "========================================"
 log "=== Tearing down test containers ==="
 az group delete --name "${NODE_RG}" --yes --no-wait 2>/dev/null || true
 log "  Test resource group ${NODE_RG} deleting (async, stops billing)"
+
+# Delete this run's file shares (async — unique names, so later runs never
+# race the deletion).
+log "=== Deleting run file shares ==="
+for region in "${REGIONS[@]}"; do
+  ACCOUNT=$(case "${region}" in
+    eastus)      echo "offstest0306east" ;;
+    brazilsouth) echo "offstest0306braz" ;;
+    eastasia)    echo "offstest0306east2" ;;
+    centralus)   echo "offstest0306cent" ;;
+    *)           echo "" ;;
+  esac)
+  [ -z "${ACCOUNT}" ] && continue
+  for replica in 1 2; do
+    az storage share delete --name "offs-${RUN_ID}-${region}-${replica}" --account-name "${ACCOUNT}" 2>/dev/null || true
+  done
+done
 
 log "=== Done. Estimated cost: ~\$0.25 ==="
