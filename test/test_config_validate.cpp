@@ -132,7 +132,7 @@ TEST(ConfigValidate, BadBlockTunablesHaveDefaults) {
   EXPECT_NEAR(config.bad_block_multiplier, 5.0f, 0.001f);
   EXPECT_NEAR(config.bad_block_rate_cost, 10.0f, 0.001f);
   EXPECT_EQ(config.peer_state_ttl_ms, 604800000u);  // 7 days
-  EXPECT_EQ(config.peer_state_save_interval_ms, 60000u);
+  EXPECT_EQ(config.peer_state_save_interval_ms, 250u);
   ASSERT_EQ(config_validate(&config), 0);
 }
 
@@ -147,8 +147,10 @@ TEST(ConfigValidate, PeerStateSaveIntervalBounded) {
   config.peer_state_save_interval_ms = 0;
   EXPECT_NE(config_validate(&config), 0);
   config = config_default();
-  config.peer_state_save_interval_ms = 5000;  // below 10s floor
+  config.peer_state_save_interval_ms = 50;  // below 100ms floor
   EXPECT_NE(config_validate(&config), 0);
+  config.peer_state_save_interval_ms = 250;
+  EXPECT_EQ(config_validate(&config), 0);
 }
 
 TEST(ConfigValidate, LocalBindingNoAuthDefaultsFalse) {

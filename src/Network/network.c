@@ -519,6 +519,20 @@ void network_shutdown_connections(network_t* network) {
 
 void network_destroy(network_t* network) {
   if (network == NULL) return;
+  /* Flush-before-destroy: if peer state is dirty and the recurring save
+     never fired (short-lived process, or a caller that skipped the Phase 8
+     save), persist before the ring set / hebbian table are torn down. The
+     direct-read save is legal here only because the peer-book actor is not
+     running (never started, or already stopped by the caller's shutdown —
+     offsd's _shutdown stops it before network_destroy). See the
+     peer_book.h invariant. */
+  if (network->authority != NULL && network->authority->peer_store_path != NULL &&
+      network->peer_state_dirty &&
+      (network->peer_book == NULL ||
+       !atomic_load(&network->peer_book->started))) {
+    network->peer_state_dirty = 0;
+    authority_save_peers(network->authority, network);
+  }
   if (atomic_load(&network->gossip_timer_id) != 0) {
     timer_actor_cancel(network->timer, atomic_load(&network->gossip_timer_id));
   }

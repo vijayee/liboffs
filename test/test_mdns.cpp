@@ -262,7 +262,16 @@ TEST_F(TestMdns, DedupSkipsOnlyConnectedPeers) {
 
   node_id_t connected_id;
   node_id_generate(&connected_id);
-  ASSERT_NE(connection_manager_add(&mgr, &connected_id, NULL, NULL), nullptr);
+  peer_connection_t* connected = connection_manager_add(&mgr, &connected_id,
+                                                        NULL, NULL);
+  ASSERT_NE(connected, nullptr);
+  /* The dedup requires a live QUIC handle (peer_connection_create leaves
+     quic_connection NULL for a pre-admitted peer — that state must be
+     re-admitted). Give the connected peer a non-NULL handle. */
+  connected->connected = 1;
+#ifdef HAS_MSQUIC
+  connected->quic_connection = (void*)&connected;  /* any non-NULL value */
+#endif
 
   node_id_t dropped_id;
   node_id_generate(&dropped_id);

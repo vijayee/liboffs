@@ -37,7 +37,7 @@ config_t config_default() {
   config.bad_block_multiplier = 5.0f;
   config.bad_block_rate_cost = 10.0f;
   config.peer_state_ttl_ms = 604800000u;   // 7 days
-  config.peer_state_save_interval_ms = 60000u;
+  config.peer_state_save_interval_ms = 250u;
   config.fsync_data = true;
   config.eabf_base_ttl_ms = 3600000;
   config.eabf_maintenance_ms = 60000;
@@ -190,8 +190,8 @@ int config_validate(const config_t* config) {
     log_error("config_validate: bad_block_rate_cost (%f) must be >= 0", config->bad_block_rate_cost);
     valid = false;
   }
-  if (config->peer_state_save_interval_ms < 10000u) {
-    log_error("config_validate: peer_state_save_interval_ms (%u) must be >= 10000", config->peer_state_save_interval_ms);
+  if (config->peer_state_save_interval_ms < 100u) {
+    log_error("config_validate: peer_state_save_interval_ms (%u) must be >= 100", config->peer_state_save_interval_ms);
     valid = false;
   }
   // peer_state_ttl_ms == 0 means "never expire" — allowed.
