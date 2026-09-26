@@ -44,9 +44,14 @@
 #include <openssl/rand.h>
 #include "pem_key.h"
 #include <stdio.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#endif
 
 #define TOPOLOGY_METRICS_PUSH_INTERVAL_MS 300000  // 5 minutes
 #define PING_CAPACITY_INTERVAL_MS 900000  // 15 minutes
@@ -623,6 +628,14 @@ void network_destroy(network_t* network) {
     network->store_pending_capacity = 0;
   }
 #ifdef HAS_MSQUIC
+  /* Destroy the listener (and its pd_loop) — nothing else owns it. Skipping
+     this leaked the loop's completion-port handle plus the listener actor on
+     every network create/destroy cycle (observed: +1 OS handle per cycle,
+     linear, in QuicIntegration.NetworkCreateDestroyNoHandleLeak). The
+     listener's offs_msquic_close pairs with the open inside
+     quic_listener_create; the close below pairs with network_create's. */
+  quic_listener_destroy(network->quic_listener);
+  network->quic_listener = NULL;
   if (network->msquic != NULL) {
     offs_msquic_close();
   }
