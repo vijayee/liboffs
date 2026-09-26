@@ -31,4 +31,12 @@ int pem_key_verify_nonce(const uint8_t* public_key, size_t public_key_len,
                          const uint8_t nonce[32],
                          const uint8_t* signature, size_t signature_len);
 
+// Generates a self-signed X.509 certificate (RSA-2048, SHA-256, 10-year
+// validity, CN=common_name) with its private key, writing the certificate to
+// cert_path and the unencrypted PKCS#8 private key to key_path. The private
+// key file is written with 0600 permissions and the parent directory is
+// created (0700) if missing. Returns 0 on success, -1 on failure.
+int pem_generate_self_signed_cert(const char* cert_path, const char* key_path,
+                                  const char* common_name);
+
 #endif

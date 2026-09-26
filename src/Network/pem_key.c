@@ -9,6 +9,11 @@
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <string.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <time.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 uint8_t* pem_extract_public_key(const char* cert_path, size_t* out_len) {
   if (cert_path == NULL || out_len == NULL) return NULL;
@@ -211,4 +216,112 @@ int pem_key_verify_nonce(const uint8_t* public_key, size_t public_key_len,
   EVP_PKEY_free(pkey);
 
   return (result == 1) ? 0 : -1;
+}
+// Generates a self-signed X.509 certificate with an RSA-2048 key (SHA-256,
+// 10-year validity). The private key is written unencrypted PKCS#8 with 0600
+// permissions; the cert with 0644. Used by the daemon on first launch when no
+// node cert is configured — the generated identity is durable because the
+// files are only created when absent.
+/* Creates every missing directory component of path (0700), mirroring
+   mkdir -p for the cert/key parent (e.g. <data-dir>/certs). */
+static int pem_key_ensure_parent_dir(const char* path) {
+  char buffer[1024];
+  size_t length = strlen(path);
+  if (length == 0 || length >= sizeof(buffer)) return -1;
+  memcpy(buffer, path, length + 1);
+  char* slash = strrchr(buffer, '/');
+  if (slash == NULL) return 0;  /* relative file in cwd */
+  *slash = '\0';
+  if (buffer[0] == '\0') return 0;  /* "/" */
+  for (char* cursor = buffer + 1; ; cursor++) {
+    if (*cursor == '/' || *cursor == '\0') {
+      char saved = *cursor;
+      *cursor = '\0';
+      if (mkdir(buffer, S_IRWXU) != 0 && errno != EEXIST) return -1;
+      *cursor = saved;
+      if (saved == '\0') break;
+    }
+  }
+  return 0;
+}
+
+int pem_generate_self_signed_cert(const char* cert_path, const char* key_path,
+                                  const char* common_name) {
+  if (cert_path == NULL || key_path == NULL || common_name == NULL) return -1;
+  if (pem_key_ensure_parent_dir(key_path) != 0 ||
+      pem_key_ensure_parent_dir(cert_path) != 0) {
+    log_error("pem_generate_self_signed_cert: cannot create parent directory "
+              "for %s", key_path);
+    return -1;
+  }
+
+  /* RSA-2048 matches the docker entrypoint's generation so both paths
+     produce equivalent identities. */
+  EVP_PKEY_CTX* key_ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
+  if (key_ctx == NULL) return -1;
+  if (EVP_PKEY_keygen_init(key_ctx) <= 0) {
+    EVP_PKEY_CTX_free(key_ctx);
+    return -1;
+  }
+  if (EVP_PKEY_CTX_set_rsa_keygen_bits(key_ctx, 2048) <= 0) {
+    EVP_PKEY_CTX_free(key_ctx);
+    return -1;
+  }
+  EVP_PKEY* pkey = NULL;
+  if (EVP_PKEY_keygen(key_ctx, &pkey) <= 0) {
+    EVP_PKEY_CTX_free(key_ctx);
+    return -1;
+  }
+  EVP_PKEY_CTX_free(key_ctx);
+
+  X509* cert = X509_new();
+  if (cert == NULL) {
+    EVP_PKEY_free(pkey);
+    return -1;
+  }
+  ASN1_INTEGER_set(X509_get_serialNumber(cert), (long)time(NULL));
+  X509_gmtime_adj(X509_get_notBefore(cert), 0);
+  X509_gmtime_adj(X509_get_notAfter(cert), 60L * 60L * 24L * 3650L);
+  X509_set_version(cert, 2);
+
+  X509_NAME* name = X509_get_subject_name(cert);
+  X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                             (const unsigned char*)common_name, -1, -1, 0);
+  X509_set_issuer_name(cert, name);
+  X509_set_pubkey(cert, pkey);
+
+  EVP_MD_CTX* sign_ctx = EVP_MD_CTX_new();
+  int rc = -1;
+  if (sign_ctx != NULL &&
+      EVP_DigestSignInit(sign_ctx, NULL, EVP_sha256(), NULL, pkey) == 1 &&
+      X509_sign(cert, pkey, EVP_sha256()) > 0) {
+    /* Private key first: a crash between the two writes leaves a certless
+       key, which the "missing cert" detection treats as regenerate. */
+    FILE* key_file = fopen(key_path, "wb");
+    if (key_file != NULL) {
+      /* 0600 — the private key must not be readable by other users. */
+      chmod(key_path, S_IRUSR | S_IWUSR);
+      int wrote_key = PEM_write_PrivateKey(key_file, pkey, NULL, NULL, 0,
+                                           NULL, NULL) == 1;
+      fclose(key_file);
+      if (wrote_key) {
+        FILE* cert_file = fopen(cert_path, "wb");
+        if (cert_file != NULL) {
+          int wrote_cert = PEM_write_X509(cert_file, cert) == 1;
+          fclose(cert_file);
+          if (wrote_cert) rc = 0;
+        }
+      }
+    }
+    if (rc != 0) {
+      log_error("pem_generate_self_signed_cert: failed to write %s / %s",
+                cert_path, key_path);
+      unlink(key_path);
+      unlink(cert_path);
+    }
+  }
+  EVP_MD_CTX_free(sign_ctx);
+  X509_free(cert);
+  EVP_PKEY_free(pkey);
+  return rc;
 }
