@@ -1030,6 +1030,9 @@ static void network_handle_salutation(network_t* network, message_t* msg,
     return;
   }
 
+  log_info("salutation: verified sender %s (expected_id=%s)",
+           computed_id.str,
+           pending->has_expected_id ? "pinned" : "unpinned");
   // Pin the salutation public_key to the TLS leaf-cert public key. The
   // BLAKE3 check above only verifies self-consistency; without this pin,
   // any CA-admitted node can lift a victim's public_key from gossip and

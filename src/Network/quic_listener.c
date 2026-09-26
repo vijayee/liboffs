@@ -367,6 +367,8 @@ static void _send_salutation_on_stream(quic_listener_t* listener, HQUIC stream) 
 
   wire_salutation_t salut;
   memset(&salut, 0, sizeof(salut));
+  log_info("quic_listener: sending salutation (sender %s) on stream %p",
+           authority->local_id.str, (void*)stream);
   memcpy(&salut.sender_id, &authority->local_id, sizeof(node_id_t));
   salut.public_key = authority->public_key;
   salut.public_key_len = authority->public_key_len;
@@ -408,6 +410,7 @@ static void _send_salutation_on_stream(quic_listener_t* listener, HQUIC stream) 
 // StreamSend in the same callback as StreamStart (which crashes msquic).
 static HQUIC _open_persistent_stream(quic_listener_t* listener, HQUIC connection,
                                       const QUIC_ADDR* peer_addr) {
+  log_info("quic_listener: opening persistent stream on CONNECTED");
   // Allocate context before StreamOpen so we can pass it directly as the callback context
   quic_stream_context_t* stream_ctx = get_clear_memory(sizeof(quic_stream_context_t));
   if (stream_ctx == NULL) return NULL;
@@ -493,7 +496,15 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
       break;
     }
     case QUIC_CONNECTION_EVENT_CONNECTED: {
-      log_info("quic_listener: connection CONNECTED");
+      QUIC_ADDR connected_peer_addr;
+      uint32_t connected_peer_len = sizeof(connected_peer_addr);
+      listener->msquic->GetParam(connection, QUIC_PARAM_CONN_REMOTE_ADDRESS,
+                                 &connected_peer_len, &connected_peer_addr);
+      char connected_peer_str[80];
+      platform_address_to_string((const platform_address_t*)&connected_peer_addr,
+                                 connected_peer_str, sizeof(connected_peer_str));
+      log_info("quic_listener: connection CONNECTED (peer %s)",
+               connected_peer_str);
       _conn_track_add(listener, connection);
 
       // Extract peer address from the connection

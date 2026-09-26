@@ -857,9 +857,14 @@ int authority_load_peers(authority_t* authority, network_t* network) {
       return -1;
     }
 
-    // Index 1: local_id
+    // Index 1: local_id — only when no identity was derived yet. A cert run
+    // derives local_id from the node cert (paired with the cached public_key);
+    // overwriting it here with a persisted id (possibly from a certless run's
+    // random identity) desynchronizes local_id from the salutation public_key
+    // and every peer rejects the node's salutation.
     cbor_item_t* local_id_item = cbor_array_get(root, 1);
-    if (cbor_isa_bytestring(local_id_item) && cbor_bytestring_length(local_id_item) == NODE_ID_HASH_SIZE) {
+    if (node_id_is_null(&authority->local_id) &&
+        cbor_isa_bytestring(local_id_item) && cbor_bytestring_length(local_id_item) == NODE_ID_HASH_SIZE) {
       memcpy(authority->local_id.hash, cbor_bytestring_handle(local_id_item), NODE_ID_HASH_SIZE);
       base58_encode(authority->local_id.hash, NODE_ID_HASH_SIZE,
                     authority->local_id.str, NODE_ID_STRING_SIZE);
