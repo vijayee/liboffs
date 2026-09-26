@@ -280,8 +280,8 @@ int pem_generate_self_signed_cert(const char* cert_path, const char* key_path,
     return -1;
   }
   ASN1_INTEGER_set(X509_get_serialNumber(cert), (long)time(NULL));
-  X509_gmtime_adj(X509_get_notBefore(cert), 0);
-  X509_gmtime_adj(X509_get_notAfter(cert), 60L * 60L * 24L * 3650L);
+  X509_gmtime_adj(X509_getm_notBefore(cert), 0);
+  X509_gmtime_adj(X509_getm_notAfter(cert), 60L * 60L * 24L * 3650L);
   X509_set_version(cert, 2);
 
   X509_NAME* name = X509_get_subject_name(cert);
