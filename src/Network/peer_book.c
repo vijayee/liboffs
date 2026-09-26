@@ -2,7 +2,6 @@
 // Created by victor on 9/24/26.
 //
 
-#include <stdio.h>
 #include "peer_book.h"
 #include "network.h"
 #include "endpoint.h"
@@ -167,8 +166,6 @@ static void _peer_book_apply_mutation(peer_book_t* peer_book,
     case peer_book_op_friend_add:
       request->result = _peer_book_apply_friend_add(authority,
                                                     &request->friend_info);
-      fprintf(stderr, "PB-ADD-TRACE: friend_add applied, result=%d count=%zu\n",
-              request->result, authority->friend_peer_count);
       break;
     case peer_book_op_friend_remove:
       request->result = _peer_book_apply_friend_remove(authority,
@@ -405,14 +402,12 @@ static void _peer_book_handle_save(peer_book_t* peer_book) {
       get_clear_memory(sizeof(peer_book_save_snapshot_t));
   if (snapshot == NULL) return;
 
-  fprintf(stderr, "PB-SAVE-TRACE: friend_peer_count=%zu\n", authority->friend_peer_count);
   if (authority->friend_peer_count > 0) {
     snapshot->b58_friends = get_clear_memory(authority->friend_peer_count *
                                              sizeof(char*));
     if (snapshot->b58_friends != NULL) {
       for (size_t index = 0; index < authority->friend_peer_count; index++) {
         char* b58 = peer_info_to_base58(authority->friend_peers[index]);
-        fprintf(stderr, "PB-SAVE-TRACE: friend[%zu] b58=%s\n", index, b58 ? "ok" : "NULL");
         if (b58 == NULL) continue;
         snapshot->b58_friends[snapshot->b58_friend_count++] = b58;
       }
