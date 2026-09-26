@@ -41,6 +41,20 @@
   #ifndef access
     #define access _access
   #endif
+  /* <unistd.h>'s access() mode constants have no UCRT equivalent. */
+  #ifndef F_OK
+    #define F_OK 0
+  #endif
+  #ifndef R_OK
+    #define R_OK 4
+  #endif
+  #ifndef W_OK
+    #define W_OK 2
+  #endif
+  #ifndef X_OK
+    /* Accepted by _access but not enforced on Windows. */
+    #define X_OK 1
+  #endif
   /* UCRT's <direct.h> declares mkdir as a function; include it before the
    * mkdir macro below, or the macro breaks the header's own declaration
    * (C4003: not enough arguments for function-like macro 'mkdir'). */
