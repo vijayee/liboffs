@@ -24,6 +24,9 @@ struct platform_socket_t {
   int family;         /* platform_address_family_e */
   int is_pipe;        /* 1 if backed by a Windows named pipe, else 0 */
   int owns_handle;    /* 1 if destroy should CloseHandle, 0 if borrowed */
+  int nonblocking;    /* 1 after platform_socket_set_nonblocking; pipes keep
+                       * their handle PIPE_WAIT and implement non-blocking
+                       * send/recv from this flag themselves */
   char* pipe_name;    /* Pipe name (for listener rearm), NULL for client/accepted sockets */
 #else
   int fd;

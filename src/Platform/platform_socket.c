@@ -647,11 +647,13 @@
 
   int platform_socket_set_nonblocking(platform_socket_t* sock) {
     /* For Winsock SOCKETs, switch to non-blocking so recv() returns
-     * WSAEWOULDBLOCK instead of blocking. For named pipes, the pipe is
-     * already driven by IOCP from the loop thread, so this call is a
-     * no-op for that path. */
+     * WSAEWOULDBLOCK instead of blocking. For named pipes, the handle
+     * stays PIPE_WAIT + FILE_FLAG_OVERLAPPED (the overlapped watcher and
+     * handshake paths depend on it); send/recv implement non-blocking
+     * semantics themselves from this flag, so just record it. */
     if (sock == NULL) return -1;
     if (sock->is_pipe) {
+      sock->nonblocking = 1;
       return 0;
     }
     unsigned long mode = 1;
@@ -710,25 +712,95 @@
     }
   }
 
+  /* Named-pipe handles are always created with FILE_FLAG_OVERLAPPED, so a
+   * synchronous send/recv must ride a local OVERLAPPED — the
+   * sync-over-async pattern. Passing a NULL lpOverlapped to WriteFile/
+   * ReadFile on an overlapped handle is undefined behaviour: it can report
+   * success without the bytes ever reaching the pipe. The local OVERLAPPED
+   * is safe even when the handle is bound to an IOCP port (completions are
+   * demuxed by the OVERLAPPED pointer), and CancelIoEx cancels exactly this
+   * transfer, never a watcher's pending read on the same handle.
+   *
+   * Returns the transferred byte count (possibly a partial transfer, like
+   * POSIX send/recv), 0 on graceful peer close, or -1 with errno set
+   * (EAGAIN on a non-blocking read when no data was queued; writes block
+   * until complete because a cancelled pipe write loses its byte count). */
+  static ssize_t _pipe_transfer(platform_socket_t* sock, int is_write,
+                                void* buf, size_t len) {
+    HANDLE event = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (event == NULL) {
+      errno = _winerr_to_errno(GetLastError());
+      return -1;
+    }
+
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof(ov));
+    ov.hEvent = event;
+
+    DWORD transferred = 0;
+    BOOL ok = is_write ? WriteFile(sock->handle, buf, (DWORD)len, NULL, &ov)
+                       : ReadFile(sock->handle, buf, (DWORD)len, NULL, &ov);
+    if (!ok && GetLastError() == ERROR_IO_PENDING) {
+      /* Only reads honor nonblocking: PeekNamedPipe gates them above, and
+       * a cancelled read reports its real byte count through
+       * GetOverlappedResult. A WRITE must never be cancelled: the kernel
+       * accepts a prefix into the pipe buffer but GetOverlappedResult
+       * reports 0 transferred after the abort (observed: 2993 cancels each
+       * injected ~4096 bytes yet all reported aborted=0), so the caller
+       * cannot know how much to skip and would resend from offset 0,
+       * duplicating the stream. The write's completion fires once every
+       * byte is written or the pipe errors, mirroring a POSIX blocking
+       * send(). */
+      DWORD wait_ms = (!is_write && sock->nonblocking) ? 0 : INFINITE;
+      if (WaitForSingleObject(event, wait_ms) == WAIT_TIMEOUT) {
+        /* Read-only path: writes never time out (see above). The cancelled
+         * read may have already pulled bytes out of the pipe before the
+         * cancel landed. Those bytes are real stream data: reporting EAGAIN
+         * here makes the caller retry and lose them. GetOverlappedResult
+         * retrieves the final count of the aborted operation; return it as
+         * a partial transfer, or EAGAIN when nothing moved. */
+        CancelIoEx(sock->handle, &ov);
+        DWORD aborted_bytes = 0;
+        GetOverlappedResult(sock->handle, &ov, &aborted_bytes, TRUE);
+        CloseHandle(event);
+        if (aborted_bytes > 0) {
+          return (ssize_t)aborted_bytes;
+        }
+        errno = EAGAIN;
+        return -1;
+      }
+      ok = GetOverlappedResult(sock->handle, &ov, &transferred, TRUE);
+    } else if (ok) {
+      /* Synchronous completion still reports the count through the
+       * OVERLAPPED. */
+      ok = GetOverlappedResult(sock->handle, &ov, &transferred, TRUE);
+    }
+    CloseHandle(event);
+
+    if (!ok) {
+      DWORD err = GetLastError();
+      if (err == ERROR_NO_DATA || err == ERROR_PIPE_BUSY) {
+        errno = EAGAIN;
+        return -1;
+      }
+      if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_CONNECTED) {
+        /* Graceful close from peer; treat as zero bytes transferred. */
+        return 0;
+      }
+      errno = _winerr_to_errno(err);
+      return -1;
+    }
+    if (!is_write && transferred == 0) {
+      /* Zero-byte read on a connected pipe: peer closed cleanly. */
+      return 0;
+    }
+    return (ssize_t)transferred;
+  }
+
   ssize_t platform_socket_send(platform_socket_t* sock, const void* buf, size_t len) {
     if (sock == NULL) return -1;
     if (sock->is_pipe) {
-      DWORD written = 0;
-      BOOL ok = WriteFile(sock->handle, buf, (DWORD)len, &written, NULL);
-      if (!ok) {
-        DWORD err = GetLastError();
-        if (err == ERROR_NO_DATA || err == ERROR_PIPE_BUSY) {
-          errno = EAGAIN;
-          return -1;
-        }
-        if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_CONNECTED) {
-          /* Graceful close from peer; treat as zero bytes sent. */
-          return 0;
-        }
-        errno = _winerr_to_errno(err);
-        return -1;
-      }
-      return (ssize_t)written;
+      return _pipe_transfer(sock, 1, (void*)buf, len);
     }
     int result = send(sock->fd, (const char*)buf, (int)len, 0);
     if (result == SOCKET_ERROR) {
@@ -741,26 +813,29 @@
   ssize_t platform_socket_recv(platform_socket_t* sock, void* buf, size_t len) {
     if (sock == NULL) return -1;
     if (sock->is_pipe) {
-      DWORD read_bytes = 0;
-      BOOL ok = ReadFile(sock->handle, buf, (DWORD)len, &read_bytes, NULL);
-      if (!ok) {
-        DWORD err = GetLastError();
-        if (err == ERROR_NO_DATA || err == ERROR_PIPE_BUSY) {
+      if (sock->nonblocking) {
+        /* Peek first so a drained pipe yields EAGAIN instead of a blocking
+         * wait that would stall a caller's poll/timeout loop (the pipe
+         * handle itself stays PIPE_WAIT). */
+        DWORD available = 0;
+        if (!PeekNamedPipe(sock->handle, NULL, 0, NULL, &available, NULL)) {
+          DWORD err = GetLastError();
+          if (err == ERROR_BROKEN_PIPE) {
+            return 0;
+          }
+          if (err == ERROR_NO_DATA || err == ERROR_PIPE_BUSY) {
+            errno = EAGAIN;
+            return -1;
+          }
+          errno = _winerr_to_errno(err);
+          return -1;
+        }
+        if (available == 0) {
           errno = EAGAIN;
           return -1;
         }
-        if (err == ERROR_BROKEN_PIPE) {
-          /* Graceful close from peer. */
-          return 0;
-        }
-        errno = _winerr_to_errno(err);
-        return -1;
       }
-      if (read_bytes == 0) {
-        /* Zero-byte read on a connected pipe: peer closed cleanly. */
-        return 0;
-      }
-      return (ssize_t)read_bytes;
+      return _pipe_transfer(sock, 0, buf, len);
     }
     int result = recv(sock->fd, (char*)buf, (int)len, 0);
     if (result == SOCKET_ERROR) {
@@ -835,10 +910,11 @@
           if (errno == ERANGE || index == 0 || index > 0xFFFFFFFFul) return -1;
           addr->inet6.scope_id = (uint32_t)index;
         } else {
-          /* IF_NAMETOINDEX/IF_INDEXTONAME/IF_NAMESIZE come from netioapi.h,
-           * which is auto-included by iphlpapi.h (not ws2tcpip.h); they map
-           * to if_nametoindex / if_indextoname. */
-          unsigned long index = (unsigned long)IF_NAMETOINDEX(zone_text);
+          /* if_nametoindex/if_indextoname/IF_NAMESIZE come from netioapi.h,
+           * which is auto-included by iphlpapi.h (not ws2tcpip.h). The MSVC
+           * SDK declares only the lowercase names (the MinGW header adds the
+           * uppercase aliases as macros, which do not exist here). */
+          unsigned long index = (unsigned long)if_nametoindex(zone_text);
           if (index == 0) return -1;
           addr->inet6.scope_id = (uint32_t)index;
         }
@@ -868,7 +944,7 @@
          * large enough or if_indextoname fails and we fall back to numeric. */
         char ifname[IF_NAMESIZE];
         int written;
-        if (IF_INDEXTONAME(addr->inet6.scope_id, ifname) != NULL) {
+        if (if_indextoname(addr->inet6.scope_id, ifname) != NULL) {
           written = snprintf(buf, len, "%s%%%s", ip, ifname);
         } else {
           written = snprintf(buf, len, "%s%%%u", ip,
