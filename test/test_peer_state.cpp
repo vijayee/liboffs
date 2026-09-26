@@ -16,36 +16,61 @@ extern "C" {
 #include <fstream>
 #include <string>
 #include <filesystem>
+#include <chrono>
+#include <system_error>
+#include <thread>
 
 namespace fs = std::filesystem;
 
+/* Windows: a just-written file can stay locked for seconds by antivirus
+ * (Defender) scan handles, making fs::remove throw a sharing violation.
+ * Retry briefly with the non-throwing overload; if the AV still holds the
+ * handle, leave the temp file behind rather than failing the test — the
+ * write assertions above are what these tests verify. */
+static void remove_with_av_retry(const fs::path& path) {
+  std::error_code ec;
+  for (int attempt = 0; attempt < 50; attempt++) {
+    ec.clear();
+    fs::remove(path, ec);
+    if (!ec) return;
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  std::fprintf(stderr, "cleanup: could not remove %s (%s)\n",
+               path.string().c_str(), ec.message().c_str());
+}
+
 TEST(PlatformAtomicWrite, WritesFileAtomically) {
   fs::path tmp = fs::temp_directory_path() / "liboffs_atomic_test.cbor";
+  /* fs::path::value_type is wchar_t on MSVC; platform_file_atomic_write
+   * takes a narrow char* path. */
+  const std::string tmp_narrow = tmp.string();
   std::string data = "hello atomic world";
-  int rc = platform_file_atomic_write(tmp.c_str(), (const uint8_t*)data.data(), data.size());
+  int rc = platform_file_atomic_write(tmp_narrow.c_str(), (const uint8_t*)data.data(), data.size());
   ASSERT_EQ(rc, 0);
   std::ifstream in(tmp, std::ios::binary);
   std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   EXPECT_EQ(got, data);
-  fs::remove(tmp);
+  remove_with_av_retry(tmp);
 }
 
 TEST(PlatformAtomicWrite, OverwritesExistingFile) {
   fs::path tmp = fs::temp_directory_path() / "liboffs_atomic_overwrite.cbor";
   { std::ofstream(tmp) << "old content"; }
+  const std::string tmp_narrow = tmp.string();
   std::string data = "new content that is longer";
-  int rc = platform_file_atomic_write(tmp.c_str(), (const uint8_t*)data.data(), data.size());
+  int rc = platform_file_atomic_write(tmp_narrow.c_str(), (const uint8_t*)data.data(), data.size());
   ASSERT_EQ(rc, 0);
   std::ifstream in(tmp, std::ios::binary);
   std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   EXPECT_EQ(got, data);
-  fs::remove(tmp);
+  remove_with_av_retry(tmp);
 }
 
 TEST(PlatformAtomicWrite, NoLeftoverTempFile) {
   fs::path tmp = fs::temp_directory_path() / "liboffs_atomic_notmp.cbor";
+  const std::string tmp_narrow = tmp.string();
   std::string data = "no leftover";
-  ASSERT_EQ(platform_file_atomic_write(tmp.c_str(), (const uint8_t*)data.data(), data.size()), 0);
+  ASSERT_EQ(platform_file_atomic_write(tmp_narrow.c_str(), (const uint8_t*)data.data(), data.size()), 0);
   // After a successful write, no .tmp sibling of the target should remain.
   for (auto& entry : fs::directory_iterator(tmp.parent_path())) {
     std::string name = entry.path().filename().string();
@@ -53,7 +78,7 @@ TEST(PlatformAtomicWrite, NoLeftoverTempFile) {
       FAIL() << "Leftover temp file: " << name;
     }
   }
-  fs::remove(tmp);
+  remove_with_av_retry(tmp);
 }
 
 // v3 peer-state format persists Hebbian weights alongside the 4 new per-peer
@@ -104,7 +129,7 @@ TEST(PeerStatePersistence, RoundTripPersistsWeightsAndPeerInfo) {
   hebbian_table_deinit(&net2.hebbian);
   rate_limit_table_deinit(&net2.rate_limits);
   connection_manager_deinit(&net2.conn_mgr);
-  fs::remove(tmp);
+  remove_with_av_retry(tmp);
 }
 
 // Full v3 peer-record round-trip: persist a peer with all 12 fields, reload
@@ -179,7 +204,7 @@ TEST(PeerStatePersistence, RoundTripPersistsV3PeerFields) {
   hebbian_table_deinit(&net2.hebbian);
   rate_limit_table_deinit(&net2.rate_limits);
   connection_manager_deinit(&net2.conn_mgr);
-  fs::remove(tmp);
+  remove_with_av_retry(tmp);
 }
 
 // Debounced mid-run peer-state save: after the Hebbian decay tick changes
@@ -263,5 +288,5 @@ TEST(PeerStateLoadTtl, DropsStalePeers) {
   hebbian_table_deinit(&net2.hebbian);
   rate_limit_table_deinit(&net2.rate_limits);
   connection_manager_deinit(&net2.conn_mgr);
-  fs::remove(tmp);
+  remove_with_av_retry(tmp);
 }
