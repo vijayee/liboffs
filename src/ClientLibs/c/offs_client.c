@@ -361,6 +361,7 @@ static int _raw_send(offs_client_t* client, const uint8_t* data, size_t len) {
          * delivered through the loop. Wait for it. */
         DWORD w = WaitForSingleObject(client->write_complete_event, 30000);
         if (w != WAIT_OBJECT_0) {
+          log_info("client_raw_send: write event wait w=%lu (pipe)", w);
           /* Timeout or wait failure — treat as send failure, matching POSIX's
            * 30s poll(POLLOUT) timeout. The connection is no longer usable. */
           client->connected = 0;
@@ -368,10 +369,12 @@ static int _raw_send(offs_client_t* client, const uint8_t* data, size_t len) {
         }
         DWORD bytes_written = 0;
         if (!GetOverlappedResult(h, &client->write_ov, &bytes_written, FALSE)) {
+          log_info("client_raw_send: GetOverlappedResult FAIL err=%lu", GetLastError());
           client->connected = 0;
           return -1;
         }
         if (bytes_written == 0) {
+          log_info("client_raw_send: GetOverlappedResult 0 bytes");
           client->connected = 0;
           return -1;
         }
@@ -453,6 +456,28 @@ static int _raw_send(offs_client_t* client, const uint8_t* data, size_t len) {
     }
     if (errno == EINTR) continue;
 #else
+    /* Named-pipe transports surface backpressure as errno EAGAIN (there is
+     * no WSA error code for it), while SOCKET transports report
+     * WSAEWOULDBLOCK. A pipe HANDLE cannot be select()ed, so back off and
+     * retry with the same 30s bound the POSIX poll() path gives. */
+    if (errno == EAGAIN) {
+      DWORD waited_ms = 0;
+      while (waited_ms < 30000) {
+        platform_sleep_ms(10);
+        waited_ms += 10;
+        ssize_t retry = platform_socket_send(client->transport.raw.sock,
+                                             data + total_sent,
+                                             len - total_sent);
+        if (retry > 0) {
+          total_sent += (size_t)retry;
+          break;
+        }
+        if (retry == 0) return -1;
+        if (errno != EAGAIN) return -1;
+      }
+      if (waited_ms >= 30000) return -1;
+      continue;
+    }
     int wsa_err = WSAGetLastError();
     if (wsa_err == WSAEWOULDBLOCK) {
       SOCKET s = (SOCKET)platform_socket_fd(client->transport.raw.sock);
@@ -1281,7 +1306,21 @@ static void _client_raw_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
     size_t total_read = 0;
     size_t n = pd_watcher_drain_read(watcher, buf, sizeof(buf));
     while (n > 0) {
-      stream_framer_feed(client->framer, buf, n);
+      /* stream_framer_feed rejects a feed when the framer cannot hold it;
+       * ignoring the return silently drops those bytes. Extract any
+       * complete frames to make room and retry once — if the framer is
+       * still wedged the connection state is unrecoverable, so drop it. */
+      int feed_rc = stream_framer_feed(client->framer, buf, n);
+      if (feed_rc != 0) {
+        _client_extract_frames(client);
+        feed_rc = stream_framer_feed(client->framer, buf, n);
+        if (feed_rc != 0) {
+          log_info("client_raw: framer rejected feed twice — dropping conn");
+          client->connected = 0;
+          client->running = 0;
+          break;
+        }
+      }
       total_read += n;
       _client_extract_frames(client);
       if (n < sizeof(buf)) break;
