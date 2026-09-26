@@ -41,6 +41,10 @@
   #ifndef access
     #define access _access
   #endif
+  /* UCRT's <direct.h> declares mkdir as a function; include it before the
+   * mkdir macro below, or the macro breaks the header's own declaration
+   * (C4003: not enough arguments for function-like macro 'mkdir'). */
+  #include <direct.h>   /* _mkdir */
   #ifndef unlink
     #define unlink _unlink
   #endif
@@ -51,10 +55,22 @@
   #ifndef chmod
     #define chmod _chmod
   #endif
-  #include <direct.h>   /* _mkdir */
   #include <io.h>       /* _chmod, _unlink, _access */
   #ifndef fileno
     #define fileno _fileno
+  #endif
+  #ifndef isatty
+    #define isatty _isatty
+  #endif
+  /* unistd.h's stdin/stdout/stderr fileno constants have no UCRT equivalent. */
+  #ifndef STDIN_FILENO
+    #define STDIN_FILENO 0
+  #endif
+  #ifndef STDOUT_FILENO
+    #define STDOUT_FILENO 1
+  #endif
+  #ifndef STDERR_FILENO
+    #define STDERR_FILENO 2
   #endif
   #ifndef S_ISREG
     #define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)

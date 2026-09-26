@@ -16,6 +16,12 @@
 #include "../Platform/platform_atomic.h"
 #include "peer_info.h"
 
+/* MSVC's <string.h> provides strtok_s instead of strtok_r; map the name. */
+#ifdef _WIN32
+  #include <string.h>
+  #define strtok_r(str, delim, saveptr) strtok_s((str), (delim), (saveptr))
+#endif
+
 peer_info_t* authority_copy_peer_info(const peer_info_t* source) {
   if (source == NULL) return NULL;
 

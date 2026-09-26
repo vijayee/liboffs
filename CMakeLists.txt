@@ -393,6 +393,11 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/pcre2/CMakeLists.txt)
     # every executable that links offs (testliboffs, the integration tests,
     # offsd).
     target_link_libraries(offs PRIVATE crypt32 ncrypt)
+    # platform_socket.c's Windows scoped-v6 path (platform_address_parse /
+    # platform_address_to_string) calls IF_NAMETOINDEX / IF_INDEXTONAME from
+    # iphlpapi.dll. offs is a static archive, so CMake propagates this PRIVATE
+    # dependency to every executable that links offs.
+    target_link_libraries(offs PRIVATE iphlpapi)
   endif()
 endif()
 

@@ -39,8 +39,13 @@ void quic_send_payload_destroy(quic_send_payload_t* payload) {
 #include "stream_framer.h"
 #include <msquic.h>
 #include <string.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#endif
 #include <cbor.h>
 #include "peer_verify.h"
 
@@ -503,10 +508,10 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
       listener->msquic->GetParam(connection, QUIC_PARAM_CONN_REMOTE_ADDRESS,
                                  &connected_peer_len, &connected_peer_addr);
       char connected_peer_str[INET6_ADDRSTRLEN + 8] = {0};
-      if (connected_peer_addr.Ip.sa_family == AF_INET6) {
+      if (QuicAddrGetFamily(&connected_peer_addr) == AF_INET6) {
         inet_ntop(AF_INET6, &connected_peer_addr.Ipv6.sin6_addr,
                   connected_peer_str, sizeof(connected_peer_str));
-      } else if (connected_peer_addr.Ip.sa_family == AF_INET) {
+      } else if (QuicAddrGetFamily(&connected_peer_addr) == AF_INET) {
         inet_ntop(AF_INET, &connected_peer_addr.Ipv4.sin_addr,
                   connected_peer_str, sizeof(connected_peer_str));
       }
