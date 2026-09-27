@@ -349,6 +349,12 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/CMakeLists.txt)
   target_compile_definitions(offs PUBLIC HAS_MSQUIC)
   target_include_directories(offs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/src/inc)
   target_link_libraries(offs PRIVATE msquic::msquic msquic::platform)
+  if(WIN32)
+    # platform_local.c builds a named-pipe DACL via
+    # ConvertStringSecurityDescriptorToSecurityDescriptorA (advapi32) so a
+    # daemon running as LocalSystem lets the interactive user's CLI connect.
+    target_link_libraries(offs PRIVATE advapi32)
+  endif()
 else()
   message(FATAL_ERROR
     "Required submodule deps/msquic is missing. msquic is a hard build "
