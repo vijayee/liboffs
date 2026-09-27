@@ -24,41 +24,19 @@ static int dirs_append(char* dst, size_t dst_size, const char* src,
 
 #if defined(_WIN32)
 
-static const char* env_or_empty(const char* name) {
-  const char* value = getenv(name);
-  return value != NULL ? value : "";
-}
-
-/* Services run in session "Services" (SESSIONNAME=Services); interactive
- * logons have RDP-Tcp#n / Console. This is the standard service-context
- * heuristic on Windows. */
-static int offs_dirs_is_service_context(void) {
-  const char* session = getenv("SESSIONNAME");
-  return session != NULL &&
-         _stricmp(session, "Services") == 0;
-}
-
+/* The node is machine state on Windows — the MSI service and an
+ * interactively-run daemon share one identity, so the default state
+ * always lives under the machine-wide %ProgramData%\offs. */
 int offs_default_dirs_get(offs_default_dirs_t* out) {
   if (out == NULL) return -1;
   memset(out, 0, sizeof(*out));
   char program_data[MAX_PATH];
-  char local_app_data[MAX_PATH];
-  if (offs_dirs_is_service_context() &&
-      GetEnvironmentVariableA("ProgramData", program_data, MAX_PATH) > 0) {
-    if (dirs_append(out->config_dir, sizeof(out->config_dir), program_data,
-                    "\\offs") != 0 ||
-        dirs_append(out->cache_dir, sizeof(out->cache_dir), program_data,
-                    "\\offs\\cache") != 0) {
-      return -1;
-    }
-    return 0;
-  }
-  UINT length = GetEnvironmentVariableA("LOCALAPPDATA", local_app_data,
+  UINT length = GetEnvironmentVariableA("ProgramData", program_data,
                                         MAX_PATH);
   if (length == 0 || length >= MAX_PATH) return -1;
-  if (dirs_append(out->config_dir, sizeof(out->config_dir), local_app_data,
+  if (dirs_append(out->config_dir, sizeof(out->config_dir), program_data,
                   "\\offs") != 0 ||
-      dirs_append(out->cache_dir, sizeof(out->cache_dir), local_app_data,
+      dirs_append(out->cache_dir, sizeof(out->cache_dir), program_data,
                   "\\offs\\cache") != 0) {
     return -1;
   }
