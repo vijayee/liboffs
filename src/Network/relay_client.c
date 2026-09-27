@@ -18,6 +18,13 @@
 #include <poll-dancer/poll-dancer.h>
 #ifdef _WIN32
 #include <winsock2.h>
+#include <wincrypt.h>
+#include <ncrypt.h>
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/pkcs12.h>
+#include <openssl/x509.h>
 #else
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -442,6 +449,145 @@ relay_client_t* relay_client_create(network_t* network, scheduler_pool_t* pool,
   return client;
 }
 
+#ifdef _WIN32
+/* Schannel/QUIC cannot read PEM certificate files
+ * (QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE fails with E_NOINTERFACE on Windows),
+ * so this mirrors quic_listener's Windows credential path: build an in-memory
+ * PKCS12 from the PEM files, import it via PFXImportCertStore with flags=0
+ * (which persists the private key into a CNG container), and hand the
+ * resulting PCCERT_CONTEXT to msquic. The store/context live on the client and
+ * are released by _relay_unload_windows_credential AFTER ConfigurationClose,
+ * since Schannel holds the context for the credential handle's lifetime. The
+ * key container is best-effort deleted on unload so a clean daemon restart
+ * leaves no residue. Returns 0 on success, -1 on failure. */
+static int _relay_load_windows_credential(relay_client_t* client,
+                                          QUIC_CREDENTIAL_CONFIG* cred_config) {
+  if (client->win_cert_context != NULL) {
+    /* Retry path: the configuration handle is still open, so Schannel still
+     * holds the previously imported context — reuse it instead of importing
+     * a second store that would leak the first. */
+    cred_config->Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_CONTEXT;
+    cred_config->CertificateContext =
+        (QUIC_CERTIFICATE*)(ULONG_PTR)client->win_cert_context;
+    return 0;
+  }
+  BIO* cert_bio = BIO_new_file(client->cert_path, "rb");
+  if (cert_bio == NULL) {
+    log_error("relay_client: cannot open cert file %s", client->cert_path);
+    return -1;
+  }
+  X509* cert = PEM_read_bio_X509(cert_bio, NULL, NULL, NULL);
+  BIO_free(cert_bio);
+  if (cert == NULL) {
+    log_error("relay_client: cannot parse PEM cert %s", client->cert_path);
+    return -1;
+  }
+
+  BIO* key_bio = BIO_new_file(client->key_path, "rb");
+  if (key_bio == NULL) {
+    log_error("relay_client: cannot open key file %s", client->key_path);
+    X509_free(cert);
+    return -1;
+  }
+  EVP_PKEY* key = PEM_read_bio_PrivateKey(key_bio, NULL, NULL, NULL);
+  BIO_free(key_bio);
+  if (key == NULL) {
+    log_error("relay_client: cannot parse PEM key %s", client->key_path);
+    X509_free(cert);
+    return -1;
+  }
+
+  /* PKCS12_DEFAULT_IV was removed in OpenSSL 3.x, so the iteration/encoding
+   * args are all 0 (library defaults). */
+  PKCS12* p12 = PKCS12_create("offsquic", "offs", key, cert, NULL, 0, 0, 0, 0, 0);
+  X509_free(cert);
+  EVP_PKEY_free(key);
+  if (p12 == NULL) {
+    log_error("relay_client: PKCS12_create failed");
+    return -1;
+  }
+
+  BIO* der_bio = BIO_new(BIO_s_mem());
+  if (der_bio == NULL || i2d_PKCS12_bio(der_bio, p12) != 1) {
+    log_error("relay_client: PKCS12 DER export failed");
+    if (der_bio != NULL) BIO_free(der_bio);
+    PKCS12_free(p12);
+    return -1;
+  }
+  PKCS12_free(p12);
+  char* der_ptr = NULL;
+  long der_len = BIO_get_mem_data(der_bio, &der_ptr);
+  CRYPT_DATA_BLOB pfx_blob = { (DWORD)der_len, (BYTE*)der_ptr };
+
+  HCERTSTORE store = PFXImportCertStore(&pfx_blob, L"offsquic", 0);
+  BIO_free(der_bio);
+  if (store == NULL) {
+    log_error("relay_client: PFXImportCertStore failed: %lu",
+              (unsigned long)GetLastError());
+    return -1;
+  }
+
+  PCCERT_CONTEXT context = CertEnumCertificatesInStore(store, NULL);
+  if (context == NULL) {
+    log_error("relay_client: imported cert store has no certificates: %lu",
+              (unsigned long)GetLastError());
+    CertCloseStore(store, 0);
+    return -1;
+  }
+
+  client->win_cert_store = (void*)(ULONG_PTR)store;
+  client->win_cert_context = (void*)(ULONG_PTR)context;
+  cred_config->Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_CONTEXT;
+  cred_config->CertificateContext = (QUIC_CERTIFICATE*)(ULONG_PTR)context;
+  return 0;
+}
+
+/* Release the cert store + context and best-effort delete the CNG key
+ * container PFXImportCertStore created. Must be called AFTER ConfigurationClose
+ * (Schannel holds the context for the credential handle's lifetime). dwProvType
+ * == 0 means CNG (delete via NCrypt); non-zero means a legacy CSP container. */
+static void _relay_unload_windows_credential(relay_client_t* client) {
+  PCCERT_CONTEXT context = (PCCERT_CONTEXT)client->win_cert_context;
+  HCERTSTORE store = (HCERTSTORE)client->win_cert_store;
+  if (context != NULL) {
+    DWORD prov_len = 0;
+    if (CertGetCertificateContextProperty(context, CERT_KEY_PROV_INFO_PROP_ID,
+                                          NULL, &prov_len) && prov_len > 0) {
+      BYTE* prov_buf = get_clear_memory(prov_len);
+      if (prov_buf != NULL &&
+          CertGetCertificateContextProperty(context, CERT_KEY_PROV_INFO_PROP_ID,
+                                            prov_buf, &prov_len)) {
+        CRYPT_KEY_PROV_INFO* prov = (CRYPT_KEY_PROV_INFO*)prov_buf;
+        if (prov->dwProvType == 0) {
+          NCRYPT_PROV_HANDLE hProvider = 0;
+          if (NCryptOpenStorageProvider(&hProvider, prov->pwszProvName, 0)
+              == ERROR_SUCCESS) {
+            NCRYPT_KEY_HANDLE hKey = 0;
+            if (NCryptOpenKey(hProvider, &hKey, prov->pwszContainerName,
+                              prov->dwKeySpec, 0) == ERROR_SUCCESS) {
+              NCryptDeleteKey(hKey, 0);  /* frees hKey */
+            }
+            NCryptFreeObject((NCRYPT_HANDLE)hProvider);
+          }
+        } else {
+          HCRYPTPROV hProv = 0;
+          CryptAcquireContextW(&hProv, prov->pwszContainerName,
+                               prov->pwszProvName, prov->dwProvType,
+                               CRYPT_DELETEKEYSET);
+        }
+      }
+      free(prov_buf);
+    }
+    CertFreeCertificateContext(context);
+    client->win_cert_context = NULL;
+  }
+  if (store != NULL) {
+    CertCloseStore(store, 0);
+    client->win_cert_store = NULL;
+  }
+}
+#endif /* _WIN32 */
+
 void relay_client_destroy(relay_client_t* client) {
   if (client == NULL) return;
 
@@ -469,6 +615,9 @@ void relay_client_destroy(relay_client_t* client) {
     client->msquic->ConfigurationClose(client->configuration);
     client->configuration = NULL;
   }
+#ifdef _WIN32
+  _relay_unload_windows_credential(client);
+#endif
   if (client->registration != NULL && client->msquic != NULL && client->owns_registration) {
     client->msquic->RegistrationClose(client->registration);
     client->registration = NULL;
@@ -570,12 +719,20 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
                        client->network->authority != NULL &&
                        client->network->authority->allow_secure);
   QUIC_CREDENTIAL_CONFIG cred_config = {0};
+#ifdef _WIN32
+  /* Schannel/QUIC cannot read PEM certificate files, so the cert/key pair is
+   * imported into a PCCERT_CONTEXT below (see _relay_load_windows_credential)
+   * instead of being handed over as QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE. */
+#else
   QUIC_CERTIFICATE_FILE cert_file = {0};
+#endif
   if (client->cert_path && client->key_path) {
+#ifndef _WIN32
     cert_file.CertificateFile = client->cert_path;
     cert_file.PrivateKeyFile = client->key_path;
     cred_config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
     cred_config.CertificateFile = &cert_file;
+#endif
     if (client->peer_verify != NULL) {
       cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE
                        | QUIC_CREDENTIAL_FLAG_CLIENT;
@@ -625,10 +782,26 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
     }
   }
 
+#ifdef _WIN32
+  if (client->cert_path && client->key_path &&
+      _relay_load_windows_credential(client, &cred_config) != 0) {
+    client->msquic->ConfigurationClose(client->configuration);
+    client->configuration = NULL;
+    if (client->owns_registration) {
+      client->msquic->RegistrationClose(client->registration);
+    }
+    client->registration = NULL;
+    return -1;
+  }
+#endif
+
   if (QUIC_FAILED(status = client->msquic->ConfigurationLoadCredential(
           client->configuration,
           &cred_config))) {
     log_error("relay_client: ConfigurationLoadCredential failed: 0x%x", status);
+#ifdef _WIN32
+    _relay_unload_windows_credential(client);
+#endif
     client->msquic->ConfigurationClose(client->configuration);
     client->configuration = NULL;
     if (client->owns_registration) {
@@ -645,6 +818,9 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
           client,
           &client->connection))) {
     log_error("relay_client: ConnectionOpen failed: 0x%x", status);
+#ifdef _WIN32
+    _relay_unload_windows_credential(client);
+#endif
     client->msquic->ConfigurationClose(client->configuration);
     client->configuration = NULL;
     if (client->owns_registration) {
