@@ -112,6 +112,14 @@ typedef struct quic_listener_t {
   size_t connection_capacity;
   platform_mutex_t* conn_lock;
   void* peer_verify;  // peer_verify_ctx_t* — NULL if no CA cert loaded
+#ifdef _WIN32
+  /* Schannel credential imported from the PEM cert/key files: the transient
+     cert store and its PCCERT_CONTEXT (see _quic_load_windows_credential).
+     Released in quic_listener_destroy after ConfigurationClose, since
+     Schannel holds the context for the credential handle's lifetime. */
+  void* win_cert_store;
+  void* win_cert_context;
+#endif
 #else
   conn_track_entry_t* connections;
   size_t connection_count;

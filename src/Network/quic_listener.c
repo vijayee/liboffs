@@ -42,6 +42,13 @@ void quic_send_payload_destroy(quic_send_payload_t* payload) {
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <wincrypt.h>
+#include <ncrypt.h>
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/pkcs12.h>
+#include <openssl/x509.h>
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -678,6 +685,140 @@ quic_listener_t* quic_listener_create(network_t* network, scheduler_pool_t* pool
   return listener;
 }
 
+#ifdef _WIN32
+/* Import the PEM cert + key into a transient cert store and fill cred_config
+ * for QUIC_CREDENTIAL_TYPE_CERTIFICATE_CONTEXT. Schannel/QUIC cannot read PEM
+ * certificate files (QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE fails on Windows),
+ * so this mirrors wt_transport's Windows credential path: build an in-memory
+ * PKCS12 from the PEM files, import it via PFXImportCertStore with flags=0
+ * (which persists the private key into a CNG container — Schannel's TLS 1.3
+ * RSA-PSS path requires a CNG/NCrypt key), and hand the resulting
+ * PCCERT_CONTEXT to msquic. The store/context live on the listener and are
+ * released by _quic_unload_windows_credential AFTER ConfigurationClose, since
+ * Schannel holds the context for the credential handle's lifetime. The key
+ * container is best-effort deleted on unload so a clean daemon restart leaves
+ * no residue. Returns 0 on success, -1 on failure. */
+static int _quic_load_windows_credential(quic_listener_t* listener,
+                                         QUIC_CREDENTIAL_CONFIG* cred_config) {
+  const char* cert_path = listener->network->authority->node_cert_path;
+  const char* key_path = listener->network->authority->node_key_path;
+  BIO* cert_bio = BIO_new_file(cert_path, "rb");
+  if (cert_bio == NULL) {
+    log_error("quic_listener: cannot open cert file %s", cert_path);
+    return -1;
+  }
+  X509* cert = PEM_read_bio_X509(cert_bio, NULL, NULL, NULL);
+  BIO_free(cert_bio);
+  if (cert == NULL) {
+    log_error("quic_listener: cannot parse PEM cert %s", cert_path);
+    return -1;
+  }
+
+  BIO* key_bio = BIO_new_file(key_path, "rb");
+  if (key_bio == NULL) {
+    log_error("quic_listener: cannot open key file %s", key_path);
+    X509_free(cert);
+    return -1;
+  }
+  EVP_PKEY* key = PEM_read_bio_PrivateKey(key_bio, NULL, NULL, NULL);
+  BIO_free(key_bio);
+  if (key == NULL) {
+    log_error("quic_listener: cannot parse PEM key %s", key_path);
+    X509_free(cert);
+    return -1;
+  }
+
+  /* PKCS12_DEFAULT_IV was removed in OpenSSL 3.x, so the iteration/encoding
+   * args are all 0 (library defaults). */
+  PKCS12* p12 = PKCS12_create("offsquic", "offs", key, cert, NULL, 0, 0, 0, 0, 0);
+  X509_free(cert);
+  EVP_PKEY_free(key);
+  if (p12 == NULL) {
+    log_error("quic_listener: PKCS12_create failed");
+    return -1;
+  }
+
+  BIO* der_bio = BIO_new(BIO_s_mem());
+  if (der_bio == NULL || i2d_PKCS12_bio(der_bio, p12) != 1) {
+    log_error("quic_listener: PKCS12 DER export failed");
+    if (der_bio != NULL) BIO_free(der_bio);
+    PKCS12_free(p12);
+    return -1;
+  }
+  PKCS12_free(p12);
+  char* der_ptr = NULL;
+  long der_len = BIO_get_mem_data(der_bio, &der_ptr);
+  CRYPT_DATA_BLOB pfx_blob = { (DWORD)der_len, (BYTE*)der_ptr };
+
+  HCERTSTORE store = PFXImportCertStore(&pfx_blob, L"offsquic", 0);
+  BIO_free(der_bio);
+  if (store == NULL) {
+    log_error("quic_listener: PFXImportCertStore failed: %lu",
+              (unsigned long)GetLastError());
+    return -1;
+  }
+
+  PCCERT_CONTEXT context = CertEnumCertificatesInStore(store, NULL);
+  if (context == NULL) {
+    log_error("quic_listener: imported cert store has no certificates: %lu",
+              (unsigned long)GetLastError());
+    CertCloseStore(store, 0);
+    return -1;
+  }
+
+  listener->win_cert_store = (void*)(ULONG_PTR)store;
+  listener->win_cert_context = (void*)(ULONG_PTR)context;
+  cred_config->Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_CONTEXT;
+  cred_config->CertificateContext = (QUIC_CERTIFICATE*)(ULONG_PTR)context;
+  return 0;
+}
+
+/* Release the cert store + context and best-effort delete the CNG key
+ * container PFXImportCertStore created. Must be called AFTER ConfigurationClose
+ * (Schannel holds the context for the credential handle's lifetime). dwProvType
+ * == 0 means CNG (delete via NCrypt); non-zero means a legacy CSP container. */
+static void _quic_unload_windows_credential(quic_listener_t* listener) {
+  PCCERT_CONTEXT context = (PCCERT_CONTEXT)listener->win_cert_context;
+  HCERTSTORE store = (HCERTSTORE)listener->win_cert_store;
+  if (context != NULL) {
+    DWORD prov_len = 0;
+    if (CertGetCertificateContextProperty(context, CERT_KEY_PROV_INFO_PROP_ID,
+                                          NULL, &prov_len) && prov_len > 0) {
+      BYTE* prov_buf = get_clear_memory(prov_len);
+      if (prov_buf != NULL &&
+          CertGetCertificateContextProperty(context, CERT_KEY_PROV_INFO_PROP_ID,
+                                            prov_buf, &prov_len)) {
+        CRYPT_KEY_PROV_INFO* prov = (CRYPT_KEY_PROV_INFO*)prov_buf;
+        if (prov->dwProvType == 0) {
+          NCRYPT_PROV_HANDLE hProvider = 0;
+          if (NCryptOpenStorageProvider(&hProvider, prov->pwszProvName, 0)
+              == ERROR_SUCCESS) {
+            NCRYPT_KEY_HANDLE hKey = 0;
+            if (NCryptOpenKey(hProvider, &hKey, prov->pwszContainerName,
+                              prov->dwKeySpec, 0) == ERROR_SUCCESS) {
+              NCryptDeleteKey(hKey, 0);  /* frees hKey */
+            }
+            NCryptFreeObject((NCRYPT_HANDLE)hProvider);
+          }
+        } else {
+          HCRYPTPROV hProv = 0;
+          CryptAcquireContextW(&hProv, prov->pwszContainerName,
+                               prov->pwszProvName, prov->dwProvType,
+                               CRYPT_DELETEKEYSET);
+        }
+      }
+      free(prov_buf);
+    }
+    CertFreeCertificateContext(context);
+    listener->win_cert_context = NULL;
+  }
+  if (store != NULL) {
+    CertCloseStore(store, 0);
+    listener->win_cert_store = NULL;
+  }
+}
+#endif /* _WIN32 */
+
 void quic_listener_destroy(quic_listener_t* listener) {
   if (listener == NULL) return;
   // Stop I/O thread if running
@@ -702,6 +843,11 @@ void quic_listener_destroy(quic_listener_t* listener) {
     listener->msquic->RegistrationClose(listener->registration);
   }
   offs_msquic_close();
+#ifdef _WIN32
+  /* Release the Schannel credential AFTER ConfigurationClose — Schannel holds
+     the context for the credential handle's lifetime. */
+  _quic_unload_windows_credential(listener);
+#endif
   if (listener->loop != NULL) {
     pd_loop_destroy(listener->loop);
   }
@@ -770,6 +916,42 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
   QUIC_CREDENTIAL_CONFIG cred_config = {0};
   QUIC_CERTIFICATE_FILE cert_file = {0};
   if (authority != NULL && authority->node_cert_path != NULL && authority->node_key_path != NULL) {
+#ifdef _WIN32
+    /* Schannel cannot read PEM certificate files, so the OpenSSL-backend
+       flags (SET_CA_CERTIFICATE_FILE with a PEM path, USE_PORTABLE_CERTIFICATES)
+       do not apply here; the PEM cert/key are imported into a transient cert
+       store and handed over as a certificate context instead. With a CA
+       configured, INDICATE_CERTIFICATE_RECEIVED keeps the received-cert
+       callback running so the manual peer_verify layer still validates peers. */
+    if (listener->peer_verify != NULL) {
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED;
+    } else if (authority->allow_secure) {
+      log_error("quic_listener: no CA configured (or authority unavailable) — "
+               "refusing to start. Provide a CA certificate or set "
+               "allow_secure=false.");
+      listener->msquic->ConfigurationClose(listener->configuration);
+      listener->configuration = NULL;
+      listener->msquic->RegistrationClose(listener->registration);
+      listener->registration = NULL;
+      return -1;
+    } else {
+      log_info("quic_listener: running without CA-based peer validation "
+               "(allow_secure=false). Set allow_secure=true and configure a CA "
+               "to require validated peer certificates.");
+      /* NO_CERTIFICATE_VALIDATION is a client-only flag (skip server-cert
+         validation); Schannel rejects it on a server credential with
+         E_INVALIDARG. A server credential needs no flag here — it always
+         presents its own certificate. */
+      cred_config.Flags = QUIC_CREDENTIAL_FLAG_NONE;
+    }
+    if (_quic_load_windows_credential(listener, &cred_config) != 0) {
+      listener->msquic->ConfigurationClose(listener->configuration);
+      listener->configuration = NULL;
+      listener->msquic->RegistrationClose(listener->registration);
+      listener->registration = NULL;
+      return -1;
+    }
+#else
     cert_file.CertificateFile = authority->node_cert_path;
     cert_file.PrivateKeyFile = authority->node_key_path;
     cred_config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
@@ -795,6 +977,7 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
                "to require validated peer certificates.");
       cred_config.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
     }
+#endif
   } else {
     cred_config.CertificateFile = &cert_file;
     if (listener->peer_verify != NULL) {
@@ -828,6 +1011,9 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
     listener->configuration = NULL;
     listener->msquic->RegistrationClose(listener->registration);
     listener->registration = NULL;
+#ifdef _WIN32
+    _quic_unload_windows_credential(listener);
+#endif
     return -1;
   }
 
@@ -842,6 +1028,9 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
     listener->configuration = NULL;
     listener->msquic->RegistrationClose(listener->registration);
     listener->registration = NULL;
+#ifdef _WIN32
+    _quic_unload_windows_credential(listener);
+#endif
     return -1;
   }
 
@@ -866,6 +1055,9 @@ int quic_listener_start(quic_listener_t* listener, const char* host, uint16_t po
     listener->configuration = NULL;
     listener->msquic->RegistrationClose(listener->registration);
     listener->registration = NULL;
+#ifdef _WIN32
+    _quic_unload_windows_credential(listener);
+#endif
     return -1;
   }
 
