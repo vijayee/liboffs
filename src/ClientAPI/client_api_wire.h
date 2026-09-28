@@ -63,6 +63,8 @@
 #define CLIENT_API_BOOTSTRAP_REMOVE              53
 #define CLIENT_API_BOOTSTRAP_LIST                54
 #define CLIENT_API_BOOTSTRAP_LIST_RESPONSE       55
+#define CLIENT_API_CACHE_RESIZE_REQUEST          56
+#define CLIENT_API_CACHE_RESIZE_RESPONSE         57
 
 /* Representation-op responses are the adjacent pair (request + 1); the
  * transport handler derives the response code arithmetically, so a renumbering
@@ -409,6 +411,26 @@ typedef struct {
                          // sets its own entries and destroys after encoding)
 } client_api_bootstrap_list_response_t;
 
+// --- Cache Resize Request ---
+// [type, capacity_bytes: uint] — the new block-cache max capacity in bytes.
+// 0 is rejected at decode as malformed (block_cache treats 0 as
+// "unlimited", which a user-facing 0 would silently mean); the handler
+// re-validates.
+typedef struct {
+  uint64_t capacity_bytes;
+} client_api_cache_resize_request_t;
+
+// --- Cache Resize Response ---
+// [type, status: uint, applied_live: uint, max_capacity_bytes: uint, current_bytes: uint]
+// applied_live: 1 = applied to the running cache (not just staged).
+// current_bytes is the recomputed live footprint after a shrink's exhale.
+typedef struct {
+  uint8_t status;
+  uint8_t applied_live;
+  uint64_t max_capacity_bytes;
+  uint64_t current_bytes;
+} client_api_cache_resize_response_t;
+
 // --- Representation op request (mark permanent / delete ephemeral / pin / unpin) ---
 // [type, url] — url is the full OFF URL string of the representation to
 // operate on. The type byte selects the op (42/44/46/48); the layout is
@@ -573,6 +595,14 @@ cbor_item_t* client_api_bootstrap_list_request_encode(void);
 cbor_item_t* client_api_bootstrap_list_response_encode(const client_api_bootstrap_list_response_t* msg);
 int client_api_bootstrap_list_response_decode(cbor_item_t* item, client_api_bootstrap_list_response_t* msg);
 void client_api_bootstrap_list_response_destroy(client_api_bootstrap_list_response_t* msg);
+
+cbor_item_t* client_api_cache_resize_request_encode(const client_api_cache_resize_request_t* msg);
+int client_api_cache_resize_request_decode(cbor_item_t* item, client_api_cache_resize_request_t* msg);
+void client_api_cache_resize_request_destroy(client_api_cache_resize_request_t* msg);
+
+cbor_item_t* client_api_cache_resize_response_encode(const client_api_cache_resize_response_t* msg);
+int client_api_cache_resize_response_decode(cbor_item_t* item, client_api_cache_resize_response_t* msg);
+void client_api_cache_resize_response_destroy(client_api_cache_resize_response_t* msg);
 
 // Helper: extract type byte from CBOR item
 uint8_t client_api_wire_get_type(cbor_item_t* item);

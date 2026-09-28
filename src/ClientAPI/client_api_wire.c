@@ -1199,6 +1199,100 @@ void client_api_block_delete_response_destroy(client_api_block_delete_response_t
   (void)msg;
 }
 
+// --- Cache Resize Request ---
+// [type, capacity_bytes: uint]
+
+cbor_item_t* client_api_cache_resize_request_encode(const client_api_cache_resize_request_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_CACHE_RESIZE_REQUEST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->capacity_bytes);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_cache_resize_request_decode(cbor_item_t* item, client_api_cache_resize_request_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) != 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* cap_item = cbor_array_get(item, 1);
+  if (cap_item != NULL && cbor_isa_uint(cap_item))
+    msg->capacity_bytes = cbor_get_uint64(cap_item);
+  cbor_decref(&cap_item);
+
+  if (msg->capacity_bytes == 0) return -1;
+  return 0;
+}
+
+void client_api_cache_resize_request_destroy(client_api_cache_resize_request_t* msg) {
+  (void)msg;
+}
+
+// --- Cache Resize Response ---
+// [type, status: uint, applied_live: uint, max_capacity_bytes: uint, current_bytes: uint]
+
+cbor_item_t* client_api_cache_resize_response_encode(const client_api_cache_resize_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(5);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_CACHE_RESIZE_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->status);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->applied_live);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->max_capacity_bytes);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->current_bytes);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_cache_resize_response_decode(cbor_item_t* item, client_api_cache_resize_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 5) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* status_item = cbor_array_get(item, 1);
+  msg->status = (uint8_t)cbor_get_uint8(status_item);
+  cbor_decref(&status_item);
+
+  cbor_item_t* live_item = cbor_array_get(item, 2);
+  msg->applied_live = (uint8_t)cbor_get_uint8(live_item);
+  cbor_decref(&live_item);
+
+  cbor_item_t* max_item = cbor_array_get(item, 3);
+  if (max_item != NULL && cbor_isa_uint(max_item))
+    msg->max_capacity_bytes = cbor_get_uint64(max_item);
+  cbor_decref(&max_item);
+
+  cbor_item_t* current_item = cbor_array_get(item, 4);
+  if (current_item != NULL && cbor_isa_uint(current_item))
+    msg->current_bytes = cbor_get_uint64(current_item);
+  cbor_decref(&current_item);
+
+  return 0;
+}
+
+void client_api_cache_resize_response_destroy(client_api_cache_resize_response_t* msg) {
+  (void)msg;
+}
+
 // --- Health Request ---
 // [type] — no payload
 

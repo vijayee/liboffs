@@ -23,7 +23,8 @@ typedef enum {
   BLOCK_OP_NONE = 0,
   BLOCK_OP_PUT  = 1,
   BLOCK_OP_GET  = 2,
-  BLOCK_OP_DELETE = 3
+  BLOCK_OP_DELETE = 3,
+  BLOCK_OP_RESIZE = 4
 } block_op_t;
 
 typedef struct {
@@ -37,6 +38,10 @@ typedef struct {
   /* Pending async state */
   block_op_t pending_op;
   uint8_t put_encoding;  /* 0=raw, 1=base58, for PUT responses */
+
+  /* Borrowed — data dir for staging config changes (cache resize). Wired
+     only by transports that serve cache management; NULL elsewhere. */
+  const char* data_dir;
 } block_handler_ctx_t;
 
 /* Frame handlers — called from each transport's dispatch_frame switch */

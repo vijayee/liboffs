@@ -4,6 +4,7 @@
 #include "unix_connection.h"
 #include "unix_transport.h"
 #include "../block_handlers.h"
+#include "../cache_handlers.h"
 #include "../client_api_wire.h"
 #include "../representation_api.h"
 #include <cJSON.h>
@@ -905,6 +906,9 @@ static void _unix_dispatch_frame(unix_connection_t* conn, uint8_t type, cbor_ite
     case CLIENT_API_BLOCK_DELETE_REQUEST:
       block_handle_delete_request(&conn->block_ctx, frame);
       break;
+    case CLIENT_API_CACHE_RESIZE_REQUEST:
+      cache_handle_resize_request(&conn->block_ctx, frame);
+      break;
     case CLIENT_API_CONFIG_SHOW_REQUEST:
       config_handle_show_request(&conn->config_ctx, frame);
       break;
@@ -1072,6 +1076,9 @@ void unix_connection_dispatch(void* state, message_t* msg) {
   }
 
   switch (msg->type) {
+    case CACHE_RESIZE_RESULT:
+      if (cache_handle_resize_result(&connection->block_ctx, msg)) break;
+      break;
     case CACHE_PUT_RESULT:
     case CACHE_GET_RESULT:
     case CACHE_REMOVE_RESULT:
@@ -1418,6 +1425,7 @@ unix_connection_t* unix_connection_create(unix_transport_t* transport, platform_
   connection->block_ctx.send_frame = (block_send_frame_fn)_unix_connection_send_frame;
   connection->block_ctx.send_error = (block_send_error_fn)_unix_connection_send_error;
   connection->block_ctx.pending_op = BLOCK_OP_NONE;
+  connection->block_ctx.data_dir = transport->config_data_dir;
 
   connection->config_ctx.conn = (config_connection_t*)connection;
   connection->config_ctx.node = transport->config_node;
