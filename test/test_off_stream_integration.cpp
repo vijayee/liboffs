@@ -111,9 +111,14 @@ TEST(OffStreamIntegration, WriteableOffStreamEncodesData) {
     DESTROY(collector.file_hash, buffer);
   }
 
+  /* Drain queued cache work BEFORE destroying the stream: the put path
+     replies to the stream's own actor, so destroying it while a scheduler
+     worker is still dispatching a CACHE_PUT is a use-after-free. The
+     readable test below already drains first. */
+  scheduler_pool_wait_for_idle(pool);
+
   new_blocks_recipe_destroy(recipe);
   writeable_off_stream_destroy(stream);
-  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   tuple_cache_destroy(tc);
   block_cache_destroy(bc);
