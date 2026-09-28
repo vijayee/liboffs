@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <cJSON.h>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -14,6 +15,7 @@ namespace fs = std::filesystem;
 TEST(ConfigJson, KnownFields) {
   EXPECT_TRUE(config_is_known_field("api_key_hash"));
   EXPECT_TRUE(config_is_known_field("bootstrap_peers"));
+  EXPECT_TRUE(config_is_known_field("cache_dir"));
   EXPECT_TRUE(config_is_known_field("http_port"));
   EXPECT_TRUE(config_is_known_field("tcp_tls_enabled"));
   EXPECT_TRUE(config_is_known_field("https_cert_path"));
@@ -25,6 +27,7 @@ TEST(ConfigJson, KnownFields) {
 TEST(ConfigJson, FieldTypeClassification) {
   EXPECT_EQ(CONFIG_FIELD_STRING, config_field_type("api_key_hash"));
   EXPECT_EQ(CONFIG_FIELD_STRING, config_field_type("bootstrap_peers"));
+  EXPECT_EQ(CONFIG_FIELD_STRING, config_field_type("cache_dir"));
   EXPECT_EQ(CONFIG_FIELD_STRING, config_field_type("https_cert_path"));
   EXPECT_EQ(CONFIG_FIELD_BOOL, config_field_type("http_enabled"));
   EXPECT_EQ(CONFIG_FIELD_BOOL, config_field_type("tcp_tls_enabled"));
@@ -129,4 +132,87 @@ TEST(ConfigJson, BootstrapPeersFieldParses) {
   ASSERT_NE(config->bootstrap_peers, nullptr);
   EXPECT_STREQ("10.0.0.1:8080,[2001:db8::1]:9090", config->bootstrap_peers);
   config_free(config);
+}
+
+/* cache_dir stages through the same pending file and loads into the new
+   config_t field (the `offs cache move` persistence path). */
+TEST(ConfigJson, CacheDirStagesAndLoads) {
+  fs::path dir = fs::temp_directory_path() / "liboffs_config_cache_dir_test";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  {
+    std::ofstream out(dir / "pending_config.json");
+    out << "{\"cache_dir\": \"D:/offs/cache\"}";
+  }
+  config_t* config = config_pending_load(dir.string().c_str());
+  std::error_code remove_ec;
+  fs::remove_all(dir, remove_ec);
+  ASSERT_NE(config, nullptr);
+  ASSERT_NE(config->cache_dir, nullptr);
+  EXPECT_STREQ("D:/offs/cache", config->cache_dir);
+  config_free(config);
+}
+
+/* A JSON null removes the key from the pending file entirely, which
+   restores the config_default value (NULL = platform default) on the
+   next load — the staging-revert path of `offs cache move`. The
+   pending file is a whole-file flat merge (config_pending_save always
+   rewrites), so the revert is a second save, not an append. */
+TEST(ConfigJson, CacheDirNullRevertsToDefault) {
+  fs::path dir = fs::temp_directory_path() / "liboffs_config_cache_dir_null_test";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::string dir_str = dir.string();
+  ASSERT_EQ(0, config_pending_save(dir_str.c_str(),
+                                   "{\"cache_dir\": \"C:/temp/first\"}",
+                                   strlen("{\"cache_dir\": \"C:/temp/first\"}")));
+  ASSERT_EQ(0, config_pending_save(dir_str.c_str(), "{\"cache_dir\": null}",
+                                   strlen("{\"cache_dir\": null}")));
+  config_t* config = config_pending_load(dir_str.c_str());
+  std::error_code remove_ec;
+  fs::remove_all(dir, remove_ec);
+  ASSERT_NE(config, nullptr);
+  EXPECT_EQ(nullptr, config->cache_dir);
+  config_free(config);
+}
+
+/* The resize wire command stages max_capacity_bytes through the same
+   pending file; 1 TiB must round-trip through the double exactly (it is
+   well under 2^53). */
+TEST(ConfigJson, MaxCapacityBytesStagesAndLoads) {
+  fs::path dir = fs::temp_directory_path() / "liboffs_config_max_capacity_test";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  {
+    std::ofstream out(dir / "pending_config.json");
+    out << "{\"max_capacity_bytes\": 1099511627776}";
+  }
+  config_t* config = config_pending_load(dir.string().c_str());
+  std::error_code remove_ec;
+  fs::remove_all(dir, remove_ec);
+  ASSERT_NE(config, nullptr);
+  EXPECT_EQ(1099511627776u, config->max_capacity_bytes);
+  config_free(config);
+}
+
+TEST(ConfigJson, ConfigToJsonEmitsCacheDir) {
+  config_t cfg = config_default();
+  cJSON* json = config_to_json(&cfg);
+  ASSERT_NE(json, nullptr);
+  cJSON* absent = cJSON_GetObjectItem(json, "cache_dir");
+  ASSERT_NE(absent, nullptr);
+  EXPECT_TRUE(cJSON_IsNull(absent));
+  cJSON_Delete(json);
+
+  char stack_dir[] = "D:/offs";
+  cfg.cache_dir = stack_dir;
+  json = config_to_json(&cfg);
+  ASSERT_NE(json, nullptr);
+  cJSON* present = cJSON_GetObjectItem(json, "cache_dir");
+  ASSERT_NE(present, nullptr);
+  EXPECT_TRUE(cJSON_IsString(present));
+  EXPECT_STREQ("D:/offs", present->valuestring);
+  cJSON_Delete(json);
+  /* Stack literal, value-config: nothing heap-allocated to release and
+     config_free() must not be called (see ConfigToJsonSerializesAllFieldGroups). */
 }
