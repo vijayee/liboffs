@@ -58,6 +58,7 @@ if (BUILD_TESTING)
             test_block_cache.cpp
             test_block_cache_resize.cpp
             test_file_copy.cpp
+            test_platform_dirs.cpp
             test_ephemeral.cpp
             test_file_stream.cpp
             test_message_queue.cpp
