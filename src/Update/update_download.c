@@ -8,6 +8,7 @@
 #include "update_manifest.h"
 #include "update_extract.h"
 #include "../Util/allocator.h"
+#include "../Util/file_copy.h"
 #include "../Util/log.h"
 #include "../Platform/platform_file.h"
 
@@ -35,58 +36,8 @@
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-#include <openssl/evp.h>
 
 #define FILE_READ_CHUNK_SIZE 8192
-
-/* ---------------------------------------------------------------------------
- * Static helpers – SHA256
- * --------------------------------------------------------------------------- */
-
-static bool _compute_sha256(const char* filepath, char out_hex[65]) {
-  FILE* file = fopen(filepath, "rb");
-  if (file == NULL) {
-    return false;
-  }
-
-  EVP_MD_CTX* md_context = EVP_MD_CTX_new();
-  if (md_context == NULL) {
-    fclose(file);
-    return false;
-  }
-
-  if (EVP_DigestInit_ex(md_context, EVP_sha256(), NULL) != 1) {
-    EVP_MD_CTX_free(md_context);
-    fclose(file);
-    return false;
-  }
-
-  unsigned char buffer[FILE_READ_CHUNK_SIZE];
-  size_t bytes_read = 0;
-
-  while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-    EVP_DigestUpdate(md_context, buffer, bytes_read);
-  }
-
-  fclose(file);
-
-  unsigned char digest[EVP_MAX_MD_SIZE];
-  unsigned int digest_length = 0;
-
-  if (EVP_DigestFinal_ex(md_context, digest, &digest_length) != 1) {
-    EVP_MD_CTX_free(md_context);
-    return false;
-  }
-
-  EVP_MD_CTX_free(md_context);
-
-  for (unsigned int index = 0; index < digest_length; index++) {
-    snprintf(out_hex + (index * 2), 3, "%02x", digest[index]);
-  }
-  out_hex[64] = '\0';
-
-  return true;
-}
 
 /* ---------------------------------------------------------------------------
  * Static helpers – HTTPS download
@@ -392,7 +343,7 @@ bool update_download(const update_info_t* info,
 
   char computed_sha256[65];
   memset(computed_sha256, 0, sizeof(computed_sha256));
-  if (!_compute_sha256(output_path, computed_sha256)) {
+  if (file_sha256_hex(output_path, computed_sha256) != 0) {
     log_error("update_download: SHA256 computation failed for %s", output_path);
     remove(output_path);
     return false;
