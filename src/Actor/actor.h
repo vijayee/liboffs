@@ -18,6 +18,12 @@
 #define ACTOR_FLAG_PRESSURED 0x10
 #define ACTOR_FLAG_MUTED 0x20
 
+/* MUTED + PRESSURED implement the mute-park backpressure protocol: a sender
+   whose target mailbox is full is muted and PARKED (off the run queue) until
+   the target's mailbox drains and releases it. Contract, caveats (notably
+   the open mutual-mute-cycle hazard for heavily bidirectional actor pairs),
+   and the diagnosis playbook live in docs/backpressure-and-timer-stall.md. */
+
 /* Actor queue-state: tracks whether the actor is IDLE (in no deque, not
    running), QUEUED (in a worker deque, not running), or RUNNING (being run
    by a worker). This lets actor_destroy wait until the actor is fully out
