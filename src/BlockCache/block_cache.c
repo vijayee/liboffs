@@ -521,6 +521,25 @@ void block_cache_dispatch(void* state, message_t* msg) {
       }
       break;
     }
+    case CACHE_RESIZE: {
+      cache_resize_payload_t* p = (cache_resize_payload_t*)msg->payload;
+      p->result = 0;
+      block_cache_set_max_capacity(block_cache, p->max_capacity_bytes);
+      if (p->reply_to != NULL) {
+        cache_resize_result_payload_t* result =
+            get_clear_memory(sizeof(cache_resize_result_payload_t));
+        result->result = 0;
+        result->max_capacity_bytes = block_cache->max_capacity_bytes;
+        result->current_bytes = block_cache->current_bytes;
+        result->reply_to = NULL;
+        message_t reply;
+        reply.type = CACHE_RESIZE_RESULT;
+        reply.payload = result;
+        reply.payload_destroy = free;
+        actor_send(p->reply_to, &reply);
+      }
+      break;
+    }
     case CACHE_GET: {
       cache_get_payload_t* p = (cache_get_payload_t*)msg->payload;
       p->result = NULL;
@@ -1087,6 +1106,26 @@ void block_cache_set_max_capacity(block_cache_t* block_cache, size_t max_capacit
 }
 
 /* ---- Async API ---- */
+
+/* Resize the cache's max capacity (live). The set runs on the cache actor
+   thread — the same thread that reads max_capacity_bytes inside CACHE_PUT —
+   so it cannot race the capacity check. Replies CACHE_RESIZE_RESULT with
+   the applied capacity and the recomputed current_bytes when reply_to is
+   set. The payload owns nothing refcounted, so plain free destroys it. */
+void block_cache_resize(block_cache_t* block_cache, size_t max_capacity_bytes,
+                        actor_t* reply_to) {
+  cache_resize_payload_t* payload = get_clear_memory(sizeof(cache_resize_payload_t));
+  payload->max_capacity_bytes = max_capacity_bytes;
+  payload->reply_to = reply_to;
+  payload->result = -1;
+
+  message_t msg;
+  msg.type = CACHE_RESIZE;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+
+  actor_send(&block_cache->actor, &msg);
+}
 
 void block_cache_get(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to) {
   cache_get_payload_t* payload = get_clear_memory(sizeof(cache_get_payload_t));

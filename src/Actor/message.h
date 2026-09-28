@@ -37,6 +37,9 @@ typedef enum message_type_e {
   CACHE_REMOVE,
   CACHE_DEFRAGMENT,
   CACHE_BLOCK_LOADED,
+  /* Resize the block cache's max capacity. Handled on the block-cache actor
+     thread so it cannot race CACHE_PUT's capacity check. */
+  CACHE_RESIZE,
   TIMER_SET,
   TIMER_CANCEL,
   TIMER_DEBOUNCE,
@@ -79,6 +82,7 @@ typedef enum message_type_e {
   CACHE_PUT_RESULT,
   CACHE_REMOVE_RESULT,
   CACHE_DEFRAGMENT_RESULT,
+  CACHE_RESIZE_RESULT,
   TUPLE_CACHE_GET_RESULT,
   /* HTTP connection messages */
   HTTP_CONNECTION_DATA,
