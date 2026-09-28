@@ -195,6 +195,31 @@ TEST(ConfigJson, MaxCapacityBytesStagesAndLoads) {
   config_free(config);
 }
 
+/* mark_applied renames the pending file to pending_config.applied. MSVC's
+   rename() refuses to overwrite an existing destination, so the marker left
+   by a previous apply used to make every later apply fail silently and the
+   stale pending file re-apply forever (observed live on a daemon data dir
+   with both .json and .applied present). */
+TEST(ConfigJson, MarkAppliedOverwritesPreviousApplied) {
+  fs::path dir = fs::temp_directory_path() / "liboffs_config_mark_applied_test";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::string dir_str = dir.string();
+  const char* body1 = "{\"cache_size\": 50}";
+  ASSERT_EQ(0, config_pending_save(dir_str.c_str(), body1, strlen(body1)));
+  ASSERT_EQ(1, config_pending_exists(dir_str.c_str()));
+  ASSERT_EQ(0, config_pending_mark_applied(dir_str.c_str()));
+  EXPECT_EQ(0, config_pending_exists(dir_str.c_str()));
+
+  /* Second apply cycle over the .applied left by the first. */
+  const char* body2 = "{\"cache_size\": 60}";
+  ASSERT_EQ(0, config_pending_save(dir_str.c_str(), body2, strlen(body2)));
+  ASSERT_EQ(0, config_pending_mark_applied(dir_str.c_str()));
+  EXPECT_EQ(0, config_pending_exists(dir_str.c_str()));
+  std::error_code remove_ec;
+  fs::remove_all(dir, remove_ec);
+}
+
 TEST(ConfigJson, ConfigToJsonEmitsCacheDir) {
   config_t cfg = config_default();
   cJSON* json = config_to_json(&cfg);

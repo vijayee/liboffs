@@ -193,6 +193,13 @@ int config_pending_mark_applied(const char* data_dir) {
   char* applied_path = get_clear_memory(len);
   snprintf(applied_path, len, "%s/pending_config.applied", data_dir);
 
+  /* MSVC's rename() refuses to overwrite an existing destination, so the
+     .applied left by the previous apply would make every later apply fail
+     silently and the stale pending file re-apply forever. Clear the old
+     marker first; losing it costs nothing — it is not data. */
+#ifdef _WIN32
+  remove(applied_path);
+#endif
   int result = rename(pending_path, applied_path);
   free(pending_path);
   free(applied_path);
