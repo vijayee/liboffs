@@ -73,6 +73,7 @@
   #include <windows.h>
   #include <winsock2.h>
   #include <afunix.h>
+  #include <sddl.h>
   #include <stdlib.h>
   #include <string.h>
   #include <stdio.h>
@@ -245,10 +246,35 @@
    * CreateNamedPipe call succeed.
    */
 
+  /* Pipe security: a daemon running as LocalSystem would otherwise get the
+   * default process DACL (SYSTEM/Administrators only), so a CLI running in
+   * the interactive user's session is denied connection with err=5. Grant
+   * full access to SYSTEM, Administrators and Authenticated Users — the
+   * pipe is machine-local, so this is the intended client set. The static
+   * descriptor is converted once; _pipe_listen runs single-threaded before
+   * any accept/rearm, so later callers never race on initialization. */
+  static SECURITY_ATTRIBUTES* _pipe_security_attributes(void) {
+    static SECURITY_ATTRIBUTES sa;
+    static PSECURITY_DESCRIPTOR sd = NULL;
+    if (sd == NULL) {
+      if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
+              "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)", SDDL_REVISION_1,
+              &sd, NULL)) {
+        log_warn("platform_local: SDDL conversion failed (err=%lu)", GetLastError());
+        return NULL;
+      }
+    }
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = sd;
+    sa.bInheritHandle = FALSE;
+    return &sa;
+  }
+
   static HANDLE _create_pipe_instance(const char* pipe_name) {
     /* PIPE_UNLIMITED_INSTANCES is the upper bound (255). The liboffs
      * transport caps active connections separately; this is just the
      * per-name instance count the kernel enforces. */
+    SECURITY_ATTRIBUTES* sa = _pipe_security_attributes();
     return CreateNamedPipeA(
       pipe_name,
       PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
@@ -257,7 +283,7 @@
       65536,       /* nOutBufferSize */
       65536,       /* nInBufferSize */
       0,           /* nDefaultTimeOut */
-      NULL         /* lpSecurityAttributes */
+      sa           /* lpSecurityAttributes */
     );
   }
 

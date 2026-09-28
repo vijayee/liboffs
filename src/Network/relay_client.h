@@ -79,6 +79,8 @@ typedef struct relay_client_t {
 #ifdef HAS_MSQUIC
   HQUIC shared_registration;  // shared registration from quic_listener (may be NULL)
   void* peer_verify;  // peer_verify_ctx_t* — NULL if no CA cert loaded
+  void* win_cert_store;    // HCERTSTORE from the Windows PKCS12 import, else NULL
+  void* win_cert_context;  // PCCERT_CONTEXT handed to msquic, else NULL
 #else
   void* shared_registration;
   void* peer_verify;
