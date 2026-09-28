@@ -6,6 +6,7 @@
 #include <string>
 extern "C" {
 #include "../src/Util/file_copy.h"
+#include "../src/Util/mkdir_p.h"
 }
 
 namespace fs = std::filesystem;
@@ -158,4 +159,59 @@ TEST(FileSha256, KnownVector) {
 TEST(FileSha256, MissingFileFails) {
   char hex[65];
   EXPECT_NE(0, file_sha256_hex("Z:/definitely/not/here.bin", hex));
+}
+
+/* mkdir_p must create every missing level of its chain — including when the
+ * path mixes separators, which the cache-move flow does
+ * ("C:\...\base/src/sub" with src missing used to return 0 while creating
+ * nothing: the parent step truncated at the last BACKslash). */
+class MkdirP : public ::testing::Test {
+protected:
+  void SetUp() override {
+    dir_ = fs::temp_directory_path() / "liboffs_mkdirp_test";
+    fs::remove_all(dir_);
+    fs::create_directories(dir_);
+  }
+  void TearDown() override {
+    std::error_code ec;
+    fs::remove_all(dir_, ec);
+  }
+  fs::path dir_;
+};
+
+TEST_F(MkdirP, MixedSeparatorsDeepChain) {
+  std::string leaf;
+#ifdef _WIN32
+  /* Native leading separators, forward slashes for the tail. */
+  leaf = (dir_ / "mix").string() + "/deep/leaf";
+#else
+  leaf = (dir_ / "mix" / "deep" / "leaf").string();
+#endif
+  char buffer[1024];
+  snprintf(buffer, sizeof(buffer), "%s", leaf.c_str());
+  ASSERT_EQ(0, mkdir_p(buffer));
+  EXPECT_TRUE(fs::is_directory(leaf));
+
+  /* Already-existing leaf stays success. */
+  snprintf(buffer, sizeof(buffer), "%s", leaf.c_str());
+  EXPECT_EQ(0, mkdir_p(buffer));
+}
+
+TEST_F(MkdirP, MissingLeafUnderExistingParent) {
+  std::string leaf = (dir_ / "one/level").string();
+  char buffer[1024];
+  snprintf(buffer, sizeof(buffer), "%s", leaf.c_str());
+  ASSERT_EQ(0, mkdir_p(buffer));
+  EXPECT_TRUE(fs::is_directory(leaf));
+}
+
+TEST_F(MkdirP, ExistingFileAtLeafFails) {
+  fs::path file = dir_ / "afile.txt";
+  {
+    std::ofstream out(file, std::ios::binary);
+    out << "x";
+  }
+  char buffer[1024];
+  snprintf(buffer, sizeof(buffer), "%s", file.string().c_str());
+  EXPECT_NE(0, mkdir_p(buffer));
 }
