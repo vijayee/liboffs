@@ -173,18 +173,26 @@ TEST(GcWire, ResponseRoundTripWithFailedRows) {
   ASSERT_TRUE(cbor_isa_array(decoded.failed));
   ASSERT_EQ(2, cbor_array_size(decoded.failed));
   cbor_item_t* first = cbor_array_get(decoded.failed, 0);
+  /* Read through widths, not raw: a uint32 item's inline data is only 4
+     bytes, so cbor_get_uint64 would read past it into adjacent heap, and
+     libcbor string handles carry no NUL terminator — both overreads showed
+     up as layout-dependent garbage in the full-suite run. cbor_get_int
+     selects the getter by the item's own width; the string is compared by
+     length. */
   cbor_item_t* line_item = cbor_array_get(first, 0);
   ASSERT_TRUE(cbor_isa_uint(line_item));
-  EXPECT_EQ(7u, cbor_get_uint64(line_item));
+  EXPECT_EQ(7u, cbor_get_int(line_item));
   cbor_decref(&line_item);
   cbor_item_t* reason_item = cbor_array_get(first, 1);
   ASSERT_TRUE(cbor_isa_uint(reason_item));
-  EXPECT_EQ((uint64_t)GC_LINE_MISSING_DESCRIPTOR, cbor_get_uint64(reason_item));
+  EXPECT_EQ((uint64_t)GC_LINE_MISSING_DESCRIPTOR, cbor_get_int(reason_item));
   cbor_decref(&reason_item);
   cbor_item_t* text_item = cbor_array_get(first, 2);
   ASSERT_TRUE(cbor_isa_string(text_item));
-  EXPECT_STREQ("http://localhost/offsystem/v3/a/1/ZZZ/ZZZ/ghost.bin",
-               (const char*)cbor_string_handle(text_item));
+  EXPECT_EQ(0, memcmp("http://localhost/offsystem/v3/a/1/ZZZ/ZZZ/ghost.bin",
+                      (const char*)cbor_string_handle(text_item),
+                      cbor_string_length(text_item)));
+  EXPECT_EQ(51u, cbor_string_length(text_item));
   cbor_decref(&text_item);
   cbor_decref(&first);
 
@@ -269,6 +277,40 @@ TEST(GcWire, ResponseDecodeRejections) {
     client_api_gc_response_destroy(&msg);
     cbor_decref(&frame);
   }
+}
+
+/* A compact CBOR encoder writes summary counters at their shortest encoding
+   (4820 arrives as a uint16 item, not uint64) — the decoder must read through
+   the item's own width. */
+TEST(GcWire, ResponseRoundTripNarrowUintSummary) {
+  cbor_item_t* frame = cbor_new_definite_array(12);
+  gw_push(frame, cbor_build_uint8(CLIENT_API_GC_RESPONSE));
+  gw_push(frame, cbor_build_uint8(0));
+  gw_push(frame, cbor_build_uint16(12));   /* urls_request */
+  gw_push(frame, cbor_build_uint16(10));   /* urls_collected */
+  gw_push(frame, cbor_build_uint16(4820)); /* blocks_deleted */
+  gw_push(frame, cbor_build_uint8(173));   /* blocks_kept */
+  gw_push(frame, cbor_build_uint8(4));     /* skipped_pinned */
+  gw_push(frame, cbor_build_uint16(2));    /* skipped_claimed */
+  gw_push(frame, cbor_build_uint8(1));     /* defrag_applied */
+  gw_push(frame, cbor_new_definite_array(0)); /* failed: empty */
+  gw_push(frame, cbor_build_uint8(3));     /* defrag_sections */
+  gw_push(frame, cbor_build_uint16(96));   /* defrag_blocks_relocated */
+
+  client_api_gc_response_t decoded;
+  memset(&decoded, 0, sizeof(decoded));
+  EXPECT_EQ(0, client_api_gc_response_decode(frame, &decoded));
+  EXPECT_EQ(12u, decoded.urls_request);
+  EXPECT_EQ(10u, decoded.urls_collected);
+  EXPECT_EQ(4820u, decoded.blocks_deleted);
+  EXPECT_EQ(173u, decoded.blocks_kept);
+  EXPECT_EQ(4u, decoded.skipped_pinned);
+  EXPECT_EQ(2u, decoded.skipped_claimed);
+  EXPECT_EQ(3u, decoded.defrag_sections);
+  EXPECT_EQ(96u, decoded.defrag_blocks_relocated);
+
+  client_api_gc_response_destroy(&decoded);
+  cbor_decref(&frame);
 }
 
 TEST(GcWire, ResponseDefragFlagNormalizesToBit) {
