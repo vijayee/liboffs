@@ -1223,7 +1223,7 @@ int client_api_cache_resize_request_decode(cbor_item_t* item, client_api_cache_r
 
   cbor_item_t* cap_item = cbor_array_get(item, 1);
   if (cap_item != NULL && cbor_isa_uint(cap_item))
-    msg->capacity_bytes = cbor_get_uint64(cap_item);
+    msg->capacity_bytes = cbor_get_int(cap_item);
   cbor_decref(&cap_item);
 
   if (msg->capacity_bytes == 0) return -1;
@@ -1278,12 +1278,12 @@ int client_api_cache_resize_response_decode(cbor_item_t* item, client_api_cache_
 
   cbor_item_t* max_item = cbor_array_get(item, 3);
   if (max_item != NULL && cbor_isa_uint(max_item))
-    msg->max_capacity_bytes = cbor_get_uint64(max_item);
+    msg->max_capacity_bytes = cbor_get_int(max_item);
   cbor_decref(&max_item);
 
   cbor_item_t* current_item = cbor_array_get(item, 4);
   if (current_item != NULL && cbor_isa_uint(current_item))
-    msg->current_bytes = cbor_get_uint64(current_item);
+    msg->current_bytes = cbor_get_int(current_item);
   cbor_decref(&current_item);
 
   return 0;
@@ -2720,32 +2720,32 @@ int client_api_gc_response_decode(cbor_item_t* item, client_api_gc_response_t* m
   cbor_item_t* field_item;
   field_item = cbor_array_get(item, 2);
   if (field_item != NULL && cbor_isa_uint(field_item))
-    msg->urls_request = (size_t)cbor_get_uint64(field_item);
+    msg->urls_request = (size_t)cbor_get_int(field_item);
   cbor_decref(&field_item);
 
   field_item = cbor_array_get(item, 3);
   if (field_item != NULL && cbor_isa_uint(field_item))
-    msg->urls_collected = (size_t)cbor_get_uint64(field_item);
+    msg->urls_collected = (size_t)cbor_get_int(field_item);
   cbor_decref(&field_item);
 
   field_item = cbor_array_get(item, 4);
   if (field_item != NULL && cbor_isa_uint(field_item))
-    msg->blocks_deleted = (size_t)cbor_get_uint64(field_item);
+    msg->blocks_deleted = (size_t)cbor_get_int(field_item);
   cbor_decref(&field_item);
 
   field_item = cbor_array_get(item, 5);
   if (field_item != NULL && cbor_isa_uint(field_item))
-    msg->blocks_kept = (size_t)cbor_get_uint64(field_item);
+    msg->blocks_kept = (size_t)cbor_get_int(field_item);
   cbor_decref(&field_item);
 
   field_item = cbor_array_get(item, 6);
   if (field_item != NULL && cbor_isa_uint(field_item))
-    msg->skipped_pinned = (size_t)cbor_get_uint64(field_item);
+    msg->skipped_pinned = (size_t)cbor_get_int(field_item);
   cbor_decref(&field_item);
 
   field_item = cbor_array_get(item, 7);
   if (field_item != NULL && cbor_isa_uint(field_item))
-    msg->skipped_claimed = (size_t)cbor_get_uint64(field_item);
+    msg->skipped_claimed = (size_t)cbor_get_int(field_item);
   cbor_decref(&field_item);
 
   cbor_item_t* defrag_applied_item = cbor_array_get(item, 8);
@@ -2811,12 +2811,12 @@ int client_api_gc_response_decode(cbor_item_t* item, client_api_gc_response_t* m
 
   cbor_item_t* defrag_sections_item = cbor_array_get(item, 10);
   if (defrag_sections_item != NULL && cbor_isa_uint(defrag_sections_item))
-    msg->defrag_sections = cbor_get_uint64(defrag_sections_item);
+    msg->defrag_sections = cbor_get_int(defrag_sections_item);
   cbor_decref(&defrag_sections_item);
 
   cbor_item_t* defrag_blocks_item = cbor_array_get(item, 11);
   if (defrag_blocks_item != NULL && cbor_isa_uint(defrag_blocks_item))
-    msg->defrag_blocks_relocated = cbor_get_uint64(defrag_blocks_item);
+    msg->defrag_blocks_relocated = cbor_get_int(defrag_blocks_item);
   cbor_decref(&defrag_blocks_item);
 
   return 0;
