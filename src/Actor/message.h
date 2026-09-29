@@ -40,6 +40,10 @@ typedef enum message_type_e {
   /* Resize the block cache's max capacity. Handled on the block-cache actor
      thread so it cannot race CACHE_PUT's capacity check. */
   CACHE_RESIZE,
+  /* Destructive keep-list sweep: deletes every indexed block the keep bloom
+     filter does not contain. Handled on the block-cache actor thread (the
+     index may be enumerated only there; template: CACHE_EPHEMERAL_LIST). */
+  CACHE_GC,
   TIMER_SET,
   TIMER_CANCEL,
   TIMER_DEBOUNCE,
@@ -83,6 +87,9 @@ typedef enum message_type_e {
   CACHE_REMOVE_RESULT,
   CACHE_DEFRAGMENT_RESULT,
   CACHE_RESIZE_RESULT,
+  /* Block-cache actor: summary of the CACHE_GC keep-list sweep. Payload is
+     cache_gc_result_payload_t (block_cache.h). */
+  CACHE_GC_RESULT,
   TUPLE_CACHE_GET_RESULT,
   /* HTTP connection messages */
   HTTP_CONNECTION_DATA,

@@ -100,6 +100,33 @@ typedef struct {
   actor_t* reply_to;
 } cache_resize_result_payload_t;
 
+/* Payload for CACHE_GC — a destructive keep-list sweep. `keep` is OWNED BY
+   THE DISPATCH: the cache actor tests every indexed block's hash against it,
+   deletes the blocks that miss, and destroys the filter before replying, so
+   the caller must NULL its copy as soon as it sends. With force == 0, pinned
+   and ephemeral-claimed doomed blocks are spared and counted in
+   skipped_pinned / skipped_ephemeral_claimed; with force == 1 they are
+   deleted (verbatim CACHE_REMOVE force semantics) and never counted.
+   Hazard (matched, not newly handled): a force sweep carries the same race
+   the single-hash CACHE_REMOVE already carries against pending in-flight
+   SECTIONS_READs — a read in progress may find its section deallocated.
+   See design 4.1. */
+typedef struct {
+  elastic_bloom_filter_t* keep;
+  actor_t* reply_to;
+  uint8_t force;
+  int result;   /* 0 = sweep completed */
+} cache_gc_payload_t;
+
+/* Result payload for CACHE_GC_RESULT. entries_total is the size of the index
+   snapshot the sweep enumerated; blocks_kept includes bloom false positives
+   (safe direction — they only spare doomed blocks). */
+typedef struct {
+  int result;
+  size_t blocks_deleted, blocks_kept, skipped_pinned, skipped_ephemeral_claimed, entries_total;
+  actor_t* reply_to;
+} cache_gc_result_payload_t;
+
 /* CACHE_EPHEMERAL / CACHE_PIN op semantics */
 #define CACHE_EPHEMERAL_OK        0
 #define CACHE_EPHEMERAL_NOT_FOUND -1
@@ -242,6 +269,11 @@ void block_cache_update_capacity(block_cache_t* block_cache);
 void block_cache_set_max_capacity(block_cache_t* block_cache, size_t max_capacity_bytes);
 /* Resize via the cache actor (async; replies CACHE_RESIZE_RESULT). */
 void block_cache_resize(block_cache_t* block_cache, size_t max_capacity_bytes, actor_t* reply_to);
+/* Destructive keep-list sweep via the cache actor (async; replies
+   CACHE_GC_RESULT). Consumes the keep filter on the cache actor thread — the
+   caller must NULL its copy as soon as it calls this. */
+void block_cache_gc(block_cache_t* block_cache, elastic_bloom_filter_t* keep,
+                    uint8_t force, actor_t* reply_to);
 void block_cache_dispatch(void* state, message_t* msg);
 
 /* Async API — send message and inject actor into scheduler */
