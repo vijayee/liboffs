@@ -2189,11 +2189,13 @@ static void _off_gc_dispatch(void* state, message_t* msg) {
     http_response_end(route_ctx->response);
     buffer_destroy(json);
 
-    /* The consumer owns the transferred result: destroy it here and null the
-       payload so actor_run's payload_destroy runs on an already-empty shell. */
-    block_gc_result_destroy(result);
-    msg->payload = NULL;
-
+    /* The transferred result stays with the message: actor_run's self-destruct
+       path destroyed this actor (ACTOR_FLAG_DESTROY set by the context teardown
+       below, which runs inside the dispatch on the same actor) and it destroys
+       the payload pointer it saved BEFORE the dispatch on that path — a
+       block_gc_result_destroy here would run twice (the second time on freed
+       memory). This mirrors _rep_route_dispatch, which never consumes its
+       result payload either. */
     _rep_route_context_destroy(route_ctx);
 }
 

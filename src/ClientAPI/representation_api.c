@@ -154,8 +154,12 @@ static void _rep_api_gc_dispatch(void* state, message_t* msg) {
     cbor_decref(&response.failed);
     response.failed = NULL;
   }
-  block_gc_result_destroy(result);
-  msg->payload = NULL;  /* consumed above, not by actor_run's destroy */
+  /* The transferred result stays with the message: the context teardown below
+     self-destructs this actor inside its own dispatch, and actor_run's
+     self-destruct path destroys the payload pointer it saved BEFORE the
+     dispatch — a block_gc_result_destroy here would destroy it twice (the
+     second time on freed memory). Mirror _rep_route_dispatch: read the
+     result, leave it for actor_run. */
 
   _rep_api_context_destroy(ctx);
 }
