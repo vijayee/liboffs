@@ -1,4 +1,4 @@
-//
+﻿//
 // Lightweight HTTP/3 WebTransport-compatible QUIC endpoint.
 //
 // Uses MsQuic with ALPN "h3" and speaks length-prefixed CBOR frames over the
@@ -508,7 +508,7 @@ static void _wt_h3_block_send_frame(block_connection_t* conn, cbor_item_t* frame
   _wt_h3_send_frame((webtransport_h3_conn_t*)conn, frame);
 }
 
-/* Representation op adapters: the shared handler speaks void* — cast back
+/* Representation op adapters: the shared handler speaks void* â€” cast back
    to the concrete connection type here. */
 static void _wt_h3_rep_send_frame(void* conn, cbor_item_t* frame) {
   _wt_h3_send_frame((webtransport_h3_conn_t*)conn, frame);
@@ -928,7 +928,8 @@ static void _wt_h3_dispatch_message(webtransport_h3_conn_t* conn, uint8_t type, 
     case CLIENT_API_REP_DELETE_EPHEMERAL_REQUEST:
     case CLIENT_API_REP_PIN_REQUEST:
     case CLIENT_API_REP_UNPIN_REQUEST:
-    case CLIENT_API_EPHEMERAL_LIST_REQUEST: {
+    case CLIENT_API_EPHEMERAL_LIST_REQUEST:
+    case CLIENT_API_GC_REQUEST: {
       if (!conn->is_authenticated) {
         _wt_h3_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
         break;
@@ -1022,7 +1023,7 @@ static void* _wt_h3_server_thread(void* arg) {
       cred_config.Flags |= QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
       cred_config.CaCertificateFile = peer_verify_ctx_path((peer_verify_ctx_t*)transport->peer_verify);
     } else if (transport->allow_secure) {
-      log_error("webtransport_h3: allow_secure=true but no CA configured — refusing to start");
+      log_error("webtransport_h3: allow_secure=true but no CA configured â€” refusing to start");
       transport->msquic->ConfigurationClose(transport->configuration);
       transport->configuration = NULL;
       transport->msquic->RegistrationClose(transport->registration);
@@ -1039,7 +1040,7 @@ static void* _wt_h3_server_thread(void* arg) {
       cred_config.Flags = QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
       cred_config.CaCertificateFile = peer_verify_ctx_path((peer_verify_ctx_t*)transport->peer_verify);
     } else if (transport->allow_secure) {
-      log_error("webtransport_h3: allow_secure=true but no CA configured — refusing to start");
+      log_error("webtransport_h3: allow_secure=true but no CA configured â€” refusing to start");
       transport->msquic->ConfigurationClose(transport->configuration);
       transport->configuration = NULL;
       transport->msquic->RegistrationClose(transport->registration);

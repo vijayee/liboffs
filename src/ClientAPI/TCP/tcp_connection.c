@@ -1,4 +1,4 @@
-//
+﻿//
 // Created by victor on 5/20/26.
 //
 #include "tcp_connection.h"
@@ -106,7 +106,7 @@ static void _tcp_connection_send_error(tcp_connection_t* conn, uint8_t status_co
   _tcp_connection_send_frame(conn, frame);
 }
 
-/* Representation op adapters: the shared handler speaks void* — cast back
+/* Representation op adapters: the shared handler speaks void* â€” cast back
    to the concrete connection type here. */
 static void _tcp_rep_send_frame(void* conn, cbor_item_t* frame) {
   _tcp_connection_send_frame((tcp_connection_t*)conn, frame);
@@ -293,8 +293,8 @@ static void _tcp_load_on_tuple_loaded(void* ctx, void* data) {
    * advances sent_bytes, so the render path cannot close the stream once the
    * tally completes. When every tuple the descriptor enumerates has resolved
    * (loaded + skipped reached the computed total), close the load stream so
-   * its close_event subscriber sends the terminal LOAD_END. close_event — not
-   * this tally — is the single LOAD_END trigger; request_close is idempotent,
+   * its close_event subscriber sends the terminal LOAD_END. close_event â€” not
+   * this tally â€” is the single LOAD_END trigger; request_close is idempotent,
    * so the all-loaded path (already closed by render) is unaffected. */
   if (pipeline->tuples_loaded + pipeline->tuples_skipped >= pipeline->tuples_total) {
     readable_off_stream_request_close(pipeline->rs);
@@ -526,7 +526,7 @@ static void _tcp_put_on_stream_data(void* ctx, void* data) {
   if (buf->size == 32 && pipeline->file_hash == NULL) {
     pipeline->file_hash = REFERENCE(buf, buffer_t);
   } else {
-    /* Otherwise it's a tuple — feed it to the descriptor */
+    /* Otherwise it's a tuple â€” feed it to the descriptor */
     tuple_t* tuple = REFERENCE(buf, tuple_t);
     writeable_descriptor_write(pipeline->desc, tuple);
     DESTROY(tuple, tuple);
@@ -667,7 +667,7 @@ static void _tcp_handle_put(tcp_connection_t* conn, cbor_item_t* frame) {
   /* Resolve tuple_size from the wire frame (Task 3), default 3 when absent.
    * The TCP/WS/WT transports do not carry a config pointer in their connection
    * structs (only Unix does), so the max_tuple_size bound check is not enforced
-   * here — the space check below still catches oversized uploads. */
+   * here â€” the space check below still catches oversized uploads. */
   size_t tuple_size = msg.has_tuple_size ? msg.tuple_size : 3;
 
   /* Pre-flight space check: reject if the cache cannot fit the estimated bytes */
@@ -727,7 +727,7 @@ static void _tcp_handle_put(tcp_connection_t* conn, cbor_item_t* frame) {
   stream_subscribe((stream_t*)desc, error_event, pipeline, _tcp_put_on_descriptor_error, NULL);
 
   if (msg.data != NULL && msg.data_size > 0) {
-    /* Buffered PUT — write data and finalize immediately */
+    /* Buffered PUT â€” write data and finalize immediately */
     buffer_t* data = buffer_create_from_pointer_copy(msg.data, msg.data_size);
     free(msg.data);
     msg.data = NULL;
@@ -736,7 +736,7 @@ static void _tcp_handle_put(tcp_connection_t* conn, cbor_item_t* frame) {
     DESTROY(data, buffer);
     writeable_off_stream_finalize(ws);
   } else {
-    /* Streaming PUT — store copies of strings in connection for subsequent PUT_DATA frames.
+    /* Streaming PUT â€” store copies of strings in connection for subsequent PUT_DATA frames.
      * The pipeline owns the original pointers; the connection needs its own copies
      * to avoid double-free when the pipeline frees its strings. */
     conn->put_ws = ws;
@@ -850,7 +850,8 @@ static void _tcp_dispatch_frame(tcp_connection_t* conn, uint8_t type, cbor_item_
     case CLIENT_API_REP_DELETE_EPHEMERAL_REQUEST:
     case CLIENT_API_REP_PIN_REQUEST:
     case CLIENT_API_REP_UNPIN_REQUEST:
-    case CLIENT_API_EPHEMERAL_LIST_REQUEST: {
+    case CLIENT_API_EPHEMERAL_LIST_REQUEST:
+    case CLIENT_API_GC_REQUEST: {
       if (!conn->is_authenticated) {
         _tcp_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
         break;
@@ -1004,7 +1005,7 @@ static void _tcp_handle_ofd_resolve_result(tcp_connection_t* conn, message_t* ms
 #ifdef _WIN32
 /* poll-dancer's IOCP backend never delivers PD_EVENT_WRITE for the server (it
  * issues no overlapped writes of its own), so the buffer-then-arm-WRITE strategy
- * used on POSIX can't flush a partial send on Windows — a large frame stalls
+ * used on POSIX can't flush a partial send on Windows â€” a large frame stalls
  * once the kernel send buffer fills. On loopback the peer drains continuously,
  * so a bounded synchronous retry completes the send. Returns 0 = fully sent,
  * 1 = partial (cap exhausted), -1 = peer closed, -2 = hard error. *out_sent
@@ -1035,7 +1036,7 @@ static int _connection_send_raw_blocking(tcp_connection_t* connection,
 
 /* Drain ciphertext OpenSSL emitted into the write BIO (handshake response
  * records, key-update records, or SSL_write output) and send it with bounded
- * retry. Returns 0 on success, -1 if a record could not be fully flushed — the
+ * retry. Returns 0 on success, -1 if a record could not be fully flushed â€” the
  * caller must close the connection, since TLS records are session-ordered and
  * must not be partially dropped. */
 static int _connection_ssl_flush_wbio(tcp_connection_t* connection) {
@@ -1052,8 +1053,8 @@ static int _connection_ssl_flush_wbio(tcp_connection_t* connection) {
 }
 
 /* Send plaintext over TLS via the memory write BIO. SSL_write emits TLS records
- * into wbio — a memory BIO never blocks, so the full plaintext slice is always
- * accepted in one call — then we drain wbio and raw-send the ciphertext. wbio is
+ * into wbio â€” a memory BIO never blocks, so the full plaintext slice is always
+ * accepted in one call â€” then we drain wbio and raw-send the ciphertext. wbio is
  * always drained to completion before returning, so a ciphertext send that can't
  * finish within the bounded retry is fatal for the connection (returns -2; the
  * caller closes). *out_sent receives the plaintext bytes accepted into the BIO. */
@@ -1106,13 +1107,13 @@ static int _connection_send_all_blocking(tcp_connection_t* connection,
  * read into the DATA message payload as ciphertext. Feed it into the SSL read
  * memory BIO and pump SSL_read: OpenSSL drives the handshake internally and
  * returns SSL_ERROR_WANT_READ (need more ciphertext) or SSL_ERROR_WANT_WRITE
- * (handshake response / key-update records buffered in wbio — flush them to the
+ * (handshake response / key-update records buffered in wbio â€” flush them to the
  * socket and retry) until the handshake completes, then it returns decrypted
  * application data, which is routed through the stream framer + CBOR dispatch.
  * This works for TLS 1.2 and 1.3 (SSL_read processes the client Finished + early
  * data in 1.3) without any explicit SSL_do_handshake / SSL_is_init_complete
- * gating. All SSL/BIO calls run on this worker thread — the I/O thread never
- * touches SSL — so there is no cross-thread race on the BIO. */
+ * gating. All SSL/BIO calls run on this worker thread â€” the I/O thread never
+ * touches SSL â€” so there is no cross-thread race on the BIO. */
 static void _connection_ssl_data_handle(tcp_connection_t* connection,
                                         buffer_t* data) {
   if (connection->sock == NULL || connection->ssl == NULL) {
@@ -1148,7 +1149,7 @@ static void _connection_ssl_data_handle(tcp_connection_t* connection,
     }
     int ssl_err = SSL_get_error(connection->ssl, bytes_read);
     if (ssl_err == SSL_ERROR_WANT_READ) {
-      /* Need more ciphertext — wait for the next DATA. Flush anything this turn
+      /* Need more ciphertext â€” wait for the next DATA. Flush anything this turn
        * emitted (handshake response, key-update ack) first. */
       if (_connection_ssl_flush_wbio(connection) != 0) {
         _connection_stop_watcher(connection);
@@ -1157,7 +1158,7 @@ static void _connection_ssl_data_handle(tcp_connection_t* connection,
       return;
     }
     if (ssl_err == SSL_ERROR_WANT_WRITE) {
-      /* wbio has pending output — flush it to the socket and retry SSL_read. */
+      /* wbio has pending output â€” flush it to the socket and retry SSL_read. */
       if (_connection_ssl_flush_wbio(connection) != 0) {
         _connection_stop_watcher(connection);
         _connection_close_fd(connection);
@@ -1468,15 +1469,15 @@ void tcp_connection_dispatch(void* state, message_t* msg) {
 
 /* --- Read callback (runs on I/O thread) --- */
 
-/* I/O event callback — runs on the I/O thread. For plain TCP it drains the
+/* I/O event callback â€” runs on the I/O thread. For plain TCP it drains the
    bytes that completed the read directly here and ships them to the
-   connection actor as a DATA message for framing. For SSL it can't — the
-   ciphertext has to be decrypted via SSL_read on the worker — so it sends a
+   connection actor as a DATA message for framing. For SSL it can't â€” the
+   ciphertext has to be decrypted via SSL_read on the worker â€” so it sends a
    READABLE notification and the actor recvs/decrypts. The split exists because
    of Windows IOCP: a completion-based backend places the read bytes in the
    watcher's overlapped buffer, which is only valid until this callback
    returns (the loop re-arms a fresh WSARecv into the same buffer afterward),
-   so the worker can't recv() them later — it would see an empty socket
+   so the worker can't recv() them later â€” it would see an empty socket
    (EAGAIN) and never frame anything. Draining here and sending DATA mirrors
    unix_connection/http_connection and works on every backend (on POSIX
    pd_watcher_drain_read returns 0 and we fall back to a synchronous recv). */
@@ -1577,8 +1578,8 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
 #ifndef _WIN32
 /* Perform a batch of SSL reads and frame dispatch. Called from the connection
    actor dispatch (TCP_CONNECTION_READABLE) on scheduler worker threads. The
-   I/O-thread read callback sends READABLE only for SSL connections — plain TCP
-   is drained in the callback and shipped as a DATA message — so this path is
+   I/O-thread read callback sends READABLE only for SSL connections â€” plain TCP
+   is drained in the callback and shipped as a DATA message â€” so this path is
    SSL-only: SSL_read must run on the worker to decrypt the ciphertext against
    the kernel socket (which still holds the bytes on epoll/kqueue). On Windows
    the SSL path instead feeds IOCP-drained ciphertext into the memory read BIO
@@ -1683,7 +1684,7 @@ tcp_connection_t* tcp_connection_create(tcp_transport_t* transport, platform_soc
       SSL_set_accept_state(connection->ssl);
       connection->is_ssl = 1;
     } else {
-      /* OOM during accept — free partials and leave is_ssl=0 so the first bytes
+      /* OOM during accept â€” free partials and leave is_ssl=0 so the first bytes
        * fail framing and close the connection cleanly rather than crash. SSL
        * owns the BIOs only after SSL_set_bio, so free them by hand here. */
       if (connection->rbio != NULL) BIO_free(connection->rbio);

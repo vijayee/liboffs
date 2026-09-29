@@ -884,7 +884,8 @@ static void _unix_dispatch_frame(unix_connection_t* conn, uint8_t type, cbor_ite
     case CLIENT_API_REP_DELETE_EPHEMERAL_REQUEST:
     case CLIENT_API_REP_PIN_REQUEST:
     case CLIENT_API_REP_UNPIN_REQUEST:
-    case CLIENT_API_EPHEMERAL_LIST_REQUEST: {
+    case CLIENT_API_EPHEMERAL_LIST_REQUEST:
+    case CLIENT_API_GC_REQUEST: {
       if (!conn->is_authenticated) {
         _unix_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
         break;

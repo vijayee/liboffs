@@ -6,6 +6,7 @@
 #include "../Actor/actor.h"
 #include "../Actor/message.h"
 #include "../BlockCache/block_cache.h"
+#include "../BlockCache/block_gc.h"
 #include "../OFFStreams/off_url.h"
 #include "../OFFStreams/representation_actor.h"
 #include "../RefCounter/refcounter.h"
@@ -92,6 +93,69 @@ static void _rep_api_op_dispatch(void* state, message_t* msg) {
     scheduler_pool_defer_cleanup(ctx->pool, defer,
                                  (void (*)(void*))_rep_api_deferred_destroy);
   }
+
+  _rep_api_context_destroy(ctx);
+}
+
+/* Completion for the keep-list GC: the orchestrator's BLOCK_GC_RESULT has
+   handed this context the transferred block_gc_result_t — copy the tallies
+   and the failed rows into the response encoding, then honor the transfer
+   (the consumer owns the struct and frees it via block_gc_result_destroy),
+   then tear the completion context down through the same deferred path. */
+static void _rep_api_gc_dispatch(void* state, message_t* msg) {
+  rep_api_context_t* ctx = (rep_api_context_t*)state;
+  if (msg->type != BLOCK_GC_RESULT) {
+    return;
+  }
+  block_gc_result_t* result = (block_gc_result_t*)msg->payload;
+  if (result == NULL) {
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR, "Keep-list GC failed");
+    _rep_api_context_destroy(ctx);
+    return;
+  }
+
+  client_api_gc_response_t response;
+  memset(&response, 0, sizeof(response));
+  response.status = result->status == 0 ? CLIENT_API_STATUS_OK : CLIENT_API_STATUS_INTERNAL_ERROR;
+  response.urls_request = result->urls_request;
+  response.urls_collected = result->urls_collected;
+  response.blocks_deleted = result->blocks_deleted;
+  response.blocks_kept = result->blocks_kept;
+  response.skipped_pinned = result->skipped_pinned;
+  response.skipped_claimed = result->skipped_ephemeral_claimed;
+  response.defrag_applied = result->defrag_applied;
+  response.defrag_sections = (uint64_t)result->defrag_sections;
+  response.defrag_blocks_relocated = (uint64_t)result->defrag_blocks_relocated;
+  size_t failed_count = result->failed_count < CLIENT_API_GC_MAX_FAILED_ROWS
+                            ? result->failed_count
+                            : CLIENT_API_GC_MAX_FAILED_ROWS;
+  if (failed_count > 0) {
+    cbor_item_t* failed_array = cbor_new_definite_array(failed_count);
+    for (size_t row_index = 0; row_index < failed_count; row_index++) {
+      cbor_item_t* fields[3];
+      fields[0] = cbor_build_uint64(result->failed_line[row_index]);
+      fields[1] = cbor_build_uint8(result->failed_reason[row_index]);
+      fields[2] = cbor_build_string(result->failed_lines[row_index]
+                                       ? result->failed_lines[row_index]
+                                       : "");
+      cbor_item_t* row = cbor_new_definite_array(3);
+      for (size_t cell_index = 0; cell_index < 3; cell_index++) {
+        (void)cbor_array_push(row, fields[cell_index]);
+        cbor_decref(&fields[cell_index]);
+      }
+      (void)cbor_array_push(failed_array, row);
+      cbor_decref(&row);
+    }
+    response.failed = failed_array;
+  }
+  cbor_item_t* frame = client_api_gc_response_encode(&response);
+  ctx->send_frame(ctx->conn, frame);
+  if (response.failed != NULL) {
+    cbor_decref(&response.failed);
+    response.failed = NULL;
+  }
+  block_gc_result_destroy(result);
+  msg->payload = NULL;  /* consumed above, not by actor_run's destroy */
 
   _rep_api_context_destroy(ctx);
 }
@@ -194,6 +258,28 @@ void client_api_representation_handle(block_cache_t* bc, scheduler_pool_t* pool,
     if (send_error != NULL) {
       send_error(conn, CLIENT_API_STATUS_INTERNAL_ERROR, "Transport not ready");
     }
+    return;
+  }
+
+  if (op_code == CLIENT_API_GC_REQUEST) {
+    client_api_gc_request_t gc_request;
+    memset(&gc_request, 0, sizeof(gc_request));
+    if (client_api_gc_request_decode(frame, &gc_request) != 0) {
+      if (send_error != NULL) {
+        send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Invalid keep-list GC request");
+      }
+      return;
+    }
+    rep_api_context_t* ctx = _rep_api_context_create(conn, send_frame, send_error,
+                                                     pool, _rep_api_gc_dispatch,
+                                                     CLIENT_API_GC_RESPONSE);
+    /* block_gc_create splits and copies the text into its own line array at
+       create time (transport thread), so the decode-owned `urls` copy is safe
+       to free as soon as the call returns. */
+    block_gc_t* gc = block_gc_create(bc, network, pool, gc_request.urls,
+                                     gc_request.force, gc_request.defrag, &ctx->actor);
+    (void)gc;
+    client_api_gc_request_destroy(&gc_request);
     return;
   }
 
