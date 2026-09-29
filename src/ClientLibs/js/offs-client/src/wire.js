@@ -56,7 +56,9 @@ export const MSG = {
   BOOTSTRAP_ADD: 52,
   BOOTSTRAP_REMOVE: 53,
   BOOTSTRAP_LIST: 54,
-  BOOTSTRAP_LIST_RESPONSE: 55
+  BOOTSTRAP_LIST_RESPONSE: 55,
+  CACHE_RESIZE_REQUEST: 56,
+  CACHE_RESIZE_RESPONSE: 57
 };
 
 /**
@@ -564,6 +566,34 @@ export function decodeConfigReloadResponse(bytes) {
   const arr = decode(bytes);
   if (arr[0] !== MSG.CONFIG_RELOAD_RESPONSE) throw new Error('Not a config reload response');
   return { status: arr[1], message: arr[2] };
+}
+
+// --- Cache capacity set ---
+// [type, status: uint, applied_live: uint, max_capacity_bytes: uint, current_bytes: uint]
+
+/**
+ * Encode a cache-resize request: [type, capacityBytes]. capacityBytes must be
+ * nonzero (the daemon rejects a zero capacity).
+ * @param {number|bigint} capacityBytes
+ * @returns {Uint8Array}
+ */
+export function encodeCacheResizeRequest(capacityBytes) {
+  return encoder.encode([MSG.CACHE_RESIZE_REQUEST, capacityBytes]);
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {{status: number, appliedLive: boolean, maxCapacityBytes: number, currentBytes: number}}
+ */
+export function decodeCacheResizeResponse(bytes) {
+  const arr = decode(bytes);
+  if (arr[0] !== MSG.CACHE_RESIZE_RESPONSE) throw new Error('Not a cache resize response');
+  return {
+    status: arr[1],
+    appliedLive: arr[2] === 1,
+    maxCapacityBytes: Number(arr[3]),
+    currentBytes: Number(arr[4])
+  };
 }
 
 // --- Representation ephemeral/pin operations ---

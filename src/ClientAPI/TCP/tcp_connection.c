@@ -4,6 +4,7 @@
 #include "tcp_connection.h"
 #include "tcp_transport.h"
 #include "../client_api_wire.h"
+#include "../cache_handlers.h"
 #include "../representation_api.h"
 #include <cJSON.h>
 #include <stdlib.h>
@@ -875,6 +876,9 @@ static void _tcp_dispatch_frame(tcp_connection_t* conn, uint8_t type, cbor_item_
     case CLIENT_API_BLOCK_DELETE_REQUEST:
       block_handle_delete_request(&conn->block_ctx, frame);
       break;
+    case CLIENT_API_CACHE_RESIZE_REQUEST:
+      cache_handle_resize_request(&conn->block_ctx, frame);
+      break;
     case CLIENT_API_FRIEND_ADD:
       peer_handle_friend_add(&conn->peer_ctx, frame);
       break;
@@ -1190,6 +1194,9 @@ void tcp_connection_dispatch(void* state, message_t* msg) {
   }
 
   switch (msg->type) {
+    case CACHE_RESIZE_RESULT:
+      if (cache_handle_resize_result(&connection->block_ctx, msg)) break;
+      break;
     case CACHE_PUT_RESULT:
     case CACHE_GET_RESULT:
     case CACHE_REMOVE_RESULT:

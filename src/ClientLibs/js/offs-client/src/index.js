@@ -712,6 +712,26 @@ export class OffsClient {
   }
 
   /**
+   * Set the daemon's block-cache capacity (resize). The daemon stages the
+   * field and applies it live when possible; appliedLive reports which
+   * happened (when false the running daemon keeps its current capacity until
+   * restarted). Returns {status, appliedLive, maxCapacityBytes,
+   * currentBytes}.
+   * @param {number|bigint} capacityBytes - must be nonzero
+   * @returns {Promise<{status: number, appliedLive: boolean,
+   *   maxCapacityBytes: number, currentBytes: number}>}
+   */
+  async cacheCapacity(capacityBytes) {
+    if (this.transport instanceof HttpTransport) {
+      return this.transport.cacheResize(capacityBytes);
+    }
+
+    const requestBytes = wire.encodeCacheResizeRequest(capacityBytes);
+    const responseBytes = await this._sendAndWait(requestBytes, wire.MSG.CACHE_RESIZE_RESPONSE);
+    return wire.decodeCacheResizeResponse(responseBytes);
+  }
+
+  /**
    * Upload a folder recursively and return the root directory's ORI URL.
    * Matches the algorithm used by the Flutter example client in
    * examples/off_client/lib/screens/import_screen.dart.

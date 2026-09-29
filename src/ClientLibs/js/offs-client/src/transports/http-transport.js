@@ -518,6 +518,25 @@ export class HttpTransport {
   }
 
   /**
+   * Set the daemon's block-cache capacity. Fire-and-forget on the daemon:
+   * the reply confirms the field was staged (applied: async), not that the
+   * running node already uses it.
+   * @param {number|bigint} capacityBytes - must be nonzero
+   * @returns {Promise<{status: number, appliedLive: boolean,
+   *   maxCapacityBytes: number, currentBytes: number}>}
+   */
+  async cacheResize(capacityBytes) {
+    const response = await fetch(this.url('/cache/resize'), {
+      method: 'POST',
+      headers: { ...this.authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ capacity_bytes: Number(capacityBytes) }),
+      signal: this.abortController?.signal,
+    });
+    if (!response.ok) throw new Error(`Cache resize failed: ${response.status}`);
+    return response.json();
+  }
+
+  /**
    * Shared plumbing for the representation ephemeral/pin HTTP routes.
    * @private
    * @param {string} path

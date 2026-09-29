@@ -111,6 +111,14 @@ typedef struct {
 typedef void (*offs_bootstrap_list_cb_t)(void* ctx, uint8_t status,
     const offs_bootstrap_entry_t* entries, size_t entry_count);
 
+/* Cache capacity set (resize). applied_live is 1 when the daemon applied the
+   new capacity to the running node, 0 when it only staged it into the pending
+   config (the running daemon keeps its current capacity until restarted).
+   max_capacity_bytes / current_bytes echo the daemon's staged capacity and
+   its current byte usage. */
+typedef void (*offs_cache_resize_cb_t)(void* ctx, uint8_t status,
+    uint8_t applied_live, uint64_t max_capacity_bytes, uint64_t current_bytes);
+
 /* Config set/reload result. status: 0 = accepted, nonzero = rejected
    (daemon-defined). restart_required is 1 when the staged config needs a
    node restart to apply (config_set only; always 0 for config_reload). */
@@ -296,6 +304,16 @@ int offs_client_bootstrap_remove(offs_client_t* client, const char* endpoint,
    one outstanding list per slot (see peer operations above). */
 int offs_client_bootstrap_list(offs_client_t* client,
                                offs_bootstrap_list_cb_t callback, void* ctx);
+
+/* Set the daemon's block-cache capacity (resize). capacity_bytes must be
+   nonzero. The daemon stages the field and applies it live when possible;
+   applied_live in the callback reports which happened.
+   Error delivery follows the peer operations above (ERROR frames complete
+   the callback with the daemon's error status; see the generic ERROR-frame
+   completion note at offs_client_set_error_cb).
+   Concurrency: one outstanding resize per slot (see peer operations above). */
+int offs_client_cache_size(offs_client_t* client, uint64_t capacity_bytes,
+                           offs_cache_resize_cb_t callback, void* ctx);
 
 /* Register the shared ERROR-frame callback without sending a GET.
    Peer/friend/load daemon-side rejections arrive here.

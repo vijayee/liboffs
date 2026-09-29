@@ -204,6 +204,8 @@ struct offs_client_t {
   void* bootstrap_result_cb_ctx;
   offs_bootstrap_list_cb_t bootstrap_list_cb;
   void* bootstrap_list_cb_ctx;
+  offs_cache_resize_cb_t cache_resize_cb;
+  void* cache_resize_cb_ctx;
   offs_json_cb_t config_show_cb;
   void* config_show_cb_ctx;
   /* Shared by config_set and config_reload (serialized use by the caller;
@@ -659,6 +661,8 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
   void* bootstrap_result_cb_ctx = client->bootstrap_result_cb_ctx;
   offs_bootstrap_list_cb_t bootstrap_list_cb = client->bootstrap_list_cb;
   void* bootstrap_list_cb_ctx = client->bootstrap_list_cb_ctx;
+  offs_cache_resize_cb_t cache_resize_cb = client->cache_resize_cb;
+  void* cache_resize_cb_ctx = client->cache_resize_cb_ctx;
   offs_json_cb_t config_show_cb = client->config_show_cb;
   void* config_show_cb_ctx = client->config_show_cb_ctx;
   offs_config_set_cb_t config_set_cb = client->config_set_cb;
@@ -767,6 +771,9 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
         if (bootstrap_list_cb != NULL) {
           bootstrap_list_cb(bootstrap_list_cb_ctx, msg.status_code, NULL, 0);
         }
+        if (cache_resize_cb != NULL) {
+          cache_resize_cb(cache_resize_cb_ctx, msg.status_code, 0, 0, 0);
+        }
         if (config_show_cb != NULL) {
           config_show_cb(config_show_cb_ctx, msg.status_code, NULL);
         }
@@ -804,6 +811,7 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
         _clear_delivered_slot(client, peer_list_cb);
         _clear_delivered_slot(client, friend_list_cb);
         _clear_delivered_slot(client, bootstrap_list_cb);
+        _clear_delivered_slot(client, cache_resize_cb);
         _clear_delivered_slot(client, config_show_cb);
         _clear_delivered_slot(client, config_set_cb);
         _clear_delivered_slot(client, update_status_cb);
@@ -1242,6 +1250,19 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
           _clear_delivered_slot(client, ephemeral_list_cb);
         }
         client_api_ephemeral_list_response_destroy(&msg);
+      }
+      break;
+    }
+    case CLIENT_API_CACHE_RESIZE_RESPONSE: {
+      client_api_cache_resize_response_t msg;
+      memset(&msg, 0, sizeof(msg));
+      if (client_api_cache_resize_response_decode(frame, &msg) == 0) {
+        if (cache_resize_cb != NULL) {
+          cache_resize_cb(cache_resize_cb_ctx, msg.status, msg.applied_live,
+                          msg.max_capacity_bytes, msg.current_bytes);
+          _clear_delivered_slot(client, cache_resize_cb);
+        }
+        client_api_cache_resize_response_destroy(&msg);
       }
       break;
     }
@@ -2804,6 +2825,26 @@ int offs_client_bootstrap_list(offs_client_t* client,
   platform_mutex_unlock(client->lock);
 
   cbor_item_t* frame = client_api_bootstrap_list_request_encode();
+  _send_frame(client, frame);
+  return 0;
+}
+
+int offs_client_cache_size(offs_client_t* client, uint64_t capacity_bytes,
+                           offs_cache_resize_cb_t callback, void* ctx) {
+  if (client == NULL || !client->connected || capacity_bytes == 0) return -1;
+
+  client_api_cache_resize_request_t msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.capacity_bytes = capacity_bytes;
+
+  cbor_item_t* frame = client_api_cache_resize_request_encode(&msg);
+  if (frame == NULL) return -1;  /* cbor allocation failure */
+
+  platform_mutex_lock(client->lock);
+  client->cache_resize_cb = callback;
+  client->cache_resize_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
   _send_frame(client, frame);
   return 0;
 }

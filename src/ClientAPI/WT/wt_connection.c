@@ -7,6 +7,7 @@
 #ifdef HAS_MSQUIC
 
 #include "../client_api_wire.h"
+#include "../cache_handlers.h"
 #include "../representation_api.h"
 #include <cJSON.h>
 #include <stdlib.h>
@@ -600,6 +601,9 @@ static void _wt_dispatch_frame(wt_connection_t* conn, uint8_t type, cbor_item_t*
     case CLIENT_API_BLOCK_DELETE_REQUEST:
       block_handle_delete_request(&conn->block_ctx, frame);
       break;
+    case CLIENT_API_CACHE_RESIZE_REQUEST:
+      cache_handle_resize_request(&conn->block_ctx, frame);
+      break;
     case CLIENT_API_FRIEND_ADD:
       peer_handle_friend_add(&conn->peer_ctx, frame);
       break;
@@ -711,6 +715,9 @@ void wt_connection_dispatch(void* state, message_t* msg) {
   }
 
   switch (msg->type) {
+    case CACHE_RESIZE_RESULT:
+      if (cache_handle_resize_result(&connection->block_ctx, msg)) break;
+      break;
     case CACHE_PUT_RESULT:
     case CACHE_GET_RESULT:
     case CACHE_REMOVE_RESULT:

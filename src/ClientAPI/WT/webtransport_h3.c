@@ -17,6 +17,7 @@
 #include "../../Actor/message.h"
 #include "../../Actor/message_queue.h"
 #include "../client_api_wire.h"
+#include "../cache_handlers.h"
 #include "../representation_api.h"
 #include "../block_handlers.h"
 #include "../health_handler.h"
@@ -440,6 +441,9 @@ static void _wt_h3_connection_dispatch(void* state, message_t* msg) {
     return;
   }
   switch (msg->type) {
+    case CACHE_RESIZE_RESULT:
+      if (cache_handle_resize_result(&conn->block_ctx, msg)) break;
+      break;
     case CACHE_PUT_RESULT:
     case CACHE_GET_RESULT:
     case CACHE_REMOVE_RESULT:
@@ -947,6 +951,9 @@ static void _wt_h3_dispatch_message(webtransport_h3_conn_t* conn, uint8_t type, 
       break;
     case CLIENT_API_BLOCK_DELETE_REQUEST:
       block_handle_delete_request(&conn->block_ctx, frame);
+      break;
+    case CLIENT_API_CACHE_RESIZE_REQUEST:
+      cache_handle_resize_request(&conn->block_ctx, frame);
       break;
     case CLIENT_API_HEALTH_REQUEST: {
       health_data_t data = health_data_collect(conn->transport->health_ctx);
