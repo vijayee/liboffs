@@ -150,6 +150,8 @@ static void block_gc_fill_lines(const char* text, char** lines, size_t line_coun
 
 /* ---- orchestration ---- */
 
+static void block_gc_report(block_gc_t* gc);  /* forward — REPORT step, below */
+
 /* Record one failed line: 1-based line number, GC_LINE_* reason, and a copy
    of the original text. The arrays are sized line_count at create, so every
    line can fail without reallocation. */

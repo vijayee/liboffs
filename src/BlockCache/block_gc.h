@@ -45,7 +45,9 @@ typedef struct {
 
 void block_gc_result_destroy(void* ptr);
 
-struct block_gc_t {
+typedef struct block_gc_t block_gc_t;
+
+typedef struct block_gc_t {
   actor_t actor;          /* FIRST member — the deferred-teardown ritual */
   block_cache_t* bc;
   network_t* network;     /* NULL = local-only; the collect walks announce nothing */
