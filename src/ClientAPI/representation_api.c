@@ -277,7 +277,8 @@ void client_api_representation_handle(block_cache_t* bc, scheduler_pool_t* pool,
        create time (transport thread), so the decode-owned `urls` copy is safe
        to free as soon as the call returns. */
     block_gc_t* gc = block_gc_create(bc, network, pool, gc_request.urls,
-                                     gc_request.force, gc_request.defrag, &ctx->actor);
+                                     gc_request.force, gc_request.defrag,
+                                     0.5f, &ctx->actor);
     (void)gc;
     client_api_gc_request_destroy(&gc_request);
     return;

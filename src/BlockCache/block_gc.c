@@ -363,7 +363,7 @@ void block_gc_dispatch(void* state, message_t* msg) {
       if (gc->defrag) {
         gc->defrag_applied = 1;
         gc->phase = BLOCK_GC_PHASE_DEFRAG;
-        block_cache_defragment(gc->bc, 0.5f, &gc->actor);
+        block_cache_defragment(gc->bc, gc->defrag_threshold, &gc->actor);
       } else {
         block_gc_report(gc);
       }
@@ -387,13 +387,14 @@ void block_gc_dispatch(void* state, message_t* msg) {
 
 block_gc_t* block_gc_create(block_cache_t* bc, network_t* network, scheduler_pool_t* pool,
                             const char* text, uint8_t force, uint8_t defrag,
-                            actor_t* reply_to) {
+                            float defrag_threshold, actor_t* reply_to) {
   block_gc_t* gc = get_clear_memory(sizeof(block_gc_t));
   gc->bc = bc;
   gc->network = network;
   gc->pool = pool;
   gc->force = force;
   gc->defrag = defrag;
+  gc->defrag_threshold = defrag_threshold;
   gc->phase = BLOCK_GC_PHASE_COLLECT;
   gc->reply_to = reply_to;
   gc->line_count = block_gc_count_lines(text);

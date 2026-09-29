@@ -56,6 +56,7 @@ typedef struct block_gc_t {
   size_t line_count, next_line;
   uint8_t force;          /* per the sweep: 1 deletes pinned/claimed blocks too */
   uint8_t defrag;         /* 1 chains a block_cache_defragment pass after the sweep */
+  float defrag_threshold; /* occupancy threshold passed to that defrag pass */
   uint8_t phase;          /* COLLECT(0) / SWEEP(1) / DEFRAG(2) */
   uint8_t collecting;     /* 1 while one representation walk is outstanding */
   size_t current_line;    /* index of the line the outstanding walk belongs to */
@@ -78,7 +79,7 @@ typedef struct block_gc_t {
    so call it through a scheduler_pool_defer_cleanup wrapper. */
 block_gc_t* block_gc_create(block_cache_t* bc, network_t* network, scheduler_pool_t* pool,
                             const char* text, uint8_t force, uint8_t defrag,
-                            actor_t* reply_to);
+                            float defrag_threshold, actor_t* reply_to);
 void block_gc_destroy(block_gc_t* gc);
 void block_gc_dispatch(void* state, message_t* msg);
 
