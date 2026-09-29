@@ -65,6 +65,8 @@
 #define CLIENT_API_BOOTSTRAP_LIST_RESPONSE       55
 #define CLIENT_API_CACHE_RESIZE_REQUEST          56
 #define CLIENT_API_CACHE_RESIZE_RESPONSE         57
+#define CLIENT_API_GC_REQUEST                    58
+#define CLIENT_API_GC_RESPONSE                   59
 
 /* Representation-op responses are the adjacent pair (request + 1); the
  * transport handler derives the response code arithmetically, so a renumbering
@@ -86,6 +88,8 @@ CLIENT_API_STATIC_ASSERT(CLIENT_API_REP_PIN_RESPONSE == CLIENT_API_REP_PIN_REQUE
 CLIENT_API_STATIC_ASSERT(CLIENT_API_REP_UNPIN_RESPONSE == CLIENT_API_REP_UNPIN_REQUEST + 1,
                          "rep op response codes must be request + 1");
 CLIENT_API_STATIC_ASSERT(CLIENT_API_EPHEMERAL_LIST_RESPONSE == CLIENT_API_EPHEMERAL_LIST_REQUEST + 1,
+                         "rep op response codes must be request + 1");
+CLIENT_API_STATIC_ASSERT(CLIENT_API_GC_RESPONSE == CLIENT_API_GC_REQUEST + 1,
                          "rep op response codes must be request + 1");
 
 // Status codes for responses
@@ -431,6 +435,46 @@ typedef struct {
   uint64_t current_bytes;
 } client_api_cache_resize_response_t;
 
+// --- GC Request ---
+// [type, urls: tstr (newline-delimited), force: uint, defrag: uint]
+// urls is the keep-list text — one representation URL/ORI per newline, the
+// same text the HTTP route takes as its body, so both share one server-side
+// split path. Size cap CLIENT_API_GC_MAX_URLS_TEXT; decode rejects an empty
+// tstr and force/defrag values other than 0/1 before orchestration starts.
+#define CLIENT_API_GC_MAX_URLS_TEXT (4 * 1024 * 1024)
+
+typedef struct {
+  char* urls;  // decode side owns via client_api_gc_request_destroy; the
+               // encode-path caller passes a borrowed, NUL-terminated string
+  uint8_t force;  // 0 = respect pins/claims, 1 = delete them too
+  uint8_t defrag; // 1 = chain a defragment pass after the sweep
+} client_api_gc_request_t;
+
+// --- GC Response ---
+// [type, status: uint, urls_request: uint, urls_collected: uint,
+//  blocks_deleted: uint, blocks_kept: uint, skipped_pinned: uint,
+//  skipped_claimed: uint, defrag_applied: uint,
+//  failed: [[line: uint, reason: uint, text: tstr], ...],
+//  defrag_sections: uint, defrag_blocks_relocated: uint]
+// status: 0 = sweep completed, 1 = internal error / empty-keep refusal
+// (the orchestrator refuses outright when nothing resolved — an empty keep
+// filter would delete the entire cache). Each failed row names the 1-based
+// source line, the GC_LINE_* reason, and the line text.
+#define CLIENT_API_GC_MAX_FAILED_ROWS (256)
+
+typedef struct {
+  int status;
+  size_t urls_request, urls_collected;
+  size_t blocks_deleted, blocks_kept, skipped_pinned, skipped_claimed;
+  uint8_t defrag_applied;
+  cbor_item_t* failed;  // owned by struct, freed by _destroy (decode side
+                        // holds a fresh reference; the daemon encode path
+                        // sets its own array and destroys it after encoding);
+                        // NULL when there are no failed lines. The daemon
+                        // encodes at most CLIENT_API_GC_MAX_FAILED_ROWS rows.
+  uint64_t defrag_sections, defrag_blocks_relocated;
+} client_api_gc_response_t;
+
 // --- Representation op request (mark permanent / delete ephemeral / pin / unpin) ---
 // [type, url] — url is the full OFF URL string of the representation to
 // operate on. The type byte selects the op (42/44/46/48); the layout is
@@ -603,6 +647,14 @@ void client_api_cache_resize_request_destroy(client_api_cache_resize_request_t* 
 cbor_item_t* client_api_cache_resize_response_encode(const client_api_cache_resize_response_t* msg);
 int client_api_cache_resize_response_decode(cbor_item_t* item, client_api_cache_resize_response_t* msg);
 void client_api_cache_resize_response_destroy(client_api_cache_resize_response_t* msg);
+
+cbor_item_t* client_api_gc_request_encode(const client_api_gc_request_t* msg);
+int client_api_gc_request_decode(cbor_item_t* item, client_api_gc_request_t* msg);
+void client_api_gc_request_destroy(client_api_gc_request_t* msg);
+
+cbor_item_t* client_api_gc_response_encode(const client_api_gc_response_t* msg);
+int client_api_gc_response_decode(cbor_item_t* item, client_api_gc_response_t* msg);
+void client_api_gc_response_destroy(client_api_gc_response_t* msg);
 
 // Helper: extract type byte from CBOR item
 uint8_t client_api_wire_get_type(cbor_item_t* item);
