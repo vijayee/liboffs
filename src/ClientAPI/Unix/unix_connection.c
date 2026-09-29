@@ -1451,9 +1451,20 @@ unix_connection_t* unix_connection_create(unix_transport_t* transport, platform_
 
   ATOMIC_STORE(&connection->watcher, platform_socket_watcher_create(transport->loop, sock,
     PD_EVENT_READ, _connection_read_callback, connection));
-  if (ATOMIC_LOAD(&connection->watcher) != NULL) {
-    pd_watcher_start(ATOMIC_LOAD(&connection->watcher));
+  if (ATOMIC_LOAD(&connection->watcher) == NULL) {
+    /* Watcher creation failed (IOCP registration or async-arm): the
+     * connection could never receive I/O, so returning it half-built
+     * would leave the caller with an accepted-but-dead socket. Tear down
+     * what create built (loop-registry actor + framer) and return NULL;
+     * the caller's NULL branch destroys the socket and rearms the
+     * listener. unix_connection_destroy is not usable here — it would
+     * decrement active_connections and pop an entry that was never pushed. */
+    actor_destroy(&connection->actor);
+    stream_framer_destroy(connection->framer);
+    free(connection);
+    return NULL;
   }
+  pd_watcher_start(ATOMIC_LOAD(&connection->watcher));
 
   return connection;
 }
