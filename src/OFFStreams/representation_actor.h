@@ -26,7 +26,11 @@ typedef enum {
   REPRESENTATION_OP_MARK_PERMANENT = 0,  /* CLEAR every claim — commit */
   REPRESENTATION_OP_DELETE_EPHEMERAL = 1, /* RELEASE every claim — delete at 0 */
   REPRESENTATION_OP_PIN = 2,
-  REPRESENTATION_OP_UNPIN = 3
+  REPRESENTATION_OP_UNPIN = 3,
+  /* Read-only keep-set walk: issues NO block-level op; the accumulated,
+     deduplicated hash set is transferred to the consumer in
+     REPRESENTATION_COLLECT_RESULT (see below). */
+  REPRESENTATION_OP_COLLECT = 4
 } representation_op_e;
 
 /* Payload for REPRESENTATION_OP_RESULT. Result codes: 0 = ok,
@@ -49,6 +53,23 @@ typedef struct {
      representation_actor_destroy). */
   representation_actor_t* source;
 } representation_op_result_payload_t;
+
+/* Payload for REPRESENTATION_COLLECT_RESULT — the REPRESENTATION_OP_COLLECT
+   arm's reply. A walk's accumulated, deduplicated hash set (data hashes the
+   chain carried PLUS every descriptor block's own hash) is TRANSFERRED to the
+   consumer: it owns every hashes[i] reference and the array itself until it
+   destroys them (buffer_destroy each, then free the array). count == 0 with
+   result != 0 means the walk found nothing to keep; count > 0 with result
+   -3 is a valid PARTIAL set (the walk stopped at the cycle).
+   `source` mirrors representation_op_result_payload_t above (same
+   deferred-destroy contract). */
+typedef struct {
+  int result;
+  size_t blocks_touched;
+  size_t count;
+  buffer_t** hashes;  /* count referenced buffers, transferred */
+  representation_actor_t* source;
+} representation_collect_result_payload_t;
 
 /* Walks a representation's descriptor chain (descriptor blocks chained by the
    trailing 32-byte next-descriptor hash), issues one block-level op per block

@@ -279,6 +279,10 @@ typedef enum message_type_e {
      pin / unpin walk over a representation's descriptor chain. Payload is
      representation_op_result_payload_t (representation_actor.h). */
   REPRESENTATION_OP_RESULT,
+  /* Representation actor: read-only COLLECT walk (REPRESENTATION_OP_COLLECT)
+     that transfers the walk's accumulated, deduplicated block-hash set.
+     Payload is representation_collect_result_payload_t. */
+  REPRESENTATION_COLLECT_RESULT,
 } message_type_e;
 
 /* Stream-to-network: request block from peers */
