@@ -327,6 +327,17 @@
     /* Issue ConnectNamedPipe and wait synchronously for the result. */
     OVERLAPPED ov;
     memset(&ov, 0, sizeof(ov));
+    /* A real manual-reset event, not the NULL-hEvent form: with hEvent NULL
+     * GetOverlappedResult waits on the file object's shared synchronization
+     * event, whose completion signaling races against the result read (the
+     * GC keep-list sweep's intermittent lost-connection flake pointed here).
+     * One event per accept call; closed on every exit path. */
+    HANDLE cnp_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (cnp_event == NULL) {
+      log_warn("platform_local_accept: CreateEvent failed (err=%lu)", GetLastError());
+      return NULL;
+    }
+    ov.hEvent = cnp_event;
     BOOL ok = ConnectNamedPipe(h, &ov);
     if (!ok) {
       DWORD err = GetLastError();
@@ -335,6 +346,7 @@
       }
       if (err != ERROR_IO_PENDING) {
         log_warn("platform_local_accept: ConnectNamedPipe failed (err=%lu)", err);
+        CloseHandle(cnp_event);
         return NULL;
       }
       /* Pending — wait for the connection. This call blocks (bWait=TRUE)
@@ -347,6 +359,7 @@
       ok = GetOverlappedResult(h, &ov, &bytes, TRUE);
       if (!ok) {
         DWORD err2 = GetLastError();
+        CloseHandle(cnp_event);
         if (err2 == ERROR_PIPE_CONNECTED) {
           goto accept_done;
         }
@@ -354,6 +367,7 @@
       }
     }
 accept_done:
+    CloseHandle(cnp_event);
     /* H is now in connected state. Create a new instance to replace
      * the one we just accepted, so the listener is ready for the next
      * client even before the caller rearms. The new instance lives
