@@ -148,6 +148,41 @@ typedef void (*offs_ephemeral_list_cb_t)(void* ctx, int status, size_t count,
                                          const uint16_t* claims,
                                          const uint32_t* pins);
 
+/* Failed-line entry for the keep-list GC response (offs_client_cache_gc).
+   line is the 1-based source line; reason is the wire's GC_LINE_* code
+   (1 malformed URL, 2 missing descriptor, 3 malformed descriptor,
+   4 cycle — see client_api_wire.h); text is the original line. */
+typedef struct {
+  size_t line;
+  uint8_t reason;
+  const char* text;  /* NUL-terminated, held via offs_client_release_payload */
+} offs_cache_gc_failed_line_t;
+
+/* Keep-list GC sweep result. status is 0 when the sweep completed —
+   individual lines may still have failed and stay unreported in the sweep
+   (failed rows carry them, capped at CLIENT_API_GC_MAX_FAILED_ROWS by the
+   daemon); nonzero is the daemon's internal-error signal, which includes
+   its refusal to sweep an empty keep set (EVERY line failed to resolve).
+   defrag_* report the optional chained defragment pass (applied is 0 when
+   it was not requested). */
+typedef struct {
+  uint8_t status;
+  size_t urls_request, urls_collected;
+  size_t blocks_deleted, blocks_kept, skipped_pinned, skipped_claimed;
+  size_t failed_count;
+  const offs_cache_gc_failed_line_t* failed;  /* held, see the callback note */
+  uint8_t defrag_applied;
+  size_t defrag_sections, defrag_blocks_relocated;
+} offs_cache_gc_result_t;
+
+/* Payload ownership follows the rule at the top of this header: every
+   result->failed[index].text string AND the failed array itself stay valid
+   until released with offs_client_release_payload (failed_count + 1 calls;
+   a NULL failed with count 0 needs none). result is NULL-able: on ERROR-frame
+   completion it arrives as NULL with the daemon's error status. */
+typedef void (*offs_cache_gc_cb_t)(void* ctx, uint8_t status,
+                                   const offs_cache_gc_result_t* result);
+
 /* Connection lifecycle */
 offs_client_t* offs_client_connect(const char* transport_url, const char* api_key);
 offs_client_t* offs_client_connect_ex(const char* transport_url, const char* api_key,
@@ -314,6 +349,22 @@ int offs_client_bootstrap_list(offs_client_t* client,
    Concurrency: one outstanding resize per slot (see peer operations above). */
 int offs_client_cache_size(offs_client_t* client, uint64_t capacity_bytes,
                            offs_cache_resize_cb_t callback, void* ctx);
+
+/* Keep-list garbage collection: `urls_text` is newline-delimited OFF URL /
+   ORI text; the daemon spares every block contained in those
+   representations (data + descriptor blocks) and deletes every other block
+   from its cache. force=1 deletes pinned and ephemeral-claimed blocks too;
+   force=0 skips them and reports the counts in the result. defrag=1 chains
+   a block_cache_defragment pass after the sweep. The daemon never sweeps an
+   empty keep set: when EVERY line fails to resolve it answers the
+   internal-error status with nothing deleted (see offs_cache_gc_result_t).
+   `urls_text` length is capped at CLIENT_API_GC_MAX_URLS_TEXT client-side.
+   Error delivery follows the peer operations above (ERROR frames complete
+   the callback with the daemon's error status and a NULL result).
+   Concurrency: one outstanding gc per slot (see peer operations above). */
+int offs_client_cache_gc(offs_client_t* client, const char* urls_text,
+                         uint8_t force, uint8_t defrag,
+                         offs_cache_gc_cb_t callback, void* ctx);
 
 /* Register the shared ERROR-frame callback without sending a GET.
    Peer/friend/load daemon-side rejections arrive here.

@@ -221,6 +221,8 @@ struct offs_client_t {
   void* rep_op_cb_ctx;
   offs_ephemeral_list_cb_t ephemeral_list_cb;
   void* ephemeral_list_cb_ctx;
+  offs_cache_gc_cb_t cache_gc_cb;
+  void* cache_gc_cb_ctx;
 };
 
 /* Forward declaration — needed for MsQuic callbacks that call _handle_frame */
@@ -673,6 +675,8 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
   void* rep_op_cb_ctx = client->rep_op_cb_ctx;
   offs_ephemeral_list_cb_t ephemeral_list_cb = client->ephemeral_list_cb;
   void* ephemeral_list_cb_ctx = client->ephemeral_list_cb_ctx;
+  offs_cache_gc_cb_t cache_gc_cb = client->cache_gc_cb;
+  void* cache_gc_cb_ctx = client->cache_gc_cb_ctx;
   platform_mutex_unlock(client->lock);
 
   switch (type) {
@@ -792,6 +796,9 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
         if (ephemeral_list_cb != NULL) {
           ephemeral_list_cb(ephemeral_list_cb_ctx, (int)msg.status_code, 0,
                             NULL, NULL, NULL);
+        }
+        if (cache_gc_cb != NULL) {
+          cache_gc_cb(cache_gc_cb_ctx, msg.status_code, NULL);
         }
         /* Clear every completed slot so a late duplicate frame cannot fire
            it again (identity-guarded: a newer registration is never
@@ -1263,6 +1270,81 @@ static void _handle_frame(offs_client_t* client, uint8_t type, cbor_item_t* fram
           _clear_delivered_slot(client, cache_resize_cb);
         }
         client_api_cache_resize_response_destroy(&msg);
+      }
+      break;
+    }
+    case CLIENT_API_GC_RESPONSE: {
+      client_api_gc_response_t msg;
+      memset(&msg, 0, sizeof(msg));
+      if (client_api_gc_response_decode(frame, &msg) == 0) {
+        if (cache_gc_cb != NULL) {
+          /* Move the decoded failed rows into a flat array before the
+             callback: the response destroy below must not free them,
+             because ownership passes to the hold list (ephemeral-list
+             precedent — the consumer releases each text pointer and the
+             array via offs_client_release_payload; see
+             offs_cache_gc_result_t's note in offs_client.h). */
+          offs_cache_gc_result_t result;
+          memset(&result, 0, sizeof(result));
+          result.status = (uint8_t)msg.status;
+          result.urls_request = msg.urls_request;
+          result.urls_collected = msg.urls_collected;
+          result.blocks_deleted = msg.blocks_deleted;
+          result.blocks_kept = msg.blocks_kept;
+          result.skipped_pinned = msg.skipped_pinned;
+          result.skipped_claimed = msg.skipped_claimed;
+          result.defrag_applied = msg.defrag_applied;
+          result.defrag_sections = msg.defrag_sections;
+          result.defrag_blocks_relocated = msg.defrag_blocks_relocated;
+          size_t row_count = 0;
+          if (msg.failed != NULL) {
+            row_count = cbor_array_size(msg.failed);
+          }
+          offs_cache_gc_failed_line_t* rows = NULL;
+          if (row_count > 0) {
+            rows = get_clear_memory(sizeof(offs_cache_gc_failed_line_t) * row_count);
+            for (size_t row_index = 0; row_index < row_count; row_index++) {
+              cbor_item_t* row_item = cbor_array_get(msg.failed, row_index);
+              if (row_item != NULL && cbor_isa_array(row_item) &&
+                  cbor_array_size(row_item) >= 3) {
+                cbor_item_t* line_item = cbor_array_get(row_item, 0);
+                cbor_item_t* reason_item = cbor_array_get(row_item, 1);
+                cbor_item_t* text_item = cbor_array_get(row_item, 2);
+                if (text_item != NULL && cbor_isa_string(text_item)) {
+                  size_t text_len = cbor_string_length(text_item);
+                  char* text_copy = get_memory(text_len + 1);
+                  memcpy(text_copy, cbor_string_handle(text_item), text_len);
+                  text_copy[text_len] = '\0';
+                  rows[row_index].text = text_copy;
+                  rows[row_index].line =
+                      (size_t)(line_item != NULL ? cbor_get_uint64(line_item) : 0);
+                  rows[row_index].reason =
+                      (uint8_t)(reason_item != NULL ? cbor_get_uint64(reason_item) : 0);
+                }
+                if (line_item != NULL) cbor_decref(&line_item);
+                if (reason_item != NULL) cbor_decref(&reason_item);
+                if (text_item != NULL) cbor_decref(&text_item);
+              }
+              if (row_item != NULL) {
+                cbor_decref(&row_item);
+              }
+            }
+            result.failed_count = row_count;
+            result.failed = rows;
+          }
+          cache_gc_cb(cache_gc_cb_ctx, result.status, &result);
+          if (rows != NULL) {
+            /* Hold every row's text and the array (failed_count + 1 calls). */
+            for (size_t row_index = 0; row_index < row_count; row_index++) {
+              if (rows[row_index].text != NULL) {
+                _hold_payload(client, (void*)rows[row_index].text);
+              }
+            }
+            _hold_payload(client, rows);
+          }
+          _clear_delivered_slot(client, cache_gc_cb);
+        }
+        client_api_gc_response_destroy(&msg);
       }
       break;
     }
@@ -2843,6 +2925,31 @@ int offs_client_cache_size(offs_client_t* client, uint64_t capacity_bytes,
   platform_mutex_lock(client->lock);
   client->cache_resize_cb = callback;
   client->cache_resize_cb_ctx = ctx;
+  platform_mutex_unlock(client->lock);
+
+  _send_frame(client, frame);
+  return 0;
+}
+
+int offs_client_cache_gc(offs_client_t* client, const char* urls_text,
+                         uint8_t force, uint8_t defrag,
+                         offs_cache_gc_cb_t callback, void* ctx) {
+  if (client == NULL || !client->connected || urls_text == NULL ||
+      urls_text[0] == '\0' || callback == NULL) return -1;
+  if (strlen(urls_text) >= CLIENT_API_GC_MAX_URLS_TEXT) return -1;
+
+  client_api_gc_request_t msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.urls = (char*)urls_text;
+  msg.force = force ? 1 : 0;
+  msg.defrag = defrag ? 1 : 0;
+
+  cbor_item_t* frame = client_api_gc_request_encode(&msg);
+  if (frame == NULL) return -1;  /* cbor allocation failure */
+
+  platform_mutex_lock(client->lock);
+  client->cache_gc_cb = callback;
+  client->cache_gc_cb_ctx = ctx;
   platform_mutex_unlock(client->lock);
 
   _send_frame(client, frame);
