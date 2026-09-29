@@ -78,6 +78,9 @@ if (BUILD_TESTING)
             test_off_stream_integration.cpp
             test_block_recipe.cpp
             test_off_url.cpp
+            test_gc_collect.cpp
+            test_gc_wire.cpp
+            test_off_routes_gc.cpp
             test_ofd.cpp
             test_ofd_cache.cpp
             test_wanted_list.cpp
