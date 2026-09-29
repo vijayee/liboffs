@@ -26,6 +26,7 @@
 #include "../../OFFStreams/tuple.h"
 #include "../../OFFStreams/ofd.h"
 #include "../../BlockCache/block_cache.h"
+#include "../../BlockCache/block_gc.h"
 #include "../../BlockCache/ephemeral_registry.h"
 #include "../../Util/atomic_compat.h"
 #include "../../Util/log.h"
@@ -2067,6 +2068,201 @@ static void _off_list_ephemeral_handler(http_request_t* request, http_response_t
     block_cache_list_ephemeral(ctx->bc, &route_ctx->actor);
 }
 
+/* ---- keep-list garbage-collection route ---- */
+
+/* Append one JSON string (quotes and escapes) for untrusted line text. The
+   body lines are operator-supplied, so they can carry quotes, backslashes,
+   and control characters; control bytes go out as \u00XX and everything else
+   passes through (the split path never rewrote non-ASCII bytes, so a UTF-8
+   byte sequence in the text stays byte-identical in the response). */
+static void _gc_json_append_string(buffer_t* json, const char* text) {
+    /* Worst case per input byte: \u00XX (6) for control bytes. */
+    buffer_ensure_capacity(json, json->size + 6 * strlen(text) + 3);
+    json->data[json->size++] = '"';
+    for (const char* cursor = text; *cursor != '\0'; cursor++) {
+        unsigned char ch = (unsigned char)*cursor;
+        switch (ch) {
+            case '"':
+                json->data[json->size++] = '\\';
+                json->data[json->size++] = '"';
+                break;
+            case '\\':
+                json->data[json->size++] = '\\';
+                json->data[json->size++] = '\\';
+                break;
+            default:
+                if (ch < 0x20) {
+                    json->data[json->size++] = '\\';
+                    json->data[json->size++] = 'u';
+                    json->data[json->size++] = '0';
+                    json->data[json->size++] = '0';
+                    json->data[json->size++] =
+                        (char)"0123456789abcdef"[(ch >> 4) & 0x0F];
+                    json->data[json->size++] =
+                        (char)"0123456789abcdef"[ch & 0x0F];
+                } else {
+                    json->data[json->size++] = (char)ch;
+                }
+                break;
+        }
+    }
+    json->data[json->size++] = '"';
+}
+
+/* Wire-identical failed-line reason names for the response JSON. Keep the
+   mapping in sync with the GC_LINE_* values (block_gc.h). */
+static const char* _gc_reason_name(uint8_t reason) {
+    switch (reason) {
+        case GC_LINE_MALFORMED_URL: return "malformed_url";
+        case GC_LINE_MISSING_DESCRIPTOR: return "missing_descriptor";
+        case GC_LINE_MALFORMED_DESCRIPTOR: return "malformed_descriptor";
+        case GC_LINE_CYCLE: return "cycle";
+        default: return "unknown";
+    }
+}
+
+/* Completion for the GC route: consume the transferred block_gc_result_t into
+   the JSON body. status == 0 answers 200 even when individual lines failed
+   (the sweep itself ran); status == 1 — an internal error, which includes the
+   every-line-failed empty-keep refusal — answers 500. Rows are capped at
+   CLIENT_API_GC_MAX_FAILED_ROWS, the same bound the wire encoding applies. */
+static void _off_gc_dispatch(void* state, message_t* msg) {
+    rep_route_context_t* route_ctx = (rep_route_context_t*)state;
+    if (msg->type != BLOCK_GC_RESULT) {
+        return;
+    }
+    block_gc_result_t* result = (block_gc_result_t*)msg->payload;
+    if (result == NULL) {
+        http_response_set_status(route_ctx->response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+        http_response_end(route_ctx->response);
+        _rep_route_context_destroy(route_ctx);
+        return;
+    }
+
+    size_t rows = result->failed_count < CLIENT_API_GC_MAX_FAILED_ROWS
+                      ? result->failed_count
+                      : CLIENT_API_GC_MAX_FAILED_ROWS;
+    buffer_t* json = buffer_create_with_capacity(0, 256 + rows * 64);
+    int text_len = snprintf((char*)json->data + json->size, json->capacity - json->size,
+                            "{\"status\":\"%s\",\"urls_request\":%zu,\"urls_collected\":%zu,"
+                            "\"blocks_deleted\":%zu,\"blocks_kept\":%zu,"
+                            "\"skipped\":{\"pinned\":%zu,\"ephemeral_claimed\":%zu},"
+                            "\"failed\":[",
+                            result->status == 0 ? "ok" : "error",
+                            result->urls_request, result->urls_collected,
+                            result->blocks_deleted, result->blocks_kept,
+                            result->skipped_pinned, result->skipped_ephemeral_claimed);
+    if (text_len > 0) {
+        json->size += (size_t)text_len;
+    }
+    for (size_t row_index = 0; row_index < rows; row_index++) {
+        if (row_index > 0) {
+            json->data[json->size++] = ',';
+        }
+        buffer_ensure_capacity(json, json->size + 64);
+        text_len = snprintf((char*)json->data + json->size, json->capacity - json->size,
+                            "{\"line\":%zu,\"reason\":\"%s\",\"text\":",
+                            result->failed_line[row_index],
+                            _gc_reason_name(result->failed_reason[row_index]));
+        if (text_len > 0) {
+            json->size += (size_t)text_len;
+        }
+        _gc_json_append_string(json, result->failed_lines[row_index] != NULL
+                                          ? result->failed_lines[row_index]
+                                          : "");
+        json->data[json->size++] = '}';
+    }
+    buffer_ensure_capacity(json, json->size + 96);
+    text_len = snprintf((char*)json->data + json->size, json->capacity - json->size,
+                        "],\"defrag\":{\"applied\":%u,\"result\":%d,\"sections\":%zu,"
+                        "\"blocks_relocated\":%zu}}",
+                        (unsigned)result->defrag_applied, result->defrag_result,
+                        result->defrag_sections, result->defrag_blocks_relocated);
+    if (text_len > 0) {
+        json->size += (size_t)text_len;
+    }
+
+    http_response_set_header(route_ctx->response, "Content-Type", "application/json");
+    http_response_set_status(route_ctx->response, result->status == 0
+                             ? HTTP_STATUS_OK : HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_write(route_ctx->response, (const char*)json->data, json->size);
+    http_response_end(route_ctx->response);
+    buffer_destroy(json);
+
+    /* The consumer owns the transferred result: destroy it here and null the
+       payload so actor_run's payload_destroy runs on an already-empty shell. */
+    block_gc_result_destroy(result);
+    msg->payload = NULL;
+
+    _rep_route_context_destroy(route_ctx);
+}
+
+/* Body = newline-delimited URL/ORI text (the wire and HTTP bodies share one
+   server-side split path in block_gc_create); query flags select force, defrag,
+   and the defrag occupancy threshold (?force=1&defrag=1&threshold=0.5).
+   The response completes asynchronously once the whole pipeline (collect,
+   sweep, optional defrag) reports. */
+static void _off_gc_handler(http_request_t* request, http_response_t* response,
+                            void* user_data) {
+    off_routes_context_t* ctx = (off_routes_context_t*)user_data;
+
+    if (request->body == NULL || request->body->data == NULL || request->body->size == 0) {
+        http_response_set_status(response, HTTP_STATUS_BAD_REQUEST);
+        http_response_set_header(response, "Content-Type", "text/plain");
+        http_response_write(response, "missing keep-list body", 22);
+        http_response_end(response);
+        return;
+    }
+    /* The wire pair 58 enforces the same cap; the HTTP body must not smuggle
+       anything larger past the shared server-side parser. */
+    if (request->body->size > CLIENT_API_GC_MAX_URLS_TEXT) {
+        http_response_set_status(response, HTTP_STATUS_PAYLOAD_TOO_LARGE);
+        http_response_set_header(response, "Content-Type", "text/plain");
+        http_response_write(response, "keep-list body too large", 24);
+        http_response_end(response);
+        return;
+    }
+
+    /* The body buffer is not NUL-terminated — copy it into a string for the
+       orchestrator's splitter (same discipline as _rep_route_start). */
+    size_t text_len = request->body->size;
+    char* text = get_memory(text_len + 1);
+    memcpy(text, request->body->data, text_len);
+    text[text_len] = '\0';
+
+    uint8_t force = _query_has_param(request->query_string, "force") ? 1 : 0;
+    uint8_t defrag = _query_has_param(request->query_string, "defrag") ? 1 : 0;
+    float threshold = 0.5f;
+    if (request->query_string != NULL) {
+        const char* param = strstr(request->query_string, "threshold=");
+        if (param != NULL) {
+            char* endptr = NULL;
+            double val = strtod(param + 10, &endptr);
+            if (endptr != param + 10 && val > 0.0 && val <= 1.0) {
+                threshold = (float)val;
+            }
+        }
+    }
+
+    rep_route_context_t* route_ctx = get_clear_memory(sizeof(rep_route_context_t));
+    route_ctx->response = response;
+    route_ctx->connection = response->connection;
+    route_ctx->pool = ctx->pool;
+    response->is_piped = 1;
+    response->connection->piped_pending = 1;
+    refcounter_reference((refcounter_t*)response);
+    refcounter_reference((refcounter_t*)response->connection);
+    actor_init(&route_ctx->actor, route_ctx, _off_gc_dispatch, ctx->pool);
+
+    /* block_gc_create splits and copies the text into its own line array at
+       create time (transport thread), so the NUL-terminated copy is safe to
+       free as soon as the call returns. */
+    block_gc_t* gc = block_gc_create(ctx->bc, ctx->network, ctx->pool, text,
+                                     force, defrag, threshold, &route_ctx->actor);
+    (void)gc;
+    free(text);
+}
+
 void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
                          block_cache_t* bc, ofd_cache_t* ofd_cache, tuple_cache_t* tc,
                          network_t* network,
@@ -2124,4 +2320,6 @@ void off_routes_register(http_server_t* server, scheduler_pool_t* pool,
     http_server_post_with_data(server, "/offsystem/unpin", _off_unpin_handler, ctx, NULL);
     http_server_get_with_data(server, "/offsystem/ephemeral/list",
                               _off_list_ephemeral_handler, ctx, NULL);
+    http_server_post_with_data(server, "/offsystem/cache/gc",
+                               _off_gc_handler, ctx, NULL);
 }
