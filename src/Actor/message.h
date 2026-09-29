@@ -90,6 +90,13 @@ typedef enum message_type_e {
   /* Block-cache actor: summary of the CACHE_GC keep-list sweep. Payload is
      cache_gc_result_payload_t (block_cache.h). */
   CACHE_GC_RESULT,
+  /* Keep-list GC orchestrator: kick the next collect line (also the walk-/
+     sweep-step continuation). No payload. */
+  BLOCK_GC_START,
+  /* Keep-list GC orchestrator: the finished block_gc_result_t is TRANSFERRED
+     to the consumer (it owns the struct; destroy via block_gc_result_destroy).
+     Payload is block_gc_result_t (block_gc.h). */
+  BLOCK_GC_RESULT,
   TUPLE_CACHE_GET_RESULT,
   /* HTTP connection messages */
   HTTP_CONNECTION_DATA,
