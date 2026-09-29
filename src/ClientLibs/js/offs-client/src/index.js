@@ -732,6 +732,42 @@ export class OffsClient {
   }
 
   /**
+   * Keep-list garbage collection: `urls` is newline-delimited OFF URL / ORI
+   * text; the daemon spares every block contained in those representations
+   * (data + descriptor blocks) and deletes every other block from its cache.
+   * force deletes pinned and ephemeral-claimed blocks too; defrag chains a
+   * defragment pass after the sweep; threshold tunes that pass's occupancy
+   * trigger (HTTP transport only, 0 < t <= 1, default 0.5). The daemon
+   * refuses to sweep an empty keep set: when every line fails to resolve it
+   * answers status 1 with blocksDeleted 0. Returns the daemon's summary
+   * (failed rows included — they are advisories, not errors, when status is
+   * 0).
+   * @param {string} urls - newline-delimited URLs/ORIs
+   * @param {boolean} [force=false]
+   * @param {boolean} [defrag=false]
+   * @param {Object} [options] - HTTP transport only: {threshold: number}
+   * @returns {Promise<{status: number, urlsRequest: number, urlsCollected: number,
+   *   blocksDeleted: number, blocksKept: number, skippedPinned: number,
+   *   skippedClaimed: number, defragApplied: boolean,
+   *   failed: Array<{line: number, reason: number, text: string}>,
+   *   defragSections: number, defragBlocksRelocated: number}>}
+   */
+  async cacheGc(urls, force = false, defrag = false, options = {}) {
+    if (this.transport instanceof HttpTransport) {
+      const params = new URLSearchParams();
+      if (force) params.set('force', '1');
+      if (defrag) params.set('defrag', '1');
+      if (options.threshold !== undefined) params.set('threshold', String(options.threshold));
+      const query = params.toString();
+      return this.transport.cacheGc(urls, query ? `?${query}` : '');
+    }
+
+    const requestBytes = wire.encodeCacheGcRequest(urls, force, defrag);
+    const responseBytes = await this._sendAndWait(requestBytes, wire.MSG.CACHE_GC_RESPONSE);
+    return wire.decodeCacheGcResponse(responseBytes);
+  }
+
+  /**
    * Upload a folder recursively and return the root directory's ORI URL.
    * Matches the algorithm used by the Flutter example client in
    * examples/off_client/lib/screens/import_screen.dart.
