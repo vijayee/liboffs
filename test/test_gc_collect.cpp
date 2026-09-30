@@ -795,3 +795,46 @@ TEST_F(TestGcCollect, DefragChainPropagatesTheSummary) {
   block_cache = NULL;
   DESTROY(descriptor_hash, buffer);
 }
+
+/* Exact keep-filter sizing: the URL itself carries the stream extent, so
+   block_gc_expected_blocks derives the block counts from pure arithmetic —
+   one descriptor pad per data block, block_size / 32 - 1 pads per
+   descriptor block (the trailing pad is the next-descriptor pointer).
+   standard = 128000 → 3999 pads per descriptor block. */
+TEST_F(TestGcCollect, KeepFilterSizedExactlyFromUrls) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  ASSERT_NE(block_cache, nullptr);
+
+  buffer_t* hash = buffer_create(32);
+  ASSERT_NE(hash, nullptr);
+  hash->size = 32;
+  for (size_t i = 0; i < hash->size; i++) {
+    hash->data[i] = (uint8_t)(i + 1);
+  }
+
+  /* 128000 bytes: 1 data block + 1 descriptor block. */
+  char* one = gc_url_for(hash, 128000);
+  /* 384001 bytes: ceil = 4 data blocks + 1 descriptor block. */
+  char* three = gc_url_for(hash, 3 * 128000 + 1);
+  /* 5000 data blocks + ceil(5000 / 3999) = 2 descriptor blocks. */
+  char* wide = gc_url_for(hash, 5000 * (size_t)128000);
+  /* Unparseable: buys no filter room (collect reports the line and
+     keeps nothing for it either way). */
+  char* junk = strdup("not-a-url");
+
+  const char* lines[4] = {one, three, wide, junk};
+  EXPECT_EQ(block_gc_expected_blocks(block_cache, lines, 4),
+            2u + 5u + 5002u);
+
+  const char* junk_lines[1] = {junk};
+  EXPECT_EQ(block_gc_expected_blocks(block_cache, junk_lines, 1), 0u);
+
+  free(junk);
+  free(wide);
+  free(three);
+  free(one);
+  DESTROY(hash, buffer);
+  block_cache_sync(block_cache);
+  block_cache_destroy(block_cache);
+  block_cache = NULL;
+}

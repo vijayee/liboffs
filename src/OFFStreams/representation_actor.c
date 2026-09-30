@@ -7,9 +7,7 @@
 #include "../Util/allocator.h"
 #include <string.h>
 
-#define REPRESENTATION_DESCRIPTOR_PAD 32
-
-static size_t _rep_block_size_for_type(block_size_e type) {
+size_t representation_block_size_for_type(block_size_e type) {
   switch (type) {
     case mega:     return 1000000;
     case standard: return 128000;
@@ -147,7 +145,7 @@ static void _rep_apply_to_hash(representation_actor_t* rep, buffer_t* hash) {
 static void _rep_process_descriptor_block(representation_actor_t* rep, buffer_t* block_data,
                                           buffer_t* descriptor_block_hash) {
   size_t descriptor_pad = REPRESENTATION_DESCRIPTOR_PAD;
-  size_t block_size = _rep_block_size_for_type(rep->bc->type);
+  size_t block_size = representation_block_size_for_type(rep->bc->type);
   size_t cut_point = (block_size / descriptor_pad) * descriptor_pad;
 
   if (block_data->size < descriptor_pad) {

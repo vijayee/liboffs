@@ -13,14 +13,71 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Exact keep-filter sizing from the keep-list lines (see the contract
+   comment in block_gc.h): the URL carries its stream extent, so the
+   block counts are pure arithmetic — no descriptor walk at create
+   time. One data block per block-size slice of the stream (rounded up;
+   the tail block is stored padded), one descriptor pad per data block,
+   plus the next-descriptor pad per non-last descriptor block, and
+   block_size / 32 - 1 of those pads fitting per descriptor block.
+   Overcounts are safe (roomier filter, fewer expansion passes); the
+   stream_offset is deliberately ignored — the walk's chain may cover
+   the full extent, and over-counting is the safe direction. */
+size_t block_gc_expected_blocks(block_cache_t* bc, const char* const* lines,
+                                size_t line_count) {
+  if (bc == NULL || lines == NULL) {
+    return 0;
+  }
+  size_t block_size = representation_block_size_for_type(bc->type);
+  if (block_size <= REPRESENTATION_DESCRIPTOR_PAD) {
+    return 0;
+  }
+  /* The trailing 32 bytes of every descriptor block are the
+     next-descriptor pointer, not an entry. */
+  size_t entries_per_descriptor_block =
+      block_size / REPRESENTATION_DESCRIPTOR_PAD - 1;
+  if (entries_per_descriptor_block == 0) {
+    entries_per_descriptor_block = 1;
+  }
+  size_t expected = 0;
+  for (size_t idx = 0; idx < line_count; idx++) {
+    off_url_t* url = off_url_parse(lines[idx]);
+    if (url == NULL || url->descriptor_hash == NULL) {
+      /* The collect step reports these as GC_LINE_MALFORMED_URL;
+         they contribute no keep set, so they buy no filter room. */
+      if (url != NULL) {
+        off_url_destroy(url);
+      }
+      continue;
+    }
+    size_t stream_length = url->stream_length;
+    off_url_destroy(url);
+    size_t data_blocks = (stream_length + block_size - 1) / block_size;
+    size_t descriptor_blocks =
+        (data_blocks + entries_per_descriptor_block - 1) /
+        entries_per_descriptor_block;
+    if (descriptor_blocks == 0) {
+      /* The head descriptor exists even at stream extent 0 — the walk
+         always adds its own hash. */
+      descriptor_blocks = 1;
+    }
+    expected += data_blocks + descriptor_blocks;
+  }
+  return expected;
+}
+
 /* Phases (uint8_t fields; the names are .c-local). */
 #define BLOCK_GC_PHASE_COLLECT 0
 #define BLOCK_GC_PHASE_SWEEP   1
 #define BLOCK_GC_PHASE_DEFRAG  2
 
-/* Keep-filter budget: blocks spared per URL, on average. The filter elastically
-   expands on saturation (elastic_bloom_filter_add), so a tight budget cannot
-   lose blocks — it only costs extra expansion passes. */
+/* Fallback keep-filter budget: blocks spared per URL when the URL
+   arithmetic cannot see any extent (unparseable lines, unknown block
+   class). Exact sizing from the parsed stream extents
+   (block_gc_expected_blocks) is the primary seed; the filter elastically
+   expands on saturation (elastic_bloom_filter_add) either way, so a
+   tight budget cannot lose blocks — it only costs extra expansion
+   passes. */
 #define BLOCK_GC_EXPECTED_PER_URL 16
 #define BLOCK_GC_EBF_HASH_COUNT 4
 
@@ -405,7 +462,16 @@ block_gc_t* block_gc_create(block_cache_t* bc, network_t* network, scheduler_poo
     gc->failed_line = get_clear_memory(sizeof(size_t) * gc->line_count);
     gc->failed_reason = get_clear_memory(sizeof(uint8_t) * gc->line_count);
     gc->failed_lines = get_clear_memory(sizeof(char*) * gc->line_count);
-    size_t expected = gc->line_count * BLOCK_GC_EXPECTED_PER_URL;
+    /* Exact sizing first: the URL carries its stream extent, so the
+       block counts need no walk (block_gc_expected_blocks). The
+       fallback only covers lists where nothing parsed — collect
+       refuses an all-unparseable list at its end anyway, but create
+       still wants a working filter for that refused run's report. */
+    size_t expected = block_gc_expected_blocks(gc->bc, gc->lines,
+                                               gc->line_count);
+    if (expected == 0) {
+      expected = gc->line_count * BLOCK_GC_EXPECTED_PER_URL;
+    }
     size_t ebf_size = expected * 16;
     if (ebf_size < 1024) {
       ebf_size = 1024;

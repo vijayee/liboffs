@@ -19,6 +19,16 @@ typedef struct network_t network_t;
    so a consumer can queue the actor's deferred destruction. */
 typedef struct representation_actor_t representation_actor_t;
 
+/* Descriptor-block geometry, shared with the GC keep-filter sizing (see
+   representation_block_size_for_type and the pad-splitting walk in
+   representation_actor.c): every descriptor entry is a fixed 32-byte hash
+   pad, and the trailing pad of each descriptor block carries the
+   next-descriptor pointer instead of an entry. */
+#define REPRESENTATION_DESCRIPTOR_PAD 32
+
+/* A block-size class's size in bytes (mega / standard / mini / nano). */
+size_t representation_block_size_for_type(block_size_e type);
+
 /* Operation a representation actor applies to EVERY block in a
    representation's descriptor chain (data hashes + the descriptor blocks
    themselves). */

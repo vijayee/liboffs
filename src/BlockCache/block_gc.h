@@ -45,9 +45,22 @@ typedef struct {
 
 void block_gc_result_destroy(void* ptr);
 
+/* Exact keep-filter sizing, computed from the keep list BEFORE any
+   descriptor walk: an OFF URL carries its stream extent (off_url_parse),
+   and the encoding is deterministic after that — one data block per
+   block-size slice of the stream, one 32-byte descriptor pad per data
+   block, one next-descriptor pad per non-last descriptor block, and
+   block_size / 32 - 1 of those pads per descriptor block. Parseless
+   lines contribute 0 (collect reports them GC_LINE_MALFORMED_URL and
+   they keep nothing either way). Overcounts are SAFE: they only buy
+   filter room, and the sweep's elastic path stays as the
+   belt-and-braces for anything the URL arithmetic cannot see. */
+size_t block_gc_expected_blocks(block_cache_t* bc, const char* const* lines,
+                                size_t line_count);
+
 typedef struct block_gc_t block_gc_t;
 
-typedef struct block_gc_t {
+struct block_gc_t {
   actor_t actor;          /* FIRST member — the deferred-teardown ritual */
   block_cache_t* bc;
   network_t* network;     /* NULL = local-only; the collect walks announce nothing */
