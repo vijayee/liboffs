@@ -19,7 +19,10 @@
   typedef SSIZE_T ssize_t;
   #define _SSIZE_T_DEFINED
 #else
+  /* POSIX consumers include this shim for isatty/STDERR_FILENO (the MSVC
+     branch defines them); unistd.h is where those actually live. */
   #include <sys/types.h>
+  #include <unistd.h>
 #endif
 
 #if defined(_MSC_VER)
