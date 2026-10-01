@@ -42,6 +42,23 @@ typedef struct timer_actor_t {
      the watcher array's watcher_count is left inconsistent, and the loop
      later iterates a stale (already-freed) pointer. */
   platform_mutex_t* loop_lock;
+  /* Timers untracked but not yet disposed. On backends whose timer destroy
+     never waits on the loop thread (epoll, kqueue), an epoll_wait batch the
+     loop thread already returned can still dispatch timerfd_callback /
+     _timer_completion_callback for an untracked timer — freeing the timer
+     struct or its user_data from a foreign thread then races the captured
+     callback (use-after-free; see harmony OFFS-189). These timers are
+     therefore disposed on the LOOP thread, after the batch that could carry
+     their events has been fully processed; under IOCP destroying inline is
+     safe (pd_timer_destroy's drain-sync blocks the destroying thread until
+     the loop cannot dispatch the timer again) and staying inline avoids a
+     self-wait in iocp_drain_sync when the drain runs on the loop thread. */
+  pd_timer_t** pending_destroy_timers;
+  size_t pending_destroy_count;
+  size_t pending_destroy_capacity;
+  /* 1 when timer disposal is deferred to the loop thread (epoll / kqueue); 0
+     when pd_timer_destroy runs inline on the destroying thread (IOCP). */
+  uint8_t destroy_deferred;
 } timer_actor_t;
 
 typedef struct {

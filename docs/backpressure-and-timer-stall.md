@@ -155,6 +155,46 @@ with heavy bidirectional actor traffic.
 - **Leak-on-drain-timeout is deliberate** (poll-dancer). Do not "fix" the
   leaked timer struct by freeing it earlier.
 
+### 4.3 The epoll captured-batch race (fixed 2026-10-01)
+
+The IOCP destroy contract (leak instead of UAF, §3.3) does not extend to
+epoll/kqueue — but a second race existed there, and it was Linux-visible
+under valgrind (harmony OFFS-189). `epoll_loop_run` captures a batch of
+events in one `epoll_wait` return and dispatches the callbacks one by one
+(`eps/poll-dancer/src/platform/epoll.c`). A timer untracked **and freed**
+by a foreign thread (timer_actor dispatch replacing a debounce timer, a
+synchronous cancel, or teardown) between the batch capture and its
+dispatch would be dereferenced by `timerfd_callback` (the `pd_timer_t*`)
+and `_timer_completion_callback` (the `user_data` completion payload) —
+use-after-free, on both the timer struct and the completion payload. The
+"untrack before free" ordering only makes the *tracked* re-check drop the
+firing; it cannot help a callback that dereferences the payload before the
+re-check (timer_actor.c `_timer_completion_callback` reads
+`completion->timer_actor` first) or one that never re-checks
+(`timerfd_callback`).
+
+Fix (timer_actor.c, OFFS-189): on backends whose timer destroy does **not**
+wait on the loop thread (epoll, kqueue — `pd_platform_name() != "iocp"`),
+timer disposal is deferred: the destroying thread only `pd_timer_stop`s
+the timer and parks it on `timer_actor_t::pending_destroy_timers`; the
+loop thread drains that queue after each `pd_loop_run_once` batch has been
+fully dispatched, and teardown (post-join, or a loop that never ran a
+batch) drains inline. IOCP keeps the inline destroy path, where the
+drain-sync contract already guarantees the loop cannot reference the timer
+after `pd_timer_destroy` returns.
+
+Rules this adds to §5's playbook:
+
+6. **Never free a `pd_timer_t` (or its `user_data` completion payload) from
+   a thread other than the loop thread on epoll/kqueue.** Route the
+   disposal through `_timer_actor_queue_destroy`; the loop thread's
+   post-batch drain owns the free.
+7. **The captured-batch window generalizes**: any poll-dancer watcher freed
+   on a foreign thread while the loop runs is exposed to the same race for
+   the one batch already in flight. Timer disposal is the only path that
+   does this today; keep it that way (the "watcher ops on the I/O thread
+   only" rule from the HTTP connection patterns is the same invariant).
+
 ## 5. Downstream playbook
 
 Symptoms of this class, and what they mean:
