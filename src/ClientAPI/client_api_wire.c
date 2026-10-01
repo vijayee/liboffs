@@ -2779,6 +2779,7 @@ int client_api_gc_response_decode(cbor_item_t* item, client_api_gc_response_t* m
         cbor_item_t* reason_item = cbor_array_get(row, 1);
         if (!cbor_isa_uint(reason_item)) {
           cbor_decref(&reason_item);
+          cbor_decref(&line_item);
           cbor_decref(&row);
           cbor_decref(&failed_item);
           client_api_gc_response_destroy(msg);
@@ -2787,6 +2788,8 @@ int client_api_gc_response_decode(cbor_item_t* item, client_api_gc_response_t* m
         cbor_item_t* text_item = cbor_array_get(row, 2);
         if (!cbor_isa_string(text_item)) {
           cbor_decref(&text_item);
+          cbor_decref(&reason_item);
+          cbor_decref(&line_item);
           cbor_decref(&row);
           cbor_decref(&failed_item);
           client_api_gc_response_destroy(msg);
