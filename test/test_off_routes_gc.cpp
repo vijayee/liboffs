@@ -402,6 +402,7 @@ TEST_F(TestOffRoutesGc, AllMalformedRefusalAnswers500) {
     EXPECT_NE(strstr(response, "\"defrag\":{\"applied\":0"), nullptr);
 
     /* The refusal deleted nothing — the preloaded content still resolves. */
+    platform_socket_destroy(sock);
     sock = wait_connect();
     ASSERT_NE(sock, nullptr);
     char get_request[8192];
