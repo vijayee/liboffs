@@ -881,9 +881,17 @@ TEST_F(TestUnixTransport, LoadFailedWhenDescriptorUnreachable) {
     for (size_t index = 0; index < sizeof(hash_bytes); index++) {
         hash_bytes[index] = (uint8_t)(index + 1);
     }
-    char hash_b58[64];
-    ASSERT_GT(base58_encode(hash_bytes, sizeof(hash_bytes),
-                            hash_b58, sizeof(hash_b58)), 0);
+    /* base58_encode does not null-terminate (caller owns the terminator):
+       without it, snprintf's %s keeps reading past the hash into stack
+       garbage, so the ghost ORI differs per build/configuration — under
+       valgrind it is reported as a conditional jump on uninitialised value
+       (and in Release it derails the load path into a shape that never
+       terminates with LOAD_END; harmony OFFS-247). */
+    char hash_b58[64] = {0};
+    int hash_b58_len = base58_encode(hash_bytes, sizeof(hash_bytes),
+                                     hash_b58, sizeof(hash_b58));
+    ASSERT_GT(hash_b58_len, 0);
+    hash_b58[hash_b58_len] = '\0';
 
     char ghost_ori[512];
     snprintf(ghost_ori, sizeof(ghost_ori),
