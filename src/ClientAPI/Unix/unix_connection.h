@@ -34,6 +34,11 @@ typedef struct unix_transport_t unix_transport_t;
 typedef struct {
   pd_watcher_t* watcher;
   pd_event_t events;
+  /* Destroyed together with the watcher on the transport actor thread
+     (STOP_WATCHER only): the unregister must precede the fd's close, or the
+     closed fd number can be reused by an accepted connection whose
+     registration the deferred unregister then removes by fd value. */
+  platform_socket_t* sock;
 } unix_watcher_update_payload_t;
 
 typedef enum {

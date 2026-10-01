@@ -1483,9 +1483,16 @@ void unix_connection_destroy(unix_connection_t* connection) {
       pd_watcher_t* watcher = ATOMIC_EXCHANGE(&connection->watcher, NULL);
       if (watcher != NULL) {
         if (connection->transport != NULL) {
+          /* Hand the socket to the STOP_WATCHER payload: closing it here —
+             before the transport actor has unregistered the watcher — frees
+             the fd number for reuse by an accepted connection, and the later
+             unregister then removes THAT connection's (same-numbered) fd from
+             the loop's epoll, leaving it accepted but never read. */
           unix_watcher_update_payload_t* payload = get_clear_memory(sizeof(unix_watcher_update_payload_t));
           payload->watcher = watcher;
           payload->events = 0;
+          payload->sock = connection->sock;
+          connection->sock = NULL;
           message_t msg;
           msg.type = UNIX_SERVER_STOP_WATCHER;
           msg.payload = payload;

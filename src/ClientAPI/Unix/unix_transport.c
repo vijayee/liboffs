@@ -70,8 +70,16 @@ void _unix_server_dispatch(void* state, message_t* msg) {
     case UNIX_SERVER_STOP_WATCHER: {
       unix_watcher_update_payload_t* payload = (unix_watcher_update_payload_t*)msg->payload;
       if (payload->watcher != NULL) {
+        /* Unregister BEFORE the fd's close (below): this unregister targets
+           the fd by number, so if the fd were already closed and reused by a
+           newly accepted connection, the DEL here would strip that
+           connection's registration and it would never see another read. */
         pd_watcher_stop(payload->watcher);
         _destroy_stack_push(transport, payload->watcher);
+      }
+      if (payload->sock != NULL) {
+        platform_socket_destroy(payload->sock);
+        payload->sock = NULL;
       }
       break;
     }
