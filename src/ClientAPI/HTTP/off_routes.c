@@ -1127,7 +1127,19 @@ typedef struct {
     uint8_t temporary;
     uint64_t bytes_received;  /* actual bytes received in the streaming body, bounded by stream_length */
     uint8_t stream_exceeded;  /* set when bytes_received crosses stream_length; further chunks are dropped */
+    /* Two-leg completion: the request stream's close and the descriptor's
+       close fire from different stream actors, and their relative order is
+       scheduling-dependent — the buffered path finalizes the pipeline inline
+       at headers-complete, so the descriptor close can be dispatched while
+       the request's close is still queued. The LAST arriving leg frees the
+       context; freeing it in either handler alone races the other handler's
+       dereferences (valgrind use-after-free, harmony OFFS-244). The buffered
+       path has no request leg and presets request_leg_closed = 1. */
+    uint8_t request_leg_closed;
+    uint8_t desc_leg_closed;
 } put_context_t;
+
+static void _put_ctx_release(put_context_t* put_ctx);
 
 static void _put_on_descriptor_close(void* ctx, void* unused) {
     (void)unused;
@@ -1179,6 +1191,18 @@ static void _put_on_descriptor_close(void* ctx, void* unused) {
         http_connection_destroy(conn);
     }
 
+    off_url_destroy(url);
+
+    put_ctx->desc_leg_closed = 1;
+    if (put_ctx->request_leg_closed) {
+        _put_ctx_release(put_ctx);
+    }
+}
+
+/* Free the put context once every leg that touches it has completed. Which
+   leg arrives last (request close vs descriptor close) is scheduling-
+   dependent, so the one that sees both legs closed owns the release. */
+static void _put_ctx_release(put_context_t* put_ctx) {
     /* Order matters: pending list is LIFO. Add recipe first so its destructor
        runs LAST — after ws's destructor drops its recipe ref. */
     refcounter_dereference((refcounter_t*)put_ctx->recipe);
@@ -1187,7 +1211,6 @@ static void _put_on_descriptor_close(void* ctx, void* unused) {
     stream_deferred_deref((stream_t*)put_ctx->desc);
     stream_deferred_deref((stream_t*)put_ctx->ws);
 
-    off_url_destroy(url);
     buffer_destroy(put_ctx->file_hash);
     buffer_destroy(put_ctx->descriptor_hash);
     if (put_ctx->upload_data != NULL) {
@@ -1480,6 +1503,10 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
     put_ctx->bc = ctx->bc;
     put_ctx->upload_data = upload_data;  /* saved for OFD cache population */
     put_ctx->temporary = is_temporary;
+    /* No piped request leg on the buffered path: the context is released
+       entirely from the descriptor close (see the two-leg comment in
+       put_context_t). */
+    put_ctx->request_leg_closed = 1;
 
     stream_subscribe((stream_t*)ws, data_event, put_ctx,
                      (void (*)(void*, void*))_put_on_stream_data, NULL);
@@ -1550,6 +1577,7 @@ static void _put_on_request_data(void* ctx, void* data) {
 static void _put_on_request_close(void* ctx, void* unused) {
     (void)unused;
     put_context_t* put_ctx = (put_context_t*)ctx;
+    put_ctx->request_leg_closed = 1;
     writeable_off_stream_finalize(put_ctx->ws);
     /* The request stream has delivered all its body chunks and is now closed;
        release the pipeline's reference. Use a deferred deref so the request is
@@ -1557,6 +1585,9 @@ static void _put_on_request_close(void* ctx, void* unused) {
        still iterating the request's handler list on the request actor thread. */
     stream_deferred_deref((stream_t*)put_ctx->request);
     put_ctx->request = NULL;
+    if (put_ctx->desc_leg_closed) {
+        _put_ctx_release(put_ctx);
+    }
 }
 
 static void _set_cors_headers(http_response_t* response) {
