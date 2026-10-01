@@ -1,4 +1,4 @@
-//
+﻿//
 // Created by victor on 5/20/26.
 //
 #include "wt_connection.h"
@@ -7,6 +7,7 @@
 #ifdef HAS_MSQUIC
 
 #include "../client_api_wire.h"
+#include "../cache_handlers.h"
 #include "../representation_api.h"
 #include <cJSON.h>
 #include <stdlib.h>
@@ -112,7 +113,7 @@ void wt_connection_send_error(wt_connection_t* connection, uint8_t status_code, 
   wt_connection_send_frame(connection, frame);
 }
 
-/* Representation op adapters: the shared handler speaks void* — cast back
+/* Representation op adapters: the shared handler speaks void* â€” cast back
    to the concrete connection type here. */
 static void _wt_rep_send_frame(void* conn, cbor_item_t* frame) {
   wt_connection_send_frame((wt_connection_t*)conn, frame);
@@ -404,7 +405,7 @@ static void _wt_handle_put(wt_connection_t* conn, cbor_item_t* frame) {
   /* Resolve tuple_size from the wire frame (Task 3), default 3 when absent.
    * The TCP/WS/WT transports do not carry a config pointer in their connection
    * structs (only Unix does), so the max_tuple_size bound check is not enforced
-   * here — the space check below still catches oversized uploads. */
+   * here â€” the space check below still catches oversized uploads. */
   size_t tuple_size = msg.has_tuple_size ? msg.tuple_size : 3;
 
   /* Pre-flight space check: reject if the cache cannot fit the estimated bytes */
@@ -574,7 +575,8 @@ static void _wt_dispatch_frame(wt_connection_t* conn, uint8_t type, cbor_item_t*
     case CLIENT_API_REP_DELETE_EPHEMERAL_REQUEST:
     case CLIENT_API_REP_PIN_REQUEST:
     case CLIENT_API_REP_UNPIN_REQUEST:
-    case CLIENT_API_EPHEMERAL_LIST_REQUEST: {
+    case CLIENT_API_EPHEMERAL_LIST_REQUEST:
+    case CLIENT_API_GC_REQUEST: {
       if (!conn->is_authenticated) {
         wt_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
         break;
@@ -599,6 +601,9 @@ static void _wt_dispatch_frame(wt_connection_t* conn, uint8_t type, cbor_item_t*
       break;
     case CLIENT_API_BLOCK_DELETE_REQUEST:
       block_handle_delete_request(&conn->block_ctx, frame);
+      break;
+    case CLIENT_API_CACHE_RESIZE_REQUEST:
+      cache_handle_resize_request(&conn->block_ctx, frame);
       break;
     case CLIENT_API_FRIEND_ADD:
       peer_handle_friend_add(&conn->peer_ctx, frame);
@@ -711,6 +716,9 @@ void wt_connection_dispatch(void* state, message_t* msg) {
   }
 
   switch (msg->type) {
+    case CACHE_RESIZE_RESULT:
+      if (cache_handle_resize_result(&connection->block_ctx, msg)) break;
+      break;
     case CACHE_PUT_RESULT:
     case CACHE_GET_RESULT:
     case CACHE_REMOVE_RESULT:
@@ -825,7 +833,7 @@ void wt_connection_destroy(wt_connection_t* connection) {
   if (refcounter_dereference_is_zero((refcounter_t*)connection)) {
     if (connection->transport != NULL) {
       /* active_connections is decremented by the SHUTDOWN_COMPLETE handler
-         in wt_transport.c, not here — do NOT decrement in this path or the
+         in wt_transport.c, not here â€” do NOT decrement in this path or the
          counter will double-decrement. See concurrency-pass.md F7. */
       platform_mutex_lock(connection->transport->conn_lock);
       vec_remove(&connection->transport->connections, connection);

@@ -37,6 +37,13 @@ typedef enum message_type_e {
   CACHE_REMOVE,
   CACHE_DEFRAGMENT,
   CACHE_BLOCK_LOADED,
+  /* Resize the block cache's max capacity. Handled on the block-cache actor
+     thread so it cannot race CACHE_PUT's capacity check. */
+  CACHE_RESIZE,
+  /* Destructive keep-list sweep: deletes every indexed block the keep bloom
+     filter does not contain. Handled on the block-cache actor thread (the
+     index may be enumerated only there; template: CACHE_EPHEMERAL_LIST). */
+  CACHE_GC,
   TIMER_SET,
   TIMER_CANCEL,
   TIMER_DEBOUNCE,
@@ -79,6 +86,17 @@ typedef enum message_type_e {
   CACHE_PUT_RESULT,
   CACHE_REMOVE_RESULT,
   CACHE_DEFRAGMENT_RESULT,
+  CACHE_RESIZE_RESULT,
+  /* Block-cache actor: summary of the CACHE_GC keep-list sweep. Payload is
+     cache_gc_result_payload_t (block_cache.h). */
+  CACHE_GC_RESULT,
+  /* Keep-list GC orchestrator: kick the next collect line (also the walk-/
+     sweep-step continuation). No payload. */
+  BLOCK_GC_START,
+  /* Keep-list GC orchestrator: the finished block_gc_result_t is TRANSFERRED
+     to the consumer (it owns the struct; destroy via block_gc_result_destroy).
+     Payload is block_gc_result_t (block_gc.h). */
+  BLOCK_GC_RESULT,
   TUPLE_CACHE_GET_RESULT,
   /* HTTP connection messages */
   HTTP_CONNECTION_DATA,
@@ -275,6 +293,10 @@ typedef enum message_type_e {
      pin / unpin walk over a representation's descriptor chain. Payload is
      representation_op_result_payload_t (representation_actor.h). */
   REPRESENTATION_OP_RESULT,
+  /* Representation actor: read-only COLLECT walk (REPRESENTATION_OP_COLLECT)
+     that transfers the walk's accumulated, deduplicated block-hash set.
+     Payload is representation_collect_result_payload_t. */
+  REPRESENTATION_COLLECT_RESULT,
 } message_type_e;
 
 /* Stream-to-network: request block from peers */

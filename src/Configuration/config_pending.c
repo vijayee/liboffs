@@ -163,6 +163,8 @@ config_t* config_pending_load(const char* data_dir) {
       config->tcp_tls_cert_path = strdup(item->valuestring);
     else if (strcmp(item->string, "tcp_tls_key_path") == 0 && cJSON_IsString(item))
       config->tcp_tls_key_path = strdup(item->valuestring);
+    else if (strcmp(item->string, "cache_dir") == 0 && cJSON_IsString(item))
+      config->cache_dir = strdup(item->valuestring);
 
     item = item->next;
   }
@@ -175,6 +177,7 @@ config_t* config_pending_load(const char* data_dir) {
     free(config->https_cert_path);
     free(config->https_key_path);
     free(config->bootstrap_peers);
+    free(config->cache_dir);
     free(config->tcp_tls_cert_path);
     free(config->tcp_tls_key_path);
     free(config);
@@ -190,6 +193,13 @@ int config_pending_mark_applied(const char* data_dir) {
   char* applied_path = get_clear_memory(len);
   snprintf(applied_path, len, "%s/pending_config.applied", data_dir);
 
+  /* MSVC's rename() refuses to overwrite an existing destination, so the
+     .applied left by the previous apply would make every later apply fail
+     silently and the stale pending file re-apply forever. Clear the old
+     marker first; losing it costs nothing — it is not data. */
+#ifdef _WIN32
+  remove(applied_path);
+#endif
   int result = rename(pending_path, applied_path);
   free(pending_path);
   free(applied_path);

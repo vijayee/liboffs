@@ -64,10 +64,14 @@ int mkdir_p(char* path) {
     while (copy_len > 1 && (copy[copy_len - 1] == '/' || copy[copy_len - 1] == '\\')) {
       copy[--copy_len] = '\0';
     }
-    char* last_sep = strrchr(copy, '\\');
-    if (last_sep == NULL) {
-      last_sep = strrchr(copy, '/');
-    }
+    /* The parent ends at the LAST separator of either kind — a mixed
+       "C:\a/b/c" path truncated at the last backslash would name a grandparent
+       and silently create nothing (mkdir_p returned the recursion's 0 while
+       the leaf _mkdir kept failing ENOENT). */
+    char* last_back = strrchr(copy, '\\');
+    char* last_fwd = strrchr(copy, '/');
+    char* last_sep = (last_back != NULL && (last_fwd == NULL || last_back > last_fwd))
+                         ? last_back : last_fwd;
     if (last_sep == NULL) {
       free(copy);
       return -1;

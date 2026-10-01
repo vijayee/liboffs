@@ -3,6 +3,7 @@
 //
 #include "config_routes.h"
 #include "../config_handlers.h"
+#include "../cache_handlers.h"
 #include "http_response.h"
 #include "http_request.h"
 #include "http_headers.h"
@@ -12,6 +13,7 @@
 #include "../../Util/allocator.h"
 #include "../../Util/log.h"
 #include <cJSON.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -243,6 +245,68 @@ static void _config_routes_ctx_destroy(void* data) {
   free(ctx);
 }
 
+/* POST /cache/resize — body {"capacity_bytes": <n>}. Shares the Unix
+   frame handler's stage+dispatch core so the two paths cannot drift.
+   Fire-and-forget on this transport: the response cannot wait on the
+   cache actor's completion reply, so it reports the apply as async;
+   the Unix CLI transport is the interactive path that reports the
+   applied footprint. */
+static void _cache_resize_handler(http_request_t* request, http_response_t* response,
+                                  void* user_data) {
+  config_routes_ctx_t* ctx = (config_routes_ctx_t*)user_data;
+
+  if (_config_check_auth(request, response, ctx->node->http_server, ctx, true) != 0) return;
+
+  if (request->body == NULL || request->body->size == 0) {
+    http_response_set_status(response, HTTP_STATUS_BAD_REQUEST);
+    http_response_end(response);
+    return;
+  }
+
+  cJSON* body = cJSON_ParseWithLength((const char*)request->body->data,
+                                      request->body->size);
+  cJSON* cap_item = (body != NULL) ? cJSON_GetObjectItem(body, "capacity_bytes") : NULL;
+  if (cap_item == NULL || !cJSON_IsNumber(cap_item) ||
+      cap_item->valuedouble < 0 ||
+      cap_item->valuedouble != (double)(uint64_t)cap_item->valuedouble ||
+      (uint64_t)cap_item->valuedouble == 0) {
+    cJSON_Delete(body);
+    http_response_set_status(response, HTTP_STATUS_BAD_REQUEST);
+    http_response_set_header(response, "Content-Type", "application/json");
+    const char* msg = "{\"error\":\"capacity_bytes must be a positive integer\"}";
+    http_response_write(response, msg, strlen(msg));
+    http_response_end(response);
+    return;
+  }
+  uint64_t capacity = (uint64_t)cap_item->valuedouble;
+  cJSON_Delete(body);
+
+  char err_buf[128];
+  if (cache_resize_stage_and_dispatch(ctx->node->block_cache, ctx->data_dir,
+                                      capacity, NULL, err_buf, sizeof(err_buf)) != 0) {
+    cJSON* err = cJSON_CreateObject();
+    cJSON_AddStringToObject(err, "error", err_buf);
+    char* err_str = cJSON_PrintUnformatted(err);
+    cJSON_Delete(err);
+    http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_set_header(response, "Content-Type", "application/json");
+    http_response_write(response, err_str, strlen(err_str));
+    http_response_end(response);
+    free(err_str);
+    return;
+  }
+
+  char ok_buf[160];
+  snprintf(ok_buf, sizeof(ok_buf),
+           "{\"status\":\"ok\",\"staged\":true,\"applied\":\"async\","
+           "\"max_capacity_bytes\":%llu}",
+           (unsigned long long)capacity);
+  http_response_set_status(response, HTTP_STATUS_OK);
+  http_response_set_header(response, "Content-Type", "application/json");
+  http_response_write(response, ok_buf, strlen(ok_buf));
+  http_response_end(response);
+}
+
 void config_routes_register(http_server_t* server, offs_node_t* node,
                             const config_t* config, const char* data_dir,
                             config_trigger_restart_fn trigger_restart,
@@ -260,4 +324,5 @@ void config_routes_register(http_server_t* server, offs_node_t* node,
                             _config_routes_ctx_destroy);
   http_server_put_with_data(server, "/config", _config_put_handler, ctx, NULL);
   http_server_post_with_data(server, "/config/restart", _config_restart_handler, ctx, NULL);
+  http_server_post_with_data(server, "/cache/resize", _cache_resize_handler, ctx, NULL);
 }

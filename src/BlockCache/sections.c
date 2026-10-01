@@ -680,19 +680,25 @@ uint8_t round_robin_contains(round_robin_t* robin, size_t id) {
 }
 
 cbor_item_t* round_robin_to_cbor(round_robin_t* robin) {
-  cbor_item_t* array = cbor_new_definite_array(robin->size);
+  /* Indefinite array: the list can be concurrently extended while this walk
+     is in flight, so the element count is not knowable up front. A definite
+     array sized from a stale robin->size pushes past capacity; on a failed
+     push the cbor_move'd item is relinquished-but-never-freed (cbor_move
+     decrements without releasing), which is the flaky save-failure leak in
+     harmony OFFS-189. */
+  cbor_item_t* array = cbor_new_indefinite_array();
   round_robin_node_t* current = robin->first;
-  bool success = true;
   while (current != NULL) {
-    success &= cbor_array_push(array, cbor_move(cbor_build_uint64(current->id)));
+    cbor_item_t* item = cbor_build_uint64(current->id);
+    if (!cbor_array_push(array, item)) {
+      cbor_decref(&item);
+      cbor_decref(&array);
+      return NULL;
+    }
+    cbor_decref(&item);
     current = current->next;
   }
-  if (!success) {
-    cbor_decref(&array);
-    return NULL;
-  } else {
-    return array;
-  }
+  return array;
 }
 
 round_robin_t* cbor_to_round_robin(cbor_item_t* cbor, char* robin_path, timer_actor_t* timer_actor, actor_t* save_target, uint64_t wait, uint64_t max_wait) {

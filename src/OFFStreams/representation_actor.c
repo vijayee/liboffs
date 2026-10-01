@@ -7,9 +7,7 @@
 #include "../Util/allocator.h"
 #include <string.h>
 
-#define REPRESENTATION_DESCRIPTOR_PAD 32
-
-static size_t _rep_block_size_for_type(block_size_e type) {
+size_t representation_block_size_for_type(block_size_e type) {
   switch (type) {
     case mega:     return 1000000;
     case standard: return 128000;
@@ -29,9 +27,30 @@ static int _rep_is_zero_hash(buffer_t* hash) {
 }
 
 /* Send the summary reply to reply_to exactly once (the field is nulled after
-   the send so later messages cannot double-reply). */
+   the send so later messages cannot double-reply).
+   COLLECT: the accumulated set moves ownership into the reply (every
+   hashes[i] reference and the array transfer); the vec shell is zeroed
+   WITHOUT vec_deinit (deinit would free the array the consumer now owns) so
+   the later destroy path frees nothing. */
 static void _rep_reply(representation_actor_t* rep) {
   if (rep->reply_to == NULL) {
+    return;
+  }
+  if (rep->op == REPRESENTATION_OP_COLLECT) {
+    representation_collect_result_payload_t* payload =
+        get_clear_memory(sizeof(representation_collect_result_payload_t));
+    payload->result = rep->result;
+    payload->blocks_touched = rep->blocks_touched;
+    payload->count = (size_t)rep->seen_hashes.length;
+    payload->hashes = rep->seen_hashes.data;
+    payload->source = rep;
+    message_t reply;
+    reply.type = REPRESENTATION_COLLECT_RESULT;
+    reply.payload = payload;
+    reply.payload_destroy = free;
+    actor_send(rep->reply_to, &reply);
+    rep->reply_to = NULL;
+    vec_init(&rep->seen_hashes);
     return;
   }
   representation_op_result_payload_t* payload =
@@ -94,18 +113,25 @@ static void _rep_apply_to_hash(representation_actor_t* rep, buffer_t* hash) {
   }
   vec_push(&rep->seen_hashes, REFERENCE(hash, buffer_t));
   rep->blocks_touched++;
-  rep->outstanding_ops++;
   switch (rep->op) {
+    case REPRESENTATION_OP_COLLECT:
+      /* Read-only keep-set walk: dedup/track only. outstanding_ops stays
+         untouched — the set transfers in _rep_reply, not via block ops. */
+      return;
     case REPRESENTATION_OP_MARK_PERMANENT:
+      rep->outstanding_ops++;
       block_cache_ephemeral(rep->bc, hash, CACHE_EPHEMERAL_CLEAR, &rep->actor);
       break;
     case REPRESENTATION_OP_DELETE_EPHEMERAL:
+      rep->outstanding_ops++;
       block_cache_ephemeral(rep->bc, hash, CACHE_EPHEMERAL_RELEASE, &rep->actor);
       break;
     case REPRESENTATION_OP_PIN:
+      rep->outstanding_ops++;
       block_cache_pin(rep->bc, hash, &rep->actor);
       break;
     case REPRESENTATION_OP_UNPIN:
+      rep->outstanding_ops++;
       block_cache_unpin(rep->bc, hash, &rep->actor);
       break;
   }
@@ -119,7 +145,7 @@ static void _rep_apply_to_hash(representation_actor_t* rep, buffer_t* hash) {
 static void _rep_process_descriptor_block(representation_actor_t* rep, buffer_t* block_data,
                                           buffer_t* descriptor_block_hash) {
   size_t descriptor_pad = REPRESENTATION_DESCRIPTOR_PAD;
-  size_t block_size = _rep_block_size_for_type(rep->bc->type);
+  size_t block_size = representation_block_size_for_type(rep->bc->type);
   size_t cut_point = (block_size / descriptor_pad) * descriptor_pad;
 
   if (block_data->size < descriptor_pad) {

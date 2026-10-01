@@ -518,6 +518,45 @@ export class HttpTransport {
   }
 
   /**
+   * Set the daemon's block-cache capacity. Fire-and-forget on the daemon:
+   * the reply confirms the field was staged (applied: async), not that the
+   * running node already uses it.
+   * @param {number|bigint} capacityBytes - must be nonzero
+   * @returns {Promise<{status: number, appliedLive: boolean,
+   *   maxCapacityBytes: number, currentBytes: number}>}
+   */
+  async cacheResize(capacityBytes) {
+    const response = await fetch(this.url('/cache/resize'), {
+      method: 'POST',
+      headers: { ...this.authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ capacity_bytes: Number(capacityBytes) }),
+      signal: this.abortController?.signal,
+    });
+    if (!response.ok) throw new Error(`Cache resize failed: ${response.status}`);
+    return response.json();
+  }
+
+  /**
+   * Keep-list garbage collection via POST /cache/gc (newline-delimited URL /
+   * ORI text body, `query` carries the force/defrag/threshold flags).
+   * Returns the daemon's JSON summary; 500 (including the empty-keep
+   * refusal) throws.
+   * @param {string} urls
+   * @param {string} [query] - prebuilt "?force=1&defrag=1&threshold=0.5" text
+   * @returns {Promise<any>}
+   */
+  async cacheGc(urls, query = '') {
+    const response = await fetch(this.url(`/cache/gc${query}`), {
+      method: 'POST',
+      headers: { ...this.authHeaders(), 'Content-Type': 'text/plain' },
+      body: urls,
+      signal: this.abortController?.signal,
+    });
+    if (!response.ok) throw new Error(`Cache gc failed: ${response.status}`);
+    return response.json();
+  }
+
+  /**
    * Shared plumbing for the representation ephemeral/pin HTTP routes.
    * @private
    * @param {string} path

@@ -322,7 +322,11 @@ handoffs use reference counting plus the lock-free backpressure machinery in
 `src/Actor` and `src/Scheduler`. `docs/concurrency-pass.md` is the accurate
 per-finding log of the actor/deque/queue_state invariants; the invariants
 themselves are documented in scattered code comments (`actor.h`,
-`scheduler.c`, `streams.c`).
+`scheduler.c`, `streams.c`). `docs/backpressure-and-timer-stall.md` records
+the mute-park backpressure contract, its caveats (including the open
+mutual-mute-cycle hazard), and a diagnosis playbook for timer-stall
+incidents — read it before adding actors with high-frequency timer or
+debounce traffic.
 
 > **Note:** an earlier version of this document listed a fixed "Lock Ordering"
 > (Block Cache → Index → Section → LRU) as if it described the runtime. It did

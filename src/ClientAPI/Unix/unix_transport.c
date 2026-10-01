@@ -312,6 +312,7 @@ static void* _server_thread(void* arg) {
     atomic_store(&transport->loop_running, 1);
     transport->loop_thread = platform_thread_create(_pipe_loop_thread, transport);
 
+    unsigned accept_failures = 0;
     while (atomic_load(&transport->running)) {
       platform_socket_t* client_sock = platform_local_accept(transport->listen_sock);
       if (client_sock == NULL) {
@@ -323,9 +324,27 @@ static void* _server_thread(void* arg) {
         if (!atomic_load(&transport->running)) {
           break;
         }
-        log_error("unix_transport: pipe accept failed; stopping server thread");
-        break;
+        /* A NULL accept while still running is usually transient (an
+         * event-creation race or an overlapped-result hiccup).
+         * Permanently killing the server thread on the first hiccup
+         * would leave the daemon's RPC endpoint dead until restart, so
+         * re-create the listening opportunity and keep accepting: the
+         * backoff below keeps a terminally broken listener handle from
+         * hot-spinning this loop, and ten consecutive failures mark it
+         * dead — at that point accepting, the thread's only job, can
+         * no longer make progress. */
+        accept_failures++;
+        log_warn("unix_transport: pipe accept failed (%u consecutive); rearming",
+                 accept_failures);
+        platform_local_rearm(transport->listen_sock);
+        if (accept_failures >= 10) {
+          log_error("unix_transport: pipe accept failed 10x consecutively; stopping server thread");
+          break;
+        }
+        platform_sleep_ms(50 * accept_failures);
+        continue;
       }
+      accept_failures = 0;
 
       if (transport->max_connections > 0 &&
           atomic_load(&transport->active_connections) >= transport->max_connections) {
@@ -343,9 +362,12 @@ static void* _server_thread(void* arg) {
       vec_push(&transport->connections, connection);
       atomic_fetch_add(&transport->active_connections, 1);
 
-      /* Rearm: DisconnectNamedPipe + new overlapped ConnectNamedPipe
-       * inside platform_local_rearm. The listener HANDLE remains
-       * valid; the same wrapper socket is reused for the next accept. */
+      /* Rearm: platform_local_accept already pre-created the next pipe
+       * instance and stored it in the listener's HANDLE, so this is a no-op
+       * in the normal case; platform_local_rearm only falls back to creating
+       * a fresh instance when the pre-create failed (listener->handle is
+       * then in the "connected" state). The same wrapper socket is reused
+       * for the next accept. */
       platform_local_rearm(transport->listen_sock);
     }
 

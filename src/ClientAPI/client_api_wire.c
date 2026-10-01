@@ -1199,6 +1199,100 @@ void client_api_block_delete_response_destroy(client_api_block_delete_response_t
   (void)msg;
 }
 
+// --- Cache Resize Request ---
+// [type, capacity_bytes: uint]
+
+cbor_item_t* client_api_cache_resize_request_encode(const client_api_cache_resize_request_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(2);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_CACHE_RESIZE_REQUEST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->capacity_bytes);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_cache_resize_request_decode(cbor_item_t* item, client_api_cache_resize_request_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) != 2) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* cap_item = cbor_array_get(item, 1);
+  if (cap_item != NULL && cbor_isa_uint(cap_item))
+    msg->capacity_bytes = cbor_get_int(cap_item);
+  cbor_decref(&cap_item);
+
+  if (msg->capacity_bytes == 0) return -1;
+  return 0;
+}
+
+void client_api_cache_resize_request_destroy(client_api_cache_resize_request_t* msg) {
+  (void)msg;
+}
+
+// --- Cache Resize Response ---
+// [type, status: uint, applied_live: uint, max_capacity_bytes: uint, current_bytes: uint]
+
+cbor_item_t* client_api_cache_resize_response_encode(const client_api_cache_resize_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(5);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_CACHE_RESIZE_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->status);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->applied_live);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->max_capacity_bytes);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->current_bytes);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_cache_resize_response_decode(cbor_item_t* item, client_api_cache_resize_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 5) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* status_item = cbor_array_get(item, 1);
+  msg->status = (uint8_t)cbor_get_uint8(status_item);
+  cbor_decref(&status_item);
+
+  cbor_item_t* live_item = cbor_array_get(item, 2);
+  msg->applied_live = (uint8_t)cbor_get_uint8(live_item);
+  cbor_decref(&live_item);
+
+  cbor_item_t* max_item = cbor_array_get(item, 3);
+  if (max_item != NULL && cbor_isa_uint(max_item))
+    msg->max_capacity_bytes = cbor_get_int(max_item);
+  cbor_decref(&max_item);
+
+  cbor_item_t* current_item = cbor_array_get(item, 4);
+  if (current_item != NULL && cbor_isa_uint(current_item))
+    msg->current_bytes = cbor_get_int(current_item);
+  cbor_decref(&current_item);
+
+  return 0;
+}
+
+void client_api_cache_resize_response_destroy(client_api_cache_resize_response_t* msg) {
+  (void)msg;
+}
+
 // --- Health Request ---
 // [type] — no payload
 
@@ -2464,4 +2558,277 @@ void client_api_ephemeral_list_response_destroy(client_api_ephemeral_list_respon
   free(msg->pins);
   msg->pins = NULL;
   msg->count = 0;
+}
+
+// --- GC Request ---
+// [type, urls: tstr (newline-delimited), force: uint, defrag: uint]
+
+cbor_item_t* client_api_gc_request_encode(const client_api_gc_request_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(4);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_GC_REQUEST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = _encode_string(msg->urls);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->force ? 1 : 0);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->defrag ? 1 : 0);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_gc_request_decode(cbor_item_t* item, client_api_gc_request_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) != 4) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* urls_item = cbor_array_get(item, 1);
+  /* _decode_string rejects the empty tstr and anything over
+     CLIENT_API_GC_MAX_URLS_TEXT; whitespace-only text decodes (the
+     orchestrator's empty-keep refusal covers it: nothing resolves, nothing
+     is swept). */
+  msg->urls = _decode_string(urls_item, CLIENT_API_GC_MAX_URLS_TEXT);
+  cbor_decref(&urls_item);
+  if (msg->urls == NULL) {
+    client_api_gc_request_destroy(msg);
+    return -1;
+  }
+
+  cbor_item_t* force_item = cbor_array_get(item, 2);
+  if (force_item != NULL && cbor_isa_uint(force_item)) {
+    uint64_t force_value = cbor_get_int(force_item);
+    if (force_value > 1) {
+      cbor_decref(&force_item);
+      client_api_gc_request_destroy(msg);
+      return -1;
+    }
+    msg->force = (uint8_t)force_value;
+  }
+  cbor_decref(&force_item);
+
+  cbor_item_t* defrag_item = cbor_array_get(item, 3);
+  if (defrag_item != NULL && cbor_isa_uint(defrag_item)) {
+    uint64_t defrag_value = cbor_get_int(defrag_item);
+    if (defrag_value > 1) {
+      cbor_decref(&defrag_item);
+      client_api_gc_request_destroy(msg);
+      return -1;
+    }
+    msg->defrag = (uint8_t)defrag_value;
+  }
+  cbor_decref(&defrag_item);
+
+  return 0;
+}
+
+void client_api_gc_request_destroy(client_api_gc_request_t* msg) {
+  if (msg == NULL) return;
+  free(msg->urls);
+  msg->urls = NULL;
+}
+
+// --- GC Response ---
+// [type, status, urls_request, urls_collected, blocks_deleted, blocks_kept,
+//  skipped_pinned, skipped_claimed, defrag_applied, failed[], defrag_sections,
+//  defrag_blocks_relocated]
+
+cbor_item_t* client_api_gc_response_encode(const client_api_gc_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(12);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_GC_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->status);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->urls_request);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->urls_collected);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->blocks_deleted);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->blocks_kept);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->skipped_pinned);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->skipped_claimed);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->defrag_applied ? 1 : 0);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  /* Index 9: failed rows [[line, reason, text], ...] — the daemon encode
+     path sets msg->failed to its own row array and destroys it after
+     encoding; encode pushes borrowed element references into the reply. */
+  {
+    size_t failed_count = (msg->failed != NULL) ? cbor_array_size(msg->failed) : 0;
+    if (failed_count > CLIENT_API_GC_MAX_FAILED_ROWS) {
+      failed_count = CLIENT_API_GC_MAX_FAILED_ROWS;
+    }
+    cbor_item_t* failed_array = cbor_new_definite_array(failed_count);
+    for (size_t row_index = 0; row_index < failed_count; row_index++) {
+      cbor_item_t* row = cbor_array_get(msg->failed, row_index);
+      (void)cbor_array_push(failed_array, row);
+      cbor_decref(&row);
+    }
+    (void)cbor_array_push(array, failed_array);
+    cbor_decref(&failed_array);
+  }
+
+  item = cbor_build_uint64(msg->defrag_sections);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->defrag_blocks_relocated);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_gc_response_decode(cbor_item_t* item, client_api_gc_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 12) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* status_item = cbor_array_get(item, 1);
+  msg->status = (int)cbor_get_uint8(status_item);
+  cbor_decref(&status_item);
+
+  cbor_item_t* field_item;
+  field_item = cbor_array_get(item, 2);
+  if (field_item != NULL && cbor_isa_uint(field_item))
+    msg->urls_request = (size_t)cbor_get_int(field_item);
+  cbor_decref(&field_item);
+
+  field_item = cbor_array_get(item, 3);
+  if (field_item != NULL && cbor_isa_uint(field_item))
+    msg->urls_collected = (size_t)cbor_get_int(field_item);
+  cbor_decref(&field_item);
+
+  field_item = cbor_array_get(item, 4);
+  if (field_item != NULL && cbor_isa_uint(field_item))
+    msg->blocks_deleted = (size_t)cbor_get_int(field_item);
+  cbor_decref(&field_item);
+
+  field_item = cbor_array_get(item, 5);
+  if (field_item != NULL && cbor_isa_uint(field_item))
+    msg->blocks_kept = (size_t)cbor_get_int(field_item);
+  cbor_decref(&field_item);
+
+  field_item = cbor_array_get(item, 6);
+  if (field_item != NULL && cbor_isa_uint(field_item))
+    msg->skipped_pinned = (size_t)cbor_get_int(field_item);
+  cbor_decref(&field_item);
+
+  field_item = cbor_array_get(item, 7);
+  if (field_item != NULL && cbor_isa_uint(field_item))
+    msg->skipped_claimed = (size_t)cbor_get_int(field_item);
+  cbor_decref(&field_item);
+
+  cbor_item_t* defrag_applied_item = cbor_array_get(item, 8);
+  uint64_t defrag_applied_value = (defrag_applied_item != NULL && cbor_isa_uint(defrag_applied_item))
+                                      ? cbor_get_uint8(defrag_applied_item)
+                                      : 0;
+  msg->defrag_applied = defrag_applied_value ? 1 : 0;
+  cbor_decref(&defrag_applied_item);
+
+  /* Index 9: failed rows — a fresh cbor reference held by the struct. */
+  cbor_item_t* failed_item = cbor_array_get(item, 9);
+  if (cbor_isa_array(failed_item)) {
+    size_t failed_count = cbor_array_size(failed_item);
+    if (failed_count > 0) {
+      for (size_t row_index = 0; row_index < failed_count && row_index < CLIENT_API_GC_MAX_FAILED_ROWS; row_index++) {
+        cbor_item_t* row = cbor_array_get(failed_item, row_index);
+        if (!cbor_isa_array(row) || cbor_array_size(row) < 3) {
+          cbor_decref(&row);
+          cbor_decref(&failed_item);
+          client_api_gc_response_destroy(msg);
+          return -1;
+        }
+        cbor_item_t* line_item = cbor_array_get(row, 0);
+        if (!cbor_isa_uint(line_item)) {
+          cbor_decref(&line_item);
+          cbor_decref(&row);
+          cbor_decref(&failed_item);
+          client_api_gc_response_destroy(msg);
+          return -1;
+        }
+        cbor_item_t* reason_item = cbor_array_get(row, 1);
+        if (!cbor_isa_uint(reason_item)) {
+          cbor_decref(&reason_item);
+          cbor_decref(&line_item);
+          cbor_decref(&row);
+          cbor_decref(&failed_item);
+          client_api_gc_response_destroy(msg);
+          return -1;
+        }
+        cbor_item_t* text_item = cbor_array_get(row, 2);
+        if (!cbor_isa_string(text_item)) {
+          cbor_decref(&text_item);
+          cbor_decref(&reason_item);
+          cbor_decref(&line_item);
+          cbor_decref(&row);
+          cbor_decref(&failed_item);
+          client_api_gc_response_destroy(msg);
+          return -1;
+        }
+        cbor_decref(&text_item);
+        cbor_decref(&reason_item);
+        cbor_decref(&line_item);
+        cbor_decref(&row);
+      }
+      /* The decode side holds a fresh deep copy (cbor_copy) — the struct
+         owns it, freed by _destroy. */
+      msg->failed = cbor_copy(failed_item);
+      if (msg->failed == NULL) {
+        cbor_decref(&failed_item);
+        client_api_gc_response_destroy(msg);
+        return -1;
+      }
+    }
+  }
+  cbor_decref(&failed_item);
+
+  cbor_item_t* defrag_sections_item = cbor_array_get(item, 10);
+  if (defrag_sections_item != NULL && cbor_isa_uint(defrag_sections_item))
+    msg->defrag_sections = cbor_get_int(defrag_sections_item);
+  cbor_decref(&defrag_sections_item);
+
+  cbor_item_t* defrag_blocks_item = cbor_array_get(item, 11);
+  if (defrag_blocks_item != NULL && cbor_isa_uint(defrag_blocks_item))
+    msg->defrag_blocks_relocated = cbor_get_int(defrag_blocks_item);
+  cbor_decref(&defrag_blocks_item);
+
+  return 0;
+}
+
+void client_api_gc_response_destroy(client_api_gc_response_t* msg) {
+  if (msg == NULL) return;
+  if (msg->failed != NULL) {
+    cbor_decref(&msg->failed);
+    msg->failed = NULL;
+  }
 }

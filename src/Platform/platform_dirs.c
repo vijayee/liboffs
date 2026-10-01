@@ -43,6 +43,22 @@ int offs_default_dirs_get(offs_default_dirs_t* out) {
   return 0;
 }
 
+/* $OFFS_CONFIG, else the same machine-wide root the daemon's default
+ * state dirs live under. */
+int offs_default_config_path_get(char* out, size_t out_size) {
+  if (out == NULL || out_size == 0) return -1;
+  out[0] = '\0';
+  const char* from_env = getenv("OFFS_CONFIG");
+  if (from_env != NULL && from_env[0] != '\0') {
+    return dirs_append(out, out_size, from_env, "");
+  }
+  char program_data[MAX_PATH];
+  UINT length = GetEnvironmentVariableA("ProgramData", program_data,
+                                        MAX_PATH);
+  if (length == 0 || length >= MAX_PATH) return -1;
+  return dirs_append(out, out_size, program_data, "\\offs\\offs.json");
+}
+
 #else
 
 static void dirs_env_or(char* dst, size_t dst_size, const char* env_name,
@@ -94,6 +110,18 @@ int offs_default_dirs_get(offs_default_dirs_t* out) {
               ".cache/offs");
 #endif
   return 0;
+}
+
+/* Same resolution the daemon's default-config gate performed inline —
+ * factored here so the CLI and daemon cannot drift. */
+int offs_default_config_path_get(char* out, size_t out_size) {
+  if (out == NULL || out_size == 0) return -1;
+  out[0] = '\0';
+  const char* from_env = getenv("OFFS_CONFIG");
+  if (from_env != NULL && from_env[0] != '\0') {
+    return dirs_append(out, out_size, from_env, "");
+  }
+  return dirs_append(out, out_size, "/etc", "/offs/offs.json");
 }
 
 #endif

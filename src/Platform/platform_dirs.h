@@ -31,4 +31,13 @@ typedef struct {
  * HOME/USERPROFILE). Buffers are always NUL-terminated. */
 int offs_default_dirs_get(offs_default_dirs_t* out);
 
+/* The daemon's default config file: $OFFS_CONFIG when set (and
+ * non-empty), else the platform machine-wide default —
+ * %ProgramData%\offs\offs.json on Windows, /etc/offs/offs.json
+ * elsewhere — the same machine-wide root offs_default_dirs_get() puts
+ * the default state dirs under. Returns 0 with out NUL-terminated, -1
+ * when neither source resolves or the result would not fit. Whether
+ * the file exists (and is regular) is the caller's stat gate. */
+int offs_default_config_path_get(char* out, size_t out_size);
+
 #endif /* OFFS_PLATFORM_DIRS_H */

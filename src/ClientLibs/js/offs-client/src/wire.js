@@ -56,7 +56,11 @@ export const MSG = {
   BOOTSTRAP_ADD: 52,
   BOOTSTRAP_REMOVE: 53,
   BOOTSTRAP_LIST: 54,
-  BOOTSTRAP_LIST_RESPONSE: 55
+  BOOTSTRAP_LIST_RESPONSE: 55,
+  CACHE_RESIZE_REQUEST: 56,
+  CACHE_RESIZE_RESPONSE: 57,
+  CACHE_GC_REQUEST: 58,
+  CACHE_GC_RESPONSE: 59
 };
 
 /**
@@ -566,6 +570,34 @@ export function decodeConfigReloadResponse(bytes) {
   return { status: arr[1], message: arr[2] };
 }
 
+// --- Cache capacity set ---
+// [type, status: uint, applied_live: uint, max_capacity_bytes: uint, current_bytes: uint]
+
+/**
+ * Encode a cache-resize request: [type, capacityBytes]. capacityBytes must be
+ * nonzero (the daemon rejects a zero capacity).
+ * @param {number|bigint} capacityBytes
+ * @returns {Uint8Array}
+ */
+export function encodeCacheResizeRequest(capacityBytes) {
+  return encoder.encode([MSG.CACHE_RESIZE_REQUEST, capacityBytes]);
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {{status: number, appliedLive: boolean, maxCapacityBytes: number, currentBytes: number}}
+ */
+export function decodeCacheResizeResponse(bytes) {
+  const arr = decode(bytes);
+  if (arr[0] !== MSG.CACHE_RESIZE_RESPONSE) throw new Error('Not a cache resize response');
+  return {
+    status: arr[1],
+    appliedLive: arr[2] === 1,
+    maxCapacityBytes: Number(arr[3]),
+    currentBytes: Number(arr[4])
+  };
+}
+
 // --- Representation ephemeral/pin operations ---
 
 /**
@@ -609,4 +641,70 @@ export function decodeEphemeralListResponse(bytes) {
     pins: entry[2]
   }));
   return { status: arr[1], entries };
+}
+
+// --- Keep-list garbage collection ---
+// Request: [type, urls: tstr (newline-delimited), force: uint, defrag: uint]
+// Response: [type, status, urls_request, urls_collected, blocks_deleted,
+//            blocks_kept, skipped_pinned, skipped_claimed, defrag_applied,
+//            failed: [[line, reason, text], ...], defrag_sections,
+//            defrag_blocks_relocated]
+
+/**
+ * Encode a keep-list GC request. `urls` is newline-delimited OFF URL / ORI
+ * text; the daemon spares every block contained in those representations and
+ * deletes every other block from its cache. force=1 deletes pinned and
+ * ephemeral-claimed blocks too; defrag=1 chains a defragment pass.
+ * @param {string} urls
+ * @param {boolean} force
+ * @param {boolean} defrag
+ * @returns {Uint8Array}
+ */
+export function encodeCacheGcRequest(urls, force, defrag) {
+  return encoder.encode([
+    MSG.CACHE_GC_REQUEST,
+    urls,
+    force ? 1 : 0,
+    defrag ? 1 : 0
+  ]);
+}
+
+/** Failed-line reason codes (wire-identical to the daemon's GC_LINE_*). */
+export const GC_LINE_REASONS = {
+  MALFORMED_URL: 1,
+  MISSING_DESCRIPTOR: 2,
+  MALFORMED_DESCRIPTOR: 3,
+  CYCLE: 4
+};
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {{status: number, urlsRequest: number, urlsCollected: number,
+ *            blocksDeleted: number, blocksKept: number,
+ *            skippedPinned: number, skippedClaimed: number,
+ *            defragApplied: boolean,
+ *            failed: Array<{line: number, reason: number, text: string}>,
+ *            defragSections: number, defragBlocksRelocated: number}}
+ */
+export function decodeCacheGcResponse(bytes) {
+  const arr = decode(bytes);
+  if (arr[0] !== MSG.CACHE_GC_RESPONSE) throw new Error('Not a cache gc response');
+  const failed = (arr[9] || []).map((row) => ({
+    line: Number(row[0]),
+    reason: Number(row[1]),
+    text: row[2]
+  }));
+  return {
+    status: arr[1],
+    urlsRequest: Number(arr[2]),
+    urlsCollected: Number(arr[3]),
+    blocksDeleted: Number(arr[4]),
+    blocksKept: Number(arr[5]),
+    skippedPinned: Number(arr[6]),
+    skippedClaimed: Number(arr[7]),
+    defragApplied: arr[8] === 1,
+    failed,
+    defragSections: Number(arr[10]),
+    defragBlocksRelocated: Number(arr[11])
+  };
 }

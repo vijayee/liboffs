@@ -1,9 +1,10 @@
-//
+﻿//
 // Created by victor on 5/20/26.
 //
 #include "ws_connection.h"
 #include "ws_transport.h"
 #include "../client_api_wire.h"
+#include "../cache_handlers.h"
 #include "../representation_api.h"
 #include <cJSON.h>
 #include <stdlib.h>
@@ -241,7 +242,7 @@ static void _ws_connection_send_error(ws_connection_t* conn, uint8_t status_code
   _ws_connection_send_frame(conn, frame);
 }
 
-/* Representation op adapters: the shared handler speaks void* — cast back
+/* Representation op adapters: the shared handler speaks void* â€” cast back
    to the concrete connection type here. */
 static void _ws_rep_send_frame(void* conn, cbor_item_t* frame) {
   _ws_connection_send_frame((ws_connection_t*)conn, frame);
@@ -365,7 +366,7 @@ static void _ws_handle_upgrade(ws_connection_t* conn, const uint8_t* data, size_
 static void _ws_handle_frame(ws_connection_t* conn, ws_frame_t* frame) {
   switch (frame->opcode) {
     case WS_OPCODE_BINARY: {
-      /* Payload is a CBOR frame — parse and dispatch */
+      /* Payload is a CBOR frame â€” parse and dispatch */
       if (frame->payload == NULL || frame->payload_len == 0) {
         _ws_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST, "Empty binary frame");
         break;
@@ -386,7 +387,7 @@ static void _ws_handle_frame(ws_connection_t* conn, ws_frame_t* frame) {
     }
 
     case WS_OPCODE_TEXT: {
-      /* We only accept binary frames — send close with unsupported data */
+      /* We only accept binary frames â€” send close with unsupported data */
       const char* unsupported_msg = "Binary frames only";
       size_t close_payload_len = 2 + strlen(unsupported_msg);
       uint8_t* close_payload = get_memory(close_payload_len);
@@ -405,7 +406,7 @@ static void _ws_handle_frame(ws_connection_t* conn, ws_frame_t* frame) {
     }
 
     case WS_OPCODE_PING: {
-      /* Respond with PONG — echo the payload back */
+      /* Respond with PONG â€” echo the payload back */
       size_t ws_len;
       uint8_t* ws_frame = ws_frame_build(WS_OPCODE_PONG, frame->payload, frame->payload_len, &ws_len);
       if (ws_frame != NULL) {
@@ -430,7 +431,7 @@ static void _ws_handle_frame(ws_connection_t* conn, ws_frame_t* frame) {
     }
 
     default:
-      /* Unknown opcode — send close with protocol error */
+      /* Unknown opcode â€” send close with protocol error */
       {
         uint8_t close_reason[2];
         close_reason[0] = 0x03; /* 1002 = protocol error */
@@ -573,8 +574,8 @@ static void _ws_load_on_tuple_loaded(void* ctx, void* data) {
    * advances sent_bytes, so the render path cannot close the stream once the
    * tally completes. When every tuple the descriptor enumerates has resolved
    * (loaded + skipped reached the computed total), close the load stream so
-   * its close_event subscriber sends the terminal LOAD_END. close_event — not
-   * this tally — is the single LOAD_END trigger; request_close is idempotent,
+   * its close_event subscriber sends the terminal LOAD_END. close_event â€” not
+   * this tally â€” is the single LOAD_END trigger; request_close is idempotent,
    * so the all-loaded path (already closed by render) is unaffected. */
   if (pipeline->tuples_loaded + pipeline->tuples_skipped >= pipeline->tuples_total) {
     readable_off_stream_request_close(pipeline->rs);
@@ -806,7 +807,7 @@ static void _ws_put_on_stream_data(void* ctx, void* data) {
   if (buf->size == 32 && pipeline->file_hash == NULL) {
     pipeline->file_hash = REFERENCE(buf, buffer_t);
   } else {
-    /* Otherwise it's a tuple — feed it to the descriptor */
+    /* Otherwise it's a tuple â€” feed it to the descriptor */
     tuple_t* tuple = REFERENCE(buf, tuple_t);
     writeable_descriptor_write(pipeline->desc, tuple);
     DESTROY(tuple, tuple);
@@ -947,7 +948,7 @@ static void _ws_handle_put(ws_connection_t* conn, cbor_item_t* frame) {
   /* Resolve tuple_size from the wire frame (Task 3), default 3 when absent.
    * The TCP/WS/WT transports do not carry a config pointer in their connection
    * structs (only Unix does), so the max_tuple_size bound check is not enforced
-   * here — the space check below still catches oversized uploads. */
+   * here â€” the space check below still catches oversized uploads. */
   size_t tuple_size = msg.has_tuple_size ? msg.tuple_size : 3;
 
   /* Pre-flight space check: reject if the cache cannot fit the estimated bytes */
@@ -1007,7 +1008,7 @@ static void _ws_handle_put(ws_connection_t* conn, cbor_item_t* frame) {
   stream_subscribe((stream_t*)desc, error_event, pipeline, _ws_put_on_descriptor_error, NULL);
 
   if (msg.data != NULL && msg.data_size > 0) {
-    /* Buffered PUT — write data and finalize immediately */
+    /* Buffered PUT â€” write data and finalize immediately */
     buffer_t* data = buffer_create_from_pointer_copy(msg.data, msg.data_size);
     free(msg.data);
     msg.data = NULL;
@@ -1016,7 +1017,7 @@ static void _ws_handle_put(ws_connection_t* conn, cbor_item_t* frame) {
     DESTROY(data, buffer);
     writeable_off_stream_finalize(ws);
   } else {
-    /* Streaming PUT — store copies of strings in connection for subsequent PUT_DATA frames.
+    /* Streaming PUT â€” store copies of strings in connection for subsequent PUT_DATA frames.
      * The pipeline owns the original pointers; the connection needs its own copies
      * to avoid double-free when the pipeline frees its strings. */
     conn->put_ws = ws;
@@ -1130,7 +1131,8 @@ static void _ws_dispatch_frame(ws_connection_t* conn, uint8_t type, cbor_item_t*
     case CLIENT_API_REP_DELETE_EPHEMERAL_REQUEST:
     case CLIENT_API_REP_PIN_REQUEST:
     case CLIENT_API_REP_UNPIN_REQUEST:
-    case CLIENT_API_EPHEMERAL_LIST_REQUEST: {
+    case CLIENT_API_EPHEMERAL_LIST_REQUEST:
+    case CLIENT_API_GC_REQUEST: {
       if (!conn->is_authenticated) {
         _ws_connection_send_error(conn, CLIENT_API_STATUS_UNAUTHORIZED, "Authentication required");
         break;
@@ -1155,6 +1157,9 @@ static void _ws_dispatch_frame(ws_connection_t* conn, uint8_t type, cbor_item_t*
       break;
     case CLIENT_API_BLOCK_DELETE_REQUEST:
       block_handle_delete_request(&conn->block_ctx, frame);
+      break;
+    case CLIENT_API_CACHE_RESIZE_REQUEST:
+      cache_handle_resize_request(&conn->block_ctx, frame);
       break;
     case CLIENT_API_FRIEND_ADD:
       peer_handle_friend_add(&conn->peer_ctx, frame);
@@ -1310,7 +1315,7 @@ static void _ws_connection_feed_plaintext(ws_connection_t* connection, buffer_t*
           connection->upgrade_buf->data + headers_end, remaining);
       }
 
-      /* We have a complete HTTP upgrade request — process it */
+      /* We have a complete HTTP upgrade request â€” process it */
       _ws_handle_upgrade(connection, connection->upgrade_buf->data, (size_t)headers_end);
 
       /* _ws_handle_upgrade destroys upgrade_buf, so don't access it anymore */
@@ -1335,7 +1340,7 @@ static void _ws_connection_feed_plaintext(ws_connection_t* connection, buffer_t*
             connection->recv_buf->size - ws_offset,
             &frame, &needed);
           if (consumed == 0) {
-            /* Incomplete frame — stop parsing */
+            /* Incomplete frame â€” stop parsing */
             break;
           } else if (consumed < 0) {
             /* Protocol error */
@@ -1353,7 +1358,7 @@ static void _ws_connection_feed_plaintext(ws_connection_t* connection, buffer_t*
         /* Compact recv_buf */
         if (connection->recv_buf != NULL) {
           if (ws_offset == 0) {
-            /* Nothing consumed — keep buffer as is */
+            /* Nothing consumed â€” keep buffer as is */
           } else if (ws_offset >= connection->recv_buf->size) {
             DESTROY(connection->recv_buf, buffer);
             connection->recv_buf = NULL;
@@ -1391,10 +1396,10 @@ static void _ws_connection_feed_plaintext(ws_connection_t* connection, buffer_t*
       connection->recv_buf->size - offset,
       &frame, &needed);
     if (consumed == 0) {
-      /* Incomplete frame — stop parsing, keep remaining bytes */
+      /* Incomplete frame â€” stop parsing, keep remaining bytes */
       break;
     } else if (consumed < 0) {
-      /* Protocol error — close the connection */
+      /* Protocol error â€” close the connection */
       DESTROY(connection->recv_buf, buffer);
       connection->recv_buf = NULL;
       _connection_stop_watcher(connection);
@@ -1409,13 +1414,13 @@ static void _ws_connection_feed_plaintext(ws_connection_t* connection, buffer_t*
   /* Compact recv_buf: shift any remaining bytes to the front */
   if (connection->recv_buf != NULL) {
     if (offset == 0) {
-      /* Nothing consumed — keep buffer as is (incomplete frame) */
+      /* Nothing consumed â€” keep buffer as is (incomplete frame) */
     } else if (offset >= connection->recv_buf->size) {
-      /* All data consumed — free the buffer */
+      /* All data consumed â€” free the buffer */
       DESTROY(connection->recv_buf, buffer);
       connection->recv_buf = NULL;
     } else {
-      /* Partial consumption — shift remaining data to front */
+      /* Partial consumption â€” shift remaining data to front */
       size_t leftover = connection->recv_buf->size - offset;
       memmove(connection->recv_buf->data, connection->recv_buf->data + offset, leftover);
       connection->recv_buf->size = leftover;
@@ -1426,7 +1431,7 @@ static void _ws_connection_feed_plaintext(ws_connection_t* connection, buffer_t*
 #ifdef _WIN32
 /* poll-dancer's IOCP backend never delivers PD_EVENT_WRITE for the server (it
  * issues no overlapped writes of its own), so the buffer-then-arm-WRITE strategy
- * used on POSIX can't flush a partial send on Windows — a large frame stalls
+ * used on POSIX can't flush a partial send on Windows â€” a large frame stalls
  * once the kernel send buffer fills. On loopback the peer drains continuously,
  * so a bounded synchronous retry completes the send. Returns 0 = fully sent,
  * 1 = partial (cap exhausted), -1 = peer closed, -2 = hard error. *out_sent
@@ -1457,7 +1462,7 @@ static int _connection_send_raw_blocking(ws_connection_t* connection,
 
 /* Drain ciphertext OpenSSL emitted into the write BIO (handshake response
  * records, key-update records, or SSL_write output) and send it with bounded
- * retry. Returns 0 on success, -1 if a record could not be fully flushed — the
+ * retry. Returns 0 on success, -1 if a record could not be fully flushed â€” the
  * caller must close the connection, since TLS records are session-ordered and
  * must not be partially dropped. */
 static int _connection_ssl_flush_wbio(ws_connection_t* connection) {
@@ -1474,8 +1479,8 @@ static int _connection_ssl_flush_wbio(ws_connection_t* connection) {
 }
 
 /* Send plaintext over TLS via the memory write BIO. SSL_write emits TLS records
- * into wbio — a memory BIO never blocks, so the full plaintext slice is always
- * accepted in one call — then we drain wbio and raw-send the ciphertext. wbio is
+ * into wbio â€” a memory BIO never blocks, so the full plaintext slice is always
+ * accepted in one call â€” then we drain wbio and raw-send the ciphertext. wbio is
  * always drained to completion before returning, so a ciphertext send that can't
  * finish within the bounded retry is fatal for the connection (returns -2; the
  * caller closes). *out_sent receives the plaintext bytes accepted into the BIO. */
@@ -1528,14 +1533,14 @@ static int _connection_send_all_blocking(ws_connection_t* connection,
  * read into the DATA message payload as ciphertext. Feed it into the SSL read
  * memory BIO and pump SSL_read: OpenSSL drives the handshake internally and
  * returns SSL_ERROR_WANT_READ (need more ciphertext) or SSL_ERROR_WANT_WRITE
- * (handshake response / key-update records buffered in wbio — flush them to the
+ * (handshake response / key-update records buffered in wbio â€” flush them to the
  * socket and retry) until the handshake completes, then it returns decrypted
  * application data. Each decrypted chunk is fed straight back through
  * WS_CONNECTION_DATA, which reuses the existing upgrade + WebSocket frame-parsing
  * logic (so the HTTP upgrade request and WS frames are parsed from plaintext
  * exactly as on the plain path). This works for TLS 1.2 and 1.3 without any
  * explicit SSL_do_handshake / SSL_is_init_complete gating. All SSL/BIO calls run
- * on this worker thread — the I/O thread never touches SSL — so there is no
+ * on this worker thread â€” the I/O thread never touches SSL â€” so there is no
  * cross-thread race on the BIO. */
 static void _connection_ssl_data_handle(ws_connection_t* connection,
                                         buffer_t* data) {
@@ -1561,7 +1566,7 @@ static void _connection_ssl_data_handle(ws_connection_t* connection,
     }
     int ssl_err = SSL_get_error(connection->ssl, bytes_read);
     if (ssl_err == SSL_ERROR_WANT_READ) {
-      /* Need more ciphertext — wait for the next DATA. Flush anything this turn
+      /* Need more ciphertext â€” wait for the next DATA. Flush anything this turn
        * emitted (handshake response, key-update ack) first. */
       if (_connection_ssl_flush_wbio(connection) != 0) {
         _connection_stop_watcher(connection);
@@ -1570,7 +1575,7 @@ static void _connection_ssl_data_handle(ws_connection_t* connection,
       return;
     }
     if (ssl_err == SSL_ERROR_WANT_WRITE) {
-      /* wbio has pending output — flush it to the socket and retry SSL_read. */
+      /* wbio has pending output â€” flush it to the socket and retry SSL_read. */
       if (_connection_ssl_flush_wbio(connection) != 0) {
         _connection_stop_watcher(connection);
         _connection_close_fd(connection);
@@ -1607,6 +1612,9 @@ void ws_connection_dispatch(void* state, message_t* msg) {
   }
 
   switch (msg->type) {
+    case CACHE_RESIZE_RESULT:
+      if (cache_handle_resize_result(&connection->block_ctx, msg)) break;
+      break;
     case CACHE_PUT_RESULT:
     case CACHE_GET_RESULT:
     case CACHE_REMOVE_RESULT:
@@ -1863,16 +1871,16 @@ void ws_connection_dispatch(void* state, message_t* msg) {
 
 /* --- Read callback (runs on I/O thread) --- */
 
-/* I/O event callback — runs on the I/O thread. For plain WS it drains the
+/* I/O event callback â€” runs on the I/O thread. For plain WS it drains the
    bytes that completed the read directly here and ships them to the
    connection actor as a DATA message (the actor handles both the HTTP
-   upgrade handshake and WebSocket framing). For SSL it can't — the
-   ciphertext has to be decrypted via SSL_read on the worker — so it sends a
+   upgrade handshake and WebSocket framing). For SSL it can't â€” the
+   ciphertext has to be decrypted via SSL_read on the worker â€” so it sends a
    READABLE notification and the actor recvs/decrypts and re-feeds DATA. The
    split exists because of Windows IOCP: a completion-based backend places the
    read bytes in the watcher's overlapped buffer, which is only valid until
    this callback returns (the loop re-arms a fresh WSARecv into the same
-   buffer afterward), so the worker can't recv() them later — it would see an
+   buffer afterward), so the worker can't recv() them later â€” it would see an
    empty socket (EAGAIN) and never frame anything. Draining here and sending
    DATA mirrors unix_connection/http_connection and works on every backend
    (on POSIX pd_watcher_drain_read returns 0 and we fall back to a synchronous
@@ -1962,7 +1970,7 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
       total_read = (size_t)bytes_read;
     }
 
-    /* Send raw data to actor thread — it handles upgrade parsing and WS frame
+    /* Send raw data to actor thread â€” it handles upgrade parsing and WS frame
        parsing. */
     buffer_t* data = buffer_create_from_pointer_copy(buffer, total_read);
     message_t msg;
@@ -1976,8 +1984,8 @@ static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
 #ifndef _WIN32
 /* Perform a batch of SSL reads. Called from the connection actor dispatch
    (WS_CONNECTION_READABLE) on scheduler worker threads. The I/O-thread read
-   callback sends READABLE only for SSL connections — plain WS is drained in the
-   callback and shipped as a DATA message — so this path is SSL-only: SSL_read
+   callback sends READABLE only for SSL connections â€” plain WS is drained in the
+   callback and shipped as a DATA message â€” so this path is SSL-only: SSL_read
    must run on the worker to decrypt the ciphertext against the kernel socket
    (which still holds the bytes on epoll/kqueue). Each decrypted chunk is fed
    straight back through WS_CONNECTION_DATA, which reuses the existing upgrade
@@ -2076,7 +2084,7 @@ ws_connection_t* ws_connection_create(ws_transport_t* transport, platform_socket
       SSL_set_accept_state(connection->ssl);
       connection->is_ssl = 1;
     } else {
-      /* OOM during accept — free partials and leave is_ssl=0 so the first bytes
+      /* OOM during accept â€” free partials and leave is_ssl=0 so the first bytes
        * fail upgrade parsing and close the connection cleanly rather than crash.
        * SSL owns the BIOs only after SSL_set_bio, so free them by hand here. */
       if (connection->rbio != NULL) BIO_free(connection->rbio);

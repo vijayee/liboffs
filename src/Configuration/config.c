@@ -26,7 +26,7 @@ config_t config_default() {
   config.descriptor_pad = 32;
   config.max_snapshots = 3;
   config.max_wals = 3;
-  config.max_capacity_bytes = 5368709120;
+  config.max_capacity_bytes = 1099511627776;
   config.shutdown_timeout_ms = 30000;
   config.scheduler_thread_count = 4;
   config.gossip_init_interval_s = 2;
@@ -56,6 +56,7 @@ config_t config_default() {
   config.https_cert_path = NULL;
   config.https_key_path = NULL;
   config.bootstrap_peers = NULL;
+  config.cache_dir = NULL;
   config.unix_enabled = false;
   config.tcp_enabled = false;
   config.tcp_port = 9000;
@@ -290,6 +291,8 @@ config_t* config_deep_copy(const config_t* src) {
     copy->https_key_path = strdup(src->https_key_path);
   if (src->bootstrap_peers)
     copy->bootstrap_peers = strdup(src->bootstrap_peers);
+  if (src->cache_dir)
+    copy->cache_dir = strdup(src->cache_dir);
   if (src->tcp_tls_cert_path)
     copy->tcp_tls_cert_path = strdup(src->tcp_tls_cert_path);
   if (src->tcp_tls_key_path)
@@ -303,6 +306,7 @@ void config_free(config_t* config) {
   free(config->https_cert_path);
   free(config->https_key_path);
   free(config->bootstrap_peers);
+  free(config->cache_dir);
   free(config->tcp_tls_cert_path);
   free(config->tcp_tls_key_path);
   free(config);
@@ -318,6 +322,8 @@ void config_free_members(config_t* config) {
   config->https_key_path = NULL;
   free(config->bootstrap_peers);
   config->bootstrap_peers = NULL;
+  free(config->cache_dir);
+  config->cache_dir = NULL;
   free(config->tcp_tls_cert_path);
   config->tcp_tls_cert_path = NULL;
   free(config->tcp_tls_key_path);

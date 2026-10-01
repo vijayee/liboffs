@@ -14,7 +14,8 @@
 
 static const char* _string_fields[] = {
   "api_key_hash", "https_cert_path", "https_key_path",
-  "tcp_tls_cert_path", "tcp_tls_key_path", "bootstrap_peers", NULL
+  "tcp_tls_cert_path", "tcp_tls_key_path", "bootstrap_peers", "cache_dir",
+  NULL
 };
 
 static const char* _bool_fields[] = {
@@ -101,6 +102,11 @@ cJSON* config_to_json(const config_t* config) {
     cJSON_AddStringToObject(root, "bootstrap_peers", config->bootstrap_peers);
   else
     cJSON_AddNullToObject(root, "bootstrap_peers");
+
+  if (config->cache_dir)
+    cJSON_AddStringToObject(root, "cache_dir", config->cache_dir);
+  else
+    cJSON_AddNullToObject(root, "cache_dir");
 
   return root;
 }

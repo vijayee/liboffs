@@ -514,6 +514,23 @@ static void _stream_notify_payload_destroy(void* ptr) {
 }
 
 void stream_deactivate(stream_t* stream, async_error_t* error) {
+  /* Idempotent: a stream terminalizes exactly once. Re-deactivating a
+     deactivated stream would re-notify error_event + close_event on its
+     actor, and a subscribed error handler that reacts by calling
+     stream_deactivate on this same stream would re-enqueue its own trigger —
+     an unbounded STREAM_NOTIFY message storm that livelocks every scheduler
+     worker (see the guarded deactivate comments in the unix/tcp/ws/HTTP
+     load pipelines, which document this hazard for their call sites). The
+     is_deactivated flag never resets (no reactivation path), so the first
+     deactivate owns the error/close terminal events for the stream's whole
+     life. A no-op re-deactivate must still release the caller-supplied
+     error: callers transfer ownership of it to this call. */
+  if (stream->is_deactivated) {
+    if (error != NULL) {
+      error_destroy(error);
+    }
+    return;
+  }
   stream->is_deactivated = 1;
   stream_notify_payload_t* error_payload = get_clear_memory(sizeof(stream_notify_payload_t));
   error_payload->event = error_event;

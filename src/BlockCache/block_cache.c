@@ -113,6 +113,17 @@ static void cache_pin_payload_destroy(void* ptr) {
   free(payload);
 }
 
+static void cache_gc_payload_destroy(void* ptr) {
+  cache_gc_payload_t* payload = (cache_gc_payload_t*)ptr;
+  if (payload->keep != NULL) {
+    /* Normally destroyed inside the CACHE_GC dispatch (nulled there) — this
+       covers the no-reply-fires paths (cache actor destroyed first). */
+    elastic_bloom_filter_destroy(payload->keep);
+    payload->keep = NULL;
+  }
+  free(payload);
+}
+
 /* Tolerates the emptied shell (NULL arrays / count 0) that a consumer leaves
    behind after stealing the arrays. */
 void cache_ephemeral_list_payload_destroy(cache_ephemeral_list_payload_t* payload) {
@@ -518,6 +529,86 @@ void block_cache_dispatch(void* state, message_t* msg) {
         if (result_hash != NULL) {
           DESTROY(result_hash, buffer);
         }
+      }
+      break;
+    }
+    case CACHE_RESIZE: {
+      cache_resize_payload_t* p = (cache_resize_payload_t*)msg->payload;
+      p->result = 0;
+      block_cache_set_max_capacity(block_cache, p->max_capacity_bytes);
+      if (p->reply_to != NULL) {
+        cache_resize_result_payload_t* result =
+            get_clear_memory(sizeof(cache_resize_result_payload_t));
+        result->result = 0;
+        result->max_capacity_bytes = block_cache->max_capacity_bytes;
+        result->current_bytes = block_cache->current_bytes;
+        result->reply_to = NULL;
+        message_t reply;
+        reply.type = CACHE_RESIZE_RESULT;
+        reply.payload = result;
+        reply.payload_destroy = free;
+        actor_send(p->reply_to, &reply);
+      }
+      break;
+    }
+    case CACHE_GC: {
+      /* Destructive keep-list sweep — see the payload comment in the header.
+         Enumerates the index on the cache actor thread (sole enum seam,
+         CACHE_EPHEMERAL_LIST template) and deletes the blocks the keep filter
+         misses; the filter is consumed here. */
+      cache_gc_payload_t* p = (cache_gc_payload_t*)msg->payload;
+      p->result = 0;
+      cache_gc_result_payload_t* result =
+          get_clear_memory(sizeof(cache_gc_result_payload_t));
+      index_entry_vec_t* entries = index_to_array(block_cache->index);
+      for (size_t entry_idx = 0; entry_idx < entries->length; entry_idx++) {
+        index_entry_t* entry = entries->data[entry_idx];
+        result->entries_total++;
+        if (p->keep != NULL &&
+            elastic_bloom_filter_contains(p->keep, entry->hash->data, entry->hash->size)) {
+          result->blocks_kept++;
+          continue;
+        }
+        if (!p->force && entry->ephemeral_count > 0) {
+          log_warn("CACHE_GC: hash %02x%02x%02x%02x... holds %u ephemeral claims — skipped (no force)",
+                   entry->hash->data[0], entry->hash->data[1], entry->hash->data[2],
+                   entry->hash->data[3], (unsigned)entry->ephemeral_count);
+          result->skipped_ephemeral_claimed++;
+          continue;
+        }
+        if (!p->force && entry->pin_count > 0) {
+          log_warn("CACHE_GC: hash %02x%02x%02x%02x... holds %u pins — skipped (no force)",
+                   entry->hash->data[0], entry->hash->data[1], entry->hash->data[2],
+                   entry->hash->data[3], (unsigned)entry->pin_count);
+          result->skipped_pinned++;
+          continue;
+        }
+        /* Snapshot entry: deleting mid-loop is what the CACHE_DEFRAGMENT
+           reload loop already tolerates — the snapshot reference outlives
+           the index removal. */
+        _block_cache_delete_entry(block_cache, entry->hash, entry);
+        result->blocks_deleted++;
+      }
+      for (size_t entry_idx = 0; entry_idx < entries->length; entry_idx++) {
+        index_entry_destroy(entries->data[entry_idx]);
+      }
+      vec_deinit(entries);
+      free(entries);
+      if (p->keep != NULL) {
+        /* Consumed — the payload_destroy covers only the no-sweep paths. */
+        elastic_bloom_filter_destroy(p->keep);
+        p->keep = NULL;
+      }
+      if (p->reply_to != NULL) {
+        result->result = p->result;
+        result->reply_to = NULL;
+        message_t reply;
+        reply.type = CACHE_GC_RESULT;
+        reply.payload = result;
+        reply.payload_destroy = free;
+        actor_send(p->reply_to, &reply);
+      } else {
+        free(result);
       }
       break;
     }
@@ -1088,6 +1179,26 @@ void block_cache_set_max_capacity(block_cache_t* block_cache, size_t max_capacit
 
 /* ---- Async API ---- */
 
+/* Resize the cache's max capacity (live). The set runs on the cache actor
+   thread — the same thread that reads max_capacity_bytes inside CACHE_PUT —
+   so it cannot race the capacity check. Replies CACHE_RESIZE_RESULT with
+   the applied capacity and the recomputed current_bytes when reply_to is
+   set. The payload owns nothing refcounted, so plain free destroys it. */
+void block_cache_resize(block_cache_t* block_cache, size_t max_capacity_bytes,
+                        actor_t* reply_to) {
+  cache_resize_payload_t* payload = get_clear_memory(sizeof(cache_resize_payload_t));
+  payload->max_capacity_bytes = max_capacity_bytes;
+  payload->reply_to = reply_to;
+  payload->result = -1;
+
+  message_t msg;
+  msg.type = CACHE_RESIZE;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+
+  actor_send(&block_cache->actor, &msg);
+}
+
 void block_cache_get(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to) {
   cache_get_payload_t* payload = get_clear_memory(sizeof(cache_get_payload_t));
   payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)hash);
@@ -1246,6 +1357,25 @@ void block_cache_defragment(block_cache_t* block_cache, float occupancy_threshol
   msg.type = CACHE_DEFRAGMENT;
   msg.payload = payload;
   msg.payload_destroy = free;
+
+  actor_send(&block_cache->actor, &msg);
+}
+
+/* Destructive keep-list sweep via the cache actor (async; replies
+   CACHE_GC_RESULT). Consumes the keep filter on the cache actor thread — the
+   caller must NULL its copy as soon as it calls this. */
+void block_cache_gc(block_cache_t* block_cache, elastic_bloom_filter_t* keep,
+                    uint8_t force, actor_t* reply_to) {
+  cache_gc_payload_t* payload = get_clear_memory(sizeof(cache_gc_payload_t));
+  payload->keep = keep;
+  payload->reply_to = reply_to;
+  payload->force = force;
+  payload->result = -1;
+
+  message_t msg;
+  msg.type = CACHE_GC;
+  msg.payload = payload;
+  msg.payload_destroy = cache_gc_payload_destroy;
 
   actor_send(&block_cache->actor, &msg);
 }

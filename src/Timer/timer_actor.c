@@ -42,39 +42,160 @@ static bool _timer_actor_untrack(timer_actor_t* ta, pd_timer_t* timer) {
   return false;
 }
 
-/* Destroy every tracked timer synchronously under loop_lock while the loop
-   thread is still alive. pd_timer_destroy drains the IOCP via
+/* Stop, destroy, and free one already-untracked timer. MUST be called
+   WITHOUT loop_lock held. pd_timer_destroy's iocp_drain_sync posts a sync
+   completion and waits for the pd-loop thread to consume it, and that thread
+   takes loop_lock inside _timer_completion_callback — holding loop_lock
+   across the wait would deadlock the two threads against each other and
+   stretch every drain to its full 5s timeout. On a timed-out drain,
+   pd_timer_destroy deliberately leaks the timer struct and its platform
+   data instead of freeing them (the loop thread may still be about to
+   dereference them) — a leak is recoverable, a use-after-free is not. */
+static void _timer_destroy_timer(pd_timer_t* timer) {
+  void* user_data = timer->user_data;
+  pd_timer_stop(timer);
+  pd_timer_destroy(timer);
+  free(user_data);
+}
+
+/* Dispose of one already-untracked timer on the CURRENT thread. Safe only
+   when no loop thread can dispatch callbacks for it — either the loop thread
+   has exited (post-join teardown) or the loop never ran a batch. */
+static void _timer_actor_dispose_timer(pd_timer_t* timer) {
+  void* user_data = timer->user_data;
+  pd_timer_destroy(timer);
+  free(user_data);
+}
+
+/* Queue one already-untracked timer for disposal. On IOCP this destroys
+   inline (see _timer_destroy_timer — that path's drain sync is why the
+   stop/destroy must stay off the loop thread and off loop_lock). On
+   epoll/kqueue the destroying thread only stops the OS timer and parks it;
+   the loop thread frees the struct (and its user_data completion payload)
+   after the event batch that could still carry this timer's callback has
+   been fully processed — freeing it from a foreign thread races that
+   captured callback (see _timer_completion_callback's lifetime guard and
+   timerfd_callback's unguarded pd_timer_t dereference). */
+static void _timer_actor_queue_destroy(timer_actor_t* timer_actor,
+                                       pd_timer_t* timer) {
+  if (timer == NULL) {
+    return;
+  }
+  if (!timer_actor->destroy_deferred) {
+    _timer_destroy_timer(timer);
+    return;
+  }
+  pd_timer_stop(timer);
+  platform_mutex_lock(timer_actor->loop_lock);
+  size_t count = timer_actor->pending_destroy_count;
+  if (count >= timer_actor->pending_destroy_capacity) {
+    size_t new_cap = timer_actor->pending_destroy_capacity == 0
+      ? 8 : timer_actor->pending_destroy_capacity * 2;
+    pd_timer_t** grown = get_memory(new_cap * sizeof(pd_timer_t*));
+    if (timer_actor->pending_destroy_timers != NULL) {
+      memcpy(grown, timer_actor->pending_destroy_timers,
+             count * sizeof(pd_timer_t*));
+      free(timer_actor->pending_destroy_timers);
+    }
+    timer_actor->pending_destroy_timers = grown;
+    timer_actor->pending_destroy_capacity = new_cap;
+  }
+  timer_actor->pending_destroy_timers[count] = timer;
+  timer_actor->pending_destroy_count++;
+  platform_mutex_unlock(timer_actor->loop_lock);
+}
+
+/* Same as _timer_actor_queue_destroy for callers that already hold
+   loop_lock (timer_actor_set's OOM branch). */
+static void _timer_actor_queue_destroy_locked(timer_actor_t* timer_actor,
+                                              pd_timer_t* timer) {
+  if (timer == NULL) {
+    return;
+  }
+  if (!timer_actor->destroy_deferred) {
+    _timer_destroy_timer(timer);
+    return;
+  }
+  pd_timer_stop(timer);
+  size_t count = timer_actor->pending_destroy_count;
+  if (count >= timer_actor->pending_destroy_capacity) {
+    size_t new_cap = timer_actor->pending_destroy_capacity == 0
+      ? 8 : timer_actor->pending_destroy_capacity * 2;
+    pd_timer_t** grown = get_memory(new_cap * sizeof(pd_timer_t*));
+    if (timer_actor->pending_destroy_timers != NULL) {
+      memcpy(grown, timer_actor->pending_destroy_timers,
+             count * sizeof(pd_timer_t*));
+      free(timer_actor->pending_destroy_timers);
+    }
+    timer_actor->pending_destroy_timers = grown;
+    timer_actor->pending_destroy_capacity = new_cap;
+  }
+  timer_actor->pending_destroy_timers[count] = timer;
+  timer_actor->pending_destroy_count++;
+}
+
+/* Swap out and dispose the pending-destroy queue. MUST run on the timer
+   actor's pd-loop thread (after pd_loop_run_once has returned, so every
+   captured timer callback has been fully processed), or after the loop
+   thread has exited (post-join teardown) or the loop never ran a batch. */
+static void _timer_actor_drain_pending_destroys(timer_actor_t* timer_actor) {
+  pd_timer_t** timers;
+  size_t count;
+  platform_mutex_lock(timer_actor->loop_lock);
+  timers = timer_actor->pending_destroy_timers;
+  count = timer_actor->pending_destroy_count;
+  timer_actor->pending_destroy_timers = NULL;
+  timer_actor->pending_destroy_count = 0;
+  timer_actor->pending_destroy_capacity = 0;
+  platform_mutex_unlock(timer_actor->loop_lock);
+  for (size_t i = 0; i < count; i++) {
+    if (timers[i] == NULL) continue;
+    _timer_actor_dispose_timer(timers[i]);
+  }
+  free(timers);
+}
+
+/* Destroy every tracked timer. pd_timer_destroy drains the IOCP via
    iocp_drain_sync, which posts a sync completion and waits for the loop
    thread to process it; if the loop thread has already been joined the drain
    hits its 5s timeout per timer, which is the source of the per-test teardown
    stall. Performing this teardown before joining the loop thread keeps the
    drain fast.
 
-   Holding loop_lock serializes this against a concurrent synchronous
-   timer_actor_set / timer_actor_cancel on another thread, or a
-   TIMER_DEBOUNCE / TIMER_DEBOUNCE_FLUSH dispatch on a pool worker (all of
-   which take the same lock). Callers must first ensure no set/cancel or
-   dispatch is in flight: timer_actor_stop and timer_actor_destroy set
-   ACTOR_FLAG_DESTROY up front (which makes actor_run skip new dispatches),
-   and the pool is either joined (test teardown calls scheduler_pool_stop
-   first) or drained via scheduler_pool_wait_for_idle. A synchronous cancel
-   (or debounce dispatch) that is waiting on loop_lock is handled safely: by
-   the time it acquires the lock, _timer_actor_untrack has already removed
-   every timer, so its _timer_actor_untrack lookup returns false and it skips
-   the freed pointer rather than touching it. */
+   Only the untracking happens under loop_lock — the disposal runs outside it
+   (see _timer_actor_queue_destroy): on IOCP the destroy waits for the pd-loop
+   thread, which takes loop_lock inside _timer_completion_callback, so holding
+   the lock across a drain wait would deadlock the two threads against each
+   other; on epoll/kqueue the timer is parked on the pending-destroy queue and
+   the loop thread disposes it after the captured batch has been processed.
+   Callers must first ensure no set/cancel or dispatch is in flight:
+   timer_actor_stop and timer_actor_destroy set ACTOR_FLAG_DESTROY up front
+   (which makes actor_run skip new dispatches), and the pool is either joined
+   (test teardown calls scheduler_pool_stop first) or drained via
+   scheduler_pool_wait_for_idle. A synchronous cancel (or debounce dispatch)
+   that is waiting on loop_lock is handled safely: by the time it acquires
+   the lock, this teardown has already swapped out the whole tracked array,
+   so its _timer_actor_untrack lookup returns false and it skips the freed
+   pointer rather than touching it. */
 static void _timer_actor_destroy_all_tracked(timer_actor_t* timer_actor) {
   platform_mutex_lock(timer_actor->loop_lock);
-  for (size_t i = 0; i < timer_actor->active_timer_count; i++) {
-    pd_timer_t* timer = timer_actor->active_timers[i];
-    if (timer == NULL) continue;
-    void* user_data = timer->user_data;
-    pd_timer_stop(timer);
-    pd_timer_destroy(timer);
-    free(user_data);
-    timer_actor->active_timers[i] = NULL;
-  }
+  /* Swap the whole tracked array out under the lock, then destroy the timers
+     OUTSIDE the lock (see _timer_destroy_timer): pd_timer_destroy waits on
+     the pd-loop thread, which needs loop_lock inside
+     _timer_completion_callback. Holding the lock across the wait would
+     deadlock the two threads against each other and stretch every drain to
+     its full 5s timeout — for teardown, one 5s stall per tracked timer. */
+  pd_timer_t** timers = timer_actor->active_timers;
+  size_t count = timer_actor->active_timer_count;
+  timer_actor->active_timers = NULL;
   timer_actor->active_timer_count = 0;
+  timer_actor->active_timer_capacity = 0;
   platform_mutex_unlock(timer_actor->loop_lock);
+  for (size_t i = 0; i < count; i++) {
+    if (timers[i] == NULL) continue;
+    _timer_actor_queue_destroy(timer_actor, timers[i]);
+  }
+  free(timers);
 }
 
 static debounce_entry_t* _timer_actor_find_debounce(timer_actor_t* ta,
@@ -118,8 +239,10 @@ static void _timer_completion_callback(pd_loop_t* loop, pd_watcher_t* watcher,
      synchronization against a concurrent timer_actor_cancel /
      timer_actor_cancel_target / _timer_actor_destroy_all_tracked on another
      thread. Those paths untrack the timer (remove it from active_timers /
-     debounce_map) and free its user_data (this `completion`) under
-     loop_lock BEFORE pd_timer_destroy is called, so by the time the timer
+     debounce_map) under loop_lock, then free its user_data (this
+     `completion`) and destroy the timer outside the lock — the untrack
+     happens before the free and before pd_timer_destroy, so by the time the
+     timer
      is destroyed (and this callback can no longer fire) the completion is
      already freed. But poll-dancer may have already dispatched this callback
      on the loop thread before the untrack+destroy acquired loop_lock — in
@@ -184,14 +307,18 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
       timer_debounce_payload_t* payload = (timer_debounce_payload_t*)msg->payload;
       debounce_entry_t* entry = _timer_actor_find_debounce(
           timer_actor, payload->target, payload->completion_type);
+      /* Untrack the existing debounce timer under loop_lock, but stop and
+         destroy it OUTSIDE the lock (see _timer_destroy_timer): the destroy
+         waits on the pd-loop thread, which needs loop_lock inside
+         _timer_completion_callback. The untracked timer can still fire
+         before its destroy completes, but its callback's tracked re-check
+         then fails and the firing is dropped. */
+      pd_timer_t* old_timer = NULL;
+      pd_timer_t* failed_timer = NULL;
       platform_mutex_lock(timer_actor->loop_lock);
       if (entry != NULL && entry->timer != NULL) {
-        /* Cancel the existing debounce timer for this (target, type) pair. */
-        pd_timer_stop(entry->timer);
-        void* old_user_data = entry->timer->user_data;
-        _timer_actor_untrack(timer_actor, entry->timer);
-        pd_timer_destroy(entry->timer);
-        free(old_user_data);
+        old_timer = entry->timer;
+        _timer_actor_untrack(timer_actor, old_timer);
         entry->timer = NULL;
         entry->completion_payload = NULL;
       }
@@ -217,10 +344,9 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
           entry->timer = timer;
           entry->completion_payload = completion;
         } else {
-          /* Tracking failed (OOM) — stop and destroy the timer. */
-          pd_timer_stop(timer);
-          pd_timer_destroy(timer);
-          free(completion);
+          /* Tracking failed (OOM) — stop and destroy the timer; destroy
+             outside the lock like every other pd_timer_destroy. */
+          failed_timer = timer;
           /* Clear the debounce entry since the timer wasn't set up. */
           if (entry->timer == NULL) {
             entry->target = NULL;
@@ -229,14 +355,18 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
         }
       } else {
         if (timer != NULL) {
-          pd_timer_stop(timer);
-          pd_timer_destroy(timer);
-          free(completion);
+          failed_timer = timer;
         } else {
           free(completion);
         }
       }
       platform_mutex_unlock(timer_actor->loop_lock);
+      if (old_timer != NULL) {
+        _timer_actor_queue_destroy(timer_actor, old_timer);
+      }
+      if (failed_timer != NULL) {
+        _timer_actor_queue_destroy(timer_actor, failed_timer);
+      }
       /* payload (timer_debounce_payload_t) is read-only to this dispatch —
          the fields are copied into the timer's completion payload above.
          Let actor_run free it via msg->payload_destroy (free). The previous
@@ -248,14 +378,18 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
       timer_debounce_payload_t* payload = (timer_debounce_payload_t*)msg->payload;
       debounce_entry_t* entry = _timer_actor_find_debounce(
           timer_actor, payload->target, payload->completion_type);
+      pd_timer_t* old_timer = NULL;
       platform_mutex_lock(timer_actor->loop_lock);
       if (entry != NULL && entry->timer != NULL) {
-        /* Cancel the pending debounce timer. */
-        pd_timer_stop(entry->timer);
-        void* old_user_data = entry->timer->user_data;
-        _timer_actor_untrack(timer_actor, entry->timer);
-        pd_timer_destroy(entry->timer);
-        free(old_user_data);
+        /* Cancel the pending debounce timer: untrack and clear the entry
+           under loop_lock; the stop/destroy runs OUTSIDE the lock (see
+           _timer_destroy_timer — the destroy waits on the pd-loop thread,
+           which needs loop_lock inside _timer_completion_callback). The
+           untracked timer can still fire before its destroy completes, but
+           its callback's tracked re-check then fails and the firing is
+           dropped, so no competing completion is enqueued. */
+        old_timer = entry->timer;
+        _timer_actor_untrack(timer_actor, old_timer);
         /* Clear the debounce entry. */
         entry->target = NULL;
         entry->completion_type = 0;
@@ -266,8 +400,8 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
            the entry was just cleared above, so the TIMER_COMPLETION
            dispatch's F8 re-check (which only forwards when the target is
            still in the debounce_map / active_timers) would otherwise drop
-           the completion. The cancel+clear happened under loop_lock, so the
-           timer can no longer fire and enqueue a competing completion.
+           the completion. The cancel+clear happened under loop_lock, so
+           this flush's own completion is the only one for this key.
            actor_send to a destroyed target drops the payload safely; a
            freed target is the destroyer's responsibility (the destroyer
            calls timer_actor_cancel_target before freeing, which removes
@@ -282,6 +416,7 @@ static void _timer_actor_dispatch(void* state, message_t* msg) {
         target_msg.payload = copy;
         target_msg.payload_destroy = free;
         platform_mutex_unlock(timer_actor->loop_lock);
+        _timer_actor_queue_destroy(timer_actor, old_timer);
         actor_send(copy->target, &target_msg);
       } else {
         platform_mutex_unlock(timer_actor->loop_lock);
@@ -365,7 +500,18 @@ static void* _timer_actor_thread(void* arg) {
     if (result < 0) {
       break;
     }
+    /* Dispose queued timers only after this batch has been fully
+       dispatched: a destroyed timer's callback may have been captured in
+       this batch's events and dereferenced here — freeing the timer before
+       the dispatch would be a use-after-free (see
+       pending_destroy_timers in timer_actor.h). */
+    _timer_actor_drain_pending_destroys(timer_actor);
   }
+
+  /* Cover the early-exit paths (error break, running cleared): the loop
+     thread is about to return, so its captured batches are done and queued
+     timers are safe to dispose here. */
+  _timer_actor_drain_pending_destroys(timer_actor);
 
   return NULL;
 }
@@ -373,6 +519,11 @@ static void* _timer_actor_thread(void* arg) {
 timer_actor_t* timer_actor_create(scheduler_pool_t* pool) {
   timer_actor_t* timer_actor = get_clear_memory(sizeof(timer_actor_t));
   actor_init(&timer_actor->actor, timer_actor, _timer_actor_dispatch, pool);
+  /* IOCP destroys inline; every other backend (epoll, kqueue) defers timer
+     disposal to the loop thread — see _timer_actor_queue_destroy and the
+     pending_destroy_timers contract in timer_actor.h. */
+  timer_actor->destroy_deferred =
+      strcmp(pd_platform_name(), "iocp") != 0;
   timer_actor->loop = pd_loop_create(NULL);
   if (timer_actor->loop == NULL) {
     /* actor_init registered this actor in the pool's registry; leaving it
@@ -394,6 +545,10 @@ timer_actor_t* timer_actor_create(scheduler_pool_t* pool) {
   if (timer_actor->thread == NULL) {
     atomic_store(&timer_actor->running, 0);
     actor_detach_pool(&timer_actor->actor);
+    /* The loop thread never ran, so no event batch was ever captured —
+       queued timers (a dispatch that raced the thread creation) are safe to
+       dispose on this thread. */
+    _timer_actor_drain_pending_destroys(timer_actor);
     platform_mutex_destroy(timer_actor->loop_lock);
     pd_loop_destroy(timer_actor->loop);
     free(timer_actor);
@@ -453,6 +608,10 @@ void timer_actor_destroy(timer_actor_t* timer_actor) {
     platform_thread_join(timer_actor->thread);
     timer_actor->thread = NULL;
   }
+  /* The loop thread has exited (its exit drain already disposed the parked
+     timers) or never existed; dispose any straggler queued by a thread that
+     raced this teardown. */
+  _timer_actor_drain_pending_destroys(timer_actor);
   free(timer_actor->active_timers);
   platform_mutex_destroy(timer_actor->loop_lock);
   pd_loop_stop(timer_actor->loop);
@@ -488,7 +647,9 @@ uint64_t timer_actor_set(timer_actor_t* timer_actor, uint64_t timeout_ms,
      watcher-list mutation (pd_timer_create/pd_timer_start) is serialized.
      pd_timer_create/pd_timer_start do not need the timer_actor's loop thread
      to make progress, so holding loop_lock across them cannot deadlock with
-     the loop thread (which never takes loop_lock). The completion payload is
+     the loop thread (pd_timer_create/pd_timer_start never wait on it — only
+     pd_timer_stop/pd_timer_destroy do, and those must never run under
+     loop_lock, see _timer_destroy_timer). The completion payload is
      the timer's user_data and is freed when the timer is cancelled or torn
      down via _timer_actor_destroy_all_tracked. */
   timer_completion_payload_t* completion = get_clear_memory(sizeof(timer_completion_payload_t));
@@ -508,10 +669,13 @@ uint64_t timer_actor_set(timer_actor_t* timer_actor, uint64_t timeout_ms,
       id = (uint64_t)(uintptr_t)timer;
       completion->timer_id = id;
     } else {
-      /* Tracking failed (OOM) — stop and destroy the timer to avoid leak. */
-      pd_timer_stop(timer);
-      pd_timer_destroy(timer);
-      free(completion);
+      /* Tracking failed (OOM) — stop and dispose the timer to avoid leak.
+         The completion payload is freed with the timer (see
+         _timer_actor_queue_destroy_locked): queueing under the already-held
+         loop_lock keeps user_data ownership with the pending-destroy drain
+         instead of freeing it here, where the loop thread may still be about
+         to dispatch the timer's (already-captured) callback. */
+      _timer_actor_queue_destroy_locked(timer_actor, timer);
       completion = NULL;
     }
   } else {
@@ -549,26 +713,31 @@ void timer_actor_cancel(timer_actor_t* timer_actor, uint64_t timer_id) {
      scheduler delivery.
 
      This mirrors the stop+destroy sequence _timer_actor_destroy_all_tracked
-     uses at teardown, and takes the same lock a concurrent synchronous
-     timer_actor_set (or a TIMER_DEBOUNCE / TIMER_DEBOUNCE_FLUSH dispatch on a
-     pool worker) takes. loop_lock serializes the watcher-list mutation
-     (pd_timer_stop/destroy) against those. pd_timer_stop is
-     synchronous on IOCP (DeleteTimerQueueTimer(INVALID_HANDLE_VALUE) waits
-     for the thread-pool callback) and pd_timer_destroy drains the IOCP via
-     iocp_drain_sync; neither needs the timer_actor's loop thread to take
-     loop_lock, so holding loop_lock across them cannot deadlock with the
-     loop thread (which never takes loop_lock). _timer_actor_untrack returns
+     uses at teardown, and untracks under the same lock a concurrent
+     synchronous timer_actor_set (or a TIMER_DEBOUNCE / TIMER_DEBOUNCE_FLUSH
+     dispatch on a pool worker) takes. The stop/destroy itself runs OUTSIDE
+     loop_lock (see _timer_destroy_timer): pd_timer_stop is synchronous on
+     IOCP (DeleteTimerQueueTimer(INVALID_HANDLE_VALUE) waits for the
+     thread-pool callback) and pd_timer_destroy drains the IOCP via
+     iocp_drain_sync, which waits on the loop thread — the loop thread takes
+     loop_lock inside _timer_completion_callback, so holding loop_lock
+     across those waits would deadlock the two threads against each other.
+     _timer_actor_untrack returns
      false if the timer was already removed (a duplicate cancel, or teardown
      via _timer_actor_destroy_all_tracked); in that case the pointer is
      already freed and must not be touched. */
   platform_mutex_lock(timer_actor->loop_lock);
-  if (_timer_actor_untrack(timer_actor, timer)) {
-    void* user_data = timer->user_data;
-    pd_timer_stop(timer);
-    pd_timer_destroy(timer);
-    free(user_data);
-  }
+  bool was_tracked = _timer_actor_untrack(timer_actor, timer);
   platform_mutex_unlock(timer_actor->loop_lock);
+  if (was_tracked) {
+    /* Untracked under loop_lock; disposal outside it (see
+       _timer_actor_queue_destroy — on IOCP pd_timer_destroy waits on the
+       pd-loop thread, which needs loop_lock inside
+       _timer_completion_callback, so holding loop_lock across the wait would
+       deadlock the two threads; on epoll/kqueue the timer is parked for the
+       loop thread, which frees it after the captured batch is processed). */
+    _timer_actor_queue_destroy(timer_actor, timer);
+  }
 }
 
 void timer_actor_cancel_target(timer_actor_t* timer_actor, actor_t* target) {
@@ -592,31 +761,52 @@ void timer_actor_cancel_target(timer_actor_t* timer_actor, actor_t* target) {
 
      Takes the same loop_lock as timer_actor_cancel / timer_actor_set / the
      TIMER_DEBOUNCE / TIMER_DEBOUNCE_FLUSH dispatches / teardown, so the
-     debounce_map and active_timers mutations are serialized. pd_timer_stop
-     and pd_timer_destroy do not need the timer_actor's loop thread to take
-     loop_lock, so holding it across them cannot deadlock with the loop
-     thread (which never takes loop_lock). _timer_actor_untrack returns
+     debounce_map and active_timers mutations are serialized. Only the
+     untracking happens under loop_lock; the matched timers are collected
+     and their stop/destroy/free runs OUTSIDE the lock (see
+     _timer_destroy_timer: pd_timer_destroy waits on the loop thread, which
+     takes loop_lock inside _timer_completion_callback, so holding the lock
+     across those waits would deadlock the two threads against each other).
+     _timer_actor_untrack returns
      false if a timer was already removed (a concurrent cancel, or teardown
      via _timer_actor_destroy_all_tracked); in that case the pointer is
      already freed and must not be touched. */
+  pd_timer_t** to_destroy = NULL;
+  size_t destroy_count = 0;
+  size_t destroy_capacity = 0;
   platform_mutex_lock(timer_actor->loop_lock);
 
   /* Cancel every debounce entry for this target. Mirrors the per-entry
      cleanup in the TIMER_DEBOUNCE / TIMER_DEBOUNCE_FLUSH dispatches. */
-  for (size_t index = 0; index < MAX_DEBOUNCE_KEYS; index++) {
-    debounce_entry_t* entry = &timer_actor->debounce_map[index];
+  for (size_t entry_index = 0; entry_index < MAX_DEBOUNCE_KEYS;
+       entry_index++) {
+    debounce_entry_t* entry = &timer_actor->debounce_map[entry_index];
     if (entry->target != target) {
       continue;
     }
-    if (entry->timer != NULL) {
-      pd_timer_stop(entry->timer);
-      void* old_user_data = entry->timer->user_data;
-      _timer_actor_untrack(timer_actor, entry->timer);
-      pd_timer_destroy(entry->timer);
-      free(old_user_data);
-      entry->timer = NULL;
-      entry->completion_payload = NULL;
+    if (entry->timer == NULL) {
+      entry->target = NULL;
+      entry->completion_type = 0;
+      continue;
     }
+    pd_timer_t* timer = entry->timer;
+    if (destroy_count == destroy_capacity) {
+      size_t new_cap = destroy_capacity == 0 ? 16 : destroy_capacity * 2;
+      pd_timer_t** grown = realloc(to_destroy, new_cap * sizeof(pd_timer_t*));
+      if (grown == NULL) {
+        /* Collector OOM: stop collecting and leave this entry (and every
+           later one) fully intact and tracked — a later cancel_target /
+           teardown destroys them. Destroying inline under loop_lock would
+           re-introduce the lock-across-drain deadlock. */
+        break;
+      }
+      to_destroy = grown;
+      destroy_capacity = new_cap;
+    }
+    to_destroy[destroy_count++] = timer;
+    _timer_actor_untrack(timer_actor, timer);
+    entry->timer = NULL;
+    entry->completion_payload = NULL;
     entry->target = NULL;
     entry->completion_type = 0;
   }
@@ -639,15 +829,32 @@ void timer_actor_cancel_target(timer_actor_t* timer_actor, actor_t* target) {
       index++;
       continue;
     }
-    pd_timer_stop(timer);
+    if (destroy_count == destroy_capacity) {
+      size_t new_cap = destroy_capacity == 0 ? 16 : destroy_capacity * 2;
+      pd_timer_t** grown = realloc(to_destroy, new_cap * sizeof(pd_timer_t*));
+      if (grown == NULL) {
+        /* Collector OOM: stop collecting; this timer (and any remaining
+           matches) stays tracked for a later cancel_target / teardown.
+           Destroying inline under loop_lock would re-introduce the
+           lock-across-drain deadlock. */
+        break;
+      }
+      to_destroy = grown;
+      destroy_capacity = new_cap;
+    }
+    to_destroy[destroy_count++] = timer;
     _timer_actor_untrack(timer_actor, timer);
-    pd_timer_destroy(timer);
-    free(completion);
     /* Don't advance index — the swap brought the previous last element
        into this slot, and it may also target `target`. */
   }
 
   platform_mutex_unlock(timer_actor->loop_lock);
+
+  /* Stop/destroy/free outside loop_lock (see _timer_actor_queue_destroy). */
+  for (size_t i = 0; i < destroy_count; i++) {
+    _timer_actor_queue_destroy(timer_actor, to_destroy[i]);
+  }
+  free(to_destroy);
 }
 
 uint64_t timer_actor_debounce(timer_actor_t* timer_actor,
