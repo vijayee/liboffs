@@ -16,6 +16,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # poll-dancer and msquic (whose quictls/xdp sub-builds have nested
+          # submodules of their own) are ExternalProject source dirs consumed
+          # directly off the checkout; a plain checkout leaves them empty and
+          # configure fails with "not an existing non-empty directory".
+          submodules: recursive
 
       - name: Install dependencies
         run: |
