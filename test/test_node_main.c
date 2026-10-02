@@ -1568,7 +1568,11 @@ static void handle_command(int client_fd, char* line) {
     send_response(client_fd, CTRL_RESP_ERROR " not available");
 #endif
   } else if (strcmp(line, CTRL_RING) == 0) {
+#ifdef OFFS_TEST
     handle_ring_cmd(client_fd);
+#else
+    send_response(client_fd, CTRL_RESP_ERROR " not available");
+#endif
   } else if (strcmp(line, CTRL_HEBBIAN) == 0) {
 #ifdef OFFS_TEST
     handle_hebbian_cmd(client_fd);
