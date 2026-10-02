@@ -229,6 +229,10 @@ if (BUILD_TESTING)
     # test_rpc_integration block, so it never ran on Windows and those stream
     # suites failed to open ./test.pdf. Stage it unconditionally here instead.
     file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/test.pdf DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+    # ctest sets the suite's working directory to build/test, but CI runs the
+    # binary directly from the build root (cd build && ./test/testliboffs) —
+    # stage the asset there too, like the certs block below does.
+    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/test.pdf DESTINATION ${CMAKE_BINARY_DIR})
     # test_http_server_ssl reads certs/leaf_cert.pem + leaf_key.pem from its
     # working directory to start an https server. The certs copy below was nested
     # inside the if(NOT WIN32) test_rpc_integration block, so it never ran on
