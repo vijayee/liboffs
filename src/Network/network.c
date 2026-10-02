@@ -4,6 +4,7 @@
 
 #include "network.h"
 #include "peer_info.h"
+#include "../Util/base58.h"
 #include "peer_book.h"
 #include "connection_manager.h"
 #include "endpoint.h"
