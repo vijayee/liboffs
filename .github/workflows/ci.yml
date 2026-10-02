@@ -11,8 +11,19 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        compiler: [gcc, clang]
-        build_type: [Debug, Release]
+        include:
+          - compiler: gcc
+            cxx_compiler: g++
+            build_type: Debug
+          - compiler: gcc
+            cxx_compiler: g++
+            build_type: Release
+          - compiler: clang
+            cxx_compiler: clang++
+            build_type: Debug
+          - compiler: clang
+            cxx_compiler: clang++
+            build_type: Release
 
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +47,7 @@ jobs:
           # suppression its headers need) off CMAKE_CXX_COMPILER_ID, so an
           # unmatched default C++ compiler fails its -Werror warnings build.
           CC: ${{ matrix.compiler }}
-          CXX: ${{ matrix.compiler }}++
+          CXX: ${{ matrix.cxx_compiler }}
 
       - name: Build
         run: cmake --build build --target testliboffs -j$(nproc)
