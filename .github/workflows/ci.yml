@@ -31,7 +31,12 @@ jobs:
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
         env:
+          # Both compilers must come from the matrix: msquic keys its warning
+          # flags (including the clang-only -Wno-microsoft-anon-tag
+          # suppression its headers need) off CMAKE_CXX_COMPILER_ID, so an
+          # unmatched default C++ compiler fails its -Werror warnings build.
           CC: ${{ matrix.compiler }}
+          CXX: ${{ matrix.compiler }}++
 
       - name: Build
         run: cmake --build build --target testliboffs -j$(nproc)
