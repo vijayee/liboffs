@@ -45,6 +45,8 @@
 #define CTRL_RESP_RECALL         "RECALL_RESP"
 #define CTRL_RESP_EVENTS     "EVENTS"
 #define CTRL_RESP_HEBBIAN    "HEBBIAN_RESP"
+#define CTRL_RING            "RING"
+#define CTRL_RESP_RING       "RING_RESP"
 
 /* Response prefixes (node → coordinator) */
 #define CTRL_RESP_OK         "OK"

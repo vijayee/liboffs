@@ -16,6 +16,10 @@
 #include <atomic>
 #include <chrono>
 #include <sstream>
+#include <cstdlib>
+extern "C" {
+#include "../src/Network/find_block.h"
+}
 #include <filesystem>
 
 #include "test_control_protocol.h"
@@ -673,6 +677,27 @@ protected:
     }
 
     return result;
+  }
+
+  /* RING_RESP <count>|<id>:<w>;... — wait for the given peer to be a ring
+     member of the queried node with a weight at or above the store/find
+     candidate gates. */
+  static bool ring_entry_ready(const std::string& ring_response,
+                               const std::string& peer_id) {
+    const float min_weight = FIND_BLOCK_MIN_WEIGHT;
+    size_t pipe_pos = ring_response.find('|');
+    if (pipe_pos == std::string::npos) return false;
+
+    std::istringstream entry_stream(ring_response.substr(pipe_pos + 1));
+    std::string entry;
+    while (std::getline(entry_stream, entry, ';')) {
+      size_t colon_pos = entry.find(':');
+      if (colon_pos == std::string::npos) continue;
+      if (entry.substr(0, colon_pos) != peer_id) continue;
+      float weight = std::strtof(entry.substr(colon_pos + 1).c_str(), NULL);
+      return weight >= min_weight;
+    }
+    return false;
   }
 
   std::vector<HebbianEntry> get_hebbian(int control_fd) {
@@ -1611,12 +1636,20 @@ TEST_F(RpcIntegrationTest, StoreBlockHebbianDiamond) {
   auto diamond = make_diamond();
   ASSERT_EQ(diamond.size(), 4u);
 
-  // Warm up Hebbian weights: PingCapacity is sent automatically on connect,
-  // but the response needs time to arrive and update ring node weights.
-  // Without this, compute_storage_score returns below FIND_BLOCK_MIN_WEIGHT
-  // and store_block_execute finds no forwarding candidates.
+  // Warm up before the store: PingCapacity is sent automatically on connect,
+  // but the responses need time to land, the salutation has to insert the
+  // peers into the rings, and the ring nodes' hebbian weight has to clear
+  // the gates store_block_execute reads (next-hop candidates come from the
+  // rings; a below-MIN_WEIGHT peer is skipped). Fixed 1 s sleeps flaked:
+  // under load a round's responses can still be in flight when all rounds
+  // have "run". Poll instead — ring-membership per adjacency (the net_node
+  // entry carries w_{self→peer}, the exact gate input) with a bounded
+  // deadline.
   // Diamond: A↔B, A↔C, B↔D, C↔D
-  for (int round = 0; round < 3; round++) {
+  const auto warmup_deadline = std::chrono::steady_clock::now() +
+                               std::chrono::seconds(60);
+  bool warmed_up = false;
+  while (!warmed_up && std::chrono::steady_clock::now() < warmup_deadline) {
     send_command(diamond[0].control_fd,
         std::string(CTRL_PING_CAPACITY) + " " + diamond[1].node_id);
     send_command(diamond[0].control_fd,
@@ -1625,8 +1658,22 @@ TEST_F(RpcIntegrationTest, StoreBlockHebbianDiamond) {
         std::string(CTRL_PING_CAPACITY) + " " + diamond[3].node_id);
     send_command(diamond[2].control_fd,
         std::string(CTRL_PING_CAPACITY) + " " + diamond[3].node_id);
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    warmed_up =
+        ring_entry_ready(send_command(diamond[0].control_fd, CTRL_RING),
+                         diamond[1].node_id) &&
+        ring_entry_ready(send_command(diamond[0].control_fd, CTRL_RING),
+                         diamond[2].node_id) &&
+        ring_entry_ready(send_command(diamond[1].control_fd, CTRL_RING),
+                         diamond[3].node_id) &&
+        ring_entry_ready(send_command(diamond[2].control_fd, CTRL_RING),
+                         diamond[3].node_id);
   }
+  EXPECT_TRUE(warmed_up)
+      << "the diamond adjacency never warmed up: peers never entered the "
+      << "rings, or their weights never cleared FIND_BLOCK_MIN_WEIGHT "
+      << "(salutation may not engage for relay-dialed peers — see OFFS-238)";
 
   // Store a block on Node A so it can announce it
   std::string store_resp = send_command(diamond[0].control_fd,

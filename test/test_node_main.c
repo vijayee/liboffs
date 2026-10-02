@@ -795,6 +795,44 @@ static void handle_hebbian_cmd(int client_fd) {
   send_response(client_fd, response);
 }
 
+/* CTRL_RING: dump the primary membership of every ring as
+   RING_RESP <count>|<node_id>:<weight>;... — the same shape as HEBBIAN_RESP
+   so the OFFS-245 diamond warm-up can poll for ring-insert completion. */
+static void handle_ring_cmd(int client_fd) {
+  if (g_node.network == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " no network");
+    return;
+  }
+
+  ring_set_t* rings = g_node.network->rings;
+  if (rings == NULL) {
+    send_response(client_fd, CTRL_RESP_ERROR " no rings");
+    return;
+  }
+  size_t total = 0;
+  for (size_t ring_index = 0; ring_index < rings->ring_count; ring_index++) {
+    total += (size_t)rings->rings[ring_index].primary.length;
+  }
+
+  char response[8192];
+  int offset = snprintf(response, sizeof(response), "%s %zu|",
+                        CTRL_RESP_RING, total);
+
+  for (size_t ring_index = 0;
+       ring_index < rings->ring_count && offset > 0; ring_index++) {
+    ring_t* ring = &rings->rings[ring_index];
+    for (int node_index = 0; node_index < ring->primary.length; node_index++) {
+      net_node_t* node = ring->primary.data[node_index];
+      if (node == NULL) continue;
+      offset += snprintf(response + offset, sizeof(response) - offset,
+                         "%s:%.4f;", node->id.str, (double)node->weight);
+      if (offset < 0) break;
+    }
+  }
+
+  send_response(client_fd, response);
+}
+
 static void handle_closest_nodes_cmd(int client_fd, const char* target_id_str) {
   if (g_node.network == NULL) {
     send_response(client_fd, CTRL_RESP_ERROR " no network");
@@ -1529,6 +1567,8 @@ static void handle_command(int client_fd, char* line) {
 #else
     send_response(client_fd, CTRL_RESP_ERROR " not available");
 #endif
+  } else if (strcmp(line, CTRL_RING) == 0) {
+    handle_ring_cmd(client_fd);
   } else if (strcmp(line, CTRL_HEBBIAN) == 0) {
 #ifdef OFFS_TEST
     handle_hebbian_cmd(client_fd);
