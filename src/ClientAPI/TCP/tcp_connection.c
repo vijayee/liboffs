@@ -491,10 +491,8 @@ static void _tcp_put_on_descriptor_close(void* ctx, void* unused) {
   free(ori_string);
   off_url_destroy(url);
 
-  /* Deferred deref the streams, then free pipeline if refcount reaches zero */
-  refcounter_dereference((refcounter_t*)pipeline->recipe);
   /* Gate after the ORI response; the leg whose pipeline dereference reaches
-     zero performs the release once (see _tcp_put_pipeline_free). */
+     zero performs the recipe/desc/ws releases once (see _tcp_put_pipeline_free). */
   if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
     _tcp_put_pipeline_free(pipeline);
   }
