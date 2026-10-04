@@ -444,6 +444,12 @@ void stream_notify(stream_t* stream, stream_event_e event, void* payload, void (
 static uint8_t _stream_notify_dispatch(stream_t* stream, stream_event_e event, void* payload, void (*payload_destroy)(void*)) {
   stream_event_handler_list_t* list = stream->handlers[event];
   if (list->count == 0) {
+    if (event == close_event) {
+      /* Terminal-state bookkeeping: the close cannot be re-emitted by the
+         producer; a later close subscriber must be caught up (see
+         stream_subscribe_internal). */
+      stream->close_undelivered = 1;
+    }
     if (event == error_event) {
       async_error_t* error = (async_error_t*) payload;
       if (error != NULL && error->message != NULL) {
@@ -485,6 +491,9 @@ static uint8_t _stream_notify_dispatch(stream_t* stream, stream_event_e event, v
    * wrapper's) reference is still intact, so it remains the owner. */
   if (payload_destroy != NULL) {
     payload_destroy(payload);
+  }
+  if (event == close_event) {
+    stream->close_undelivered = 0;
   }
   return 0;
 }
@@ -754,6 +763,24 @@ void stream_subscribe_internal(stream_t* stream, stream_event_e event, size_t id
   stream_event_handler_list_t* list = stream->handlers[event];
   size_t count_before = list->count;
   stream_event_list_enqueue(list, _handler);
+
+  /* Terminal catch-up: if an earlier close notify was discarded on an EMPTY
+     handler list, no producer will ever re-emit it — the pump emits close
+     exactly once during deactivation. A subscriber arriving onto an empty
+     close list on a discarded-close stream must be signalled, or it waits
+     forever (the auto-push of the first data handler starts the pump on its
+     dispatch; on a contended 2-core runner the whole file pumps and the
+     stream deactivates before the caller's later subscribe lands). Only
+     catch up when the list was empty before this subscribe: the catch-up
+     notify then dispatches to exactly this one handler. A stream whose close
+     notify was delivered (non-empty list at the time) has bookkeeping saying
+     so, and late subscribers must NOT be re-fired — the load pipeline's
+     own late close subscriber (test_readable_load.cpp SkipMissingTupleContinues)
+     depends on silence. All of this runs FIFO on the stream's actor thread. */
+  if (event == close_event && stream->close_undelivered && count_before == 0) {
+    stream_notify((stream_t*) stream, close_event, NULL, NULL);
+  }
+
   uint8_t push = 0;
   if ((event == data_event) && !stream->is_piped && stream->auto_push) {
     push = once ? (count_before == 1) : (count_before == 0);

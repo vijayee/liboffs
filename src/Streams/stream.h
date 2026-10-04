@@ -160,6 +160,11 @@ struct stream_t {
   uint8_t auto_push;
   uint8_t is_pulling;
   uint8_t is_deactivated;
+  /* Set when a close_event notify was discarded on an EMPTY handler list,
+     cleared when a close notify is delivered. A late close subscriber onto a
+     discarded-close stream is caught up — close is a terminal state, not an
+     event (see stream_subscribe_internal). */
+  uint8_t close_undelivered;
   stream_t* pullable_stream;
   stream_notifier_t* pipe_notifiers;
   scheduler_pool_t* pool;
