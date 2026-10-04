@@ -67,6 +67,15 @@ typedef struct {
   buffer_t* descriptor_hash;
   size_t file_hash_offset;
   uint8_t temporary;
+  /* Commit-once free guard: both close legs (the ws's and the descriptor's)
+     run on two different actors and race — whichever leg's pipeline
+     dereference reaches zero frees the context EXACTLY once via this
+     exchange; the loser's exchange returns nonzero and touches nothing
+     after it. Release-once also prevents a double destroy of recipe/desc/ws
+     (the descriptor leg used to release them unconditionally BEFORE its
+     gate, so both legs could release the same references — an
+     ASAN-confirmed double-free; harmony CI session 2026-10-04). */
+    ATOMIC(uint8_t) released;
 } unix_put_pipeline_t;
 
 static void _connection_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
@@ -448,6 +457,43 @@ static void _unix_handle_load(unix_connection_t* conn, cbor_item_t* frame) {
 
 /* --- PUT pipeline callbacks --- */
 
+/* Free the PUT pipeline: releases the recipe's +1 and the streams' deferred
+   derefs, frees the fields, and frees the pipeline — once. Both close legs
+   call this from their pipeline-dereference-reaches-zero branch; the
+   commit-once exchange makes the winner's the only call. */
+static void _unix_put_pipeline_free(unix_put_pipeline_t* pipeline) {
+  uint8_t released = ATOMIC_EXCHANGE(&pipeline->released, 1);
+  if (released != 0) {
+    return;
+  }
+
+  /* Order matters: pending list is LIFO. Recipe ref released first so its
+     deferred destructor runs LAST — after ws's destructor drops its recipe
+     ref. */
+  refcounter_dereference((refcounter_t*)pipeline->recipe);
+  scheduler_pool_defer_cleanup(((stream_t*)pipeline->ws)->pool, pipeline->recipe,
+                               (void (*)(void*))new_blocks_recipe_destroy);
+  stream_deferred_deref((stream_t*)pipeline->desc);
+  stream_deferred_deref((stream_t*)pipeline->ws);
+
+  if (pipeline->content_type != NULL) {
+    free(pipeline->content_type);
+  }
+  if (pipeline->file_name != NULL) {
+    free(pipeline->file_name);
+  }
+  if (pipeline->server_address != NULL) {
+    free(pipeline->server_address);
+  }
+  if (pipeline->file_hash != NULL) {
+    DESTROY(pipeline->file_hash, buffer);
+  }
+  if (pipeline->descriptor_hash != NULL) {
+    DESTROY(pipeline->descriptor_hash, buffer);
+  }
+  free(pipeline);
+}
+
 static void _unix_put_on_descriptor_close(void* ctx, void* unused) {
   (void)unused;
   unix_put_pipeline_t* pipeline = (unix_put_pipeline_t*)ctx;
@@ -482,30 +528,10 @@ static void _unix_put_on_descriptor_close(void* ctx, void* unused) {
   free(ori_string);
   off_url_destroy(url);
 
-  /* Deferred deref the streams, then free pipeline if refcount reaches zero */
-  refcounter_dereference((refcounter_t*)pipeline->recipe);
-  scheduler_pool_defer_cleanup(((stream_t*)pipeline->ws)->pool, pipeline->recipe,
-                               (void (*)(void*))new_blocks_recipe_destroy);
-  stream_deferred_deref((stream_t*)pipeline->desc);
-  stream_deferred_deref((stream_t*)pipeline->ws);
-
+  /* Gate after the ORI response; the leg whose pipeline dereference
+     reaches zero performs the release once (see _unix_put_pipeline_free). */
   if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
-    if (pipeline->content_type != NULL) {
-      free(pipeline->content_type);
-    }
-    if (pipeline->file_name != NULL) {
-      free(pipeline->file_name);
-    }
-    if (pipeline->server_address != NULL) {
-      free(pipeline->server_address);
-    }
-    if (pipeline->file_hash != NULL) {
-      DESTROY(pipeline->file_hash, buffer);
-    }
-    if (pipeline->descriptor_hash != NULL) {
-      DESTROY(pipeline->descriptor_hash, buffer);
-    }
-    free(pipeline);
+    _unix_put_pipeline_free(pipeline);
   }
 }
 
@@ -524,17 +550,7 @@ static void _unix_put_on_stream_close(void* ctx, void* unused) {
   unix_put_pipeline_t* pipeline = (unix_put_pipeline_t*)ctx;
   writeable_descriptor_close(pipeline->desc);
   if (refcounter_dereference_is_zero((refcounter_t*)pipeline)) {
-    refcounter_dereference((refcounter_t*)pipeline->recipe);
-    scheduler_pool_defer_cleanup(((stream_t*)pipeline->ws)->pool, pipeline->recipe,
-                                 (void (*)(void*))new_blocks_recipe_destroy);
-    stream_deferred_deref((stream_t*)pipeline->desc);
-    stream_deferred_deref((stream_t*)pipeline->ws);
-    if (pipeline->content_type != NULL) free(pipeline->content_type);
-    if (pipeline->file_name != NULL) free(pipeline->file_name);
-    if (pipeline->server_address != NULL) free(pipeline->server_address);
-    if (pipeline->file_hash != NULL) DESTROY(pipeline->file_hash, buffer);
-    if (pipeline->descriptor_hash != NULL) DESTROY(pipeline->descriptor_hash, buffer);
-    free(pipeline);
+    _unix_put_pipeline_free(pipeline);
   }
 }
 
