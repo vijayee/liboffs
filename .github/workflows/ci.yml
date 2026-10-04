@@ -52,5 +52,8 @@ jobs:
       - name: Build
         run: cmake --build build --target testliboffs -j$(nproc)
 
+      # Bound the suite so a hung test fails visibly with its log instead of
+      # burning the runner's 6-hour limit (a clang-only test hang cancelled
+      # a previous run after six blank hours).
       - name: Test
-        run: cd build && ./test/testliboffs
+        run: cd build && timeout 1200 ./test/testliboffs

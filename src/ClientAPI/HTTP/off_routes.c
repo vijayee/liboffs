@@ -943,8 +943,10 @@ static void _off_get_handler(http_request_t* request, http_response_t* response,
             http_response_set_header(response, "Content-Type", "text/plain");
             http_response_write(response, "Redirect", 8);
             http_response_end(response);
-            off_url_destroy(url);
             free(location);
+            off_url_destroy(url);
+            state->url = NULL;  /* already released; the destroy below must not double-free it */
+            _off_get_state_destroy(state);
             return;
         }
 
@@ -1131,12 +1133,17 @@ typedef struct {
        close fire from different stream actors, and their relative order is
        scheduling-dependent — the buffered path finalizes the pipeline inline
        at headers-complete, so the descriptor close can be dispatched while
-       the request's close is still queued. The LAST arriving leg frees the
-       context; freeing it in either handler alone races the other handler's
-       dereferences (valgrind use-after-free, harmony OFFS-244). The buffered
-       path has no request leg and presets request_leg_closed = 1. */
-    uint8_t request_leg_closed;
-    uint8_t desc_leg_closed;
+       the request's close is still queued (harmony OFFS-244's use-after-free;
+       a follow-on race freed the context twice and then NULL-dereferenced the
+       pending-deref stack). Each handler finishes its own context work
+       FIRST, sets its atomic flag LAST, then checks the other leg; the
+       release is commit-once (the released exchange), so whatever the
+       interleave exactly one handler frees the context and neither touches
+       it afterwards. The buffered path has no request leg and presets
+       request_leg_closed = 1. */
+    ATOMIC(uint8_t) request_leg_closed;
+    ATOMIC(uint8_t) desc_leg_closed;
+    ATOMIC(uint8_t) released;
 } put_context_t;
 
 static void _put_ctx_release(put_context_t* put_ctx);
@@ -1193,16 +1200,21 @@ static void _put_on_descriptor_close(void* ctx, void* unused) {
 
     off_url_destroy(url);
 
-    put_ctx->desc_leg_closed = 1;
-    if (put_ctx->request_leg_closed) {
+    ATOMIC_STORE(&put_ctx->desc_leg_closed, 1);
+    if (ATOMIC_LOAD(&put_ctx->request_leg_closed)) {
         _put_ctx_release(put_ctx);
     }
 }
 
-/* Free the put context once every leg that touches it has completed. Which
-   leg arrives last (request close vs descriptor close) is scheduling-
-   dependent, so the one that sees both legs closed owns the release. */
+/* Free the put context. Both close legs' gate checks reach this; the
+   released exchange makes it commit-once — the leg whose exchange wins
+   frees, the other's post-flag work touches nothing after its losing
+   exchange returns. */
 static void _put_ctx_release(put_context_t* put_ctx) {
+    uint8_t released = ATOMIC_EXCHANGE(&put_ctx->released, 1);
+    if (released != 0) {
+        return;
+    }
     /* Order matters: pending list is LIFO. Add recipe first so its destructor
        runs LAST — after ws's destructor drops its recipe ref. */
     refcounter_dereference((refcounter_t*)put_ctx->recipe);
@@ -1506,7 +1518,7 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
     /* No piped request leg on the buffered path: the context is released
        entirely from the descriptor close (see the two-leg comment in
        put_context_t). */
-    put_ctx->request_leg_closed = 1;
+    ATOMIC_STORE(&put_ctx->request_leg_closed, 1);
 
     stream_subscribe((stream_t*)ws, data_event, put_ctx,
                      (void (*)(void*, void*))_put_on_stream_data, NULL);
@@ -1577,7 +1589,6 @@ static void _put_on_request_data(void* ctx, void* data) {
 static void _put_on_request_close(void* ctx, void* unused) {
     (void)unused;
     put_context_t* put_ctx = (put_context_t*)ctx;
-    put_ctx->request_leg_closed = 1;
     writeable_off_stream_finalize(put_ctx->ws);
     /* The request stream has delivered all its body chunks and is now closed;
        release the pipeline's reference. Use a deferred deref so the request is
@@ -1585,7 +1596,11 @@ static void _put_on_request_close(void* ctx, void* unused) {
        still iterating the request's handler list on the request actor thread. */
     stream_deferred_deref((stream_t*)put_ctx->request);
     put_ctx->request = NULL;
-    if (put_ctx->desc_leg_closed) {
+    /* The flag is this handler's LAST context write: once it is set, the
+       descriptor leg's release (which requires the flag) can free the
+       context without racing any pending field access from this leg. */
+    ATOMIC_STORE(&put_ctx->request_leg_closed, 1);
+    if (ATOMIC_LOAD(&put_ctx->desc_leg_closed)) {
         _put_ctx_release(put_ctx);
     }
 }

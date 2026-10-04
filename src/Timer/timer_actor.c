@@ -85,8 +85,12 @@ static void _timer_actor_queue_destroy(timer_actor_t* timer_actor,
     _timer_destroy_timer(timer);
     return;
   }
-  pd_timer_stop(timer);
+  /* On epoll/kqueue pd_timer_stop only disarms/closes the timer's fd and
+     unregister's its backend record — it never waits on the loop thread —
+     so it runs under loop_lock, serialized against creates and disposes
+     touching the same backend structures from other threads. */
   platform_mutex_lock(timer_actor->loop_lock);
+  pd_timer_stop(timer);
   size_t count = timer_actor->pending_destroy_count;
   if (count >= timer_actor->pending_destroy_capacity) {
     size_t new_cap = timer_actor->pending_destroy_capacity == 0
@@ -138,6 +142,14 @@ static void _timer_actor_queue_destroy_locked(timer_actor_t* timer_actor,
    actor's pd-loop thread (after pd_loop_run_once has returned, so every
    captured timer callback has been fully processed), or after the loop
    thread has exited (post-join teardown) or the loop never ran a batch. */
+/* The entire drain holds loop_lock: the dispose's pd_timer_destroy mutates
+   the loop's watcher list and the backend's registration records, the same
+   structures pd_timer_create/pd_timer_stop mutate from pool workers under
+   this lock. On poll-dancer builds with thread-safety off the loop's own
+   mutex is a stub, so loop_lock is the only serializer between the loop
+   thread and the workers. On epoll/kqueue no drained call waits, so holding
+   the lock cannot deadlock; IOCP never defers, so its no-lock-across-drain
+   rule is untouched. */
 static void _timer_actor_drain_pending_destroys(timer_actor_t* timer_actor) {
   pd_timer_t** timers;
   size_t count;
@@ -147,11 +159,11 @@ static void _timer_actor_drain_pending_destroys(timer_actor_t* timer_actor) {
   timer_actor->pending_destroy_timers = NULL;
   timer_actor->pending_destroy_count = 0;
   timer_actor->pending_destroy_capacity = 0;
-  platform_mutex_unlock(timer_actor->loop_lock);
   for (size_t i = 0; i < count; i++) {
     if (timers[i] == NULL) continue;
     _timer_actor_dispose_timer(timers[i]);
   }
+  platform_mutex_unlock(timer_actor->loop_lock);
   free(timers);
 }
 
