@@ -84,7 +84,9 @@ TEST_F(TestStreamActor, TestPushFileStreamActorDispatch) {
                    (void(*)(void*, void*))on_error_set_promise, NULL);
 
   auto close_future = close_promise.promise.get_future();
-  close_future.wait();
+  ASSERT_TRUE(close_future.wait_for(std::chrono::seconds(30))
+              == std::future_status::ready)
+      << "the stream never signalled close within 30 s";
 
   scheduler_pool_wait_for_idle(pool);
 
@@ -117,7 +119,9 @@ TEST_F(TestStreamActor, TestPullFileStreamActorDispatch) {
   writeable_pull_stream_pipe((stream_t*)ws, (stream_t*)rs);
 
   auto w_close_future = w_close_promise.promise.get_future();
-  w_close_future.wait();
+  ASSERT_TRUE(w_close_future.wait_for(std::chrono::seconds(30))
+              == std::future_status::ready)
+      << "the writeable never signalled close within 30 s";
 
   scheduler_pool_wait_for_idle(pool);
 
@@ -151,7 +155,9 @@ TEST_F(TestStreamActor, TestStreamNotifyManyHandlers) {
                    (void(*)(void*, void*))on_error_set_promise, NULL);
 
   auto close_future = close_promise.promise.get_future();
-  close_future.wait();
+  ASSERT_TRUE(close_future.wait_for(std::chrono::seconds(30))
+              == std::future_status::ready)
+      << "the stream never signalled close within 30 s";
 
   scheduler_pool_wait_for_idle(pool);
 
@@ -210,7 +216,9 @@ TEST_F(TestStreamActor, TestPushPipeEndToEnd) {
   readable_push_stream_pipe((stream_t*)rs, (stream_t*)ws);
 
   auto w_close_future = w_close_promise.promise.get_future();
-  w_close_future.wait();
+  ASSERT_TRUE(w_close_future.wait_for(std::chrono::seconds(30))
+              == std::future_status::ready)
+      << "the writeable never signalled close within 30 s";
 
   scheduler_pool_wait_for_idle(pool);
 
