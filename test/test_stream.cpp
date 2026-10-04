@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <atomic>
+#include <chrono>
 #include <future>
 extern "C" {
 #include "../src/Streams/stream.h"
@@ -176,7 +177,12 @@ TEST_F(TestStreamActor, TestIdleSignalWaitsForCompletion) {
                    (void(*)(void*, void*))on_error_set_promise, NULL);
 
   auto close_future = close_promise.promise.get_future();
-  close_future.wait();
+  /* wait_for, not wait(): an indefinite wait burns a CI runner's whole job
+     budget if a lost close-event wake-up ever strands this future. A
+     timeout turns that into a visible failure with the gtest log. */
+  ASSERT_TRUE(close_future.wait_for(std::chrono::seconds(30))
+              == std::future_status::ready)
+      << "the stream never signalled close within 30 s";
 
   scheduler_pool_wait_for_idle(pool);
 
