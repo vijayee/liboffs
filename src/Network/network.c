@@ -3990,6 +3990,14 @@ static void network_handle_seeking_blocks(network_t* network, message_t* msg) {
       entry_count++;
     }
     response->offer_count = (uint8_t)entry_count;
+    /* index_to_array pushes every entry with a fresh reference; release
+     * them or each SEEKING-BLOCKS scan leaks the entries and their hash
+     * buffers (index/LRU teardown only drops the index/LRU refs). */
+    for (size_t index = 0; index < entries->length; index++) {
+      if (entries->data[index] != NULL) {
+        index_entry_destroy(entries->data[index]);
+      }
+    }
     vec_deinit(entries);
     free(entries);
   }
