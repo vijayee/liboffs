@@ -676,6 +676,13 @@ TEST_F(TestUnixTransport, LoadPartialSkipsMissingTuples) {
         } else {
             platform_sleep_ms(20);
         }
+        /* Each scan holds one reference per entry (index_to_array pushes
+         * every entry with a fresh reference). Release them before dropping
+         * the vec, or the stray reference keeps index/LRU teardown from ever
+         * free()ing the entries and their hash buffers. */
+        for (int index = 0; index < entries->length; index++) {
+            index_entry_destroy(entries->data[index]);
+        }
         vec_deinit(entries);
         free(entries);
     }

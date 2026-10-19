@@ -392,6 +392,13 @@ TEST_F(TestOffRoutesLoad, LoadPartialSkipsMissingTuples) {
     ASSERT_NE(victim_hash, nullptr) << "no data block found in the cache index";
     buffer_t* victim_copy = buffer_copy(victim_hash);
     ASSERT_NE(victim_copy, nullptr);
+    /* Each scan holds one reference per entry (index_to_array pushes every
+     * entry with a fresh reference). Release them before dropping the vec,
+     * or the stray reference keeps index/LRU teardown from ever free()ing
+     * the entries and their hash buffers. */
+    for (int index = 0; index < entries->length; index++) {
+        index_entry_destroy(entries->data[index]);
+    }
     vec_deinit(entries);
     free(entries);
     block_cache_remove(bc, victim_copy, NULL);
