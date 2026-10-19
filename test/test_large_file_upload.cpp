@@ -224,7 +224,7 @@ static int run_unix_node(const char* socket_path, const char* cache_dir) {
 
   unix_transport_t* transport = unix_transport_create(pool, bc, ofd_cache, tc,
                                                      (char*)socket_path, NULL,
-                                                     &health_ctx);
+                                                     &health_ctx, 0);
   if (transport == NULL) return 1;
   unix_transport_start(transport);
 

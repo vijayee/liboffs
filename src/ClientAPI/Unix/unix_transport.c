@@ -11,6 +11,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 static void* _server_thread(void* arg);
 /* _accept_callback drives accept via the poll-dancer readiness listen watcher,
@@ -94,7 +97,8 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
                                          tuple_cache_t* tc,
                                          const char* socket_path,
                                          const char* api_key_hash,
-                                         health_context_t* health_ctx) {
+                                         health_context_t* health_ctx,
+                                         unsigned socket_mode) {
   unix_transport_t* transport = get_clear_memory(sizeof(unix_transport_t));
   transport->pool = pool;
   transport->bc = bc;
@@ -136,6 +140,21 @@ unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
     free(transport);
     return NULL;
   }
+
+#ifndef _WIN32
+  /* The socket inherits the process umask at bind (root umask -> 0755),
+   * locking out non-root clients. Publish the requested mode on the
+   * bound inode; a chmod failure keeps the daemon running with the
+   * umask-derived mode rather than failing startup. */
+  unsigned effective_socket_mode = (socket_mode == 0) ? 0666 : socket_mode;
+  if (chmod(socket_path, (mode_t)effective_socket_mode) != 0) {
+    log_warn("unix_transport_create: chmod(%s, %04o) failed (errno=%d); "
+             "socket keeps its umask-derived mode",
+             socket_path, effective_socket_mode, errno);
+  }
+#else
+  (void)socket_mode; /* named-pipe DACL (see platform_local.c) governs access */
+#endif
 
   platform_socket_set_nonblocking(transport->listen_sock);
 

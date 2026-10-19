@@ -253,7 +253,7 @@ protected:
         snprintf(socket_path, sizeof(socket_path), "/tmp/test_client_sock_%d", platform_getpid());
         unlink(socket_path);
 
-        transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path, NULL, &health_ctx);
+        transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path, NULL, &health_ctx, 0);
         ASSERT_NE(transport, nullptr);
         unix_transport_start(transport);
 
@@ -1240,7 +1240,7 @@ protected:
            handlers run their success path; the config ctx borrows the node
            so per-connection peer_ctx.network/authority are populated. */
         transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path,
-                                          NULL, NULL);
+                                          NULL, NULL, 0);
         ASSERT_NE(transport, nullptr);
         unix_transport_set_config_ctx(transport, &node_obj, cache_dir, NULL, NULL);
         unix_transport_start(transport);

@@ -25,6 +25,9 @@ extern "C" {
 #include "../src/Util/base58.h"
 #include "../src/Platform/platform.h"
 #include "../src/Platform/platform_posix_compat.h"
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -148,7 +151,7 @@ protected:
         _make_socket_path(socket_path, sizeof(socket_path), "sock");
         platform_local_cleanup(socket_path);
 
-        transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path, NULL, NULL);
+        transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path, NULL, NULL, 0);
         ASSERT_NE(transport, nullptr);
         unix_transport_start(transport);
     }
@@ -601,7 +604,7 @@ TEST_F(TestUnixTransport, LoadPartialSkipsMissingTuples) {
 
     tuple_cache_t* partial_tc = tuple_cache_create(100, pool);
     unix_transport_t* partial = unix_transport_create(
-        pool, bc, ofd_cache, partial_tc, partial_path, NULL, NULL);
+        pool, bc, ofd_cache, partial_tc, partial_path, NULL, NULL, 0);
     ASSERT_NE(partial, nullptr);
     unix_transport_start(partial);
 
@@ -694,7 +697,7 @@ TEST_F(TestUnixTransport, LoadPartialSkipsMissingTuples) {
 
     tuple_cache_t* load_tc = tuple_cache_create(100, pool);
     unix_transport_t* load_transport = unix_transport_create(
-        pool, bc, ofd_cache, load_tc, load_path, NULL, NULL);
+        pool, bc, ofd_cache, load_tc, load_path, NULL, NULL, 0);
     ASSERT_NE(load_transport, nullptr);
     unix_transport_start(load_transport);
 
@@ -960,7 +963,7 @@ TEST_F(TestUnixTransport, MaxConnections) {
     _make_socket_path(limited_path, sizeof(limited_path), "limited");
     platform_local_cleanup(limited_path);
 
-    unix_transport_t* limited = unix_transport_create(pool, bc, ofd_cache, tc, limited_path, NULL, NULL);
+    unix_transport_t* limited = unix_transport_create(pool, bc, ofd_cache, tc, limited_path, NULL, NULL, 0);
     ASSERT_NE(limited, nullptr);
     unix_transport_set_max_connections(limited, 1);
     unix_transport_start(limited);
@@ -1168,7 +1171,7 @@ protected:
            without needing a network/authority (they return at the auth check
            before dereferencing those borrowed pointers). */
         transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path,
-                                          "peer_routing_auth_hash", NULL);
+                                          "peer_routing_auth_hash", NULL, 0);
         ASSERT_NE(transport, nullptr);
         unix_transport_start(transport);
     }
@@ -1328,7 +1331,7 @@ protected:
            handlers run their success path. Config ctx borrows the node so
            per-connection peer_ctx.network/authority are populated. */
         transport = unix_transport_create(pool, bc, ofd_cache, tc, socket_path,
-                                          NULL, NULL);
+                                          NULL, NULL, 0);
         ASSERT_NE(transport, nullptr);
         unix_transport_set_config_ctx(transport, &node_obj, cache_dir, NULL, NULL);
         unix_transport_start(transport);
@@ -1593,5 +1596,36 @@ TEST_F(TestUnixTransportPeerSuccess, BootstrapAddListRemoveHappyPath) {
     stream_framer_destroy(framer);
     platform_socket_destroy(sock);
 }
+
+/* POSIX file modes only: on Windows the socket path maps to a named pipe
+ * whose DACL (platform_local.c) governs access — no st_mode to assert. */
+#ifndef _WIN32
+TEST_F(TestUnixTransport, ZeroModeMeansWorldAccessibleDefault) {
+    struct stat st;
+    ASSERT_EQ(stat(socket_path, &st), 0);
+    EXPECT_EQ(st.st_mode & 0777, 0666u);
+}
+
+TEST_F(TestUnixTransport, ExplicitSocketModeAppliesToSocketFile) {
+    char mode_path[128];
+    _make_socket_path(mode_path, sizeof(mode_path), "mode");
+    platform_local_cleanup(mode_path);
+
+    tuple_cache_t* mode_tc = tuple_cache_create(100, pool);
+    unix_transport_t* mode_transport = unix_transport_create(
+        pool, bc, ofd_cache, mode_tc, mode_path, NULL, NULL, 0640);
+    ASSERT_NE(mode_transport, nullptr);
+    unix_transport_start(mode_transport);
+
+    struct stat st;
+    ASSERT_EQ(stat(mode_path, &st), 0);
+    EXPECT_EQ(st.st_mode & 0777, 0640u);
+
+    unix_transport_stop(mode_transport);
+    unix_transport_destroy(mode_transport);
+    tuple_cache_destroy(mode_tc);
+    platform_local_cleanup(mode_path);
+}
+#endif
 
 } // namespace unix_transport_test

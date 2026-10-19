@@ -60,13 +60,17 @@ typedef struct unix_transport_t {
   void* restart_user_data;
 } unix_transport_t;
 
+/* socket_mode: POSIX only — the mode chmod()ed onto the bound unix socket
+   inode (0 -> default 0666, umask-independent). Ignored on Windows where the
+   socket path is a named pipe whose DACL (platform_local.c) governs access. */
 unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
                                          block_cache_t* bc,
                                          ofd_cache_t* ofd_cache,
                                          tuple_cache_t* tc,
                                          const char* socket_path,
                                          const char* api_key_hash,
-                                         health_context_t* health_ctx);
+                                         health_context_t* health_ctx,
+                                         unsigned socket_mode);
 void unix_transport_destroy(unix_transport_t* transport);
 void unix_transport_start(unix_transport_t* transport);
 void unix_transport_stop(unix_transport_t* transport);

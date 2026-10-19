@@ -149,7 +149,7 @@ static int run_unix_node(const char* socket_path, const char* cache_dir) {
   uint8_t draining = 0;
   health_ctx.draining = &draining;
 
-  unix_transport_t* transport = unix_transport_create(pool, bc, ofd_cache, tc, (char*)socket_path, NULL, &health_ctx);
+  unix_transport_t* transport = unix_transport_create(pool, bc, ofd_cache, tc, (char*)socket_path, NULL, &health_ctx, 0);
   if (transport == NULL) return 1;
   unix_transport_start(transport);
 
