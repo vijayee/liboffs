@@ -61,8 +61,10 @@ typedef struct unix_transport_t {
 } unix_transport_t;
 
 /* socket_mode: POSIX only — the mode chmod()ed onto the bound unix socket
-   inode (0 -> default 0666, umask-independent). Ignored on Windows where the
-   socket path is a named pipe whose DACL (platform_local.c) governs access. */
+   inode (0 -> default 0666, umask-independent). Values outside 0..0777 are
+   the caller's contract violation: validate before calling (offsd's
+   --unix-socket-mode parse does). Ignored on Windows where the socket path
+   is a named pipe whose DACL (platform_local.c) governs access. */
 unix_transport_t* unix_transport_create(scheduler_pool_t* pool,
                                          block_cache_t* bc,
                                          ofd_cache_t* ofd_cache,
