@@ -137,7 +137,7 @@ find_block_result_e find_block_execute(
     ring_set_t* rings,
     const node_id_t* local_id,
     const find_block_state_t* state,
-    net_node_t** next_hops,
+    node_id_t* next_hops,
     size_t* next_hop_count,
     bool secure_mode) {
   if (state == NULL || local_id == NULL || next_hops == NULL || next_hop_count == NULL) {
@@ -163,7 +163,11 @@ find_block_result_e find_block_execute(
   }
 
   // Step 3: Check connection manager gravity wells first (connected peers)
-  // Prefer connected peers — they have live QUIC streams for immediate forwarding
+  // Prefer connected peers — they have live QUIC streams for immediate
+  // forwarding. The hop is returned as a node id and the caller re-resolves
+  // it to the live connection, so no ring-table entry is required here: a
+  // connected peer that never entered the ring table (relay admission, no
+  // gossip exchange yet) must still be forwardable (OFFS-254).
   if (conn_mgr != NULL) {
     size_t match_count = 0;
     peer_connection_t** matches = connection_manager_get_peers_for_topic(
@@ -185,14 +189,10 @@ find_block_result_e find_block_execute(
                                     peer->remote_node_id.hash)) {
             continue;
           }
-          // Look up the peer node in ring table for net_node_t
-          net_node_t* peer_node = ring_set_find_by_id(rings, &peer->remote_node_id);
-          if (peer_node != NULL && !(peer_node->flags & NET_NODE_FLAG_RENDEZVOUS)) {
-            next_hops[0] = peer_node;
-            *next_hop_count = 1;
-            free(matches);
-            return FIND_BLOCK_FORWARDING;
-          }
+          next_hops[0] = peer->remote_node_id;
+          *next_hop_count = 1;
+          free(matches);
+          return FIND_BLOCK_FORWARDING;
         }
       }
       free(matches);
@@ -264,7 +264,7 @@ find_block_result_e find_block_execute(
 
   if (gravity_candidate != NULL) {
     // Directed walk: forward to the peer with the strongest gravity well
-    next_hops[0] = gravity_candidate;
+    next_hops[0] = gravity_candidate->id;
     *next_hop_count = 1;
     return FIND_BLOCK_FORWARDING;
   }
@@ -355,9 +355,13 @@ find_block_result_e find_block_execute(
 
   // Step 6: Roulette-wheel select FORWARD_FANOUT candidates
   if (candidate_count > 0) {
+    net_node_t* selected[FIND_BLOCK_FORWARD_FANOUT];
     *next_hop_count = find_block_roulette_wheel_select(
         candidates, candidate_weights, candidate_count,
-        FIND_BLOCK_FORWARD_FANOUT, next_hops);
+        FIND_BLOCK_FORWARD_FANOUT, selected);
+    for (size_t hop = 0; hop < *next_hop_count; hop++) {
+      next_hops[hop] = selected[hop]->id;
+    }
     if (*next_hop_count > 0) {
       return FIND_BLOCK_FORWARDING;
     }
@@ -397,12 +401,9 @@ find_block_result_e find_block_execute(
       }
 
       // The caller resolves next-hops back to live connections by node id,
-      // so the net_node is a routing shell carrying the id; a connected
-      // peer without a ring entry has no shell — skip it (its ring insert
-      // happens on the next salutation exchange).
-      net_node_t* flood_hop = ring_set_find_by_id(rings, &peer->remote_node_id);
-      if (flood_hop == NULL) continue;
-      next_hops[flood_count++] = flood_hop;
+      // so a connected peer needs no ring-table entry to be floodable — the
+      // live pipe is the transport (OFFS-254).
+      next_hops[flood_count++] = peer->remote_node_id;
     }
     if (flood_count > 0) {
       *next_hop_count = flood_count;

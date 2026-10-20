@@ -921,7 +921,7 @@ TEST_F(FindBlockTest, TtlExpiredReturnsTtlExpired) {
   memset(state.block_hash, 0xAA, 32);
   state.ttl = 0;  // TTL expired
 
-  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
@@ -933,7 +933,7 @@ TEST_F(FindBlockTest, TtlExpiredReturnsTtlExpired) {
 }
 
 TEST_F(FindBlockTest, NullStateReturnsNotFound) {
-  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
@@ -948,7 +948,7 @@ TEST_F(FindBlockTest, NoPeersReturnsNotFound) {
   memset(state.block_hash, 0xAA, 32);
   state.ttl = 6;
 
-  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
@@ -983,7 +983,7 @@ TEST_F(FindBlockTest, ZeroWeightConnectedPeerFloodFallback) {
   memset(state.block_hash, 0xBB, 32);
   state.ttl = 6;
 
-  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
@@ -995,10 +995,52 @@ TEST_F(FindBlockTest, ZeroWeightConnectedPeerFloodFallback) {
   EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
   EXPECT_EQ(next_hop_count, 1u);
   if (next_hop_count > 0) {
-    EXPECT_TRUE(node_id_equals(&next_hops[0]->id, &peer_id));
+    EXPECT_TRUE(node_id_equals(&next_hops[0], &peer_id));
   }
 
   net_node_destroy(node);
+  connection_manager_deinit(&mgr);
+}
+
+/* Production OFFS-254: a peer with a live QUIC pipe (POST /peer/connect
+   reported "Already connected", /peers showed connected:true) is invisible to
+   find-block routing when it has no ring-table entry. Ring entries only
+   appear via the salutation/gossip paths, so a connected peer that never
+   exchanged gossip — e.g. admitted through the relay candidate in
+   network_connect_peer_candidates, or connected before any PING ran — has no
+   net_node_t shell, and every find_block_execute stage (connected-peer
+   gravity well, ring walk, connected-peer flood) required one. The walk
+   returned NOT_FOUND without sending a single frame: GET failed in
+   milliseconds with tuples_loaded=0 and zero peer traffic. A connected peer
+   must be forwardable on the strength of its live connection alone. */
+TEST_F(FindBlockTest, ConnectedPeerWithoutRingEntryStillForwards) {
+  connection_manager_t mgr;
+  connection_manager_init(&mgr, 0, NULL);
+
+  node_id_t peer_id = {};
+  memset(peer_id.hash, 0x02, NODE_ID_HASH_SIZE);
+  peer_connection_t* peer = connection_manager_add(&mgr, &peer_id, NULL, NULL);
+  ASSERT_NE(peer, (peer_connection_t*)NULL);
+  peer->connected = 1;  // live QUIC pipe, no ring entry, no EABF knowledge
+
+  find_block_state_t state = {};
+  memset(state.block_hash, 0xBB, 32);
+  state.ttl = 6;
+
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  find_block_result_e result = find_block_execute(
+      &eabf_table, &eabf_ttl, &mgr, rings, &local_id, &state,
+      next_hops, &next_hop_count, false);
+
+  /* The live connection alone must route the query — no ring shell needed. */
+  EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
+  EXPECT_EQ(next_hop_count, 1u);
+  if (next_hop_count > 0) {
+    EXPECT_TRUE(node_id_equals(&next_hops[0], &peer_id));
+  }
+
   connection_manager_deinit(&mgr);
 }
 
@@ -1028,7 +1070,7 @@ TEST_F(FindBlockTest, WithRingMembersForwards) {
   memset(state.block_hash, 0xAA, 32);
   state.ttl = 6;
 
-  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
@@ -1071,7 +1113,7 @@ TEST_F(FindBlockTest, EabfGravityWellOverrides) {
   memcpy(state.block_hash, block_hash, 32);
   state.ttl = 6;
 
-  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
@@ -1081,7 +1123,7 @@ TEST_F(FindBlockTest, EabfGravityWellOverrides) {
   EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
   // Should route to node_b (gravity well) despite its lower weight
   ASSERT_EQ(next_hop_count, 1u);
-  EXPECT_TRUE(node_id_equals(&next_hops[0]->id, &id_b));
+  EXPECT_TRUE(node_id_equals(&next_hops[0], &id_b));
 
   net_node_destroy(node_a);
   net_node_destroy(node_b);
@@ -1110,7 +1152,7 @@ TEST_F(FindBlockTest, PathCycleDetection) {
   memcpy(&state.path[0], &id_a, sizeof(node_id_t));
   state.path_len = 1;
 
-  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
@@ -1143,7 +1185,7 @@ TEST_F(FindBlockTest, VisitedBloomFiltersEabfGravityWell) {
   // Add node_a to visited bloom — should be filtered out
   find_block_add_visited(state.visited_bloom, &state.visited_count, id_a.hash);
 
-  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
   find_block_result_e result = find_block_execute(
       &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
@@ -1176,7 +1218,7 @@ TEST_F(FindBlockTest, VisitedBloomFiltersRingCandidates) {
   // Add node_a to visited bloom — should be filtered out
   find_block_add_visited(state.visited_bloom, &state.visited_count, id_a.hash);
 
-  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
   find_block_result_e result = find_block_execute(
       &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
@@ -1185,7 +1227,7 @@ TEST_F(FindBlockTest, VisitedBloomFiltersRingCandidates) {
   // Should forward but only to node_b (node_a is filtered by visited bloom)
   EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
   EXPECT_EQ(next_hop_count, 1u);
-  EXPECT_TRUE(node_id_equals(&next_hops[0]->id, &id_b));
+  EXPECT_TRUE(node_id_equals(&next_hops[0], &id_b));
 
   net_node_destroy(node_a);
   net_node_destroy(node_b);
@@ -1215,7 +1257,7 @@ TEST_F(FindBlockTest, VisitedBloomAndPathBothFilter) {
   // node_b in visited bloom
   find_block_add_visited(state.visited_bloom, &state.visited_count, id_b.hash);
 
-  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
   find_block_result_e result = find_block_execute(
       &eabf_table, &eabf_ttl, NULL, rings, &local_id, &state,
@@ -1251,7 +1293,7 @@ TEST_F(FindBlockTest, RelayAdmittedBelowGateNotRoutableInDefaultMode) {
   memcpy(state.block_hash, block_hash, 32);
   state.ttl = 6;
 
-  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
@@ -1261,6 +1303,8 @@ TEST_F(FindBlockTest, RelayAdmittedBelowGateNotRoutableInDefaultMode) {
   // No routable candidates — relay-admitted peer is below the weight gate
   EXPECT_EQ(result, FIND_BLOCK_NOT_FOUND);
   EXPECT_EQ(next_hop_count, 0u);
+
+  net_node_destroy(relay_node);
 }
 
 TEST_F(FindBlockTest, RelayAdmittedRoutableAfterEarningWeightInDefaultMode) {
@@ -1279,7 +1323,7 @@ TEST_F(FindBlockTest, RelayAdmittedRoutableAfterEarningWeightInDefaultMode) {
   memcpy(state.block_hash, block_hash, 32);
   state.ttl = 6;
 
-  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
@@ -1289,7 +1333,9 @@ TEST_F(FindBlockTest, RelayAdmittedRoutableAfterEarningWeightInDefaultMode) {
   // Above the weight gate — routable in default mode despite relay_verified=false
   EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
   ASSERT_EQ(next_hop_count, 1u);
-  EXPECT_TRUE(node_id_equals(&next_hops[0]->id, &id_relay));
+  EXPECT_TRUE(node_id_equals(&next_hops[0], &id_relay));
+
+  net_node_destroy(relay_node);
 }
 
 TEST_F(FindBlockTest, RelayAdmittedNotRoutableInSecureModeEvenWithHighWeight) {
@@ -1307,7 +1353,7 @@ TEST_F(FindBlockTest, RelayAdmittedNotRoutableInSecureModeEvenWithHighWeight) {
   memcpy(state.block_hash, block_hash, 32);
   state.ttl = 6;
 
-  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
@@ -1317,6 +1363,8 @@ TEST_F(FindBlockTest, RelayAdmittedNotRoutableInSecureModeEvenWithHighWeight) {
   // Secure mode: identity gate excludes the unverified peer
   EXPECT_EQ(result, FIND_BLOCK_NOT_FOUND);
   EXPECT_EQ(next_hop_count, 0u);
+
+  net_node_destroy(relay_node);
 }
 
 TEST_F(FindBlockTest, RelayAdmittedRoutableInSecureModeAfterVerified) {
@@ -1335,7 +1383,7 @@ TEST_F(FindBlockTest, RelayAdmittedRoutableInSecureModeAfterVerified) {
   memcpy(state.block_hash, block_hash, 32);
   state.ttl = 6;
 
-  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
@@ -1344,7 +1392,9 @@ TEST_F(FindBlockTest, RelayAdmittedRoutableInSecureModeAfterVerified) {
 
   EXPECT_EQ(result, FIND_BLOCK_FORWARDING);
   ASSERT_EQ(next_hop_count, 1u);
-  EXPECT_TRUE(node_id_equals(&next_hops[0]->id, &id_relay));
+  EXPECT_TRUE(node_id_equals(&next_hops[0], &id_relay));
+
+  net_node_destroy(relay_node);
 }
 
 TEST(RelayGossipGatingTest, NetworkSecureModePredicate) {

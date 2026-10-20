@@ -46,6 +46,11 @@ typedef struct find_block_state_t {
 // signed-nonce challenge verifies their identity. When false (default mode),
 // relay-admitted peers are gated only by Hebbian weight (reputation). See
 // network_secure_mode() in network.h.
+// next_hops: selected next-hop node IDs (up to FORWARD_FANOUT). Hops are
+// returned as node identities, not net_node_t pointers — ring candidates
+// contribute their id, and connected peers carry their live remote_node_id
+// even when they have no ring-table entry. The caller re-resolves each hop
+// to a live connection via connection_manager_lookup before sending.
 find_block_result_e find_block_execute(
     eabf_table_t* eabf_table,
     eabf_ttl_table_t* eabf_ttl,
@@ -53,8 +58,8 @@ find_block_result_e find_block_execute(
     ring_set_t* rings,
     const node_id_t* local_id,
     const find_block_state_t* state,
-    /* Output: selected next-hop nodes (up to FORWARD_FANOUT) */
-    net_node_t** next_hops,
+    /* Output: selected next-hop node ids (up to FORWARD_FANOUT) */
+    node_id_t* next_hops,
     size_t* next_hop_count,
     bool secure_mode);
 

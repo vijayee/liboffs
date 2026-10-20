@@ -3042,7 +3042,7 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
   memcpy(&state.original_source, &find->original_source, sizeof(node_id_t));
 
   // Execute FindBlock logic
-  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
@@ -3175,12 +3175,12 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         // Encode and send FindBlock to next_hops[hop] via QUIC
         cbor_item_t* cbor = wire_find_block_encode(forward);
         peer_connection_t* next_peer = connection_manager_lookup(
-            &network->conn_mgr, &next_hops[hop]->id);
+            &network->conn_mgr, &next_hops[hop]);
         if (next_peer != NULL && conn_state_send(network, next_peer, cbor) == 0) {
           reachable_hops++;
           if (network->log != NULL) {
             message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
-                               &next_hops[hop]->id, state.message_id, state.block_hash,
+                               &next_hops[hop], state.message_id, state.block_hash,
                                1, &network->hebbian);
           }
         }
@@ -4503,7 +4503,7 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
   state.start_time_ms = now_ts;
   memcpy(&state.original_source, &network->authority->local_id, sizeof(node_id_t));
 
-  net_node_t* next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
 
   find_block_result_e result = find_block_execute(
@@ -4606,12 +4606,12 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
         // Encode and send FindBlock to next_hops[hop] via QUIC
         cbor_item_t* cbor = wire_find_block_encode(forward);
         peer_connection_t* next_peer = connection_manager_lookup(
-            &network->conn_mgr, &next_hops[hop]->id);
+            &network->conn_mgr, &next_hops[hop]);
         if (next_peer != NULL && conn_state_send(network, next_peer, cbor) == 0) {
           reachable_hops++;
           if (network->log != NULL) {
             message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
-                               &next_hops[hop]->id, state.message_id, state.block_hash,
+                               &next_hops[hop], state.message_id, state.block_hash,
                                1, &network->hebbian);
           }
         }
