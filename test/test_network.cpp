@@ -4560,3 +4560,119 @@ TEST_F(PeerBookBackoffTest, EmptySnapshotSkipsHeal) {
   EXPECT_EQ(network->bootstrap_backoff_ms, 0u);
   EXPECT_EQ(network->bootstrap_next_attempt_ms, 0u);
 }
+
+// --- Orphaned DIRECT self-heal (OFFS-255) ---
+//
+// Production (2026-10-20): a peer was promoted to CONN_STATE_DIRECT while its
+// direct connect had only been STARTED — the salutation never completed (no
+// relay, unreachable peer), so peer->quic_stream stayed NULL. Every send then
+// hard-failed ("conn_state_send: DIRECT state but no QUIC stream"), find-block
+// forwarding saw reachable_hops == 0 and failed instantly, and because the
+// peer looks connected, nothing ever demoted or re-dialed it. The reconnect
+// tick is the only periodic place that can notice an orphaned DIRECT peer
+// (DIRECT state, no stream) and demote it back to RELAY so interim traffic
+// uses the relay path again and the peer can re-dial.
+//
+// Fixture mirrors PeerBookBackoffTest's minimal network_t; peers added to a
+// real connection_manager. No msquic needed: the demotion sweep runs before
+// the quic_listener guard in network_attempt_direct_upgrades.
+class OrphanedDirectHealTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    config = config_default();
+    authority = authority_create(&config);
+    ASSERT_NE(authority, nullptr);
+
+    network = (network_t*)calloc(1, sizeof(network_t));
+    ASSERT_NE(network, nullptr);
+    network->authority = authority;
+    network->rings = ring_set_create(0, 0, 0);
+    ASSERT_NE(network->rings, nullptr);
+    hebbian_table_init(&network->hebbian, 4, 0.999f);
+    rate_limit_table_init(&network->rate_limits, 4);
+    hebbian_config_t hebbian_cfg;
+    hebbian_config_init(&hebbian_cfg);
+    connection_manager_init(&network->conn_mgr, 16, &hebbian_cfg);
+
+    memset(authority->local_id.hash, 0xAB, NODE_ID_HASH_SIZE);
+  }
+
+  void TearDown() override {
+    if (network != nullptr) {
+      connection_manager_deinit(&network->conn_mgr);
+      ring_set_clear_nodes(network->rings);
+      ring_set_destroy(network->rings);
+      hebbian_table_deinit(&network->hebbian);
+      rate_limit_table_deinit(&network->rate_limits);
+      free(network);
+    }
+    authority_destroy(authority);
+  }
+
+  // Fire one reconnect tick with an empty snapshot: the heal branch and the
+  // friend loop stay inert, so the dispatch exercises only the
+  // direct-upgrade pass (and its orphaned-DIRECT sweep).
+  void DispatchEmptyReconnectTick() {
+    peer_book_reconnect_payload_t snapshot;
+    memset(&snapshot, 0, sizeof(snapshot));
+
+    message_t msg = {};
+    msg.type = PEER_BOOK_RECONNECT;
+    msg.payload = &snapshot;
+    msg.payload_destroy = NULL;
+    network_dispatch(network, &msg);
+  }
+
+  config_t config;
+  authority_t* authority;
+  network_t* network;
+};
+
+// A peer stuck in DIRECT with no QUIC stream must be demoted back to RELAY by
+// the reconnect tick: with DIRECT state, conn_state_send hard-fails (no
+// stream) and the relay fallback is unreachable — exactly the production
+// wedge. Demoting restores the relay send path and lets the retry budget
+// re-dial the peer.
+TEST_F(OrphanedDirectHealTest, DirectPeerWithoutStreamDemotesToRelayOnTick) {
+  node_id_t peer_id = {};
+  memset(peer_id.hash, 0x21, NODE_ID_HASH_SIZE);
+  peer_connection_t* peer =
+      connection_manager_add(&network->conn_mgr, &peer_id, NULL, network->pool);
+  ASSERT_NE(peer, nullptr);
+
+  /* The production wedge: state says DIRECT but the salutation never
+     attached a stream, so quic_stream is NULL and every send fails while the
+     relay fallback is blocked by the DIRECT state. */
+  peer->conn_state = CONN_STATE_DIRECT;
+  peer->direct_path.active = 1;
+
+  DispatchEmptyReconnectTick();
+
+  /* The reconnect tick must demote the orphaned DIRECT peer back to RELAY so
+     interim traffic uses the relay path and the retry budget can re-dial. */
+  EXPECT_EQ(peer->conn_state, CONN_STATE_RELAY);
+  EXPECT_EQ(peer->direct_path.active, 0);
+}
+
+// A real DIRECT peer (salutated, stream attached at the salutation site) must
+// NOT be demoted by the sweep — the user's design requirement: a true direct
+// connection works standalone without a relay.
+TEST_F(OrphanedDirectHealTest, SalutatedDirectPeerStaysDirectOnTick) {
+  node_id_t peer_id = {};
+  memset(peer_id.hash, 0x22, NODE_ID_HASH_SIZE);
+  peer_connection_t* peer =
+      connection_manager_add(&network->conn_mgr, &peer_id, NULL, network->pool);
+  ASSERT_NE(peer, nullptr);
+
+  peer->conn_state = CONN_STATE_DIRECT;
+  peer->direct_path.active = 1;
+#ifdef HAS_MSQUIC
+  /* Mirror the salutation handler: stream attached for a real direct peer. */
+  peer->quic_stream = (void*)0x1;
+#endif
+
+  DispatchEmptyReconnectTick();
+
+  EXPECT_EQ(peer->conn_state, CONN_STATE_DIRECT);
+  EXPECT_EQ(peer->direct_path.active, 1);
+}

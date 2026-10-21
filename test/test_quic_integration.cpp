@@ -14,7 +14,9 @@ extern "C" {
 #include "Network/wire.h"
 #include "Network/peer_connection.h"
 #include "Network/network.h"
+#include "Network/peer_book.h"
 #include "Network/quic_listener.h"
+#include "test_ssl_certs.h"
 #include "Scheduler/scheduler.h"
 #include "BlockCache/block_cache.h"
 #include "Timer/timer_actor.h"
@@ -368,6 +370,141 @@ TEST_F(ConnStateIntegration, SymmetricNoUpgrade) {
   EXPECT_EQ(conn_state_get(peer), CONN_STATE_RELAY_ONLY);
 
   test_peer_destroy(peer);
+}
+
+// =====================================================================
+// B2. Direct-upgrade tick vs the STARTED/connected gap (OFFS-255)
+// =====================================================================
+
+// Production (2026-10-20, two-machine network, relay down): the SRFLX direct
+// retry loop promoted a peer to CONN_STATE_DIRECT as soon as its QUIC connect
+// was STARTED, but quic_stream only attaches when the salutation completes —
+// which never happened (peer unreachable, no relay). The peer then had no
+// working transport at all: conn_state_send's DIRECT branch requires the
+// stream and hard-fails, so the relay fallback was dead too, find-block
+// forwarding saw reachable_hops == 0 and failed instantly, and the peer looks
+// connected so nothing re-dialed it.
+//
+// With a real msquic listener, quic_listener_connect to a dead port returns 0
+// (STARTED, async) — exactly the production semantics. The reconnect tick
+// must leave the peer in TRYING_DIRECT so interim sends keep using the relay
+// branch; only the salutation attaches the stream and promotes to DIRECT.
+TEST(ConnStateUpgradeTick, UpgradeTickDoesNotPromoteOnStartedConnect) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  config_t config = config_default();
+  authority_t* authority = authority_create(&config);
+  ASSERT_NE(authority, nullptr);
+
+  /* The msquic OpenSSL backend refuses to load a credential without a
+     certificate file: generate a throwaway self-signed pair and point the
+     authority at it so quic_listener_start succeeds without a CA setup. The
+     authority takes ownership of both path strings (authority_destroy frees
+     them); the files are unlinked after the listener start has loaded them. */
+  char* node_cert_path = nullptr;
+  char* node_key_path = nullptr;
+  if (test_generate_ssl_certs(&node_cert_path, &node_key_path) != 0) {
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
+    GTEST_SKIP() << "test cert generation failed";
+  }
+  authority->node_cert_path = node_cert_path;
+  authority->node_key_path = node_key_path;
+
+  timer_actor_t* timer = timer_actor_create(pool);
+  ASSERT_NE(timer, nullptr);
+
+  block_cache_t* cache =
+      block_cache_create(config, (char*)"/tmp/test_quic_bc3", standard, timer, pool, NULL, 0);
+  ASSERT_NE(cache, nullptr);
+
+  network_t* network = network_create(authority, cache, timer, pool, &config);
+  if (network == nullptr || network->quic_listener == nullptr) {
+    if (network != nullptr) network_destroy(network);
+    block_cache_destroy(cache);
+    timer_actor_destroy(timer);
+    authority_destroy(authority);
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
+    GTEST_SKIP() << "msquic/network init failed";
+  }
+
+  /* The direct-upgrade tick only fires via quic_listener_connect, which needs
+     a started listener (registration + configuration). Port 0 = OS-picked. */
+  int start_result = quic_listener_start(network->quic_listener, "127.0.0.1", 0);
+  if (start_result == 0) {
+    /* The listener has loaded the credential; the throwaway files can go now
+       (msquic read them during ConfigurationLoadCredential). */
+    remove(node_cert_path);
+    remove(node_key_path);
+  } else {
+    remove(node_cert_path);
+    remove(node_key_path);
+    network_destroy(network);
+    block_cache_destroy(cache);
+    timer_actor_destroy(timer);
+    authority_destroy(authority);
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
+    GTEST_SKIP() << "quic listener start failed";
+  }
+
+  /* A peer in TRYING_DIRECT with a known SRFLX pointing at a dead port. The
+     connect below starts asynchronously and never completes, mirroring the
+     production "dialed while the relay was down" scenario. */
+  node_id_t peer_id = {};
+  memset(peer_id.hash, 0x31, NODE_ID_HASH_SIZE);
+  peer_connection_t* peer =
+      connection_manager_add(&network->conn_mgr, &peer_id, NULL, network->pool);
+  ASSERT_NE(peer, nullptr);
+  peer->conn_state = CONN_STATE_TRYING_DIRECT;
+  peer_connection_set_peer_reflexive(peer, "127.0.0.1", 64990);
+  ASSERT_NE(peer->peer_reflexive_host, nullptr);
+
+  peer_book_reconnect_payload_t snapshot;
+  memset(&snapshot, 0, sizeof(snapshot));
+  message_t msg = {};
+  msg.type = PEER_BOOK_RECONNECT;
+  msg.payload = &snapshot;
+  msg.payload_destroy = NULL;
+  network_dispatch(network, &msg);
+
+  /* The tick must NOT promote the peer on a merely-started connect. */
+  EXPECT_NE(conn_state_get(peer), CONN_STATE_DIRECT);
+
+  /* Interim sends must still route via the relay path: DIRECT state with a
+     NULL stream hard-fails, the failure mode observed in production. */
+  wire_ping_t ping = {};
+  ping.message_id = 0xAABBCCDDEEFF0011ULL;
+  ping.timestamp = 1;
+  cbor_item_t* cbor = wire_ping_encode(&ping);
+  ASSERT_NE(cbor, nullptr);
+  EXPECT_EQ(conn_state_send(network, peer, cbor), 0);
+  cbor_decref(&cbor);
+
+  /* Let the async connect failure drain before teardown so the destroy path
+     never races a live SHUTDOWN_COMPLETE callback. */
+  for (int drain_wait_ms = 0; drain_wait_ms < 5000; drain_wait_ms += 25) {
+    if (quic_listener__conn_track_count_for_test(network->quic_listener) == 0) break;
+    platform_sleep_ms(25);
+  }
+
+  network_destroy(network);
+  block_cache_destroy(cache);
+  timer_actor_destroy(timer);
+  authority_destroy(authority);
+  scheduler_pool_wait_for_idle(pool);
+  scheduler_pool_stop(pool);
+  scheduler_pool_destroy(pool);
+#endif
 }
 
 // =====================================================================

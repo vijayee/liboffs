@@ -1740,11 +1740,16 @@ static void network_handle_relay_punch(network_t* network,
   /* Attempt the simultaneous-open connect. */
   peer->direct_attempts++;
   int result = network_connect_peer(network, host_str, punch->reflexive_port);
-  if (result == 0) {
-    conn_state_on_direct_connected(peer);
-  } else {
+  if (result != 0) {
     conn_state_on_direct_failed(peer);
   }
+  /* result == 0 only means the QUIC connect was STARTED, not completed
+     (async). The peer keeps its pre-punch state (TRYING_DIRECT after the
+     upgrade above, RELAY_ONLY when our NAT is symmetric): the relay path
+     stays usable for interim traffic and the salutation handler attaches the
+     stream and promotes to DIRECT. Promoting on STARTED wedged the peer in
+     DIRECT with a NULL stream whenever the simultaneous-open never completed.
+     See OFFS-255. */
 }
 
 // Handle a WIRE_RELAY_CHALLENGE arriving via the relay: the responder signs
@@ -4743,6 +4748,25 @@ static void network_handle_peer_book_reconnect(
    peer's side. Throttled to once per peer per tick window. See audit #18. */
 static void network_attempt_direct_upgrades(network_t* network) {
   if (network == NULL) return;
+
+  /* Self-heal sweep (OFFS-255): a peer can be orphaned in DIRECT with no
+     attached QUIC stream — state promoted without a completed salutation, or
+     a stream lost without the disconnect handler matching the peer's
+     connection handle. conn_state_send hard-fails in that state and blocks
+     the relay fallback, so no transport works. Demote back to RELAY: interim
+     traffic uses the relay path again and the retry budget below can re-dial.
+     A genuinely salutated DIRECT peer always has its stream attached before
+     the promotion, so it is never touched here. */
+  for (size_t index = 0; index < network->conn_mgr.peer_count; index++) {
+    peer_connection_t* peer = network->conn_mgr.peers[index];
+    if (peer == NULL) continue;
+#ifdef HAS_MSQUIC
+    if (peer->conn_state == CONN_STATE_DIRECT && peer->quic_stream == NULL) {
+      conn_state_on_direct_failed(peer);
+    }
+#endif
+  }
+
   if (network->quic_listener == NULL) return;  /* no QUIC support compiled in */
 
   for (size_t index = 0; index < network->conn_mgr.peer_count; index++) {
@@ -4773,17 +4797,15 @@ static void network_attempt_direct_upgrades(network_t* network) {
     peer->direct_attempts++;
     int result = network_connect_peer(network, peer->peer_reflexive_host,
                                        peer->peer_reflexive_port);
-    if (result == 0) {
-      /* The QUIC listener will fire NETWORK_QUIC_CONNECTED, then the
-         salutation handler sets peer->conn_state = DIRECT. We also set
-         it here so conn_state_send immediately uses the direct path
-         before the salutation completes — but only the salutation
-         handler marks the peer relay_verified. */
-      conn_state_on_direct_connected(peer);
-      peer->direct_attempts = 0;
-    } else {
+    if (result != 0) {
       conn_state_on_direct_failed(peer);
     }
+    /* result == 0 only means the QUIC connect was STARTED, not completed
+       (network_connect_peer is async). The peer stays in TRYING_DIRECT: the
+       relay path remains usable for interim traffic (conn_state_send's
+       TRYING_DIRECT branch), the salutation handler attaches the stream and
+       promotes to DIRECT, and direct_attempts keeps bounding the retries so
+       an unreachable peer demotes to RELAY instead of wedging. See OFFS-255. */
   }
 }
 
