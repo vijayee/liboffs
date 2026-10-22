@@ -3181,7 +3181,10 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         cbor_item_t* cbor = wire_find_block_encode(forward);
         peer_connection_t* next_peer = connection_manager_lookup(
             &network->conn_mgr, &next_hops[hop]);
-        if (next_peer != NULL && conn_state_send(network, next_peer, cbor) == 0) {
+        int send_result = next_peer != NULL
+                              ? conn_state_send(network, next_peer, cbor)
+                              : -1;
+        if (send_result == 0) {
           reachable_hops++;
           if (network->log != NULL) {
             message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
@@ -3189,6 +3192,8 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
                                1, &network->hebbian);
           }
         }
+        log_info("find: hop=%s lookup=%d send=%d", next_hops[hop].str,
+                 next_peer != NULL, send_result);
         cbor_decref(&cbor);
         free(forward);
       }
@@ -4511,6 +4516,38 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
   node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
 
+  // Diagnostic (OFFS-254 hunt): dump the routing-relevant state for this
+  // lookup — per-peer connected/conn_state conn-mgr wire, peer-EABF match,
+  // and ring-table node weight/verification. Remove after the cross-peer
+  // retrieval root-cause lands.
+  {
+    char hash_hex[17];
+    static const char hex_digits[] = "0123456789abcdef";
+    for (size_t hex_index = 0; hex_index < 8; hex_index++) {
+      hash_hex[hex_index * 2] = hex_digits[(state.block_hash[hex_index] >> 4) & 0xF];
+      hash_hex[hex_index * 2 + 1] = hex_digits[state.block_hash[hex_index] & 0xF];
+    }
+    hash_hex[16] = '\0';
+    log_info("find: hash=%s peers=%zu", hash_hex, network->conn_mgr.peer_count);
+    for (size_t peer_index = 0; peer_index < network->conn_mgr.peer_count;
+         peer_index++) {
+      peer_connection_t* peer = network->conn_mgr.peers[peer_index];
+      if (peer == NULL) continue;
+      uint32_t eabf_hops = 0;
+      bool eabf_match = peer_eabf_check(peer, state.block_hash, 32, &eabf_hops);
+      net_node_t* ring_node =
+          ring_set_find_by_id(network->rings, &peer->remote_node_id);
+      log_info("find: peer=%s connected=%d conn_state=%d eabf=%u ring=%s "
+               "weight=%.4f relay_verified=%d flags=%u",
+               peer->remote_node_id.str, peer->connected ? 1 : 0,
+               (int)peer->conn_state, eabf_match ? eabf_hops + 1u : 0u,
+               ring_node != NULL ? "yes" : "no",
+               ring_node != NULL ? ring_node->weight : 0.0f,
+               ring_node != NULL && ring_node->relay_verified,
+               ring_node != NULL ? ring_node->flags : 0u);
+    }
+  }
+
   find_block_result_e result = find_block_execute(
       &network->eabf_table,
       &network->eabf_ttl,
@@ -4521,6 +4558,8 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
       next_hops,
       &next_hop_count,
       network_secure_mode(network));
+
+  log_info("find: execute result=%d next_hops=%zu", (int)result, next_hop_count);
 
   switch (result) {
     case FIND_BLOCK_FOUND: {
@@ -4612,7 +4651,10 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
         cbor_item_t* cbor = wire_find_block_encode(forward);
         peer_connection_t* next_peer = connection_manager_lookup(
             &network->conn_mgr, &next_hops[hop]);
-        if (next_peer != NULL && conn_state_send(network, next_peer, cbor) == 0) {
+        int send_result = next_peer != NULL
+                              ? conn_state_send(network, next_peer, cbor)
+                              : -1;
+        if (send_result == 0) {
           reachable_hops++;
           if (network->log != NULL) {
             message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
@@ -4620,6 +4662,8 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
                                1, &network->hebbian);
           }
         }
+        log_info("find: hop=%s lookup=%d send=%d", next_hops[hop].str,
+                 next_peer != NULL, send_result);
         cbor_decref(&cbor);
         free(forward);
       }
