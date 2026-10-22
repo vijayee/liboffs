@@ -17,6 +17,57 @@
 #define REFCOUNTER_NULL_LOG_MAX 20
 static ATOMIC(uint64_t) refcounter_null_deref_count = ATOMIC_VAR_INIT(0);
 
+#ifdef _WIN32
+/* Capture a short symbolized backtrace for the first few NULL derefs: the
+   calling site is the actual bug and a numeric stack pinpoints it cheaply
+   (dbghelp resolves against the running image when a matching PDB ships
+   beside the exe — the diagnosis builds do). */
+#include <windows.h>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
+
+static void refcounter_log_null_backtrace(void) {
+  void* frames[8];
+  USHORT captured = CaptureStackBackTrace(2, 8, frames, NULL);
+  HANDLE self = GetCurrentProcess();
+  static ATOMIC(uint8_t) sym_ready = 0;
+  uint8_t expected = 0;
+  if (atomic_compare_exchange_strong(&sym_ready, &expected, 1)) {
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    SymInitialize(self, NULL, TRUE);
+  }
+  char line[512];
+  int pos = snprintf(line, sizeof(line),
+                     "refcounter: NULL dereference backtrace:");
+  for (USHORT i = 0; i < captured && pos > 0; i++) {
+    char name[192];
+    IMAGEHLP_SYMBOLW64* sym = (IMAGEHLP_SYMBOLW64*)calloc(
+        1, sizeof(IMAGEHLP_SYMBOLW64) + sizeof(name));
+    if (sym == NULL) break;
+    sym->SizeOfStruct = sizeof(IMAGEHLP_SYMBOLW64);
+    sym->MaxNameLength = sizeof(name) - 1;
+    DWORD64 disp = 0;
+    IMAGEHLP_SYMBOLW64* got = sym;
+#pragma warning(push)
+#pragma warning(disable: 4152)
+    if (SymFromAddr(self, (DWORD64)frames[i], &disp, got) &&
+        WideCharToMultiByte(CP_UTF8, 0, got->Name, -1, name,
+                            sizeof(name), NULL, NULL) > 0) {
+#pragma warning(pop)
+      pos += snprintf(line + pos, sizeof(line) - (size_t)pos,
+                      " %s+%llu", name, (unsigned long long)disp);
+    } else {
+      pos += snprintf(line + pos, sizeof(line) - (size_t)pos,
+                      " %p", frames[i]);
+    }
+    free(got);
+  }
+  log_error("%s", line);
+}
+#else
+static void refcounter_log_null_backtrace(void) {}
+#endif
+
 static void refcounter_log_null_deref(void) {
   uint64_t n = atomic_fetch_add_explicit(&refcounter_null_deref_count, 1,
                                          memory_order_relaxed);
@@ -25,6 +76,7 @@ static void refcounter_log_null_deref(void) {
               "NULL pointer; tolerated, but the calling site is a bug "
               "(2026-10-22 daemon-crash hunt)",
               (unsigned long long)(n + 1));
+    refcounter_log_null_backtrace();
   }
 }
 
