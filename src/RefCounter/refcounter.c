@@ -2,9 +2,31 @@
 // Created by victor on 3/18/25.
 //
 #include "refcounter.h"
+#include "../Util/log.h"
 #include <stdint.h>
 #include <limits.h>
 #include <stdatomic.h>
+
+/* Rate-limited NULL-dereference visibility. Every destroy path funnels
+   through refcounter_dereference / refcounter_dereference_is_zero, so a
+   NULL argument here used to crash the process mid-flight (2026-10-22
+   cross-peer hunt: rcx = 0 AV inside dereference_is_zero while the daemon
+   was churning find-block requests). Nulls are now tolerated (a NULL has
+   nothing to decrement) but the first occurrences are logged loudly so the
+   caller-level logic error stays visible. */
+#define REFCOUNTER_NULL_LOG_MAX 20
+static ATOMIC(uint64_t) refcounter_null_deref_count = ATOMIC_VAR_INIT(0);
+
+static void refcounter_log_null_deref(void) {
+  uint64_t n = atomic_fetch_add_explicit(&refcounter_null_deref_count, 1,
+                                         memory_order_relaxed);
+  if (n < REFCOUNTER_NULL_LOG_MAX) {
+    log_error("refcounter: NULL dereference #%llu — the caller destroyed a "
+              "NULL pointer; tolerated, but the calling site is a bug "
+              "(2026-10-22 daemon-crash hunt)",
+              (unsigned long long)(n + 1));
+  }
+}
 
 void refcounter_init(refcounter_t* refcounter) {
 #ifndef OFFS_ATOMIC
@@ -31,6 +53,10 @@ void refcounter_init_actor(refcounter_t* refcounter) {
 }
 
 void refcounter_yield(refcounter_t* refcounter) {
+  if (refcounter == NULL) {
+    refcounter_log_null_deref();
+    return;
+  }
 #ifndef OFFS_ATOMIC
   platform_mutex_lock(refcounter->lock);
   refcounter->yield++;
@@ -92,6 +118,10 @@ void* refcounter_reference(refcounter_t* refcounter) {
 }
 
 void refcounter_dereference(refcounter_t* refcounter) {
+  if (refcounter == NULL) {
+    refcounter_log_null_deref();
+    return;
+  }
 #ifndef OFFS_ATOMIC
   platform_mutex_lock(refcounter->lock);
   if ((refcounter->yield == 0) && (refcounter->count > 0)) {
@@ -122,6 +152,10 @@ void refcounter_dereference(refcounter_t* refcounter) {
 }
 
 bool refcounter_dereference_is_zero(refcounter_t* refcounter) {
+  if (refcounter == NULL) {
+    refcounter_log_null_deref();
+    return false;  /* nothing to decrement; the caller must not free */
+  }
 #ifndef OFFS_ATOMIC
   platform_mutex_lock(refcounter->lock);
   if ((refcounter->yield == 0) && (refcounter->count > 0)) {
@@ -159,6 +193,10 @@ bool refcounter_dereference_is_zero(refcounter_t* refcounter) {
 }
 
 uint16_t refcounter_count(refcounter_t* refcounter) {
+  if (refcounter == NULL) {
+    refcounter_log_null_deref();
+    return 0;
+  }
 #ifndef OFFS_ATOMIC
   platform_mutex_lock(refcounter->lock);
   uint16_t count = refcounter->count;
