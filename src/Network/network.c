@@ -3349,6 +3349,26 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
                        response->found ? 0 : 2, &network->hebbian);
   }
 
+  /* Diagnostic (OFFS-254 hunt): every received find-block RESPONSE, with the
+     carried-data length, so "holder answered but the reply was lost or the
+     data was missing" is visible from the requester side. Remove with the
+     other hunt diagnostics. */
+  {
+    char hash_hex[17];
+    static const char hex_digits[] = "0123456789abcdef";
+    for (size_t hex_index = 0; hex_index < 8; hex_index++) {
+      hash_hex[hex_index * 2] =
+          hex_digits[(response->block_hash[hex_index] >> 4) & 0xF];
+      hash_hex[hex_index * 2 + 1] =
+          hex_digits[response->block_hash[hex_index] & 0xF];
+    }
+    hash_hex[16] = '\0';
+    log_info("find:rxresp hash=%s found=%u data_len=%u id=%llu",
+             hash_hex, (unsigned)response->found,
+             (unsigned)response->block_data_len,
+             (unsigned long long)response->message_id);
+  }
+
   if (response->found) {
     // Block found — apply Hebbian learning rules along the response path
     uint64_t latency_ms = 0;
