@@ -999,13 +999,20 @@ TEST(QuicIntegration, ConnTrackAddIsIdempotent) {
    drain at the end) forever, and the service sat in StopPending until an
    external kill. Mirror that ordering here and assert network_destroy
    returns bounded. */
+static quic_listener_t* volatile g_wedge_dialer_target = NULL;
+static quic_listener_t* volatile g_wedge_stop_requested = NULL;
+
+#ifdef _WIN32
 static DWORD g_wedge_fired = 0;
 static HANDLE g_wedge_stop_event = NULL;
-static quic_listener_t* volatile g_wedge_dialer_target = NULL;
+#endif
 
 /* Keeps dials arriving while the teardown runs (mycroft's reconnect tick
    redials every ~20s; a dial landing during quic_listener_destroy creates a
-   registration-held connection the teardown may never shut down). */
+   registration-held connection the teardown may never shut down).
+   Windows: a CreateThread dialer + event; POSIX: a detached pthread whose
+   loop checks g_wedge_stop_requested. */
+#ifdef _WIN32
 static DWORD CALLBACK _wedge_dialer(LPVOID arg) {
   (void)arg;
   while (WaitForSingleObject(g_wedge_stop_event, 0) != WAIT_OBJECT_0) {
@@ -1021,7 +1028,28 @@ static DWORD CALLBACK _wedge_dialer(LPVOID arg) {
   }
   return 0;
 }
+#else
+#include <pthread.h>
+#include <time.h>
+static pthread_t _wedge_dialer_thread;
 
+static void* _wedge_dialer(void* arg) {
+  (void)arg;
+  while (__atomic_load_n(&g_wedge_stop_requested, __ATOMIC_ACQUIRE) == NULL) {
+    quic_listener_t* listener = __atomic_exchange_n(
+        &g_wedge_dialer_target, (quic_listener_t*)NULL, __ATOMIC_ACQ_REL);
+    if (listener == NULL) {
+      platform_sleep_ms(50);
+      continue;
+    }
+    quic_listener_connect(listener, "127.0.0.1", 23411);
+    platform_sleep_ms(150);
+  }
+  return NULL;
+}
+#endif
+
+#ifdef _WIN32
 static DWORD CALLBACK _wedge_watchdog(LPVOID arg) {
   (void)arg;
   Sleep(20000);
@@ -1033,16 +1061,22 @@ static DWORD CALLBACK _wedge_watchdog(LPVOID arg) {
   TerminateProcess(GetCurrentProcess(), 2);
   return 0;
 }
+#endif
 
 TEST(QuicIntegration, TeardownAfterPoolStopBounds) {
 #ifndef HAS_MSQUIC
   GTEST_SKIP() << "msquic not available";
 #else
+#ifndef _WIN32
+  /* POSIX: rely on the assert below; no in-process watchdog. */
+#endif
+#ifdef _WIN32
   g_wedge_fired = 0;
   g_wedge_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
   ASSERT_NE(g_wedge_stop_event, (HANDLE)NULL);
   HANDLE watchdog = CreateThread(NULL, 0, _wedge_watchdog, NULL, 0, NULL);
   ASSERT_NE(watchdog, (HANDLE)NULL);
+#endif
 
   scheduler_pool_t* pool = scheduler_pool_create(2);
   ASSERT_NE(pool, nullptr);
@@ -1100,18 +1134,35 @@ TEST(QuicIntegration, TeardownAfterPoolStopBounds) {
 
   /* Keep dialing during the teardown phase, like the daemon's peers' reconnect
      ticks do. */
+#ifdef _WIN32
   g_wedge_dialer_target = network->quic_listener;
   HANDLE dialer = CreateThread(NULL, 0, _wedge_dialer, NULL, 0, NULL);
   ASSERT_NE(dialer, (HANDLE)NULL);
+#else
+  g_wedge_dialer_target = network->quic_listener;
+  ASSERT_EQ(pthread_create(&_wedge_dialer_thread, NULL, _wedge_dialer, NULL), 0);
+#endif
 
   /* The daemon's teardown ordering: the pool join BEFORE the network
      destroy (offsd _shutdown phases 3c/4). */
   scheduler_pool_stop(pool);
 
+#ifndef _WIN32
+  struct timespec t_start;
+  clock_gettime(CLOCK_MONOTONIC, &t_start);
+  DWORD tick = (DWORD)(t_start.tv_sec * 1000 + t_start.tv_nsec / 1000000);
+#else
   DWORD tick = GetTickCount();
+#endif
   network_destroy(network);
+#ifndef _WIN32
+  clock_gettime(CLOCK_MONOTONIC, &t_start);
+  DWORD elapsed = (DWORD)(t_start.tv_sec * 1000 + t_start.tv_nsec / 1000000) - tick;
+  __atomic_store_n(&g_wedge_stop_requested, (quic_listener_t*)network, __ATOMIC_RELEASE);
+#else
   DWORD elapsed = GetTickCount() - tick;
   SetEvent(g_wedge_stop_event);
+#endif
   EXPECT_LT(elapsed, (DWORD)15000)
       << "network_destroy took " << elapsed << "ms after pool stop";
 
