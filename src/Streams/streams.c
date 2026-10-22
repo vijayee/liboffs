@@ -541,6 +541,17 @@ void stream_deactivate(stream_t* stream, async_error_t* error) {
     return;
   }
   stream->is_deactivated = 1;
+  {
+    /* Diagnostic (OFFS-254 hunt): name the deactivation source at runtime —
+       "Stream error" surfaces here first. Remove with the other hunt
+       diagnostics. */
+    if (error != NULL && error->message != NULL) {
+      log_error("stream: deactivate stream=%p error=%s", (void*)stream,
+                error->message);
+    } else {
+      log_error("stream: deactivate stream=%p error=<null>", (void*)stream);
+    }
+  }
   stream_notify_payload_t* error_payload = get_clear_memory(sizeof(stream_notify_payload_t));
   error_payload->event = error_event;
   error_payload->payload = (void*) error;
