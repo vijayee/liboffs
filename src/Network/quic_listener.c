@@ -329,11 +329,13 @@ static QUIC_STATUS QUIC_API quic_stream_callback(
   quic_stream_context_t* stream_ctx = (quic_stream_context_t*)context;
   switch (event->Type) {
     case QUIC_STREAM_EVENT_RECEIVE: {
+      uint64_t consumed = 0;
       if (stream_ctx->framer != NULL) {
         // Feed received bytes into the framer and extract complete frames
         for (uint32_t index = 0; index < event->RECEIVE.BufferCount; index++) {
           const QUIC_BUFFER* buffer = &event->RECEIVE.Buffers[index];
           stream_framer_feed(stream_ctx->framer, buffer->Buffer, buffer->Length);
+          consumed += buffer->Length;
         }
         size_t msg_len = 0;
         uint8_t* msg_data = NULL;
@@ -347,8 +349,20 @@ static QUIC_STATUS QUIC_API quic_stream_callback(
           uint8_t* copy = get_clear_memory(buffer->Length);
           if (copy == NULL) continue;
           memcpy(copy, buffer->Buffer, buffer->Length);
+          consumed += buffer->Length;
           _quic_process_deframed(stream_ctx, copy, buffer->Length);
         }
+      }
+      if (consumed > 0) {
+        /* Complete the delivery: msquic holds back all further RECEIVE
+           indications (and the flow-control window never opens) until the
+           app completes the consumed length. Omitting this wedged the reply
+           channel after the first receive batch — the peer's found replies
+           beyond it sat undelivered (2026-10-22 cross-peer hunt: transfers
+           stalled at 3-4 blocks, "Block not found on network"). The callback
+           receives the stream handle directly, which also covers accepted
+           peer streams whose context carries no persistent_stream. */
+        stream_ctx->listener->msquic->StreamReceiveComplete(stream, consumed);
       }
       break;
     }
