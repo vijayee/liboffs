@@ -991,3 +991,133 @@ TEST(QuicIntegration, ConnTrackAddIsIdempotent) {
 #endif
 #endif
 }
+
+/* Daemon stop-wedge reproduction (thread-stack dumps at 15s into three
+   wedged stops, 2026-10-21/22): with a live loopback connection open, the
+   offsd teardown ordering — scheduler_pool_stop's worker joins run BEFORE
+   quic_listener_destroy — parked RegistrationClose (quic_listener.c, the
+   drain at the end) forever, and the service sat in StopPending until an
+   external kill. Mirror that ordering here and assert network_destroy
+   returns bounded. */
+static DWORD g_wedge_fired = 0;
+static HANDLE g_wedge_stop_event = NULL;
+static quic_listener_t* volatile g_wedge_dialer_target = NULL;
+
+/* Keeps dials arriving while the teardown runs (mycroft's reconnect tick
+   redials every ~20s; a dial landing during quic_listener_destroy creates a
+   registration-held connection the teardown may never shut down). */
+static DWORD CALLBACK _wedge_dialer(LPVOID arg) {
+  (void)arg;
+  while (WaitForSingleObject(g_wedge_stop_event, 0) != WAIT_OBJECT_0) {
+    quic_listener_t* listener =
+        (quic_listener_t*)InterlockedExchangePointer(
+            (PVOID volatile*)&g_wedge_dialer_target, NULL);
+    if (listener == NULL) {
+      platform_sleep_ms(50);
+      continue;
+    }
+    quic_listener_connect(listener, "127.0.0.1", 23411);
+    platform_sleep_ms(150);
+  }
+  return 0;
+}
+
+static DWORD CALLBACK _wedge_watchdog(LPVOID arg) {
+  (void)arg;
+  Sleep(20000);
+  /* Nothing should survive 20s of teardown. */
+  fprintf(stderr, "wedge test: teardown exceeded 20s, force-exiting\n");
+  fflush(stderr);
+  g_wedge_fired = 1;
+  fflush(stderr);
+  TerminateProcess(GetCurrentProcess(), 2);
+  return 0;
+}
+
+TEST(QuicIntegration, TeardownAfterPoolStopBounds) {
+#ifndef HAS_MSQUIC
+  GTEST_SKIP() << "msquic not available";
+#else
+  g_wedge_fired = 0;
+  g_wedge_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+  ASSERT_NE(g_wedge_stop_event, (HANDLE)NULL);
+  HANDLE watchdog = CreateThread(NULL, 0, _wedge_watchdog, NULL, 0, NULL);
+  ASSERT_NE(watchdog, (HANDLE)NULL);
+
+  scheduler_pool_t* pool = scheduler_pool_create(2);
+  ASSERT_NE(pool, nullptr);
+  scheduler_pool_start(pool);
+
+  config_t config = config_default();
+  authority_t* authority = authority_create(&config);
+  ASSERT_NE(authority, nullptr);
+
+  /* quic_listener_start refuses to load a credential without a certificate:
+     generate a throwaway self-signed pair (the same pattern ConnStateUpgrade
+     uses). The authority owns the path strings. */
+  char* node_cert_path = nullptr;
+  char* node_key_path = nullptr;
+  if (test_generate_ssl_certs(&node_cert_path, &node_key_path) != 0) {
+    authority_destroy(authority);
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
+    GTEST_SKIP() << "test cert generation failed";
+  }
+  authority->node_cert_path = node_cert_path;
+  authority->node_key_path = node_key_path;
+
+  timer_actor_t* timer = timer_actor_create(pool);
+  ASSERT_NE(timer, nullptr);
+
+  block_cache_t* cache = block_cache_create(config, (char*)"/tmp/test_wedge_bc", standard, timer, pool, NULL, 0);
+  ASSERT_NE(cache, nullptr);
+
+  network_t* network = network_create(authority, cache, timer, pool, &config);
+  if (network == nullptr) {
+    block_cache_destroy(cache);
+    timer_actor_destroy(timer);
+    authority_destroy(authority);
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
+    GTEST_SKIP() << "msquic initialization failed";
+  }
+
+  /* Listen on a loopback port and self-connect so the tracker holds a live
+     connection (both the dialer side and the accepted side), mirroring the
+     daemon's connected-peer state at stop time. msquic returns a transient
+     UNREACHABLE for loopback self-dials (see relay_client.c's UNREACHABLE
+     comment), so retry until the tracker holds the accepted connection. */
+  ASSERT_EQ(quic_listener_start(network->quic_listener, "127.0.0.1", 23411), 0);
+  size_t tracked = 0;
+  for (int dial = 0; dial < 8; dial++) {
+    (void)quic_listener_connect(network->quic_listener, "127.0.0.1", 23411);
+    platform_sleep_ms(1200);
+    tracked = network->quic_listener->connection_count;
+    if (tracked >= 1) break;
+  }
+
+  /* Keep dialing during the teardown phase, like the daemon's peers' reconnect
+     ticks do. */
+  g_wedge_dialer_target = network->quic_listener;
+  HANDLE dialer = CreateThread(NULL, 0, _wedge_dialer, NULL, 0, NULL);
+  ASSERT_NE(dialer, (HANDLE)NULL);
+
+  /* The daemon's teardown ordering: the pool join BEFORE the network
+     destroy (offsd _shutdown phases 3c/4). */
+  scheduler_pool_stop(pool);
+
+  DWORD tick = GetTickCount();
+  network_destroy(network);
+  DWORD elapsed = GetTickCount() - tick;
+  SetEvent(g_wedge_stop_event);
+  EXPECT_LT(elapsed, (DWORD)15000)
+      << "network_destroy took " << elapsed << "ms after pool stop";
+
+  block_cache_destroy(cache);
+  timer_actor_destroy(timer);
+  authority_destroy(authority);
+  scheduler_pool_destroy(pool);
+#endif
+}

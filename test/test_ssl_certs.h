@@ -30,13 +30,24 @@ static int test_generate_ssl_certs(char** cert_path, char** key_path) {
   *cert_path = NULL;
   *key_path = NULL;
 
-  // Generate an Ed25519 key pair.
-  EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, NULL);
-  if (pctx == NULL) return -1;
-  if (EVP_PKEY_keygen_init(pctx) <= 0) { EVP_PKEY_CTX_free(pctx); return -1; }
+  // Generate an RSA-2048 key pair. RSA (not Ed25519): the Windows
+  // PKCS12->PFXImportCertStore path (Schannel/CNG) cannot materialize an
+  // Ed25519 private key into a key container — the import dies with
+  // NTE_BAD_KEYSET (0x8009030d) and quic_listener_start fails. RSA keys
+  // import cleanly on both platforms.
   EVP_PKEY* pkey = NULL;
-  if (EVP_PKEY_keygen(pctx, &pkey) <= 0) { EVP_PKEY_CTX_free(pctx); return -1; }
-  EVP_PKEY_CTX_free(pctx);
+  {
+    EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
+    if (pctx == NULL) return -1;
+    if (EVP_PKEY_keygen_init(pctx) <= 0) {
+      EVP_PKEY_CTX_free(pctx); return -1;
+    }
+    if (EVP_PKEY_CTX_set_rsa_keygen_bits(pctx, 2048) <= 0) {
+      EVP_PKEY_CTX_free(pctx); return -1;
+    }
+    if (EVP_PKEY_keygen(pctx, &pkey) <= 0) { EVP_PKEY_CTX_free(pctx); return -1; }
+    EVP_PKEY_CTX_free(pctx);
+  }
 
   // Build a self-signed certificate.
   X509* cert = X509_new();
@@ -49,7 +60,7 @@ static int test_generate_ssl_certs(char** cert_path, char** key_path) {
   X509_NAME* name = X509_get_subject_name(cert);
   X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (const unsigned char*)"test", -1, -1, 0);
   X509_set_issuer_name(cert, name);
-  if (X509_sign(cert, pkey, NULL) == 0) {  // Ed25519: NULL digest (no prehash)
+  if (X509_sign(cert, pkey, EVP_sha256()) == 0) {
     X509_free(cert); EVP_PKEY_free(pkey); return -1;
   }
 
