@@ -54,6 +54,7 @@ if (BUILD_TESTING)
             test_load_wire.cpp
             test_peer_payload.cpp
             test_index.cpp
+            test_ring_set_nullid.cpp
             test_section.cpp
             test_block_cache.cpp
             test_block_cache_resize.cpp

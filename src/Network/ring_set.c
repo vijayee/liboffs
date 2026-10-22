@@ -3,6 +3,7 @@
 //
 
 #include "ring_set.h"
+#include "node_id.h"
 #include "../Util/allocator.h"
 #include "../Platform/platform_random.h"
 #include <math.h>
@@ -67,6 +68,16 @@ ring_t* ring_set_get_ring(ring_set_t* set, uint32_t latency_us) {
 
 int ring_set_insert(ring_set_t* set, net_node_t* node, uint32_t latency_us) {
   if (set == NULL || node == NULL) return -1;
+  if (node_id_is_null(&node->id)) {
+    /* Zero-id ring entries are routing poison: they pass the weight gate
+       once gossip rewards accumulate and find_block then routes to an empty
+       node id (connection_manager lookup matches nothing sane, replies are
+       lost) — and they SELF-PROPAGATE: every gossiper re-broadcasts its
+       ring targets verbatim, so one unvalidated insert spreads to peers
+       (observed: 5 zero-id ring entries on A, 9 on mycroft, 2026-10-22).
+       Reject at the choke point. */
+    return -2;
+  }
   int ring_index = ring_set_get_ring_index(set, latency_us);
   ring_t* ring = &set->rings[ring_index];
 

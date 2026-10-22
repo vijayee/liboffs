@@ -1375,6 +1375,12 @@ static void network_add_node_to_ring(network_t* network,
                                       uint16_t port,
                                       const wire_addr_t* v6_addr) {
   if (network == NULL || node_id == NULL) return;
+  if (node_id_is_null(node_id)) {
+    /* Zero-id gossip targets/senders are routing poison that self-propagates
+       (see ring_set_insert) — skip them at the wire boundary before the
+       success heuristics can promote their weight. */
+    return;
+  }
 
   // Check if already in ring table — skip duplicate insertion
   net_node_t* existing = ring_set_find_by_id(network->rings, node_id);
@@ -2960,6 +2966,11 @@ static void network_handle_find_node_response(network_t* network, message_t* msg
 
   // Insert responding peers into our ring table based on measured latency
   for (uint8_t index = 0; index < response->closest_count; index++) {
+    if (node_id_is_null(&response->closest_nodes[index])) {
+      /* A responder's zero-id entry would be routing poison (self-propagating
+         via gossip and FIND_NODE echoes) — skip unvalidated wire ids. */
+      continue;
+    }
     if (ring_set_find_by_id(network->rings, &response->closest_nodes[index]) != NULL) {
       continue;
     }
