@@ -70,6 +70,9 @@ index_entry_t* index_entry_from(buffer_t* hash, size_t section_id, size_t sectio
 }
 
 void index_entry_destroy(index_entry_t* entry) {
+  if (entry == NULL) {
+    return;
+  }
   refcounter_dereference((refcounter_t*) entry);
   if (refcounter_count((refcounter_t*) entry) == 0) {
     refcounter_destroy_lock((refcounter_t *) entry);
@@ -182,12 +185,24 @@ index_node_t* index_node_create_from_leaves(index_node_t* left, index_node_t* ri
 }
 
 void index_node_destroy(index_node_t* node) {
+  if (node == NULL) {
+    return;
+  }
   refcounter_dereference((refcounter_t*) node);
   if (refcounter_count((refcounter_t*) node) == 0) {
     refcounter_destroy_lock((refcounter_t*) node);
     if (node->bucket == NULL) {
-      index_node_destroy(node->left);
-      index_node_destroy(node->right);
+      /* Branch nodes with a NULL child are an observed-in-the-field corrupt
+         state (the read walkers log it as an error and skip — see
+         index_get_from_node's "branch node ... NULL child"). Destroy must
+         tolerate it the same way instead of refcounter_dereference(NULL)
+         (crash: the 2026-10-22 daemon AV with rcx = 0). */
+      if (node->left != NULL) {
+        index_node_destroy(node->left);
+      }
+      if (node->right != NULL) {
+        index_node_destroy(node->right);
+      }
     } else {
       for (int i = 0; i < node->bucket->length; i++) {
         index_entry_destroy(node->bucket->data[i]);
@@ -1123,9 +1138,19 @@ void index_destroy(index_t* index) {
   }
 }
 void index_destroy_node(index_t* index, index_node_t* node) {
+  /* NULL-safe like index_node_destroy: the observed corrupt branch-with-NULL-
+     child tree state must not crash teardown (a NULL `node` here also covers
+     an empty index destroying a NULL root). */
+  if (node == NULL) {
+    return;
+  }
   if (node->bucket == NULL) {
-    index_destroy_node(index, node->left);
-    index_destroy_node(index, node->right);
+    if (node->left != NULL) {
+      index_destroy_node(index, node->left);
+    }
+    if (node->right != NULL) {
+      index_destroy_node(index, node->right);
+    }
   } else {
     for (int i = 0; i < node->bucket->length; i++) {
       index_entry_t* cur_entry = node->bucket->data[i];

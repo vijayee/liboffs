@@ -128,6 +128,41 @@ namespace indexTest {
     EXPECT_EQ(cbor_to_index_entry(NULL), nullptr);
   }
 
+  TEST(IndexNodeCorrupt, DestroyNullNodeIsSafe) {
+    // The daemon destroyed itself once with refcounter_dereference(NULL)
+    // (rcx = 0 AV) when index_node_destroy ran without a NULL base case.
+    index_node_destroy(nullptr);
+    index_destroy_node(nullptr, nullptr);
+  }
+
+  TEST(IndexNodeCorrupt, DestroyBranchWithNullChildIsSafe) {
+    // A branch node with a NULL child is an observed-in-the-field corrupt
+    // tree state the read walkers log and skip ("branch node ... NULL
+    // child"). Destroying it must not crash either.
+    index_node_t* node = index_node_create(4);
+    node->bucket = NULL;
+    node->left = NULL;
+    node->right = NULL;
+    index_node_destroy(node);  // frees the node (refcount 1 -> 0)
+    index_destroy_node(nullptr, nullptr);
+  }
+
+  TEST(IndexNodeCorrupt, DestroyBranchWithNullChildChildren) {
+    // Two corrupt branch nodes linked as parent -> NULL-child branch: the
+    // recursion must skip the NULL child, not dereference it (the daemon
+    // crash in the 2026-10-22 hunt hit exactly this shape).
+    index_node_t* child = index_node_create(4);
+    child->bucket = NULL;
+    child->left = NULL;
+    child->right = NULL;
+    index_node_t* parent = index_node_create(4);
+    parent->bucket = NULL;
+    parent->left = child;
+    parent->right = NULL;
+    index_node_destroy(parent);  // frees subtree through the corrupt link
+    index_destroy_node(nullptr, nullptr);
+  }
+
   class TestIndex : public testing::Test {
   public:
     block_t* blocks[8];
