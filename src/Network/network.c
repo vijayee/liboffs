@@ -2991,6 +2991,24 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
     buffer_t* hash_buf = buffer_create_from_pointer_copy(find->block_hash, 32);
     if (hash_buf != NULL) {
       index_entry_t* entry = index_peek(network->block_cache->index, hash_buf);
+      {
+        /* Diagnostic (OFFS-254 hunt): log the wire-received find's local
+           peek outcome, so "holder silently answers not-found despite
+           serving the file locally" is visible. Remove with the other hunt
+           diagnostics. */
+        char hash_hex[17];
+        static const char hex_digits[] = "0123456789abcdef";
+        for (size_t hex_index = 0; hex_index < 8; hex_index++) {
+          hash_hex[hex_index * 2] =
+              hex_digits[(find->block_hash[hex_index] >> 4) & 0xF];
+          hash_hex[hex_index * 2 + 1] = hex_digits[find->block_hash[hex_index] & 0xF];
+        }
+        hash_hex[16] = '\0';
+        log_info("find:rx hash=%s peek=%s ttl=%u path_len=%u", hash_hex,
+                 entry == NULL ? "miss"
+                              : (index_entry_is_servable(entry) ? "hit" : "ephemeral"),
+                 find->ttl, (unsigned)find->path_len);
+      }
       if (entry != NULL && !index_entry_is_servable(entry)) {
         // Ephemeral blocks are local-only — treat as not-found for peers so
         // the request flows into the normal remote-search path below.

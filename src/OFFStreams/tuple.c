@@ -16,6 +16,14 @@ tuple_t* tuple_create(size_t capacity) {
 }
 
 void tuple_destroy(tuple_t* tuple) {
+  /* NULL-safe: DESTROY sets the field to NULL, so a double-destroy or a
+     cleanup racing a completed cleanup reaches here with NULL — crashing
+     refcounter_dereference_is_zero (rcx = 0) was the daemon killer in the
+     2026-10-22 cross-peer hunt (backtrace: readable_off_stream_dispatch →
+     tuple_destroy with NULL). */
+  if (tuple == NULL) {
+    return;
+  }
   if (refcounter_dereference_is_zero((refcounter_t*) tuple)) {
     for (size_t i = 0; i < tuple->count; i++) {
       if (tuple->hashes[i] != NULL) {
