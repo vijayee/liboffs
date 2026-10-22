@@ -1147,23 +1147,23 @@ TEST(QuicIntegration, TeardownAfterPoolStopBounds) {
      destroy (offsd _shutdown phases 3c/4). */
   scheduler_pool_stop(pool);
 
-#ifndef _WIN32
+#ifdef _WIN32
+  DWORD tick = GetTickCount();
+#else
   struct timespec t_start;
   clock_gettime(CLOCK_MONOTONIC, &t_start);
-  DWORD tick = (DWORD)(t_start.tv_sec * 1000 + t_start.tv_nsec / 1000000);
-#else
-  DWORD tick = GetTickCount();
+  long long tick = t_start.tv_sec * 1000LL + t_start.tv_nsec / 1000000;
 #endif
   network_destroy(network);
-#ifndef _WIN32
-  clock_gettime(CLOCK_MONOTONIC, &t_start);
-  DWORD elapsed = (DWORD)(t_start.tv_sec * 1000 + t_start.tv_nsec / 1000000) - tick;
-  __atomic_store_n(&g_wedge_stop_requested, (quic_listener_t*)network, __ATOMIC_RELEASE);
-#else
+#ifdef _WIN32
   DWORD elapsed = GetTickCount() - tick;
   SetEvent(g_wedge_stop_event);
+#else
+  clock_gettime(CLOCK_MONOTONIC, &t_start);
+  long long elapsed = t_start.tv_sec * 1000LL + t_start.tv_nsec / 1000000 - tick;
+  __atomic_store_n(&g_wedge_stop_requested, (quic_listener_t*)network, __ATOMIC_RELEASE);
 #endif
-  EXPECT_LT(elapsed, (DWORD)15000)
+  EXPECT_LT(elapsed, 15000LL)
       << "network_destroy took " << elapsed << "ms after pool stop";
 
   block_cache_destroy(cache);
