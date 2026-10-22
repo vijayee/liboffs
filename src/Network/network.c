@@ -3288,8 +3288,22 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
                                1, &network->hebbian);
           }
         }
-        log_info("find: hop=%s lookup=%d send=%d", next_hops[hop].str,
-                 next_peer != NULL, send_result);
+        {
+          /* Diagnostic (OFFS-254 hunt): the node id's str is often unset for
+             gossip-built ring nodes — print the hash hex so the actual hop
+             is identifiable. Remove with the other hunt diagnostics. */
+          char hop_hex[17];
+          static const char hex_digits[] = "0123456789abcdef";
+          for (size_t hex_index = 0; hex_index < 8; hex_index++) {
+            hop_hex[hex_index * 2] =
+                hex_digits[(next_hops[hop].hash[hex_index] >> 4) & 0xF];
+            hop_hex[hex_index * 2 + 1] =
+                hex_digits[next_hops[hop].hash[hex_index] & 0xF];
+          }
+          hop_hex[16] = '\0';
+          log_info("find: hop=%s/%s lookup=%d send=%d", next_hops[hop].str,
+                   hop_hex, next_peer != NULL, send_result);
+        }
         cbor_decref(&cbor);
         free(forward);
       }
@@ -4769,8 +4783,22 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
                                1, &network->hebbian);
           }
         }
-        log_info("find: hop=%s lookup=%d send=%d", next_hops[hop].str,
-                 next_peer != NULL, send_result);
+        {
+          /* Diagnostic (OFFS-254 hunt): the node id's str is often unset for
+             gossip-built ring nodes — print the hash hex so the actual hop
+             is identifiable. Remove with the other hunt diagnostics. */
+          char hop_hex[17];
+          static const char hex_digits[] = "0123456789abcdef";
+          for (size_t hex_index = 0; hex_index < 8; hex_index++) {
+            hop_hex[hex_index * 2] =
+                hex_digits[(next_hops[hop].hash[hex_index] >> 4) & 0xF];
+            hop_hex[hex_index * 2 + 1] =
+                hex_digits[next_hops[hop].hash[hex_index] & 0xF];
+          }
+          hop_hex[16] = '\0';
+          log_info("find: hop=%s/%s lookup=%d send=%d", next_hops[hop].str,
+                   hop_hex, next_peer != NULL, send_result);
+        }
         cbor_decref(&cbor);
         free(forward);
       }
