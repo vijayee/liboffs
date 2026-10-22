@@ -660,10 +660,16 @@ static void _unix_handle_get(unix_connection_t* conn, cbor_item_t* frame) {
 
   size_t descriptor_pad = 32;
 
+  /* Network-aware streams: a descriptor/tuple miss on a non-network-aware
+   * stream deactivates it with "Block not found in cache" without ever
+   * consulting peers, so a CLI GET could only ever see locally-cached
+   * content (the loader path already passes the network; the GET path
+   * never did). */
+  network_t* network = conn->peer_ctx.network;
   readable_off_stream_t* rs = readable_off_stream_create(
-    conn->pool, conn->bc, conn->tc, REFERENCE(ori, ori_t), descriptor_pad, NULL);
+    conn->pool, conn->bc, conn->tc, REFERENCE(ori, ori_t), descriptor_pad, network);
   readable_descriptor_t* desc = readable_descriptor_create(
-    conn->pool, conn->bc, REFERENCE(ori, ori_t), descriptor_pad, NULL);
+    conn->pool, conn->bc, REFERENCE(ori, ori_t), descriptor_pad, network);
 
   pipeline->rs = rs;
   pipeline->desc = desc;
@@ -1052,10 +1058,12 @@ static void _unix_handle_ofd_resolve_result(unix_connection_t* conn, message_t* 
 
   size_t descriptor_pad = 32;
 
+  /* Network-aware streams (see the direct GET leg above). */
+  network_t* network = conn->peer_ctx.network;
   readable_off_stream_t* rs = readable_off_stream_create(
-    conn->pool, conn->bc, conn->tc, REFERENCE(resolved_ori, ori_t), descriptor_pad, NULL);
+    conn->pool, conn->bc, conn->tc, REFERENCE(resolved_ori, ori_t), descriptor_pad, network);
   readable_descriptor_t* desc = readable_descriptor_create(
-    conn->pool, conn->bc, REFERENCE(resolved_ori, ori_t), descriptor_pad, NULL);
+    conn->pool, conn->bc, REFERENCE(resolved_ori, ori_t), descriptor_pad, network);
 
   pipeline->rs = rs;
   pipeline->desc = desc;
