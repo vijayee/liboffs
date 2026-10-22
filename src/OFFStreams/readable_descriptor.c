@@ -232,6 +232,11 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
           network_local_find_block_payload_t* payload = get_clear_memory(sizeof(network_local_find_block_payload_t));
           payload->hash = REFERENCE(result->hash, buffer_t);
           payload->reply_to = &desc->stream.actor;
+          /* Adopt a reference on this stream for the in-flight request — the
+             network moves it into the wanted_list entry (see
+             network_local_find_block_payload_t.owner). */
+          payload->owner = (stream_t*)desc;
+          refcounter_reference((refcounter_t*)desc);
           message_t msg;
           msg.type = NETWORK_LOCAL_FIND_BLOCK;
           msg.payload = payload;

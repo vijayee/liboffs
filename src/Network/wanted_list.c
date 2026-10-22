@@ -6,6 +6,18 @@
 #include "../Util/allocator.h"
 #include "../RefCounter/refcounter.h"
 
+/* Release one requester node: notify ownership bookkeeping — the requester
+   stream reference (moved in from the NETWORK_LOCAL_FIND_BLOCK payload) is
+   dropped through the stream's own destructor, which frees the stream (and
+   its embedded actor) when this was the last reference. */
+static void _wanted_requester_release(wanted_requester_t* req) {
+  if (req == NULL) return;
+  if (req->owner != NULL && req->owner_destructor != NULL) {
+    req->owner_destructor(req->owner);
+  }
+  free(req);
+}
+
 wanted_list_t* wanted_list_create(void) {
   wanted_list_t* wl = get_clear_memory(sizeof(wanted_list_t));
   size_t bloom_size;
@@ -28,7 +40,7 @@ void wanted_list_destroy(wanted_list_t* wl) {
     wanted_requester_t* req = entry->requesters;
     while (req != NULL) {
       wanted_requester_t* next_req = req->next;
-      free(req);
+      _wanted_requester_release(req);
       req = next_req;
     }
     free(entry);
@@ -54,13 +66,20 @@ wanted_entry_t* wanted_list_find(wanted_list_t* wl, buffer_t* hash) {
 }
 
 void wanted_list_add(wanted_list_t* wl, buffer_t* hash, actor_t* actor,
-                     uint64_t deadline_ms) {
+                     stream_t* owner, uint64_t deadline_ms) {
+  /* The caller moves the adopted in-flight requester stream reference into
+     this node — record the release path NOW, before anything else can drop
+     the reference. */
+  void (*owner_destructor)(stream_t*) =
+      (owner != NULL) ? owner->destructor : NULL;
   wanted_entry_t* entry = wanted_list_find(wl, hash);
   if (entry != NULL) {
     /* Entry exists — prepend requester. Preserve the existing deadline (the
        first requester set it; a late joiner shouldn't extend it). */
     wanted_requester_t* req = get_clear_memory(sizeof(wanted_requester_t));
     req->actor = actor;
+    req->owner = owner;
+    req->owner_destructor = owner_destructor;
     req->next = entry->requesters;
     entry->requesters = req;
   } else {
@@ -75,6 +94,8 @@ void wanted_list_add(wanted_list_t* wl, buffer_t* hash, actor_t* actor,
     entry->not_found_count = 0;
     wanted_requester_t* req = get_clear_memory(sizeof(wanted_requester_t));
     req->actor = actor;
+    req->owner = owner;
+    req->owner_destructor = owner_destructor;
     req->next = NULL;
     entry->requesters = req;
     entry->next = wl->entries;
@@ -144,7 +165,7 @@ wanted_requester_t* wanted_list_remove(wanted_list_t* wl, buffer_t* hash) {
 void wanted_requester_list_destroy(wanted_requester_t* requesters) {
   while (requesters != NULL) {
     wanted_requester_t* next = requesters->next;
-    free(requesters);
+    _wanted_requester_release(requesters);
     requesters = next;
   }
 }
@@ -154,13 +175,13 @@ void wanted_list_prune_requester(wanted_list_t* wl, const actor_t* actor) {
   wanted_entry_t** current = &wl->entries;
   while (*current != NULL) {
     wanted_entry_t* entry = *current;
-    /* Unlink every requester node that matches, freeing them as we go. */
+    /* Unlink every requester node that matches, releasing them as we go. */
     wanted_requester_t** req = &entry->requesters;
     while (*req != NULL) {
       if ((*req)->actor == actor) {
         wanted_requester_t* dead = *req;
         *req = dead->next;
-        free(dead);
+        _wanted_requester_release(dead);
       } else {
         req = &(*req)->next;
       }

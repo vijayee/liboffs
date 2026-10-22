@@ -21,6 +21,7 @@
 #include "topology_report.h"
 #include "ring_set.h"
 #include "wanted_list.h"
+#include "../Streams/stream.h"
 #include "relay_client.h"
 #include "nat_detect.h"
 #include "mdns.h"
@@ -235,6 +236,15 @@ void network_local_find_block_payload_destroy(void* ptr) {
   network_local_find_block_payload_t* payload = (network_local_find_block_payload_t*)ptr;
   if (payload->hash != NULL) {
     buffer_destroy(payload->hash);
+  }
+  if (payload->owner != NULL) {
+    /* Unclaimed in-flight requester reference — drop it through the stream's
+       own destructor (the wanted_list never adopted it). */
+    stream_t* owner = payload->owner;
+    payload->owner = NULL;
+    if (owner->destructor != NULL) {
+      owner->destructor(owner);
+    }
   }
   free(payload);
 }
@@ -1435,7 +1445,6 @@ static void network_wanted_list_timeout_cb(buffer_t* hash,
                                             void* user_data) {
   wanted_requester_t* req = requesters;
   while (req != NULL) {
-    wanted_requester_t* next = req->next;
     network_find_block_result_payload_t* result =
         get_clear_memory(sizeof(network_find_block_result_payload_t));
     if (result != NULL) {
@@ -1448,9 +1457,11 @@ static void network_wanted_list_timeout_cb(buffer_t* hash,
       result_msg.payload_destroy = network_find_block_result_destroy;
       actor_send(req->actor, &result_msg);
     }
-    free(req);
-    req = next;
+    req = req->next;
   }
+  /* Releases the requester nodes AND the requester stream references they
+     own (wanted_requester_list_destroy routes through the owner release). */
+  wanted_requester_list_destroy(requesters);
   (void)user_data;
 }
 
@@ -4495,6 +4506,12 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
   if (existing != NULL) {
     wanted_requester_t* requester = get_clear_memory(sizeof(wanted_requester_t));
     requester->actor = payload->reply_to;
+    /* Move the payload's in-flight requester stream reference into this node
+       (release path: wanted_requester_list_destroy / prune). */
+    requester->owner = payload->owner;
+    payload->owner = NULL;
+    requester->owner_destructor =
+        (requester->owner != NULL) ? requester->owner->destructor : NULL;
     requester->next = existing->requesters;
     existing->requesters = requester;
     return;
@@ -4505,8 +4522,13 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
   // to reply_to if no response arrives within request_timeout_ms. See #5/#9.
   uint64_t find_block_deadline_ms =
       (uint64_t)time(NULL) * 1000 + network->request_timeout_ms;
-  wanted_list_add(network->wanted_list, payload->hash, payload->reply_to,
-                  find_block_deadline_ms);
+  {
+    /* Move the payload's in-flight requester stream reference into the list. */
+    stream_t* owner = payload->owner;
+    payload->owner = NULL;
+    wanted_list_add(network->wanted_list, payload->hash, payload->reply_to,
+                    owner, find_block_deadline_ms);
+  }
 
   // Step 4: Execute FindBlock routing
   find_block_state_t state;

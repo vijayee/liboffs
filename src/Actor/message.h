@@ -303,9 +303,16 @@ typedef enum message_type_e {
 } message_type_e;
 
 /* Stream-to-network: request block from peers */
+struct stream_t;
 typedef struct {
   buffer_t* hash;       /* block hash to find */
   actor_t*  reply_to;   /* stream actor to notify */
+  /* The REQUESTER'S OWNING STREAM, adopted by the sender at send time (one
+   * extra refcounter reference). The network actor MOVES this pointer into
+   * its wanted_list entry (payload->owner = NULL on hand-off), so the stream
+   * cannot be freed while a find reply or the request timeout sweep may still
+   * actor_send into its embedded actor. NULL = fire-and-forget (no owner). */
+  struct stream_t* owner;
 } network_local_find_block_payload_t;
 
 /* Destroy function for network_local_find_block_payload_t — releases hash reference */

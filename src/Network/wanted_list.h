@@ -8,6 +8,7 @@
 #include "../Bloom/bloom_filter.h"
 #include "../Actor/actor.h"
 #include "../Buffer/buffer.h"
+#include "../Streams/stream.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -16,6 +17,15 @@
 
 typedef struct wanted_requester_t {
   actor_t*  actor;
+  /* The stream that owns `actor` (stream_t is the first member of every
+     requester stream type, and actor->state points back at it). The list
+     holds a reference: adopted from the NETWORK_LOCAL_FIND_BLOCK payload at
+     registration (the sender had adopted it for the in-flight message), so
+     the stream outlives every pending reply and the cleanup below releases
+     it via stream_t::destructor. NULL for ownerless (fire-and-forget).
+     requesters. */
+  stream_t* owner;
+  void (*owner_destructor)(stream_t*);
   struct wanted_requester_t* next;
 } wanted_requester_t;
 
@@ -41,12 +51,13 @@ typedef struct wanted_list_t {
 } wanted_list_t;
 
 /* Callback invoked by wanted_list_sweep for each entry whose deadline_ms has
-   passed. The callback takes ownership of the `requesters` list (it must free
-   each requester with free()). The `hash` is owned by the sweep; the callback
-   may REFERENCE it to keep it alive beyond the callback — the sweep calls
-   buffer_destroy(entry->hash) after the callback returns, so a REFERENCE
-   bumps the refcount and the sweep's buffer_destroy decrements it (net +1
-   for the callback's result). See audit #5/#9. */
+   passed. The callback takes ownership of the `requesters` list (it must
+   release each requester with wanted_requester_list_destroy, which also
+   releases the requester stream reference). The `hash` is owned by the sweep;
+   the callback may REFERENCE it to keep it alive beyond the callback — the
+   sweep calls buffer_destroy(entry->hash) after the callback returns, so a
+   REFERENCE bumps the refcount and the sweep's buffer_destroy decrements it
+   (net +1 for the callback's result). See audit #5/#9. */
 typedef void (*wanted_list_sweep_cb)(buffer_t* hash,
                                      wanted_requester_t* requesters,
                                      void* user_data);
@@ -63,17 +74,20 @@ wanted_entry_t* wanted_list_get(wanted_list_t* wl, buffer_t* hash);
 /* Add `actor` as a requester for `hash`. If an entry already exists, only the
    requester is prepended (the existing deadline_ms is preserved). If this is
    a new entry, `deadline_ms` is stored on the entry (0 = no deadline, never
-   swept — back-compat). fanout_count and not_found_count start at 0. */
+   swept — back-compat). fanout_count and not_found_count start at 0.
+   `owner`/: its destructor: the in-flight requester stream reference the
+   caller adopted — MOVED INTO this list (the caller must clear its copy);
+   released by wanted_requester_list_destroy / wanted_list_prune_requester. */
 void wanted_list_add(wanted_list_t* wl, buffer_t* hash, actor_t* actor,
-                     uint64_t deadline_ms);
+                     stream_t* owner, uint64_t deadline_ms);
 
 wanted_requester_t* wanted_list_remove(wanted_list_t* wl, buffer_t* hash);
 void wanted_requester_list_destroy(wanted_requester_t* requesters);
 
-/* Unregister every requester node whose actor pointer matches. Called when a
-   requester stream is destroyed so a late result/notification never lands in
-   a freed actor. Entries left with no requesters are removed. Must be called
-   on the same thread as all other wanted_list mutation (the network actor). */
+/* Unregister every requester node whose actor pointer matches. Nodes are
+   released (owner stream reference included) via their normal release path.
+   Entries left with no requesters are removed. Must be called on the same
+   thread as all other wanted_list mutation (the network actor). */
 void wanted_list_prune_requester(wanted_list_t* wl, const actor_t* actor);
 
 /* Walk the list, remove every entry whose deadline_ms != 0 and
