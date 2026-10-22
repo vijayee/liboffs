@@ -148,3 +148,32 @@ void wanted_requester_list_destroy(wanted_requester_t* requesters) {
     requesters = next;
   }
 }
+
+void wanted_list_prune_requester(wanted_list_t* wl, const actor_t* actor) {
+  if (wl == NULL || actor == NULL) return;
+  wanted_entry_t** current = &wl->entries;
+  while (*current != NULL) {
+    wanted_entry_t* entry = *current;
+    /* Unlink every requester node that matches, freeing them as we go. */
+    wanted_requester_t** req = &entry->requesters;
+    while (*req != NULL) {
+      if ((*req)->actor == actor) {
+        wanted_requester_t* dead = *req;
+        *req = dead->next;
+        free(dead);
+      } else {
+        req = &(*req)->next;
+      }
+    }
+    if (entry->requesters == NULL) {
+      /* The dying stream was the only requester — drop the whole entry so the
+         sweep never notifies nothing and the search stops being tracked. */
+      *current = entry->next;
+      wl->entry_count--;
+      buffer_destroy(entry->hash);
+      free(entry);
+    } else {
+      current = &entry->next;
+    }
+  }
+}

@@ -647,6 +647,10 @@ void readable_off_stream_destroy(readable_off_stream_t* stream) {
     }
     stream->pending_fetches = NULL;
     _clear_stale_fetches(stream);
+    /* Unregister this stream's wanted_list requesters BEFORE the struct (and
+       its embedded actor) is freed, so a late NETWORK_FIND_BLOCK_RESULT can't
+       actor_send into freed memory. See network_local_find_cancel_send. */
+    network_local_find_cancel_send(stream->network, &stream->stream.actor);
     stream_deinit((stream_t*)stream);
     free(stream);
   }

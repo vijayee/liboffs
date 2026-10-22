@@ -202,6 +202,9 @@ typedef enum message_type_e {
   TOPOLOGY_METRICS_UPDATE,
   /* Local stream-to-network messages (distinct from wire-level NETWORK_FIND_BLOCK etc.) */
   NETWORK_LOCAL_FIND_BLOCK,        /* Stream sends this to network actor on cache miss */
+  NETWORK_LOCAL_FIND_CANCEL,      /* Stream sends this to network actor at destroy:
+                                     unregister its requesters from the wanted_list so a
+                                     late result reply never lands in a destroyed actor */
   NETWORK_FIND_BLOCK_RESULT,      /* Network actor sends this back to stream */
   NETWORK_LOCAL_STORE_BLOCK,      /* Stream sends this to network actor on CACHE_PUT_NEW */
   NETWORK_STORE_BLOCK_RESULT,     /* Network actor sends this back to stream */
@@ -307,6 +310,13 @@ typedef struct {
 
 /* Destroy function for network_local_find_block_payload_t — releases hash reference */
 void network_local_find_block_payload_destroy(void* ptr);
+
+/* Stream-to-network: destroy-time unregister. The requester pointer is
+ * BORROWED only for identity comparison (never dereferenced) — the sending
+ * actor is being torn down, which is exactly why this message exists. */
+typedef struct {
+  actor_t* requester;   /* the dying requester actor to prune from wanted_list */
+} network_local_find_cancel_payload_t;
 
 /* Network-to-stream: result of FindBlock */
 typedef struct {

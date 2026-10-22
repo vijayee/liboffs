@@ -239,6 +239,18 @@ void network_local_find_block_payload_destroy(void* ptr) {
   free(payload);
 }
 
+void network_local_find_cancel_send(network_t* network, actor_t* requester) {
+  if (network == NULL || requester == NULL) return;
+  network_local_find_cancel_payload_t* payload =
+      get_clear_memory(sizeof(network_local_find_cancel_payload_t));
+  payload->requester = requester;
+  message_t msg;
+  msg.type = NETWORK_LOCAL_FIND_CANCEL;
+  msg.payload = payload;
+  msg.payload_destroy = free;
+  actor_send(&network->actor, &msg);
+}
+
 void network_local_store_block_payload_destroy(void* ptr) {
   if (ptr == NULL) return;
   network_local_store_block_payload_t* payload = (network_local_store_block_payload_t*)ptr;
@@ -5689,6 +5701,19 @@ void network_dispatch(void* state, message_t* msg) {
     case NETWORK_LOCAL_FIND_BLOCK: {
       // Stream requests block from network — check cache, dedup via wanted_list, route
       network_handle_local_find_block(network, msg);
+      break;
+    }
+    case NETWORK_LOCAL_FIND_CANCEL: {
+      // A requester stream is being destroyed — unregister it from every
+      // wanted_list entry it joined, so a late result reply never actor_sends
+      // into the freed actor (crash: refcounter_dereference_is_zero inside
+      // actor_send during the 2026-10-22 cross-peer hunt).
+      network_local_find_cancel_payload_t* cancel =
+          (network_local_find_cancel_payload_t*)msg->payload;
+      if (cancel != NULL && cancel->requester != NULL) {
+        wanted_list_prune_requester(network->wanted_list, cancel->requester);
+      }
+      free(cancel);
       break;
     }
     case NETWORK_FIND_BLOCK_RESULT: {

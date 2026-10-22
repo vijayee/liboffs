@@ -363,6 +363,9 @@ void readable_descriptor_destroy(readable_descriptor_t* desc) {
     if (desc->expected_hash != NULL) {
       DESTROY(desc->expected_hash, buffer);
     }
+    /* Unregister this descriptor's wanted_list requesters before the struct
+       (and its embedded actor) is freed. See network_local_find_cancel_send. */
+    network_local_find_cancel_send(desc->network, &desc->stream.actor);
     stream_deinit((stream_t*)desc);
     free(desc);
   }

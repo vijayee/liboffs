@@ -196,6 +196,11 @@ typedef struct network_t {
 #endif
 } network_t;
 
+/* Destroy-time unregister for a stream that issued NETWORK_LOCAL_FIND_BLOCK
+ * requests: prunes the requester from every wanted_list entry it joined so a
+ * late result reply never actor_sends into the freed requester actor. */
+void network_local_find_cancel_send(network_t* network, actor_t* requester);
+
 /* Payload for NETWORK_SHUTDOWN_CONNECTIONS. The network actor does the
    ConnectionShutdown loop and sets done_flag when done; the main thread polls
    done_flag (10ms sleep, 5s cap) — consistent with the F6/F7 quiesce pattern.

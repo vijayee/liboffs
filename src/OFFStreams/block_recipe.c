@@ -663,6 +663,10 @@ void recycler_recipe_destroy(recycler_recipe_t* recipe) {
       DESTROY(recipe->pending_fetch_hash, buffer);
     }
 
+    /* Unregister this recipe's wanted_list requesters before the struct (and
+       its embedded actor) is freed. See network_local_find_cancel_send. */
+    network_local_find_cancel_send(recipe->network,
+                                   &recipe->recipe.stream.actor);
     stream_deinit((stream_t*)recipe);
     free(recipe);
   }

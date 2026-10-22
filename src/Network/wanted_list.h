@@ -70,6 +70,12 @@ void wanted_list_add(wanted_list_t* wl, buffer_t* hash, actor_t* actor,
 wanted_requester_t* wanted_list_remove(wanted_list_t* wl, buffer_t* hash);
 void wanted_requester_list_destroy(wanted_requester_t* requesters);
 
+/* Unregister every requester node whose actor pointer matches. Called when a
+   requester stream is destroyed so a late result/notification never lands in
+   a freed actor. Entries left with no requesters are removed. Must be called
+   on the same thread as all other wanted_list mutation (the network actor). */
+void wanted_list_prune_requester(wanted_list_t* wl, const actor_t* actor);
+
 /* Walk the list, remove every entry whose deadline_ms != 0 and
    deadline_ms <= now_ms, and invoke `cb` for each expired entry with its
    hash and requesters. Entries with deadline_ms == 0 are never swept.
