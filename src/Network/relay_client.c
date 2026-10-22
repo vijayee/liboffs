@@ -588,6 +588,9 @@ static void _relay_unload_windows_credential(relay_client_t* client) {
 }
 #endif /* _WIN32 */
 
+/* Defined after relay_client_connect; declared here because destroy uses it. */
+static void _relay_client_abortive_shutdown(relay_client_t* client);
+
 void relay_client_destroy(relay_client_t* client) {
   if (client == NULL) return;
 
@@ -603,6 +606,7 @@ void relay_client_destroy(relay_client_t* client) {
     relay_client_disconnect(client);
   }
 
+  _relay_client_abortive_shutdown(client);
   if (client->stream != NULL && client->msquic != NULL) {
     client->msquic->StreamClose(client->stream);
     client->stream = NULL;
@@ -916,6 +920,20 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
   return 0;
 }
 
+/* Abortively shutdown the relay connection without waiting for a peer
+ * acknowledgement. During teardown the relay may be black-holed: a
+ * shutdown-flagged (graceful) close needs the peer's ack and waits on the
+ * connection's configured timeout, which blocks the caller's thread for up
+ * to the idle timeout — and the final registration drain behind it. The
+ * silent flag tears the connection down locally; the subsequent
+ * ConnectionClose completes promptly. */
+static void _relay_client_abortive_shutdown(relay_client_t* client) {
+  if (client->msquic != NULL && client->connection != NULL) {
+    client->msquic->ConnectionShutdown(
+        client->connection, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT, 0);
+  }
+}
+
 void relay_client_disconnect(relay_client_t* client) {
   if (client == NULL) return;
   client->shutdown_pending = 1;  // prevent retry during intentional disconnect
@@ -923,6 +941,7 @@ void relay_client_disconnect(relay_client_t* client) {
   pd_loop_async_send(client->loop, NULL);
   platform_thread_join(client->thread);
 
+  _relay_client_abortive_shutdown(client);
   if (client->stream != NULL && client->msquic != NULL) {
     client->msquic->StreamClose(client->stream);
     client->stream = NULL;
@@ -946,6 +965,14 @@ void relay_client_dispatch(void* state, message_t* msg) {
       relay_retry_payload_t* retry = (relay_retry_payload_t*)msg->payload;
       if (retry == NULL) break;
       unsigned long delay_ms = retry->delay_ms;
+      /* No re-dial once the daemon is shutting down: a pending retry payload
+         can fire during teardown and open a fresh QUIC connection to a
+         black-holed relay; the final registration drain then waits on a
+         connection no peer will ever finish and the service stop wedges
+         until an external kill (OFFS daemon stack dump, 2026-10-21). */
+      if (!ATOMIC_LOAD(&client->running) || client->shutdown_pending) {
+        break;
+      }
       log_info("relay_client: retrying connection to %s:%u (delayed %lums)",
                client->relay_host ? client->relay_host : "127.0.0.1",
                client->relay_port, delay_ms);

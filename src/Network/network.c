@@ -5599,9 +5599,15 @@ void network_dispatch(void* state, message_t* msg) {
         for (size_t index = 0; index < network->conn_mgr.peer_count; index++) {
           peer_connection_t* peer = network->conn_mgr.peers[index];
           if (peer != NULL && peer->quic_connection != NULL) {
+            /* SILENT, not graceful: the daemon is tearing down and a graceful
+               close waits for the peer's ack. A peer behind a dead relay
+               black-holes that ack and every close in the drain chain stalls
+               on the connection's configured timeout until the SCM kill.
+               The silent flag tears the connection down locally; the peer
+               sees an ordinary dropped connection either way. */
             network->msquic->ConnectionShutdown(
                 peer->quic_connection,
-                QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
+                QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT,
                 0);
             peer->quic_connection = NULL;
             peer->quic_stream = NULL;

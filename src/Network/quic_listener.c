@@ -361,13 +361,28 @@ static QUIC_STATUS QUIC_API quic_stream_callback(
       }
       break;
     }
-    case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
+    case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
       if (stream_ctx->framer != NULL) {
         stream_framer_destroy(stream_ctx->framer);
         stream_ctx->framer = NULL;
       }
+      /* msquic requires StreamClose after the SHUTDOWN_COMPLETE callback for
+         every opened/accepted stream, or the handle stays open inside the
+         registration. Normal operation defers that to the network actor's
+         dispatch (which pairs it with the peer cleanup); at teardown the
+         pool is stopped / the actor destroyed, so close inline or the
+         registration drain in quic_listener_destroy never finishes (the
+         daemon-stop wedge, thread-stack dumps 2026-10-21). */
+      quic_listener_t* owner = stream_ctx->listener;
+      if (owner != NULL && owner->msquic != NULL &&
+          ((owner->pool != NULL && atomic_load(&owner->pool->stopped)) ||
+           (owner->network != NULL &&
+            (atomic_load(&owner->network->actor.flags) & ACTOR_FLAG_DESTROY)))) {
+        owner->msquic->StreamClose(stream);
+      }
       free(stream_ctx);
       break;
+    }
     default:
       break;
   }
@@ -577,6 +592,28 @@ static QUIC_STATUS QUIC_API quic_connection_callback(
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
       log_info("quic_listener: connection SHUTDOWN_COMPLETE");
       _conn_track_remove(listener, connection);
+
+      /* Close the connection inline when the handoff can no longer
+         reach the network actor's ConnectionClose: at daemon teardown
+         the pool workers are joined (pool->stopped) before
+         quic_listener_destroy runs (and the actor itself may be
+         DESTROY-flagged), so an actor_send would either park the
+         message forever or drop the payload — in both cases the
+         connection handle leaks open inside the registration and
+         RegistrationClose below drains forever, wedging the daemon
+         stop until an external kill (thread-stack dumps,
+         2026-10-21). SHUTDOWN_COMPLETE is the one msquic callback in
+         which ConnectionClose is legal. During normal operation the
+         dispatch handoff stays authoritative: it looks the peer up
+         before closing, which a local close cannot do. */
+      if (listener->network == NULL ||
+          (atomic_load(&listener->network->actor.flags) &
+           ACTOR_FLAG_DESTROY) ||
+          (listener->pool != NULL &&
+           atomic_load(&listener->pool->stopped))) {
+        listener->msquic->ConnectionClose(connection);
+        break;
+      }
 
       // Pass the connection handle to the dispatch handler so it can look up
       // the peer before closing. ConnectionClose is called from the dispatch
