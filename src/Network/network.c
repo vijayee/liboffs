@@ -32,6 +32,7 @@
 #include "../Timer/timer_actor.h"
 #include "../Bloom/elastic_bloom_filter.h"
 #include "../BlockCache/block_cache.h"
+#include "../BlockCache/sections.h"
 #include "../BlockCache/index.h"
 #include "../Buffer/buffer.h"
 #include "../Metrics/metrics.h"
@@ -3057,6 +3058,49 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
 
           /* Include block data from LRU cache so the requester can store it */
           block_t* block = block_lru_cache_get(network->block_cache->lru, hash_buf);
+          if (block == NULL) {
+            /* The LRU only holds recently-touched blocks; a durable block
+               still on disk (in the sections + index) must be served too, or
+               the requester receives a data-less found reply, re-fetches from
+               its own cache, misses, and dead-ends on the wanted sweep —
+               exactly the cross-peer fetch failure this hunt chased
+               (penguin: holder had the bytes, requester starved). Sync-read
+               through the sections like CACHE_GET's local path does. */
+            sections_read_payload_t read_payload;
+            read_payload.section_id = entry->section_id;
+            read_payload.section_index = entry->section_index;
+            read_payload.reply_to = NULL;
+            read_payload.result = NULL;
+            message_t sections_msg;
+            sections_msg.type = SECTIONS_READ;
+            sections_msg.payload = &read_payload;
+            sections_msg.payload_destroy = NULL;
+            sections_dispatch(network->block_cache->sections, &sections_msg);
+            buffer_t* data = read_payload.result;
+            if (data != NULL) {
+              if (block_cache_verify_read_hash(data, hash_buf)) {
+                block = block_create_existing_data_hash(data, hash_buf);
+                /* Serve-from-disk warms the LRU like CACHE_GET does. */
+                index_entry_t* ejection = (index_entry_t*)refcounter_reference(
+                    (refcounter_t*)block_lru_cache_put(network->block_cache->lru,
+                                                       block, entry));
+                if (ejection) {
+                  index_set_entry_ejection(network->block_cache->index, ejection,
+                                           time(NULL));
+                  timer_actor_debounce(network->block_cache->timer_actor,
+                                       network->block_cache->index_wait, 0,
+                                       &network->block_cache->actor, INDEX_SAVE);
+                  index_entry_destroy(ejection);
+                }
+              } else {
+                log_error("find: block read hash mismatch for section "
+                          "(peer %s request)",
+                          reply_peer != NULL ? reply_peer->remote_node_id.str
+                                             : "?");
+              }
+              buffer_destroy(data);
+            }
+          }
           if (block != NULL) {
             found_resp.block_data = block->data->data;
             found_resp.block_data_len = block->data->size;
