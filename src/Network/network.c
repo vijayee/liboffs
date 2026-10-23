@@ -1128,6 +1128,13 @@ static void network_handle_salutation(network_t* network, message_t* msg,
        avoid retrying). See audit #18. */
     conn_state_set_peer_nat_type(peer, network->local_nat_type);
     conn_state_on_direct_connected(peer);
+    /* Identity confirmed over the direct QUIC stream: the send path is
+         proven, so the peer is actually connected. (connected starts
+         false at creation - true-at-creation made never-contacted
+         relay candidates, e.g. a decommissioned relay node, report
+         connected forever and never decay-prune.) */
+    peer->connected = true;
+    peer->connected_at_ms = (int64_t)time(NULL) * 1000;
 
     // Insert the authenticated peer into the ring table so find_block_execute
     // can route FindBlock requests to it. Use the peer's address from the QUIC
@@ -5767,6 +5774,7 @@ void network_dispatch(void* state, message_t* msg) {
             &network->conn_mgr, quic_conn->connection);
         if (peer != NULL) {
           peer->connected = false;
+          peer->connected_at_ms = 0;
 #ifdef HAS_MSQUIC
           peer->quic_connection = NULL;
           peer->quic_stream = NULL;
@@ -6082,6 +6090,14 @@ void network_dispatch(void* state, message_t* msg) {
           // Store the relay endpoint ID so we can route messages back
           if (existing != NULL && relay_payload->src_endpoint_id != 0) {
             existing->relay_endpoint_id = relay_payload->src_endpoint_id;
+          }
+          /* A relay-routed message from this peer PROVES the send path
+             (the relay forwards to it) - the peer is connected.
+             Never-contacted relay candidates stay false and decay-prune
+             naturally. */
+          if (existing != NULL && !existing->connected) {
+            existing->connected = true;
+            existing->connected_at_ms = (int64_t)time(NULL) * 1000;
           }
           /* Initialize the peer's conn_state based on our local NAT type.
              New peers default to CONN_STATE_RELAY (peer_connection_create);

@@ -2654,6 +2654,25 @@ TEST_F(ConnectionManagerTest, DecayTickRemovesLowWeight) {
   EXPECT_EQ(mgr.peer_count, 0u);
 }
 
+/* A peer with a PROVEN send path (connected=true) must survive the decay
+   tick: no production sender rewards conn peers, so weight-only pruning
+   would cull live peers after ~90 min regardless of how healthy their
+   connection is (2026-10-22: the never-run tick got scheduled). */
+TEST_F(ConnectionManagerTest, DecayTickNeverPrunesLivePeers) {
+  node_id_t id1 = {};
+  memset(id1.hash, 0xAA, NODE_ID_HASH_SIZE);
+  peer_connection_t* live = connection_manager_add(&mgr, &id1, NULL, NULL);
+  ASSERT_NE(live, (peer_connection_t*)NULL);
+  live->connected = true;
+  for (int i = 0; i < 100; i++) {
+    (void)connection_manager_decay_tick(&mgr);
+  }
+  EXPECT_EQ(mgr.peer_count, 1u);
+  /* Connected peer is still present; weight decayed but stayed. */
+  EXPECT_FLOAT_EQ(live->hebbian_weight, 0.0f);
+  EXPECT_TRUE(live->connected);
+}
+
 TEST_F(ConnectionManagerTest, CollectMetrics) {
   node_id_t id1 = {};
   memset(id1.hash, 0xAA, NODE_ID_HASH_SIZE);

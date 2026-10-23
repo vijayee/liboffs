@@ -264,6 +264,18 @@ size_t connection_manager_decay_tick(connection_manager_t* mgr) {
 
     peer_hebbian_decay(peer, mgr->hebbian.decay_rate);
 
+    /* Never prune a peer with a proven send path (connected): no production
+       sender rewards conn peers (PEER_UPDATE_HEBBIAN has no sender), so a
+       healthy peer's weight only ever decays — pruning by weight alone would
+       cull live peers after their 0.1 initial weight hits 0.01 (~90 min).
+       Unconnected peers (candidates that never contacted, e.g. the
+       relay-admitted node of a decommissioned relay) decay to the threshold
+       and are pruned naturally. */
+    if (peer->connected) {
+      index++;
+      continue;
+    }
+
     if (peer->hebbian_weight < mgr->hebbian.drop_threshold) {
       peer_connection_destroy(peer);
       memmove(&mgr->peers[index], &mgr->peers[index + 1],
