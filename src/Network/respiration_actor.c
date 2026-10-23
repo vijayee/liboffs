@@ -210,6 +210,10 @@ void respiration_actor_dispatch(void* state, message_t* msg) {
         }
         find_payload->hash = REFERENCE(actor->pending[idx].hash, buffer_t);
         find_payload->reply_to = &actor->actor;
+        /* Shed verification: skip the local cache (the candidate block is
+           local by definition) and skip the found-response re-store, or
+           the verify-download refills the capacity the exhale sheds. */
+        find_payload->verify_only = 1;
 
         message_t find_msg;
         find_msg.type = NETWORK_LOCAL_FIND_BLOCK;

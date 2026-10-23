@@ -3470,9 +3470,31 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
         }
       }
       if (block != NULL) {
+        uint8_t search_verify_only = 0;
+        {
+          buffer_t* probe = buffer_create_from_pointer_copy(response->block_hash, 32);
+          if (probe != NULL) {
+            wanted_entry_t* w_entry = wanted_list_get(network->wanted_list, probe);
+            search_verify_only = (w_entry != NULL) ? w_entry->verify_only : 0;
+            buffer_destroy(probe);
+          }
+        }
+        if (search_verify_only) {
+          /* Verify-only search (exhale shed): do NOT re-store the carried
+             block locally - the shed must actually shave capacity; the
+             found result still notifies requesters with the block attached
+             (stream requesters use attached blocks, the respiration actor
+             ignores them). */
+          /* block itself STAYS ALIVE: the found-response handler attaches
+             it to the NETWORK_FIND_BLOCK_RESULT payload below and destroys
+             it unconditionally at the end of the response scope. */
+          DESTROY(data_buf, buffer);
+          DESTROY(hash_buf, buffer);
+        } else {
         block_cache_put(network->block_cache, block, response->block_fib, &network->actor);
         DESTROY(data_buf, buffer);
         DESTROY(hash_buf, buffer);
+        }
       } else {
         if (data_buf != NULL) DESTROY(data_buf, buffer);
         if (hash_buf != NULL) DESTROY(hash_buf, buffer);
@@ -4610,6 +4632,15 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
       (network_local_find_block_payload_t*)msg->payload;
   if (payload == NULL || payload->hash == NULL) return;
 
+  if (payload->verify_only) {
+    /* Verify-only (exhale shed): SKIP the local cache check - the block
+       being shed is local BY DEFINITION, so a local index_peek always
+       answers found and every shed candidate would be marked redundant
+       without any actual network redundancy check (last-copy delete at
+       scale). Seek the rest of the network instead. */
+    goto wire_search;
+  }
+
   // Step 1: Check local block_cache first
   index_entry_t* entry = index_peek(network->block_cache->index, payload->hash);
   if (entry != NULL) {
@@ -4642,6 +4673,7 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
     return;
   }
 
+wire_search:
   // Step 3: New request — add to wanted list with a per-request timeout.
   // The 1s NETWORK_REQUEST_TIMEOUT_TICK sweep will deliver a found=0 result
   // to reply_to if no response arrives within request_timeout_ms. See #5/#9.
@@ -4652,7 +4684,7 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
     stream_t* owner = payload->owner;
     payload->owner = NULL;
     wanted_list_add(network->wanted_list, payload->hash, payload->reply_to,
-                    owner, find_block_deadline_ms);
+                    owner, find_block_deadline_ms, payload->verify_only);
   }
 
   // Step 4: Execute FindBlock routing

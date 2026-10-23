@@ -313,6 +313,13 @@ typedef struct {
    * cannot be freed while a find reply or the request timeout sweep may still
    * actor_send into its embedded actor. NULL = fire-and-forget (no owner). */
   struct stream_t* owner;
+  /* VERIFY-ONLY search (respiration exhale shed verification): the
+     local cache is skipped (the block being shed IS local - the local
+     index_peek would always report found and silently defeat the
+     redundancy check), and on found the response is notified WITHOUT
+     re-storing the carried block locally (the shed must actually
+     shave capacity; a re-download would refill what we just verified). */
+  uint8_t verify_only;
 } network_local_find_block_payload_t;
 
 /* Destroy function for network_local_find_block_payload_t — releases hash reference */

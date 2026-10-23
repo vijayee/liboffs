@@ -66,7 +66,8 @@ wanted_entry_t* wanted_list_find(wanted_list_t* wl, buffer_t* hash) {
 }
 
 void wanted_list_add(wanted_list_t* wl, buffer_t* hash, actor_t* actor,
-                     stream_t* owner, uint64_t deadline_ms) {
+                     stream_t* owner, uint64_t deadline_ms,
+                     uint8_t verify_only) {
   /* The caller moves the adopted in-flight requester stream reference into
      this node — record the release path NOW, before anything else can drop
      the reference. */
@@ -82,6 +83,11 @@ void wanted_list_add(wanted_list_t* wl, buffer_t* hash, actor_t* actor,
     req->owner_destructor = owner_destructor;
     req->next = entry->requesters;
     entry->requesters = req;
+    /* Propagate verify mode: a verify-only requester joining an existing
+       entry must not inherit a re-store that refills the shed. Safe for the
+       stream requester too — the found result is still notified with its
+       block attached; it only loses the opportunistic local re-store. */
+    if (verify_only) entry->verify_only = 1;
   } else {
     /* New entry */
     if (hash != NULL && hash->data != NULL && hash->size > 0) {
@@ -90,6 +96,7 @@ void wanted_list_add(wanted_list_t* wl, buffer_t* hash, actor_t* actor,
     entry = get_clear_memory(sizeof(wanted_entry_t));
     entry->hash = REFERENCE(hash, buffer_t);
     entry->deadline_ms = deadline_ms;
+    entry->verify_only = verify_only;
     entry->fanout_count = 0;
     entry->not_found_count = 0;
     wanted_requester_t* req = get_clear_memory(sizeof(wanted_requester_t));

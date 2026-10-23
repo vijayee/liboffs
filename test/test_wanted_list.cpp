@@ -55,7 +55,7 @@ TEST(TestWantedList, AddAndCheck) {
   buffer_t* hash = make_hash(hash_data, 32);
   actor_t dummy_actor;
   memset(&dummy_actor, 0, sizeof(dummy_actor));
-  wanted_list_add(wl, hash, &dummy_actor, nullptr, 0);
+  wanted_list_add(wl, hash, &dummy_actor, nullptr, 0, 0);
   EXPECT_TRUE(wanted_list_check(wl, hash));
   wanted_list_destroy(wl);
   buffer_destroy(hash);
@@ -72,8 +72,8 @@ TEST(TestWantedList, AddMultipleRequesters) {
   memset(&actor1, 0, sizeof(actor1));
   actor_t actor2;
   memset(&actor2, 0, sizeof(actor2));
-  wanted_list_add(wl, hash, &actor1, nullptr, 0);
-  wanted_list_add(wl, hash, &actor2, nullptr, 0);
+  wanted_list_add(wl, hash, &actor1, nullptr, 0, 0);
+  wanted_list_add(wl, hash, &actor2, nullptr, 0, 0);
   wanted_entry_t* entry = wanted_list_find(wl, hash);
   ASSERT_NE(entry, nullptr);
   /* Should have 2 requesters */
@@ -96,8 +96,8 @@ TEST(TestWantedList, RemoveReturnsRequesters) {
   memset(&actor1, 0, sizeof(actor1));
   actor_t actor2;
   memset(&actor2, 0, sizeof(actor2));
-  wanted_list_add(wl, hash, &actor1, nullptr, 0);
-  wanted_list_add(wl, hash, &actor2, nullptr, 0);
+  wanted_list_add(wl, hash, &actor1, nullptr, 0, 0);
+  wanted_list_add(wl, hash, &actor2, nullptr, 0, 0);
   wanted_requester_t* requesters = wanted_list_remove(wl, hash);
   ASSERT_NE(requesters, nullptr);
   /* Bloom should no longer contain the hash (well, bloom can't remove,
@@ -118,7 +118,7 @@ TEST(TestWantedList, ClearRequestersKeepsBloom) {
   buffer_t* hash = make_hash(hash_data, 32);
   actor_t actor1;
   memset(&actor1, 0, sizeof(actor1));
-  wanted_list_add(wl, hash, &actor1, nullptr, 0);
+  wanted_list_add(wl, hash, &actor1, nullptr, 0, 0);
   wanted_requester_t* requesters = wanted_list_remove(wl, hash);
   /* Bloom should still contain the hash */
   EXPECT_TRUE(wanted_list_check(wl, hash));
@@ -143,7 +143,7 @@ TEST(TestWantedList, RetryAfterFailure) {
   actor_t actor2;
   memset(&actor2, 0, sizeof(actor2));
   /* First request */
-  wanted_list_add(wl, hash, &actor1, nullptr, 0);
+  wanted_list_add(wl, hash, &actor1, nullptr, 0, 0);
   /* Fail: clear requesters but keep bloom */
   wanted_requester_t* reqs = wanted_list_remove(wl, hash);
   wanted_requester_list_destroy(reqs);
@@ -151,7 +151,7 @@ TEST(TestWantedList, RetryAfterFailure) {
   EXPECT_TRUE(wanted_list_check(wl, hash));
   EXPECT_EQ(wanted_list_find(wl, hash), nullptr);
   /* New request after failure */
-  wanted_list_add(wl, hash, &actor2, nullptr, 0);
+  wanted_list_add(wl, hash, &actor2, nullptr, 0, 0);
   wanted_entry_t* entry = wanted_list_find(wl, hash);
   ASSERT_NE(entry, nullptr);
   wanted_list_destroy(wl);
@@ -211,8 +211,8 @@ TEST(WantedListTimeout, SweepExpiresEntriesAndReturnsRequesters) {
   uint64_t base = now_ms_monotonic();
   /* Add an entry with a deadline 100ms in the future, plus a second requester
      so we can verify the entire requester list is handed to the callback. */
-  wanted_list_add(wl, hash, &actor1, nullptr, base + 100);
-  wanted_list_add(wl, hash, &actor2, nullptr, base + 100);
+  wanted_list_add(wl, hash, &actor1, nullptr, base + 100, 0);
+  wanted_list_add(wl, hash, &actor2, nullptr, base + 100, 0);
 
   /* Wait past the deadline. */
   platform_sleep_ms(150);
@@ -242,7 +242,7 @@ TEST(WantedListTimeout, SweepKeepsNonExpiredEntries) {
   memset(&actor1, 0, sizeof(actor1));
   uint64_t base = now_ms_monotonic();
   /* 60s deadline — not expired. */
-  wanted_list_add(wl, hash, &actor1, nullptr, base + 60000);
+  wanted_list_add(wl, hash, &actor1, nullptr, base + 60000, 0);
 
   std::vector<SweepCapture> captures;
   wanted_list_sweep(wl, base, capture_expired_cb, &captures);
@@ -262,7 +262,7 @@ TEST(WantedListTimeout, SweepSkipsEntriesWithNoDeadline) {
   buffer_t* hash = make_hash(hash_data, 32);
   actor_t actor1;
   memset(&actor1, 0, sizeof(actor1));
-  wanted_list_add(wl, hash, &actor1, nullptr, 0);  /* no deadline */
+  wanted_list_add(wl, hash, &actor1, nullptr, 0, 0);  /* no deadline */
 
   std::vector<SweepCapture> captures;
   wanted_list_sweep(wl, now_ms_monotonic(), capture_expired_cb, &captures);
@@ -282,7 +282,7 @@ TEST(WantedListTimeout, GetReturnsEntryForAccounting) {
   buffer_t* hash = make_hash(hash_data, 32);
   actor_t actor1;
   memset(&actor1, 0, sizeof(actor1));
-  wanted_list_add(wl, hash, &actor1, nullptr, 0);
+  wanted_list_add(wl, hash, &actor1, nullptr, 0, 0);
 
   wanted_entry_t* entry = wanted_list_get(wl, hash);
   ASSERT_NE(entry, nullptr);
@@ -309,7 +309,7 @@ TEST(WantedListTimeout, FanoutCountGatesFailUntilAllBranchesReport) {
   buffer_t* hash = make_hash(hash_data, 32);
   actor_t origin_actor;
   memset(&origin_actor, 0, sizeof(origin_actor));
-  wanted_list_add(wl, hash, &origin_actor, nullptr, 0);
+  wanted_list_add(wl, hash, &origin_actor, nullptr, 0, 0);
 
   /* Forwarding loop set fanout_count = 3 reachable hops. */
   wanted_entry_t* entry = wanted_list_get(wl, hash);
@@ -351,7 +351,7 @@ TEST(WantedListTimeout, ZeroFanoutCountFailsOnFirstNotFound) {
   buffer_t* hash = make_hash(hash_data, 32);
   actor_t origin_actor;
   memset(&origin_actor, 0, sizeof(origin_actor));
-  wanted_list_add(wl, hash, &origin_actor, nullptr, 0);
+  wanted_list_add(wl, hash, &origin_actor, nullptr, 0, 0);
 
   wanted_entry_t* entry = wanted_list_get(wl, hash);
   ASSERT_NE(entry, nullptr);
@@ -366,5 +366,44 @@ TEST(WantedListTimeout, ZeroFanoutCountFailsOnFirstNotFound) {
   EXPECT_EQ(wanted_list_find(wl, hash), nullptr);
 
   buffer_destroy(hash);
+  wanted_list_destroy(wl);
+}
+/* Exhale verify mode: the flag is stored on the new entry AND propagated to
+   an existing entry when a verify requester joins it (the re-store skip must
+   survive a join from a stream-origin requester). */
+TEST(TestWantedList, VerifyOnlyFlagStoredAndPropagated) {
+  wanted_list_t* wl = wanted_list_create();
+  uint8_t hash_data[32];
+  memset(hash_data, 0x77, 32);
+  buffer_t* hash = make_hash(hash_data, 32);
+  actor_t actor1;
+  memset(&actor1, 0, sizeof(actor1));
+  actor_t actor2;
+  memset(&actor2, 0, sizeof(actor2));
+
+  /* Stream-origin requester creates a plain entry. */
+  wanted_list_add(wl, hash, &actor1, nullptr, 0, 0);
+  wanted_entry_t* entry = wanted_list_get(wl, hash);
+  ASSERT_NE(entry, nullptr);
+  EXPECT_EQ(entry->verify_only, 0);
+
+  /* A verify-only requester joins: the entry flips verify mode so a found
+     response skips the local re-store (the shed must actually shave). */
+  wanted_list_add(wl, hash, &actor2, nullptr, 0, 1);
+  entry = wanted_list_get(wl, hash);
+  ASSERT_NE(entry, nullptr);
+  EXPECT_EQ(entry->verify_only, 1);
+
+  /* New verify entry stores the flag too. */
+  uint8_t hash2_data[32];
+  memset(hash2_data, 0x78, 32);
+  buffer_t* hash2 = make_hash(hash2_data, 32);
+  wanted_list_add(wl, hash2, &actor1, nullptr, 0, 1);
+  entry = wanted_list_get(wl, hash2);
+  ASSERT_NE(entry, nullptr);
+  EXPECT_EQ(entry->verify_only, 1);
+
+  buffer_destroy(hash);
+  buffer_destroy(hash2);
   wanted_list_destroy(wl);
 }

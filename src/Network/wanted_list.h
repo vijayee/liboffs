@@ -39,6 +39,10 @@ typedef struct wanted_entry_t {
                                  forged not-found for a different request
                                  can't prematurely fail the current search.
                                  0 = unset (no message_id check). */
+  /* Search-level verify mode (respiration exhale shed): skip the find's
+     local cache check and the origin's block-receipt re-store; the
+     found result is still notified with its carried block attached. */
+  uint8_t  verify_only;
   uint8_t  fanout_count;      /* # of next-hops the origin fanned out to */
   uint8_t  not_found_count;   /* # of not-found responses received */
   struct wanted_entry_t* next;
@@ -79,7 +83,8 @@ wanted_entry_t* wanted_list_get(wanted_list_t* wl, buffer_t* hash);
    caller adopted — MOVED INTO this list (the caller must clear its copy);
    released by wanted_requester_list_destroy / wanted_list_prune_requester. */
 void wanted_list_add(wanted_list_t* wl, buffer_t* hash, actor_t* actor,
-                     stream_t* owner, uint64_t deadline_ms);
+                     stream_t* owner, uint64_t deadline_ms,
+                     uint8_t verify_only);
 
 wanted_requester_t* wanted_list_remove(wanted_list_t* wl, buffer_t* hash);
 void wanted_requester_list_destroy(wanted_requester_t* requesters);
