@@ -152,6 +152,11 @@ typedef struct {
   uint8_t path_len;
   uint64_t start_time;
   node_id_t original_source;
+  /* VERIFY-ONLY search (respiration exhale shed): the supplier checks
+     its local index but answers a metadata-only FOUND response - it
+     does NOT ship the block, so a shed verification of e.g. 18k
+     candidates does not flood the peer with 2.3 GB of block data. */
+  uint8_t verify_only;
 } wire_find_block_t;
 
 // --- FindBlockResponse ---

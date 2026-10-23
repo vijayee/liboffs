@@ -1085,7 +1085,7 @@ int wire_ping_capacity_response_decode(cbor_item_t* item, wire_ping_capacity_res
 // --- FindBlock ---
 
 cbor_item_t* wire_find_block_encode(const wire_find_block_t* msg) {
-  cbor_item_t* array = cbor_new_definite_array(10);
+  cbor_item_t* array = cbor_new_definite_array(11);
   cbor_item_t* item;
 
   item = cbor_build_uint8(WIRE_FIND_BLOCK);
@@ -1133,11 +1133,16 @@ cbor_item_t* wire_find_block_encode(const wire_find_block_t* msg) {
   (void)cbor_array_push(array, source);
   cbor_decref(&source);
 
+  item = cbor_build_uint8(msg->verify_only);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
   return array;
 }
 
 int wire_find_block_decode(cbor_item_t* item, wire_find_block_t* msg) {
   if (!cbor_isa_array(item) || cbor_array_size(item) < 10) return -1;
+  msg->verify_only = 0;
   uint8_t type_byte;
   if (_array_get_uint8(item, 0, &type_byte) != 0 || type_byte != WIRE_FIND_BLOCK) return -1;
   uint64_t id_hi, id_lo;
@@ -1181,6 +1186,13 @@ int wire_find_block_decode(cbor_item_t* item, wire_find_block_t* msg) {
   cbor_item_t* source = cbor_array_get(item, 9);
   int rc = _node_id_decode(source, &msg->original_source);
   cbor_decref(&source);
+  if (rc == 0 && cbor_array_size(item) >= 11) {
+    /* Optional (added post-launch): peer deployments that predate the
+       verify-only field send 10 elements; default is 0. */
+    uint8_t verify_only_raw = 0;
+    if (_array_get_uint8(item, 10, &verify_only_raw) == 0)
+      msg->verify_only = verify_only_raw;
+  }
   return rc;
 }
 

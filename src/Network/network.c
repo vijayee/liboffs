@@ -3080,9 +3080,15 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
           }
           found_resp.latency_ms = 0;
 
-          /* Include block data from LRU cache so the requester can store it */
-          block_t* block = block_lru_cache_get(network->block_cache->lru, hash_buf);
-          if (block == NULL) {
+          /* Include block data from LRU cache so the requester can store it.
+             VERIFY-ONLY searches skip the block entirely: the metadata-only
+             found answer is all the redundancy check needs, and an exhale
+             verifying thousands of candidates must not ship 2+ GB back 
+             to the sheder. */
+          block_t* block = (find->verify_only != 0)
+                              ? NULL
+                              : block_lru_cache_get(network->block_cache->lru, hash_buf);
+          if (block == NULL && find->verify_only == 0) {
             /* The LRU only holds recently-touched blocks; a durable block
                still on disk (in the sections + index) must be served too, or
                the requester receives a data-less found reply, re-fetches from
@@ -3125,7 +3131,7 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
               buffer_destroy(data);
             }
           }
-          if (block != NULL) {
+          if (block != NULL && find->verify_only == 0) {
             found_resp.block_data = block->data->data;
             found_resp.block_data_len = block->data->size;
             found_resp.block_fib = entry->counter.fib;
@@ -3164,6 +3170,7 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
   if (state.path_len > FIND_BLOCK_MAX_PATH) state.path_len = FIND_BLOCK_MAX_PATH;
   memcpy(state.path, find->path, state.path_len * sizeof(node_id_t));
   state.start_time_ms = find->start_time;
+  state.verify_only = find->verify_only;
   memcpy(&state.original_source, &find->original_source, sizeof(node_id_t));
 
   // Execute FindBlock logic
@@ -3296,6 +3303,7 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         forward->path_len = state.path_len;
         forward->start_time = state.start_time_ms;
         memcpy(&forward->original_source, &state.original_source, sizeof(node_id_t));
+        forward->verify_only = state.verify_only;
 
         // Encode and send FindBlock to next_hops[hop] via QUIC
         cbor_item_t* cbor = wire_find_block_encode(forward);
@@ -4708,6 +4716,7 @@ wire_search:
   memcpy(state.block_hash, payload->hash->data, 32);
   state.ttl = FORWARD_TTL;
   state.start_time_ms = now_ts;
+  state.verify_only = payload->verify_only;
   memcpy(&state.original_source, &network->authority->local_id, sizeof(node_id_t));
 
   node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
@@ -4843,6 +4852,7 @@ wire_search:
         forward->path_len = state.path_len;
         forward->start_time = state.start_time_ms;
         memcpy(&forward->original_source, &state.original_source, sizeof(node_id_t));
+        forward->verify_only = state.verify_only;
 
         // Encode and send FindBlock to next_hops[hop] via QUIC
         cbor_item_t* cbor = wire_find_block_encode(forward);

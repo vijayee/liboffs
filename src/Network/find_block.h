@@ -37,6 +37,8 @@ typedef struct find_block_state_t {
   uint8_t path_len;
   uint64_t start_time_ms;
   node_id_t original_source;
+  /* Propagates wire_find_block_t::verify_only through the walk. */
+  uint8_t verify_only;
 } find_block_state_t;
 
 // Execute FindBlock handler logic
