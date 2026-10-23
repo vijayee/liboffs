@@ -338,8 +338,8 @@ static QUIC_STATUS QUIC_API quic_stream_callback(
       {
         uint64_t events = atomic_fetch_add_explicit(&stream_ctx->rx_events, 1, memory_order_relaxed) + 1;
         if (events <= 40 || (events % 100) == 0) {
-          log_error("quic:rx diag stream_ctx=%p event#%llu", (void*)stream_ctx,
-                    (unsigned long long)events);
+          log_error("quic:rx diag stream=%p ctx=%p event#%llu", (void*)stream,
+                    (void*)stream_ctx, (unsigned long long)events);
         }
       }
       uint64_t consumed = 0;
@@ -385,6 +385,18 @@ static QUIC_STATUS QUIC_API quic_stream_callback(
              unread bytes of subsequent frames - the wedge where the peer inbound
              goes dark after ~1.4 MB sent (2026-10-22 hunt). */
           return QUIC_STATUS_PENDING;
+      }
+      {
+        /* OFFS-254 hunt diagnostic (remove with the block): per-stream send
+            completion counter with the stream handle, so a send that msquic
+            never completes is attributable. */
+        uint64_t sc = atomic_fetch_add_explicit(&stream_ctx->send_completes, 1,
+                                                memory_order_relaxed) + 1;
+        if (sc <= 40 || (sc % 50) == 0) {
+          log_error("quic:send_complete diag stream=%p ctx=%p total#%llu canceled=%d",
+                    (void*)stream, (void*)stream_ctx, (unsigned long long)sc,
+                    (int)event->SEND_COMPLETE.Canceled);
+        }
       }
       send_complete_context_t* send_ctx =
           (send_complete_context_t*)event->SEND_COMPLETE.ClientContext;

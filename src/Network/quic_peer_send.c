@@ -92,6 +92,16 @@ int quic_peer_send(network_t* network, peer_connection_t* peer, cbor_item_t* cbo
     return -1;
   }
 
+  /* OFFS-254 hunt diagnostic (remove with the block): tie every peer send
+     to its stream handle and a global counter, so strands (StreamSend ok,
+     SEND_COMPLETE never firing) are attributable to the exact stream. */
+  static ATOMIC(uint64_t) quic_peer_send_count = ATOMIC_VAR_INIT(0);
+  {
+    uint64_t send_id = atomic_fetch_add_explicit(&quic_peer_send_count, 1,
+                                                 memory_order_relaxed);
+    log_error("quic:send stream=%p len=%zu id=%llu", (void*)peer->quic_stream,
+              (size_t)frame_len, (unsigned long long)send_id);
+  }
   QUIC_STATUS status = msquic->StreamSend(
       (HQUIC)peer->quic_stream,
       &send_ctx->buf,
