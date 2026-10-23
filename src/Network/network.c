@@ -2054,6 +2054,17 @@ static void network_handle_request_timeout_tick(network_t* network,
 
   // Sweep wanted_list — the callback notifies each expired requester with a
   // found=0 result and frees the requester list.
+  /* Prune peers that never really connected or went dark: run the
+     connection-manager decay every decay_tick_ms (60s default) - ms is
+     owned by this actor thread. An admitted-but-never-contacted peer
+     (initial weight 0.1) decays below drop_threshold (0.01) in about
+     90 ticks of non-contact; a live peer keeps its weight up through
+     its successes. */
+  if (now_ms >= network->decay_last_tick_ms + network->conn_mgr.hebbian.decay_tick_ms) {
+    network->decay_last_tick_ms = now_ms;
+    connection_manager_decay_tick(&network->conn_mgr);
+  }
+
   wanted_list_sweep(network->wanted_list, now_ms,
                     network_wanted_list_timeout_cb, network);
 

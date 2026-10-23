@@ -101,6 +101,7 @@ typedef struct relay_challenge_t {
 
 typedef struct network_t {
   actor_t actor;
+  uint64_t decay_last_tick_ms;  /* last connection_manager_decay_tick (network actor) */
   authority_t* authority;
   block_cache_t* block_cache;
   scheduler_pool_t* pool;

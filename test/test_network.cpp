@@ -2477,7 +2477,10 @@ protected:
 TEST_F(PeerConnectionTest, CreateDestroy) {
   ASSERT_NE(peer, (peer_connection_t*)NULL);
   EXPECT_FLOAT_EQ(peer->hebbian_weight, 0.1f);
-  EXPECT_TRUE(peer->connected);
+  /* NOT connected at creation: nothing has proven a send path yet (the
+     BuABpipDuk never-contacted-relay-candidate fix). Real contact
+     flips it per handler - direct salutation verified, relay-routed. */
+  EXPECT_FALSE(peer->connected);
   EXPECT_NE(peer->eabf, (eabf_t*)NULL);
 }
 
@@ -2518,6 +2521,7 @@ TEST_F(PeerConnectionTest, RTTUpdate) {
 }
 
 TEST_F(PeerConnectionTest, MetricsSnapshot) {
+  peer->connected = true;  /* live peer - the snapshot must mirror it */
   peer_hebbian_update(peer, 0.5f);
   peer_update_rtt(peer, 20.0);
   peer_metrics_snapshot_t snapshot;
@@ -2618,6 +2622,9 @@ TEST_F(ConnectionManagerTest, GravityWellSearch) {
 
   peer_connection_t* peer1 = connection_manager_add(&mgr, &id1, NULL, NULL);
   (void)connection_manager_add(&mgr, &id2, NULL, NULL);
+  /* Topic routing candidates must have a proven send path - mark them
+     connected the way the salutation/relay handlers would. */
+  peer1->connected = true;
 
   uint8_t topic[32];
   memset(topic, 0xDD, 32);
@@ -2650,7 +2657,8 @@ TEST_F(ConnectionManagerTest, DecayTickRemovesLowWeight) {
 TEST_F(ConnectionManagerTest, CollectMetrics) {
   node_id_t id1 = {};
   memset(id1.hash, 0xAA, NODE_ID_HASH_SIZE);
-  connection_manager_add(&mgr, &id1, NULL, NULL);
+  peer_connection_t* metrics_peer = connection_manager_add(&mgr, &id1, NULL, NULL);
+  metrics_peer->connected = true;  /* live peer - mirror in the snapshot */
 
   peer_metrics_snapshot_t snapshots[4];
   size_t count = connection_manager_collect_metrics(&mgr, snapshots, 4);
@@ -4490,7 +4498,10 @@ TEST_F(PeerBookBackoffTest, ConnectedPeerSkipsHealBranch) {
   peer_connection_t* peer =
       connection_manager_add(&network->conn_mgr, &peer_id, NULL, network->pool);
   ASSERT_NE(peer, nullptr);
-  ASSERT_TRUE(peer->connected);  // peer_connection_create marks peers live
+  /* The heal-skip branch keys on connected: mark a real live connection
+     (creation no longer does). */
+  peer->connected = true;
+  ASSERT_TRUE(peer->connected);
 
   // Pre-arm the backoff as if a previous partition had been weathered.
   network->bootstrap_backoff_ms = 4000u;
