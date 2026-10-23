@@ -354,6 +354,13 @@ typedef struct {
   buffer_t* hash;       /* block hash */
   uint32_t  fib;        /* FIB counter for the block */
   actor_t*  reply_to;   /* stream actor to notify (NULL = fire-and-forget) */
+  /* Include the block bytes (read back from the local cache) in the
+     wire StoreBlock. SET ONLY for the respiration exhale storing phase:
+     a shed-then-delete flow MUST transfer the bytes before deleting the
+     last local copy - the announce-only store (carry_data=0) means the
+     peer accepts without storing and the origin deletes data that was
+     never sent. */
+  uint8_t carry_data;
 } network_local_store_block_payload_t;
 
 void network_local_store_block_payload_destroy(void* ptr);

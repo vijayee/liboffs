@@ -426,6 +426,10 @@ static void _respiration_delete_redundant(respiration_actor_t* actor) {
       }
       store_payload->hash = REFERENCE(actor->pending[idx].hash, buffer_t);
       store_payload->fib = 1; /* minimum FIB for store propagation */
+      /* The shed deletes this block once a peer accepts, so the store
+         must CARRY the bytes; an announce-only store accepts without
+         storing and the block data is lost. */
+      store_payload->carry_data = 1;
       store_payload->reply_to = &actor->actor;
 
       message_t store_msg;

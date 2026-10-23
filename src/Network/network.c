@@ -5965,7 +5965,69 @@ void network_dispatch(void* state, message_t* msg) {
 
         float local_capacity = atomic_load(&network->authority->capacity);
         node_phase_e local_phase = atomic_load(&network->authority->phase);
+        /* Carry the bytes when asked (exhale shed-then-delete): read the
+            block back from the local cache and attach it to every hop's
+            StoreBlock, so a peer that accepts stores REAL data. */
+        /* Carry the bytes when asked (exhale shed-then-delete): read the
+           block back from the local cache and attach it to every hop's
+           StoreBlock, so a peer that accepts stores REAL data. An
+           announce-only store means the peer accepts without storing
+           and the origin deletes data that was never sent. */
+        block_t* store_carry_block = NULL;
+        buffer_t* store_carry_data = NULL;
+        buffer_t* store_carry_hash = NULL;
+        if (payload->carry_data) {
+          buffer_t* load_hash = buffer_create_from_pointer_copy(payload->hash->data, payload->hash->size);
+          if (load_hash != NULL) {
+            store_carry_block = block_lru_cache_get(network->block_cache->lru, load_hash);
+            if (store_carry_block != NULL) {
+              store_carry_data = store_carry_block->data;
+            } else {
+              index_entry_t* load_entry = index_peek(network->block_cache->index, load_hash);
+              if (load_entry != NULL) {
+                sections_read_payload_t load_read;
+                memset(&load_read, 0, sizeof(load_read));
+                load_read.section_id = load_entry->section_id;
+                load_read.section_index = load_entry->section_index;
+                load_read.reply_to = NULL;
+                load_read.result = NULL;
+                message_t load_msg;
+                load_msg.type = SECTIONS_READ;
+                load_msg.payload = &load_read;
+                load_msg.payload_destroy = NULL;
+                sections_dispatch(network->block_cache->sections, &load_msg);
+                buffer_t* load_data = load_read.result;
+                if (load_data != NULL) {
+                  if (block_cache_verify_read_hash(load_data, load_hash)) {
+                    /* The block references both buffers; drop the creator
+                       refs right after the block is built (same pattern as
+                       the find-serve path). */
+                    store_carry_block =
+                        block_create_existing_data_hash(load_data, load_hash);
+                    store_carry_data = load_data;
+                    store_carry_hash = load_hash;
+                  } else {
+                    log_error("store carry: block read hash mismatch");
+                    buffer_destroy(load_data);
+                  }
+                }
+              }
+              buffer_destroy(load_hash);
+            }
 
+            if (store_carry_block == NULL) {
+              /* No bytes readable - the shed's store-then-delete must
+                 not run against a block we cannot supply; keep the
+                 block local (the store result will simply never
+                 accept it). */
+            }
+            if (store_carry_block == NULL) {
+              /* No bytes readable - the shed's store-then-delete must not
+                 run against a block we cannot supply; keep the block
+                 local (the store result will simply never accept it). */
+            }
+          }
+        }
         net_node_t* next_hops[STORE_BLOCK_FORWARD_FANOUT];
         size_t next_hop_count = 0;
 
@@ -5997,13 +6059,26 @@ void network_dispatch(void* state, message_t* msg) {
               memcpy(forward.path, state.path, state.path_len * sizeof(node_id_t));
               forward.path_len = state.path_len;
               forward.start_time = state.start_time_ms;
-              forward.carry_data = 0;
+              forward.carry_data = payload->carry_data;
+              if (forward.carry_data && store_carry_block != NULL) {
+                forward.block_data = store_carry_block->data->data;
+                forward.block_data_len = store_carry_block->data->size;
+              }
 
               cbor_item_t* cbor = wire_store_block_encode(&forward);
               conn_state_send(network, peer, cbor);
               cbor_decref(&cbor);
             }
           }
+        }
+        if (store_carry_block != NULL) {
+          DESTROY(store_carry_block, block);
+        }
+        if (store_carry_data != NULL && store_carry_hash != NULL) {
+          /* The block build referenced both buffers; the last creator
+             refs drop here (the same yield as the find-serve path). */
+          buffer_destroy(store_carry_data);
+          buffer_destroy(store_carry_hash);
         }
 
         // Aggregate the result if a reply_to was provided. The origin sends
