@@ -213,14 +213,33 @@ void respiration_actor_dispatch(void* state, message_t* msg) {
         /* Shed verification: skip the local cache (the candidate block is
            local by definition) and skip the found-response re-store, or
            the verify-download refills the capacity the exhale sheds. */
-        find_payload->verify_only = 1;
+        find_payload->verify_only = 0;
 
-        message_t find_msg;
-        find_msg.type = NETWORK_LOCAL_FIND_BLOCK;
-        find_msg.payload = find_payload;
-        find_msg.payload_destroy = network_local_find_block_payload_destroy;
-
-        actor_send(&actor->network->actor, &find_msg);
+        /* Shed verification rides WIRE_PING_BLOCK: DIRECT presence pings
+           (no routing, no block transfer - find_block ships the bytes,
+           which an 18k-candidate shed must not). The network correlates
+           responses by message_id and notifies this actor via the
+           unchanged NETWORK_FIND_BLOCK_RESULT consumer. */
+        network_local_ping_block_payload_t* ping_payload =
+            get_clear_memory(sizeof(network_local_ping_block_payload_t));
+        if (ping_payload == NULL) {
+          /* Allocation failed — treat as not found, move to preserved */
+          _respiration_add_preserved(actor, actor->pending[idx].hash,
+                                      actor->pending[idx].ejection_date);
+          actor->pending[idx].hash = NULL;
+          continue;
+        }
+        ping_payload->hash = find_payload->hash;
+        ping_payload->reply_to = &actor->actor;
+        /* hash ownership moves to the ping payload; the abandoned find
+           shell is freed WITHOUT its destructor, which would release
+           the hash reference this payload now owns */
+        free(find_payload);
+        message_t ping_msg;
+        ping_msg.type = NETWORK_LOCAL_PING_BLOCK;
+        ping_msg.payload = ping_payload;
+        ping_msg.payload_destroy = network_local_ping_block_payload_destroy;
+        actor_send(&actor->network->actor, &ping_msg);
       }
       /* Resolve any allocation-failed entries from pending */
       size_t write_idx = 0;

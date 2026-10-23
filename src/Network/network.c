@@ -249,6 +249,15 @@ void network_local_find_block_payload_destroy(void* ptr) {
   }
   free(payload);
 }
+void network_local_ping_block_payload_destroy(void* ptr) {
+  network_local_ping_block_payload_t* payload =
+      (network_local_ping_block_payload_t*)ptr;
+  if (payload == NULL) return;
+  if (payload->hash != NULL) {
+    buffer_destroy(payload->hash);
+  }
+  free(payload);
+}
 
 void network_local_find_cancel_send(network_t* network, actor_t* requester) {
   if (network == NULL || requester == NULL) return;
@@ -1280,6 +1289,47 @@ typedef struct pending_ping_block_t {
   struct pending_ping_block_t* next;
 } pending_ping_block_t;
 
+// --- Exhale shed block-presence ping pendings (message_id correlation) ---
+//
+// The respiration actor pings each connected peer for block presence
+// (WIRE_PING_BLOCK; no data). Responses correlate by message_id: any
+// exists=1 resolves found; every peer answering exists=0 resolves
+// not-found; the request-timeout tick sweeps the rest.
+typedef struct {
+  uint64_t message_id;
+  buffer_t* hash;      /* reference adopted from the ping payload */
+  actor_t* requester;  /* borrowed pointer (the shed actor outlives) */
+  size_t expected;      /* peers pinged */
+  size_t answered;
+  uint8_t any_exists;
+  uint64_t deadline_ms;
+} network_ping_pending_t;
+static network_ping_pending_t* network_ping_pendings = NULL;
+static size_t network_ping_pending_count = 0;
+static size_t network_ping_pending_capacity = 0;
+static void _network_ping_pending_notify_and_remove(size_t index, uint8_t found) {
+  network_ping_pending_t* pending = &network_ping_pendings[index];
+  if (pending->requester != NULL && pending->hash != NULL) {
+    network_find_block_result_payload_t* result =
+        get_clear_memory(sizeof(network_find_block_result_payload_t));
+    if (result != NULL) {
+      result->hash = REFERENCE(pending->hash, buffer_t);
+      result->found = found;
+      result->block = NULL;
+      message_t fb_msg = {0};
+      fb_msg.type = NETWORK_FIND_BLOCK_RESULT;
+      fb_msg.payload = result;
+      fb_msg.payload_destroy = network_find_block_result_destroy;
+      actor_send(pending->requester, &fb_msg);
+    }
+  }
+  if (pending->hash != NULL) buffer_destroy(pending->hash);
+  for (size_t idx = index; idx + 1 < network_ping_pending_count; idx++) {
+    network_ping_pendings[idx] = network_ping_pendings[idx + 1];
+  }
+  network_ping_pending_count--;
+}
+
 static void network_handle_ping_block(network_t* network, message_t* msg) {
   wire_ping_block_t* ping = (wire_ping_block_t*)msg->payload;
   if (ping == NULL) return;
@@ -1352,6 +1402,23 @@ static void network_handle_ping_block_response(network_t* network, message_t* ms
     float delta_w = hebbian_compute_delta(network->gossip_timeout_ms, HEBBIAN_FIND_BLOCK_MULTIPLIER);
     hebbian_frequency(&network->hebbian, &response->sender_id, delta_w);
     network_sync_hebbian_to_rings(network);
+  }
+
+  /* Correlate into the exhale ping pendings (message_id fence): an
+     exists=1 resolves the whole ping as found - first positive wins;
+     every pinged peer answering exists=0 resolves not-found. */
+  for (size_t index = 0; index < network_ping_pending_count; index++) {
+    network_ping_pending_t* pending = &network_ping_pendings[index];
+    if (pending->message_id != response->message_id) continue;
+    if (response->exists) {
+      _network_ping_pending_notify_and_remove(index, 1);
+    } else {
+      pending->answered++;
+      if (pending->answered >= pending->expected) {
+        _network_ping_pending_notify_and_remove(index, 0);
+      }
+    }
+    break;
   }
 }
 
@@ -2063,6 +2130,17 @@ static void network_store_pending_finalize(network_t* network,
 static void network_handle_request_timeout_tick(network_t* network,
                                                  message_t* msg) {
   (void)msg;
+  /* Exhale shed ping pendings: a missed/lost ping response must not pin
+     the entry - a timed-out ping resolves as not-found so the candidate
+     is preserved (never deleted on a timeout). */
+  {
+    uint64_t now_ms_ping = (uint64_t)time(NULL) * 1000;
+    for (size_t index = network_ping_pending_count; index > 0; index--) {
+      if (now_ms_ping >= network_ping_pendings[index - 1].deadline_ms) {
+        _network_ping_pending_notify_and_remove(index - 1, 0);
+      }
+    }
+  }
   uint64_t now_ms = (uint64_t)time(NULL) * 1000;
 
   // Sweep wanted_list — the callback notifies each expired requester with a
@@ -5917,6 +5995,56 @@ void network_dispatch(void* state, message_t* msg) {
         if (network->conn_mgr.peers[index]->connected) {
           peer_eabf_tick(network->conn_mgr.peers[index]);
         }
+      }
+      break;
+    }
+    case NETWORK_LOCAL_PING_BLOCK: {
+      /* Exhale shed presence ping: send WIRE_PING_BLOCK to every
+         CONNECTED peer and correlate the responses by message_id.
+         No routing, no block transfer - the supplier answers from its
+         local index (exists fib healthy) and this node resolves the
+         entry: any exists=1 => found; all peers exists=0 => not-found;
+         timeout swept by NETWORK_REQUEST_TIMEOUT_TICK. */
+      network_local_ping_block_payload_t* ping_payload =
+          (network_local_ping_block_payload_t*)msg->payload;
+      if (ping_payload == NULL || ping_payload->hash == NULL) break;
+      wire_ping_block_t ping;
+      memset(&ping, 0, sizeof(ping));
+      ping.message_id = network_next_message_id(network);
+      memcpy(&ping.sender_id, &network->authority->local_id, sizeof(node_id_t));
+      memcpy(ping.block_hash, ping_payload->hash->data, 32);
+      size_t pinged = 0;
+      for (size_t peer_index = 0; peer_index < network->conn_mgr.peer_count;
+           peer_index++) {
+        peer_connection_t* peer = network->conn_mgr.peers[peer_index];
+        if (peer == NULL || !peer->connected) continue;
+        cbor_item_t* ping_cbor = wire_ping_block_encode(&ping);
+        conn_state_send(network, peer, ping_cbor);
+        cbor_decref(&ping_cbor);
+        pinged++;
+      }
+      /* track the pending so responses can resolve it */
+      if (network_ping_pending_count >= network_ping_pending_capacity) {
+        size_t new_capacity = network_ping_pending_capacity == 0 ? 16 : network_ping_pending_capacity * 2;
+        network_ping_pending_t* new_pendings = realloc(network_ping_pendings,
+            sizeof(network_ping_pending_t) * new_capacity);
+        if (new_pendings == NULL) break;
+        network_ping_pendings = new_pendings;
+        network_ping_pending_capacity = new_capacity;
+      }
+      network_ping_pending_t* pending =
+          &network_ping_pendings[network_ping_pending_count++];
+      pending->message_id = ping.message_id;
+      pending->hash = REFERENCE(ping_payload->hash, buffer_t);
+      pending->requester = ping_payload->reply_to;
+      pending->expected = pinged;
+      pending->answered = 0;
+      pending->any_exists = 0;
+      pending->deadline_ms = (uint64_t)time(NULL) * 1000 + network->request_timeout_ms;
+      if (pinged == 0) {
+        /* no connected peers: nothing to verify against, and the shed
+           must not delete - resolve as not-found immediately. */
+        _network_ping_pending_notify_and_remove(network_ping_pending_count - 1, 0);
       }
       break;
     }

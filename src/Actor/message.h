@@ -206,7 +206,10 @@ CACHE_CAPACITY_REFRESH,
   TOPOLOGY_METRICS_UPDATE,
   /* Local stream-to-network messages (distinct from wire-level NETWORK_FIND_BLOCK etc.) */
   NETWORK_LOCAL_FIND_BLOCK,        /* Stream sends this to network actor on cache miss */
-  NETWORK_LOCAL_FIND_CANCEL,      /* Stream sends this to network actor at destroy:
+  NETWORK_LOCAL_FIND_CANCEL,
+/* Exhale shed verification: DIRECT block-presence pings (no routing,
+   no block transfer) - correlated by message_id in the network. */
+NETWORK_LOCAL_PING_BLOCK,      /* Stream sends this to network actor at destroy:
                                      unregister its requesters from the wanted_list so a
                                      late result reply never lands in a destroyed actor */
   NETWORK_FIND_BLOCK_RESULT,      /* Network actor sends this back to stream */
@@ -335,6 +338,15 @@ void network_local_find_block_payload_destroy(void* ptr);
 typedef struct {
   actor_t* requester;   /* the dying requester actor to prune from wanted_list */
 } network_local_find_cancel_payload_t;
+
+/* Destroy function for network_local_ping_block_payload_t (releases hash) */
+void network_local_ping_block_payload_destroy(void* ptr);
+
+/* Exhale shed: DIRECT presence ping request (no data transfer) */
+typedef struct {
+  buffer_t* hash;       /* block hash to ping for */
+  actor_t*  reply_to;   /* shed actor notified via NETWORK_FIND_BLOCK_RESULT */
+} network_local_ping_block_payload_t;
 
 /* Network-to-stream: result of FindBlock */
 typedef struct {
