@@ -157,7 +157,33 @@ Blocked; revisit when the relay node returns.
 - `docs/GC_KEEP_FILTER_SIZING.md` documents sizing; the exhale test should
   account for the GC keep filter when filling to 0.8.
 
-## 5. Tracking
+## 5. Verification status (live run of 2026-10-23)
+
+**Executed live between A and mycroft (liboffs a96865a → c583fca, OFFS b453201 → a7956e2):**
+
+- **P1 ✔** restart → reconnect → salutation flip verified three times (once as part of each MSI upgrade); `offs peer list` tracks the direct peer; `status.peer_count` remains the metrics-quirk (use `/api/v1/peers` or `offs peer list`).
+- **P3 ✔ (data flows)** — byte-exact cross-peer GET verified on the final builds in BOTH directions: A→mycroft 262,144 B (SHA `d84a82e6…`) and mycroft→A 131,072 B (SHA `da8db8e8…`), plus re-verified `verify_putA2` and `verify_dirTest` after the shed had started. NOTE: the Windows CLI's stdout is O_TEXT — `offs get <url> > file` via cmd/PS redirect text-mangles binary; use `--output <path>`.
+- **P3 one incident** (P5-class): a GET issued during a daemon restart raced the connection teardown — `conn_state_send` returned success into a dying QUIC connection and the find was lost (the requester then waited out the wanted deadline). Recorded as an open P5 item: sends should fail fast when the stream is closing.
+- **P4 ✔ (respiration) — and it found four real bugs, all fixed + deployed:**
+  1. `verify_only` exhale verification (a96865a) — the shed's verify answered from the LOCAL cache (always found) and re-downloaded results (refill).
+  2. Exhale never evaluated at startup (e75c443) — `block_cache_update_capacity` ran inside `block_cache_create` before `network_create` wired the respiration actor; nothing re-evaluated until the next put (add: re-run after wiring).
+  3. offsd passed `NULL` for the cache's authority (OFFS b453201) — `block_cache_update_capacity` early-returned forever in the production daemon; respiration AND authority phase/capacity were dead outside tests.
+  4. Verify flood volume (ac44e09) — 18k candidates × 128 KB verify-downloads ≈ 2.3 GB; responses outran the 30 s watchdog (≈18 solved/cycle). Fix: optional 11th CBOR element carries `verify_only` end-to-end; suppliers answer metadata-only FOUND and skip the block serve.
+  5. Watchdog reset didn't re-trigger (512c534) — after a failed cycle the node sat IDLE above the threshold with nothing to re-arm; added `CACHE_CAPACITY_REFRESH`.
+  6. Batch cap (581392e) — one cycle carried EVERY candidate (rate-limited wire finds at ~50/s made mass expiry inevitable); each cycle is now 40 candidates (under the ~60-token FIND_BLOCK burst budget), progressed by the deletes' own re-evaluations.
+  7. **Loop-back self-verification (dcea34f)** — the origin never marked itself visited, so a peer forwarded the verify find back to the origin, whose supplier answered found=1 against its OWN copy: the shed deleted last copies verified against themselves (40 live deletions before the catch; all shared test files re-verified intact afterwards). Fixed: origin enters itself in the visited bloom; a supplier that sees a verify-only find addressed to itself answers nothing.
+  8. **Data-less store-then-delete (b0a319e, a445dcd)** — the local store path announced blocks WITHOUT data; the supplier accepted by capacity rules and stored nothing; the shed deleted each block the moment the acceptance arrived (the −40). Now the exhale's stores carry the bytes (read back from the LRU or sections, hash-verified); the block store skips entirely when bytes aren't readable; the store-carry buffer ownership follows the find-serve pattern. One ownership bug in the first cut caused `c0000374` heap corruption on every boot (the carry path runs at every first shed) — fixed in a445dcd.
+  9. **IDLE-before-refresh (c583fca)** — the completion path asked the cache to re-evaluate before publishing state=IDLE; the trigger's IDLE check lost the race and a fast batched cycle could stall the shed forever. Disarm + IDLE publish now precede the refresh.
+- **P4 live result**: A sheds 18,287 → 18,193 blocks (−512 KB verified on `current_bytes`) while mycroft grows 236 → 290 (+54 blocks RECEIVED) — store-then-delete transfers real bytes before deletion. The shed runs autonomously toward the 50% target at ~40 blocks / ~2 min.
+
+**Open items surfaced by this run (user decisions or next steps):**
+- The rate limiter is built but **never enforced** on any send/receive path (no caller of `rate_limit_table_find` in network.c, no `WIRE_RATE_LIMITED` sender) — either wire it (P5) or delete the dead table + handler.
+- Preserved (not-found) candidates keep their ejection_date, so failed candidates re-verify at the head of every batch until stored; acceptable while stores succeed, but a peer that declines everything pins the shed on the same 40 forever. An ejection-date pushback on preserved candidates would fix the pathological case.
+- journald rate-limits mycroft's log during flood-style operation (log gaps look like missing traffic — do not chase).
+- The Windows daemon's `stop` remains wedge-prone with the relay down (watchdog force-exit covers it; the SCM stop returns before the daemon finishes).
+- Hunt diagnostics (`find:`/`find:rx`/`find:rxresp`/`quic:send*`) still in tree — sweep-commit pending user's call.
+
+## 6. Tracking
 
 Harmony epic **"cross-node network-verification matrix"** is the intended
 tracker — the CLI here needs `HP_API_KEY` in env/.env to bootstrap; provide
