@@ -5973,16 +5973,20 @@ void network_dispatch(void* state, message_t* msg) {
            StoreBlock, so a peer that accepts stores REAL data. An
            announce-only store means the peer accepts without storing
            and the origin deletes data that was never sent. */
+        /* Carry the bytes when asked (exhale shed-then-delete): read the
+           block back from the local cache and attach it to every hop's
+           StoreBlock, so a peer that accepts stores REAL data. An
+           announce-only store means the peer accepts without storing
+           and the origin deletes data that was never sent. Ownership:
+           mirror the find-serve path - the block build references the
+           read-back buffers, the creator refs drop IMMEDIATELY after
+           the build, the block ref drops after the sends. */
         block_t* store_carry_block = NULL;
-        buffer_t* store_carry_data = NULL;
-        buffer_t* store_carry_hash = NULL;
         if (payload->carry_data) {
           buffer_t* load_hash = buffer_create_from_pointer_copy(payload->hash->data, payload->hash->size);
           if (load_hash != NULL) {
             store_carry_block = block_lru_cache_get(network->block_cache->lru, load_hash);
-            if (store_carry_block != NULL) {
-              store_carry_data = store_carry_block->data;
-            } else {
+            if (store_carry_block == NULL) {
               index_entry_t* load_entry = index_peek(network->block_cache->index, load_hash);
               if (load_entry != NULL) {
                 sections_read_payload_t load_read;
@@ -5999,33 +6003,21 @@ void network_dispatch(void* state, message_t* msg) {
                 buffer_t* load_data = load_read.result;
                 if (load_data != NULL) {
                   if (block_cache_verify_read_hash(load_data, load_hash)) {
-                    /* The block references both buffers; drop the creator
-                       refs right after the block is built (same pattern as
-                       the find-serve path). */
                     store_carry_block =
                         block_create_existing_data_hash(load_data, load_hash);
-                    store_carry_data = load_data;
-                    store_carry_hash = load_hash;
-                  } else {
-                    log_error("store carry: block read hash mismatch");
-                    buffer_destroy(load_data);
                   }
+                  /* creator refs drop now either way; the block keeps its
+                     own references */
+                  buffer_destroy(load_data);
                 }
               }
-              buffer_destroy(load_hash);
-            }
-
-            if (store_carry_block == NULL) {
-              /* No bytes readable - the shed's store-then-delete must
-                 not run against a block we cannot supply; keep the
-                 block local (the store result will simply never
-                 accept it). */
             }
             if (store_carry_block == NULL) {
               /* No bytes readable - the shed's store-then-delete must not
                  run against a block we cannot supply; keep the block
                  local (the store result will simply never accept it). */
             }
+            buffer_destroy(load_hash);
           }
         }
         net_node_t* next_hops[STORE_BLOCK_FORWARD_FANOUT];
@@ -6073,12 +6065,6 @@ void network_dispatch(void* state, message_t* msg) {
         }
         if (store_carry_block != NULL) {
           DESTROY(store_carry_block, block);
-        }
-        if (store_carry_data != NULL && store_carry_hash != NULL) {
-          /* The block build referenced both buffers; the last creator
-             refs drop here (the same yield as the find-serve path). */
-          buffer_destroy(store_carry_data);
-          buffer_destroy(store_carry_hash);
         }
 
         // Aggregate the result if a reply_to was provided. The origin sends
