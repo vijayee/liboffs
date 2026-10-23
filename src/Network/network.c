@@ -420,6 +420,12 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
 
   network->respiration = respiration_actor_create(network, pool);
   block_cache->respiration = network->respiration;
+  /* Re-evaluate capacity now that respiration is wired: block_cache_create
+     already ran the exhale evaluation at startup with respiration still
+     NULL (create happens before network_create here), so a daemon that
+     starts above the exhale threshold with an idle cache never exhales
+     until its next put or unpin. */
+  block_cache_update_capacity(block_cache);
 
   // Start gossip timer: first tick in init_interval_s, then recurring
   network->gossip_timer_id = 0;
