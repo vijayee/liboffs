@@ -377,26 +377,14 @@ static QUIC_STATUS QUIC_API quic_stream_callback(
            receives the stream handle directly, which also covers accepted
            peer streams whose context carries no persistent_stream. */
         stream_ctx->listener->msquic->StreamReceiveComplete(stream, consumed);
-        {
-          uint64_t total = atomic_load_explicit(&stream_ctx->rx_bytes, memory_order_relaxed);
-          uint64_t events = atomic_load_explicit(&stream_ctx->rx_events, memory_order_relaxed);
-          if (events <= 40 || (events % 100) == 0) {
-            log_error("quic:rx complete diag stream_ctx=%p consumed=%llu total=%llu",
-                      (void*)stream_ctx, (unsigned long long)consumed,
-                      (unsigned long long)total);
-          }
-        }
-      }
-      break;
-    }
-    case QUIC_STREAM_EVENT_SEND_COMPLETE: {
-      {
-        uint64_t sc = atomic_fetch_add_explicit(&stream_ctx->send_completes, 1, memory_order_relaxed) + 1;
-        if (sc <= 40 || (sc % 100) == 0) {
-          log_error("quic:send_complete diag stream_ctx=%p total#%llu canceled=%d",
-                    (void*)stream_ctx, (unsigned long long)sc,
-                    (int)event->SEND_COMPLETE.Canceled);
-        }
+          /* Returning PENDING (not SUCCESS) is the msquic contract for inline
+             StreamReceiveComplete: SUCCESS makes QuicStreamIndicateEvent
+             treat the callback as buggy and auto-complete the FULL indicated
+             length AGAIN (RecvCompletionLength = consumed + total = 2x),
+             double-draining the receive buffer and silently discarding the
+             unread bytes of subsequent frames - the wedge where the peer inbound
+             goes dark after ~1.4 MB sent (2026-10-22 hunt). */
+          return QUIC_STATUS_PENDING;
       }
       send_complete_context_t* send_ctx =
           (send_complete_context_t*)event->SEND_COMPLETE.ClientContext;
