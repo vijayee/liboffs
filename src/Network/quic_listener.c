@@ -295,6 +295,12 @@ typedef struct quic_stream_context_t {
   HQUIC persistent_stream;  // non-NULL if this is the persistent bidi stream
   QUIC_ADDR peer_addr;
   stream_framer_t* framer;
+  /* OFFS-254 hunt diagnostics (remove with the block): receive-event and
+     send-complete counters, to see whether msquic stops indicating or the
+     framer wedges. */
+  ATOMIC(uint64_t) rx_events;
+  ATOMIC(uint64_t) rx_bytes;
+  ATOMIC(uint64_t) send_completes;
 } quic_stream_context_t;
 
 // Send-complete context — frees frame buffer and QUIC_BUFFER after msquic completes the send.
@@ -329,6 +335,13 @@ static QUIC_STATUS QUIC_API quic_stream_callback(
   quic_stream_context_t* stream_ctx = (quic_stream_context_t*)context;
   switch (event->Type) {
     case QUIC_STREAM_EVENT_RECEIVE: {
+      {
+        uint64_t events = atomic_fetch_add_explicit(&stream_ctx->rx_events, 1, memory_order_relaxed) + 1;
+        if (events <= 40 || (events % 100) == 0) {
+          log_error("quic:rx diag stream_ctx=%p event#%llu", (void*)stream_ctx,
+                    (unsigned long long)events);
+        }
+      }
       uint64_t consumed = 0;
       if (stream_ctx->framer != NULL) {
         // Feed received bytes into the framer and extract complete frames
@@ -354,6 +367,7 @@ static QUIC_STATUS QUIC_API quic_stream_callback(
         }
       }
       if (consumed > 0) {
+        atomic_fetch_add_explicit(&stream_ctx->rx_bytes, consumed, memory_order_relaxed);
         /* Complete the delivery: msquic holds back all further RECEIVE
            indications (and the flow-control window never opens) until the
            app completes the consumed length. Omitting this wedged the reply
@@ -363,10 +377,27 @@ static QUIC_STATUS QUIC_API quic_stream_callback(
            receives the stream handle directly, which also covers accepted
            peer streams whose context carries no persistent_stream. */
         stream_ctx->listener->msquic->StreamReceiveComplete(stream, consumed);
+        {
+          uint64_t total = atomic_load_explicit(&stream_ctx->rx_bytes, memory_order_relaxed);
+          uint64_t events = atomic_load_explicit(&stream_ctx->rx_events, memory_order_relaxed);
+          if (events <= 40 || (events % 100) == 0) {
+            log_error("quic:rx complete diag stream_ctx=%p consumed=%llu total=%llu",
+                      (void*)stream_ctx, (unsigned long long)consumed,
+                      (unsigned long long)total);
+          }
+        }
       }
       break;
     }
     case QUIC_STREAM_EVENT_SEND_COMPLETE: {
+      {
+        uint64_t sc = atomic_fetch_add_explicit(&stream_ctx->send_completes, 1, memory_order_relaxed) + 1;
+        if (sc <= 40 || (sc % 100) == 0) {
+          log_error("quic:send_complete diag stream_ctx=%p total#%llu canceled=%d",
+                    (void*)stream_ctx, (unsigned long long)sc,
+                    (int)event->SEND_COMPLETE.Canceled);
+        }
+      }
       send_complete_context_t* send_ctx =
           (send_complete_context_t*)event->SEND_COMPLETE.ClientContext;
       if (send_ctx != NULL) {
