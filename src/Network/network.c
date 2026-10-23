@@ -3050,7 +3050,13 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         // the request flows into the normal remote-search path below.
         entry = NULL;
       }
-      if (entry != NULL) {
+      /* Verify-only find looped back to the origin itself: the origin's
+         local copy is NOT external redundancy — answer nothing, so the
+         search expires as not-found and the candidate is preserved
+         (not deleted against its own copy). */
+      if (entry != NULL && !(find->verify_only != 0 &&
+                              node_id_equals(&find->original_source,
+                                             &network->authority->local_id))) {
         // Block found locally — send FOUND response back along the path
         const node_id_t* reply_to = &find->original_source;
         if (find->path_len > 0) {
@@ -4718,6 +4724,12 @@ wire_search:
   state.start_time_ms = now_ts;
   state.verify_only = payload->verify_only;
   memcpy(&state.original_source, &network->authority->local_id, sizeof(node_id_t));
+  /* Mark ORIGIN visited: a supplier must never route a find back to the
+     requester that asked for it - for a verify-only (exhale shed) find
+     a loop-back answer would be the origin verifying its OWN copy as
+     redundancy and deleting its last copy of the block. */
+  find_block_add_visited(state.visited_bloom, &state.visited_count,
+                         network->authority->local_id.hash);
 
   node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
   size_t next_hop_count = 0;
