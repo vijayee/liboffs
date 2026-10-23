@@ -309,17 +309,20 @@ void respiration_actor_dispatch(void* state, message_t* msg) {
 
       /* If all store results resolved, check capacity and go idle */
       if (actor->pending_count == 0) {
+        _respiration_watchdog_disarm(actor);
+        atomic_store(&actor->state, RESPIRATION_IDLE);
         float capacity = atomic_load(&actor->network->authority->capacity);
         if (capacity >= RESPIRATION_EXHALE_THRESHOLD) {
           log_warn("respiration: capacity %.2f still above threshold after store-then-delete", capacity);
           /* Ask the cache to re-evaluate: the next exhale cycle can shed
-             more once the deletes above have settled. */
+             more once the deletes above have settled. Send AFTER the IDLE
+             store — the trigger's IDLE check would otherwise race this
+             dispatch-return and drop the retry, leaving the node stalled
+             above the threshold with nothing to re-arm it. */
           message_t refresh = {0};
           refresh.type = CACHE_CAPACITY_REFRESH;
           actor_send(&actor->network->block_cache->actor, &refresh);
         }
-        _respiration_watchdog_disarm(actor);
-        atomic_store(&actor->state, RESPIRATION_IDLE);
       }
       break;
     }
