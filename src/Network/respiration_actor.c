@@ -331,7 +331,7 @@ void respiration_actor_dispatch(void* state, message_t* msg) {
         _respiration_watchdog_disarm(actor);
         atomic_store(&actor->state, RESPIRATION_IDLE);
         float capacity = atomic_load(&actor->network->authority->capacity);
-        if (capacity >= RESPIRATION_EXHALE_THRESHOLD) {
+        if (capacity > RESPIRATION_INHALE_THRESHOLD) {
           log_warn("respiration: capacity %.2f still above threshold after store-then-delete", capacity);
           /* Ask the cache to re-evaluate: the next exhale cycle can shed
              more once the deletes above have settled. Send AFTER the IDLE

@@ -216,6 +216,12 @@ typedef struct block_cache_t {
   pending_get_t* pending_gets;
   size_t current_bytes;
   size_t max_capacity_bytes;
+  /* True from the moment capacity crosses the exhale threshold until
+     the shed drives it back to the 50% floor (respiration_blocks_to_free
+     targets). Between batches the gate is this flag, not the raw
+     >=0.8 threshold, or the episode would stop one batch past 0.8
+     instead of reaching the 50% resting point; clears at <=50%. */
+  uint8_t exhale_shedding;
   authority_t* authority;
   respiration_actor_t* respiration;
   ephemeral_registry_t* registry;

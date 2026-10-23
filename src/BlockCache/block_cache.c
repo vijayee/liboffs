@@ -1128,7 +1128,19 @@ void block_cache_update_capacity(block_cache_t* block_cache) {
   if (capacity > 1.0f) capacity = 1.0f;
   authority_update_capacity(block_cache->authority, capacity);
   authority_update_phase(block_cache->authority, capacity);
-  if (respiration_should_exhale(capacity) && block_cache->respiration != NULL) {
+  /* An exhale EPISODE: start at >=0.80, keep shedding (batch after batch)
+     until capacity reaches the 50% floor - respiration_blocks_to_free
+     targets total*0.50, and per the design 50% is the resting point
+     where the node stops actively seeking. Without the flag the episode
+     would stop one batch past 0.80. */
+  if (capacity <= RESPIRATION_INHALE_THRESHOLD) {
+    block_cache->exhale_shedding = 0;
+  }
+  if ((respiration_should_exhale(capacity) || block_cache->exhale_shedding) &&
+      block_cache->respiration != NULL) {
+    if (block_cache->exhale_shedding == 0) {
+      block_cache->exhale_shedding = 1;
+    }
     respiration_actor_t* respiration = block_cache->respiration;
     if (atomic_load(&respiration->state) == RESPIRATION_IDLE) {
       index_entry_vec_t* entries = index_entries_by_ejection_date(block_cache->index);
