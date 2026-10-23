@@ -312,6 +312,11 @@ void respiration_actor_dispatch(void* state, message_t* msg) {
         float capacity = atomic_load(&actor->network->authority->capacity);
         if (capacity >= RESPIRATION_EXHALE_THRESHOLD) {
           log_warn("respiration: capacity %.2f still above threshold after store-then-delete", capacity);
+          /* Ask the cache to re-evaluate: the next exhale cycle can shed
+             more once the deletes above have settled. */
+          message_t refresh = {0};
+          refresh.type = CACHE_CAPACITY_REFRESH;
+          actor_send(&actor->network->block_cache->actor, &refresh);
         }
         _respiration_watchdog_disarm(actor);
         atomic_store(&actor->state, RESPIRATION_IDLE);
@@ -329,6 +334,14 @@ void respiration_actor_dispatch(void* state, message_t* msg) {
                actor->pending_count, actor->redundant_count,
                actor->preserved_count);
       _respiration_reset_to_idle(actor);
+      /* The capacity evaluation that armed this exhale ran when the peers
+         were (possibly) unreachable; re-run it now that the state is IDLE —
+         if the node is still above the exhale threshold the cache re-triggers
+         after the next capacity pass, retried every watchdog cycle until the
+         peers return or the shed completes. */
+      message_t refresh = {0};
+      refresh.type = CACHE_CAPACITY_REFRESH;
+      actor_send(&actor->network->block_cache->actor, &refresh);
       break;
     }
 

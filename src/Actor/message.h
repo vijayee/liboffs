@@ -86,6 +86,10 @@ typedef enum message_type_e {
   CACHE_PUT_RESULT,
   CACHE_REMOVE_RESULT,
   CACHE_DEFRAGMENT_RESULT,
+/* Fire-and-forget: re-run the exhale evaluation on the cache actor (the
+   respiration watchdog asks for it after a failed exhale cycle, so a node
+   that stays above the exhale threshold retries once peers return). */
+CACHE_CAPACITY_REFRESH,
   CACHE_RESIZE_RESULT,
   /* Block-cache actor: summary of the CACHE_GC keep-list sweep. Payload is
      cache_gc_result_payload_t (block_cache.h). */

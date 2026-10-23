@@ -416,6 +416,13 @@ void block_cache_dispatch(void* state, message_t* msg) {
     return;
   }
   switch (msg->type) {
+    case CACHE_CAPACITY_REFRESH: {
+      /* Fire-and-forget re-evaluation (no payload): the respiration watchdog
+         sends it after a failed exhale cycle so a node that stays above the
+         exhale threshold retries once its peers return. */
+      block_cache_update_capacity(block_cache);
+      break;
+    }
     case CACHE_PUT: {
       cache_put_payload_t* p = (cache_put_payload_t*)msg->payload;
       int is_async = (msg->payload_destroy != NULL);
