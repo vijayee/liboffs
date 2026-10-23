@@ -1144,13 +1144,23 @@ void block_cache_update_capacity(block_cache_t* block_cache) {
         }
       }
       if (candidate_count > 0) {
+        /* Batch the cycle: collect at most RESPIRATION_EXHALE_BATCH (the
+           oldest, by ejection_date). The trigger payload previously carried
+           EVERY sheddable candidate — a full cache exhales 18k+ candidates
+           in one cycle, which the wire rate limiter and the resend timeout
+           turn into a mass-exiry that preserves everything (no shed ever
+           completes). One batch deletes → CACHE_REMOVE re-runs this
+           evaluation → the next batch proceeds until capacity drops below
+           the exhale threshold; a failed batch re-enters via the
+           respiration watchdog's CACHE_CAPACITY_REFRESH. */
+        size_t trigger_count = candidate_count;
+        if (trigger_count > RESPIRATION_EXHALE_BATCH) trigger_count = RESPIRATION_EXHALE_BATCH;
         respiration_exhale_payload_t* payload = get_clear_memory(sizeof(respiration_exhale_payload_t));
-        payload->count = candidate_count;
-        payload->hashes = get_clear_memory(sizeof(buffer_t*) * candidate_count);
-        payload->ejection_dates = get_clear_memory(sizeof(uint64_t) * candidate_count);
         payload->capacity = capacity;
+        payload->hashes = get_clear_memory(sizeof(buffer_t*) * trigger_count);
+        payload->ejection_dates = get_clear_memory(sizeof(uint64_t) * trigger_count);
         size_t out_idx = 0;
-        for (size_t entry_idx = 0; entry_idx < entries->length; entry_idx++) {
+        for (size_t entry_idx = 0; entry_idx < entries->length && out_idx < trigger_count; entry_idx++) {
           index_entry_t* entry = entries->data[entry_idx];
           if (block_cache_entry_is_sheddable(entry)) {
             payload->hashes[out_idx] = (buffer_t*)refcounter_reference((refcounter_t*)entry->hash);
@@ -1158,6 +1168,10 @@ void block_cache_update_capacity(block_cache_t* block_cache) {
             out_idx++;
           }
         }
+        /* The actor copies payload->count entries; publish only the filled
+           batch — untouched candidates keep their ejection_date and are
+           re-collected by the next cycle's evaluation. */
+        payload->count = out_idx;
         message_t msg;
         msg.type = RESPIRATION_EXHALE_TRIGGER;
         msg.payload = payload;
