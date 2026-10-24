@@ -1494,7 +1494,8 @@ static void network_handle_respiration_seek_tick(network_t* network,
     while (exclude_filled < 20 && exclude_filled < network->seek_exclude_count) {
       size_t slots = network->seek_exclude_count < 128
                      ? network->seek_exclude_count : 128;
-      size_t ring_slot = (network->seek_exclude_cursor + slots — 1 - exclude_filled) % slots;
+      size_t ring_slot = (network->seek_exclude_cursor + slots
+                          - 1 - exclude_filled) % slots;
       memcpy(seek.exclude_hashes[exclude_filled],
              network->seek_exclude_hashes + ring_slot * 32, 32);
       exclude_filled++;
