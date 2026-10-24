@@ -929,8 +929,10 @@ void _index_increment(index_t* index, index_entry_t* entry) {
     cbor_decref(&cbor_entry);
   }
 
-  if (index_entry_increment(entry)) {
-    uint32_t key = entry->counter.fib - 1;
+  /* Expose the promotion pulse: a READ-add or a GET-hit that raised the
+     entry's FIB rank. The cache advertises on this. */
+  index->last_increment_promoted = (uint8_t)index_entry_increment(entry);
+  if (index->last_increment_promoted) {    uint32_t key = entry->counter.fib - 1;
     index_entry_vec_t* rank = hashmap_get(&index->ranks, &key);
      if (rank != NULL) {
        for (int i = 0; i < rank->length; i++) {

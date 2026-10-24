@@ -7,6 +7,7 @@
 #include "../Network/authority.h"
 #include "../Network/respiration.h"
 #include "../Network/respiration_actor.h"
+#include "../Network/network.h"
 #include "../Util/allocator.h"
 #include "../Util/hash.h"
 #include "../Util/path_join.h"
@@ -628,6 +629,15 @@ void block_cache_dispatch(void* state, message_t* msg) {
       cache_get_payload_t* p = (cache_get_payload_t*)msg->payload;
       p->result = NULL;
       index_entry_t* entry = index_peek(block_cache->index, p->hash);
+      /* PROMOTION PULSE (GET-hits): index_peek just ran the fibonacci
+         hit counter and may have raised the entry's rank - a promoted
+         read advertises itself data-less, like a promoted put. */
+      if (entry != NULL && block_cache->index->last_increment_promoted &&
+          block_cache->respiration != NULL &&
+          block_cache->respiration->network != NULL) {
+        network_rank_advertise(block_cache->respiration->network, entry->hash,
+                               entry->counter.fib);
+      }
       if (entry == NULL) {
         /* Block not in index — send NULL result if async */
         if (p->reply_to != NULL) {

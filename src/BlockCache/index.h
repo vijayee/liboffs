@@ -68,6 +68,9 @@ typedef struct {
   char* parent_location;
   size_t next_id;
   wal_t* wal;
+  /* Set by the last _index_increment: 1 = that read/add raised the entry's
+     FIB rank (the promotion pulse the cache consumes to advertise). */
+  uint8_t last_increment_promoted;
   uint8_t is_rebuilding;
   uint64_t wait;
   uint64_t max_wait;
