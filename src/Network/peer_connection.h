@@ -50,8 +50,16 @@ typedef struct peer_connection_t {
   struct stream_framer_t* framer;  /* Accumulator for inbound framed messages */
 #endif
 
+  /* HAS/route ledger: find-response path traces + accepted pushes — the
+     routing wells (ask this peer / route through it for X). */
   eabf_t* eabf;
   timing_wheel_t eabf_wheel;
+  /* WANT ledger: find misses/forwards recorded against the requester —
+     the recall + EABF-interest delivery read ONLY this, so a pushed
+     store can never recall back to its own source (the recall loop
+     fix: two meanings, two filters). */
+  eabf_t* eabf_want;
+  timing_wheel_t want_wheel;
 
   float hebbian_weight;
 
@@ -111,6 +119,12 @@ void peer_connection_set_peer_reflexive(peer_connection_t* peer,
 bool peer_eabf_subscribe(peer_connection_t* peer, const uint8_t* topic, size_t topic_len);
 bool peer_eabf_check(const peer_connection_t* peer, const uint8_t* topic, size_t topic_len,
                      uint32_t* out_hops);
+/* WANT ledger (recall/interest): fed only by find misses/forwards; —
+   the two-filters-per-peer split keeps the single-hash-per-check cost
+   (every consumer reads exactly one ledger). */
+bool peer_eabf_want_subscribe(peer_connection_t* peer, const uint8_t* topic, size_t topic_len);
+bool peer_eabf_want_check(const peer_connection_t* peer, const uint8_t* topic, size_t topic_len,
+                          uint32_t* out_hops);
 void peer_eabf_add_with_ttl(peer_connection_t* peer, const uint8_t* block_hash,
                              uint32_t level, size_t bucket_index, uint32_t fingerprint);
 void peer_eabf_tick(peer_connection_t* peer);

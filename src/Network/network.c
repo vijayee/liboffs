@@ -3380,7 +3380,8 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         }
         peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, sender_id);
         if (peer != NULL) {
-          peer_eabf_subscribe(peer, state.block_hash, 32);
+          /* WANT ledger: the requester wants this hash. */
+           peer_eabf_want_subscribe(peer, state.block_hash, 32);
         }
       }
 
@@ -3430,7 +3431,8 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
         }
         peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, sender_id);
         if (peer != NULL) {
-          peer_eabf_subscribe(peer, state.block_hash, 32);
+          /* WANT ledger: the requester wants this hash. */
+           peer_eabf_want_subscribe(peer, state.block_hash, 32);
         }
       }
       // Save the predecessor and incoming path length BEFORE adding self to
@@ -3886,7 +3888,7 @@ void network_deliver_to_interested_peers(network_t* network,
     if (exclude_id != NULL &&
         node_id_equals(&peer->remote_node_id, exclude_id)) continue;
     uint32_t eabf_hops = 0;
-    if (!peer_eabf_check(peer, hash->data, 32, &eabf_hops)) continue;
+    if (!peer_eabf_want_check(peer, hash->data, 32, &eabf_hops)) continue;
     conn_state_send(network, peer, cbor);
     if (network->log != NULL) {
       message_log_record(network->log, WIRE_STORE_BLOCK, MSG_DIRECTION_FORWARDED,
@@ -4291,7 +4293,7 @@ static void network_handle_store_block_response(network_t* network, message_t* m
     // If a peer previously requested this block (failed FindBlock), push it to them.
     {
       size_t recall_count = 0;
-      peer_connection_t** recall_peers = connection_manager_get_peers_for_topic(
+      peer_connection_t** recall_peers = conn_manager_get_peers_wanting_topic(
           &network->conn_mgr, response->block_hash, 32, &recall_count);
       if (recall_peers != NULL && recall_count > 0) {
         for (size_t index = 0; index < recall_count; index++) {

@@ -191,6 +191,20 @@ peer_connection_t** connection_manager_get_peers_for_topic(
     const connection_manager_t* mgr,
     const uint8_t* topic, size_t topic_len,
     size_t* out_count) {
+  return conn_manager_get_peers_by_ledger(mgr, topic, topic_len, out_count, 0);
+}
+
+peer_connection_t** conn_manager_get_peers_wanting_topic(
+    const connection_manager_t* mgr,
+    const uint8_t* topic, size_t topic_len,
+    size_t* out_count) {
+  return conn_manager_get_peers_by_ledger(mgr, topic, topic_len, out_count, 1);
+}
+
+peer_connection_t** conn_manager_get_peers_by_ledger(
+    const connection_manager_t* mgr,
+    const uint8_t* topic, size_t topic_len,
+    size_t* out_count, uint8_t want_ledger) {
   if (out_count == NULL) {
     return NULL;
   }
@@ -214,7 +228,9 @@ peer_connection_t** connection_manager_get_peers_for_topic(
     }
 
     uint32_t hops = 0;
-    if (peer_eabf_check(peer, topic, topic_len, &hops)) {
+    if (want_ledger
+        ? peer_eabf_want_check(peer, topic, topic_len, &hops)
+        : peer_eabf_check(peer, topic, topic_len, &hops)) {
       matches[match_count].peer = peer;
       matches[match_count].min_level = hops;
       match_count++;

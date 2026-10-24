@@ -49,6 +49,14 @@ peer_connection_t* peer_connection_create(const node_id_t* remote_id,
   }
 
   timing_wheel_init(&peer->eabf_wheel, 64, 60000);
+  peer->eabf_want = eabf_create(&peer->remote_node_id);
+  if (peer->eabf_want == NULL) {
+    eabf_destroy(peer->eabf);
+  eabf_destroy(peer->eabf_want);
+    free(peer);
+    return NULL;
+  }
+  timing_wheel_init(&peer->want_wheel, 64, 60000);
 
 #ifdef HAS_MSQUIC
   peer->quic_connection = NULL;
@@ -89,6 +97,7 @@ void peer_connection_destroy(peer_connection_t* peer) {
   }
 
   timing_wheel_deinit(&peer->eabf_wheel);
+  timing_wheel_deinit(&peer->want_wheel);
 
   /* Free the peer's SRFLX host string (heap-allocated from peer_info). NULL
      when the peer was admitted without peer_info (e.g. relay-only). */
@@ -211,6 +220,28 @@ void peer_eabf_tick(peer_connection_t* peer) {
   }
 
   free(expired);
+
+  /* WANT ledger ages on its own wheel, same cadence. */
+  size_t want_expired_count = 0;
+  timing_wheel_entry_t* want_expired = timing_wheel_advance(&peer->want_wheel, 1, &want_expired_count);
+  for (size_t index = 0; index < want_expired_count; index++) {
+    elastic_bloom_filter_t* level_ebf = eabf_get_level(peer->eabf_want, want_expired[index].level);
+    if (level_ebf != NULL) {
+      elastic_bloom_filter_remove(level_ebf, want_expired[index].block_hash, 32);
+    }
+  }
+  free(want_expired);
+}
+
+bool peer_eabf_want_subscribe(peer_connection_t* peer, const uint8_t* topic, size_t topic_len) {
+  if (peer == NULL || peer->eabf_want == NULL || topic == NULL) return false;
+  return eabf_subscribe(peer->eabf_want, topic, topic_len);
+}
+
+bool peer_eabf_want_check(const peer_connection_t* peer, const uint8_t* topic, size_t topic_len,
+                          uint32_t* out_hops) {
+  if (peer == NULL || peer->eabf_want == NULL || topic == NULL) return false;
+  return eabf_check(peer->eabf_want, topic, topic_len, out_hops);
 }
 
 void peer_hebbian_update(peer_connection_t* peer, float delta) {

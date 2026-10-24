@@ -46,6 +46,17 @@ peer_connection_t** connection_manager_get_peers_for_topic(
     const connection_manager_t* mgr,
     const uint8_t* topic, size_t topic_len,
     size_t* out_count);
+/* WANT-ledger variant: peers whose find-miss interest filter matches the
+   topic (drives the block-recall push so it never bounces to sources). */
+peer_connection_t** conn_manager_get_peers_wanting_topic(
+    const connection_manager_t* mgr,
+    const uint8_t* topic, size_t topic_len,
+    size_t* out_count);
+/* Shared implementation: kind selects has/route (0) vs want (1). */
+peer_connection_t** conn_manager_get_peers_by_ledger(
+    const connection_manager_t* mgr,
+    const uint8_t* topic, size_t topic_len,
+    size_t* out_count, uint8_t want_ledger);
 
 // Apply Hebbian decay to all peers, remove those below drop_threshold
 // Returns number of peers removed
