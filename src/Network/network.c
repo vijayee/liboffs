@@ -3738,6 +3738,55 @@ static void network_sync_hebbian_to_rings(network_t* network) {
 // --- StoreBlock handler ---
 // Accept/decline/forward storage request
 
+/* EABF-INTEREST DELIVERY (the requested design: a node that receives a
+   find for a block it lacks gets that hash subscribed in the peer's
+   EABF — when it LATER obtains the block (its own PUT, a peer
+   store), it delivers the bytes to every connected peer whose EABF
+   contains the hash. Delivered as a data-carrying WIRE_STORE_BLOCK with
+   replicas_needed=0/max_hops=0 (the receiver stores it locally and does
+   NOT forward — delivery, not fanout). Bloom false positives just
+   deliver to a peer that dedups (its index already has it) or declines —
+   harmless. */
+void network_deliver_to_interested_peers(network_t* network,
+                                          const buffer_t* hash,
+                                          const block_t* block,
+                                          const node_id_t* exclude_id) {
+  if (network == NULL || hash == NULL || block == NULL ||
+      block->data == NULL) return;
+  wire_store_block_t deliver;
+  memset(&deliver, 0, sizeof(deliver));
+  deliver.message_id = network_next_message_id(network);
+  memcpy(deliver.block_hash, hash->data, hash->size < 32 ? hash->size : 32);
+  deliver.block_size = (uint32_t)block->data->size;
+  deliver.block_fib = 1;
+  deliver.replicas_needed = 0;
+  deliver.max_hops = 0;
+  deliver.visited_count = 0;
+  memcpy(&deliver.path[0], &network->authority->local_id, sizeof(node_id_t));
+  deliver.path_len = 1;
+  deliver.start_time = (uint64_t)time(NULL) * 1000;
+  deliver.carry_data = 1;
+  deliver.block_data = block->data->data;
+  deliver.block_data_len = block->data->size;
+  cbor_item_t* cbor = wire_store_block_encode(&deliver);
+  if (cbor == NULL) return;
+  for (size_t index = 0; index < network->conn_mgr.peer_count; index++) {
+    peer_connection_t* peer = network->conn_mgr.peers[index];
+    if (peer == NULL || !peer->connected) continue;
+    if (exclude_id != NULL &&
+        node_id_equals(&peer->remote_node_id, exclude_id)) continue;
+    uint32_t eabf_hops = 0;
+    if (!peer_eabf_check(peer, hash->data, 32, &eabf_hops)) continue;
+    conn_state_send(network, peer, cbor);
+    if (network->log != NULL) {
+      message_log_record(network->log, WIRE_STORE_BLOCK, MSG_DIRECTION_FORWARDED,
+                         &peer->remote_node_id, deliver.message_id,
+                         deliver.block_hash, 1, &network->hebbian);
+    }
+  }
+  cbor_decref(&cbor);
+}
+
 static void network_handle_store_block(network_t* network, message_t* msg) {
   wire_store_block_t* store = (wire_store_block_t*)msg->payload;
   if (store == NULL) return;
@@ -3828,6 +3877,20 @@ static void network_handle_store_block(network_t* network, message_t* msg) {
           block_cache_put(network->block_cache, block, store->block_fib, &network->actor);
           DESTROY(data_buf, buffer);
           DESTROY(hash_buf, buffer);
+        }        /* EABF interest: we just accepted a store — other
+           connected peers whose wells contain this hash may want it
+           (interest chains); deliver beyond the direct chain. The
+           pushing peer is excluded (it is the source). */
+        if (block != NULL) {
+          node_id_t store_from;
+          memset(&store_from, 0, sizeof(node_id_t));
+          if (store->path_len > 0) memcpy(&store_from, &store->path[store->path_len - 1], sizeof(node_id_t));
+          buffer_t* deliver_probe = buffer_create_from_pointer_copy(store->block_hash, 32);
+          if (deliver_probe != NULL) {
+            network_deliver_to_interested_peers(network, deliver_probe, block,
+                                                (store->path_len > 0) ? &store_from : NULL);
+            buffer_destroy(deliver_probe);
+          }
         } else {
           if (data_buf != NULL) DESTROY(data_buf, buffer);
           if (hash_buf != NULL) DESTROY(hash_buf, buffer);
@@ -6196,6 +6259,11 @@ void network_dispatch(void* state, message_t* msg) {
           }
         }
         if (store_carry_block != NULL) {
+          /* EABF interest: peers whose wells contain this hash sought
+           it (their finds missed here) — deliver the bytes now
+           that we hold them. */
+          network_deliver_to_interested_peers(network, payload->hash,
+                                                store_carry_block, NULL);
           DESTROY(store_carry_block, block);
         }
 
