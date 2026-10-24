@@ -754,6 +754,46 @@ static void _unix_handle_put(unix_connection_t* conn, cbor_item_t* frame) {
   new_blocks_recipe_t* recipe = new_blocks_recipe_create(conn->pool, conn->bc, block_type);
   vec_block_recipe_t recipes;
   vec_init(&recipes);
+
+  /* Recycler: source ORIs ride the wire put-request the same way the HTTP
+     route's recycler header does — the recycled source blocks are pulled
+     (and their ephemeral claims folded per mode) as this stream writes. */
+  {
+    recycle_ephemeral_e recycle_mode = RECYCLE_EPHEMERAL_NONE;
+    if (msg.recycle_ephemeral == 1) recycle_mode = RECYCLE_EPHEMERAL_COMMIT;
+    else if (msg.recycle_ephemeral == 2) recycle_mode = RECYCLE_EPHEMERAL_PROPAGATE;
+    if (recycle_mode != RECYCLE_EPHEMERAL_NONE && msg.recycler_count == 0) {
+      _unix_connection_send_error(conn, CLIENT_API_STATUS_BAD_REQUEST,
+                                  "recycle-ephemeral requires a recycler");
+      client_api_put_request_destroy(&msg);
+      return;
+    }
+    if (msg.recycler_count > 0) {
+      vec_ori_t recycler_oris;
+      vec_init(&recycler_oris);
+      for (size_t recycler_index = 0; recycler_index < msg.recycler_count; recycler_index++) {
+        off_url_t* parsed = off_url_parse(msg.recycler_urls[recycler_index]);
+        if (parsed == NULL) continue;
+        ori_t* ori = ori_create(parsed->stream_length);
+        ori->descriptor_hash = buffer_copy(parsed->descriptor_hash);
+        ori->file_hash = buffer_copy(parsed->file_hash);
+        ori->file_name = strdup(parsed->file_name);
+        ori->block_type = block_type;
+        ori->tuple_size = tuple_size;
+        vec_push(&recycler_oris, ori);
+        off_url_destroy(parsed);
+      }
+      if (recycler_oris.length > 0) {
+        recycler_recipe_t* recycler = recycler_recipe_create(
+            conn->pool, conn->bc, block_type, recycler_oris,
+            conn->peer_ctx.network, msg.temporary, recycle_mode);
+        vec_push(&recipes, (block_recipe_t*)recycler);
+      } else {
+        vec_deinit(&recycler_oris);
+      }
+    }
+  }
+
   vec_push(&recipes, (block_recipe_t*)recipe);
 
   writeable_off_stream_t* ws = writeable_off_stream_create(
