@@ -6110,7 +6110,11 @@ void network_dispatch(void* state, message_t* msg) {
            read-back buffers, the creator refs drop IMMEDIATELY after
            the build, the block ref drops after the sends. */
         block_t* store_carry_block = NULL;
-        if (payload->carry_data) {
+        /* Stores ALWAYS carry the block bytes (user design: every PUT
+           pushes real content, not an announcement) - an announce-only
+           store lets the peer accept without storing and the origin
+           delete data that was never sent. */
+        if (1) {
           buffer_t* load_hash = buffer_create_from_pointer_copy(payload->hash->data, payload->hash->size);
           if (load_hash != NULL) {
             store_carry_block = block_lru_cache_get(network->block_cache->lru, load_hash);
@@ -6179,7 +6183,7 @@ void network_dispatch(void* state, message_t* msg) {
               memcpy(forward.path, state.path, state.path_len * sizeof(node_id_t));
               forward.path_len = state.path_len;
               forward.start_time = state.start_time_ms;
-              forward.carry_data = payload->carry_data;
+              forward.carry_data = 1;
               if (forward.carry_data && store_carry_block != NULL) {
                 forward.block_data = store_carry_block->data->data;
                 forward.block_data_len = store_carry_block->data->size;

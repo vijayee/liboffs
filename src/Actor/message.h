@@ -372,6 +372,8 @@ typedef struct {
      last local copy - the announce-only store (carry_data=0) means the
      peer accepts without storing and the origin deletes data that was
      never sent. */
+  /* Kept for explicitness (exhale sets 1); the local-store sender now
+     carries the bytes regardless (stores ALWAYS ship data). */
   uint8_t carry_data;
 } network_local_store_block_payload_t;
 
