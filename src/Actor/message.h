@@ -152,6 +152,13 @@ CACHE_CAPACITY_REFRESH,
   NETWORK_METRICS_PUSH,
   NETWORK_GOSSIP_TICK,
   NETWORK_REQUEST_TIMEOUT_TICK,
+/* Inhale-seek tick: while capacity < 50% the node broadcasts
+   WIRE_SEEKING_BLOCKS to its connected peers every tau(c)
+   (respiration_seek_interval); peers answer with block offers and
+   the seeker pulls the ones it lacks. The timer re-arms itself each
+   tick (tau in the seeking state, a 60s capacity recheck past 50%,
+   where seeking stops by design). */
+NETWORK_RESPIRATION_SEEK_TICK,
   NETWORK_GOSSIP_EXPIRE,
   NETWORK_GOSSIP_RECEIVED,
   NETWORK_GOSSIP_PULL_RECEIVED,

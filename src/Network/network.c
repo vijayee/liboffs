@@ -436,6 +436,15 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
      until its next put or unpin. */
   block_cache_update_capacity(block_cache);
 
+  /* Inhale-seek tick: arm the first SEEK broadcast check at tau_min.
+     The handler re-arms with respiration_seek_interval(capacity,...)
+     while capacity < 50% and drops to a 60s capacity recheck past 50% —
+     the 0-50% inhale-seek state of the design, idle above it. */
+  network->respiration_seek_timer_id = 0;
+  timer_actor_set(timer, network->respiration_tau_min_ms, 0,
+      &network->actor, NETWORK_RESPIRATION_SEEK_TICK,
+      &network->respiration_seek_timer_id);
+
   // Start gossip timer: first tick in init_interval_s, then recurring
   network->gossip_timer_id = 0;
   timer_actor_set(timer,
@@ -1446,6 +1455,52 @@ static void network_handle_ping_capacity_tick(network_t* network, message_t* msg
     conn_state_send(network, peer, cbor);
     cbor_decref(&cbor);
   }
+}
+
+// --- Inhale-seek tick (the 0-50% seeking state) ---
+//
+// While capacity < RESPIRATION_INHALE_THRESHOLD the node broadcasts
+// WIRE_SEEKING_BLOCKS to its connected peers every tau(c)
+// (respiration_seek_interval: tau_min at empty, easing to tau_max at
+// 50%); a seeker's own response evaluation refuses offers once it
+// crosses 50%. Above 50% the design stops seeking — re-check
+// capacity on a 60s cadence instead. See respiration.h.
+static void network_handle_respiration_seek_tick(network_t* network,
+                                                  message_t* msg) {
+  (void)msg;
+  if (network->conn_mgr.peer_count > 0 &&
+      respiration_should_inhale(atomic_load(&network->authority->capacity))) {
+    float capacity = atomic_load(&network->authority->capacity);
+    wire_seeking_blocks_t seek;
+    memset(&seek, 0, sizeof(seek));
+    seek.message_id = gossip_handle_next_query_id(&network->gossip);
+    memcpy(&seek.sender_id, &network->authority->local_id, sizeof(node_id_t));
+    seek.capacity = capacity;
+    seek.exclude_count = 0;
+    cbor_item_t* cbor = wire_seeking_blocks_encode(&seek);
+    if (cbor == NULL) return;
+    for (size_t index = 0; index < network->conn_mgr.peer_count; index++) {
+      peer_connection_t* peer = network->conn_mgr.peers[index];
+      if (peer == NULL || !peer->connected) continue;
+      conn_state_send(network, peer, cbor);
+    }
+    cbor_decref(&cbor);
+    if (network->log != NULL) {
+      message_log_record(network->log, WIRE_SEEKING_BLOCKS,
+                         MSG_DIRECTION_SENT, NULL, seek.message_id, NULL,
+                         0, &network->hebbian);
+    }
+  }
+  /* Re-arm: tau(c) in the seeking state; a steady 60s capacity recheck
+     once past the inhale threshold (seeking off by design). */
+  float capacity_check = atomic_load(&network->authority->capacity);
+  uint64_t next_ms = respiration_seek_interval(capacity_check,
+                                                network->respiration_tau_min_ms,
+                                                network->respiration_tau_max_ms);
+  if (next_ms == UINT64_MAX) next_ms = 60000;
+  timer_actor_set(network->timer, next_ms, 0, &network->actor,
+                  NETWORK_RESPIRATION_SEEK_TICK,
+                  &network->respiration_seek_timer_id);
 }
 
 // --- Add node to ring table (helper for gossip handlers) ---
@@ -5500,6 +5555,9 @@ void network_dispatch(void* state, message_t* msg) {
       break;
     case NETWORK_GOSSIP_TICK:
       network_handle_gossip_tick(network, msg);
+      break;
+    case NETWORK_RESPIRATION_SEEK_TICK:
+      network_handle_respiration_seek_tick(network, msg);
       break;
     case NETWORK_REQUEST_TIMEOUT_TICK:
       network_handle_request_timeout_tick(network, msg);
