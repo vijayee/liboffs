@@ -41,8 +41,12 @@ config_t config_default() {
   config.fsync_data = true;
   config.eabf_base_ttl_ms = 3600000;
   config.eabf_maintenance_ms = 60000;
-  config.respiration_tau_min_ms = 5000;
-  config.respiration_tau_max_ms = 300000;
+  /* Inhale-seek throttle bounds (per design): a node at ~0% capacity
+     seeks every ~10 s; the rate decays quadratically to once per
+     hour at 49% - tau(c) = tau_min + (tau_max-tau_min)*(c/0.5)^2,
+     alpha = RESPIRATION_ALPHA (2.0). */
+  config.respiration_tau_min_ms = 10000;
+  config.respiration_tau_max_ms = 3600000;
   config.relay_max_retries = 5;
   config.relay_retry_delay_ms = 500;
   config.ephemeral_registry_size = 1024;
