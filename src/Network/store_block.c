@@ -9,6 +9,7 @@
 #include "find_block.h"
 #include "connection_manager.h"
 #include "peer_connection.h"
+#include "../Util/log.h"
 #include "../Platform/platform_random.h"
 #include <string.h>
 #include <stdlib.h>
@@ -103,6 +104,7 @@ store_block_result_e store_block_execute(
   *next_hop_count = 0;
 
   // Step 1: Check SHOULD-ACCEPT
+  log_error("store:ann cap=%.3f phase=%d size=%u fib=%u", local_capacity, (int)local_phase, (unsigned)state->block_size, state->block_fib);
   if (store_block_should_accept(local_capacity, local_phase, state->block_hash,
                                 state->block_size, state->block_fib)) {
     return STORE_BLOCK_ACCEPTED;
@@ -205,6 +207,7 @@ store_block_result_e store_block_execute(
     return STORE_BLOCK_MAX_HOPS_REACHED;
   }
 
+  log_error("store:ann wells-empty -> ring scan (hops=%d)", (int)state->max_hops);
   // Step 4-5: Declined — gather candidates from rings
   // Skip: exhale-phase peers, peers in visited bloom, peers with consecutive_fails >= MAX_FAILS,
   //       peers with weight < MIN_WEIGHT
@@ -252,6 +255,7 @@ store_block_result_e store_block_execute(
         candidate_scores[candidate_count] = score;
         candidate_count++;
       }
+    log_error("store:ann ring cand=%zu score=%.4f", candidate_count, score);
     }
   }
 
@@ -287,6 +291,7 @@ store_block_result_e store_block_execute(
         candidate_scores[candidate_count] = score;
         candidate_count++;
       }
+    log_error("store:ann ring cand=%zu score=%.4f", candidate_count, score);
     }
   }
 
