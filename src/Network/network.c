@@ -7037,7 +7037,18 @@ void network_dispatch(void* state, message_t* msg) {
       }
       /* CACHE_PUT_NEW / CACHE_PUT_EXISTS: the block is in the cache for
        * future GETs. Network announce for CACHE_PUT_NEW is handled by the
-       * writable_off_stream path during PUT, not here. */
+       * writable_off_stream path during PUT, not here.
+       * PROMOTED (the rank rose on this put - e.g. an accepted remote
+       * store carried a higher FIB than our copy had): the design's
+       * block promotion is OURS to announce too — advertise the
+       * new rank data-less so subscribers farther out learn it. The
+       * stream-origin sites (writeable_off_stream/descriptor) emit
+       * theirs locally; this covers re-stores + accepted pushes.
+       */
+      if (result->result == CACHE_PUT_EXISTS && result->promoted &&
+          result->hash != NULL) {
+        network_rank_advertise(network, result->hash, result->fib);
+      }
       break;
     }
     case NETWORK_PEER_STATE_SAVE: {
