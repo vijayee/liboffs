@@ -1516,7 +1516,7 @@ static void network_handle_respiration_seek_tick(network_t* network,
                          MSG_DIRECTION_SENT, NULL, seek.message_id, NULL,
                          0, &network->hebbian);
     }
-    log_info("seek: sent peers=%zu cap=%.3f", network->conn_mgr.peer_count, capacity);
+    log_info("seek: sent peers=%zu excludes=%zu ring=%zu", network->conn_mgr.peer_count, exclude_filled, network->seek_exclude_count);
   }
   /* Re-arm: tau(c) in the seeking state; a steady 60s capacity recheck
      once past the inhale threshold (seeking off by design). */
@@ -4413,6 +4413,7 @@ static void network_handle_seeking_blocks(network_t* network, message_t* msg) {
   memcpy(&response->sender_id, &network->authority->local_id, sizeof(node_id_t));
   response->offer_count = 0;
 
+  log_info("seek:rx excl_count=%zu", seeking->exclude_count);
   // Walk the block index and select up to WIRE_MAX_OFFERS blocks,
   // sorted by FIB counter descending, excluding any hashes in seeking->exclude_hashes
   index_entry_vec_t* entries = index_to_array(network->block_cache->index);
