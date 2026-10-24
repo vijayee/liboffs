@@ -184,7 +184,12 @@ bool peer_eabf_subscribe(peer_connection_t* peer, const uint8_t* topic, size_t t
   if (peer == NULL || peer->eabf == NULL || topic == NULL) {
     return false;
   }
-  return eabf_subscribe(peer->eabf, topic, topic_len);
+  if (eabf_subscribe(peer->eabf, topic, topic_len)) {
+    /* Level-0 wheel entry: ages out on the wheel's TTL curve. */
+    timing_wheel_add(&peer->eabf_wheel, &peer->remote_node_id, 0, 0, 0, topic);
+    return true;
+  }
+  return false;
 }
 
 bool peer_eabf_check(const peer_connection_t* peer, const uint8_t* topic, size_t topic_len,
@@ -213,9 +218,9 @@ void peer_eabf_tick(peer_connection_t* peer) {
   timing_wheel_entry_t* expired = timing_wheel_advance(&peer->eabf_wheel, 1, &expired_count);
 
   for (size_t index = 0; index < expired_count; index++) {
-    elastic_bloom_filter_t* level_ebf = eabf_get_level(peer->eabf, expired[index].level);
-    if (level_ebf != NULL) {
-      elastic_bloom_filter_remove(level_ebf, expired[index].block_hash, 32);
+    elastic_bloom_filter_t* l0 = eabf_get_level(peer->eabf, 0);
+    if (l0 != NULL) {
+      elastic_bloom_filter_remove(l0, expired[index].block_hash, 32);
     }
   }
 
@@ -225,9 +230,9 @@ void peer_eabf_tick(peer_connection_t* peer) {
   size_t want_expired_count = 0;
   timing_wheel_entry_t* want_expired = timing_wheel_advance(&peer->want_wheel, 1, &want_expired_count);
   for (size_t index = 0; index < want_expired_count; index++) {
-    elastic_bloom_filter_t* level_ebf = eabf_get_level(peer->eabf_want, want_expired[index].level);
-    if (level_ebf != NULL) {
-      elastic_bloom_filter_remove(level_ebf, want_expired[index].block_hash, 32);
+    elastic_bloom_filter_t* l0 = eabf_get_level(peer->eabf_want, 0);
+    if (l0 != NULL) {
+      elastic_bloom_filter_remove(l0, want_expired[index].block_hash, 32);
     }
   }
   free(want_expired);
@@ -235,13 +240,23 @@ void peer_eabf_tick(peer_connection_t* peer) {
 
 bool peer_eabf_want_subscribe(peer_connection_t* peer, const uint8_t* topic, size_t topic_len) {
   if (peer == NULL || peer->eabf_want == NULL || topic == NULL) return false;
-  return eabf_subscribe(peer->eabf_want, topic, topic_len);
+  if (eabf_subscribe(peer->eabf_want, topic, topic_len)) {
+    timing_wheel_add(&peer->want_wheel, &peer->remote_node_id, 0, 0, 0, topic);
+    return true;
+  }
+  return false;
 }
 
 bool peer_eabf_want_check(const peer_connection_t* peer, const uint8_t* topic, size_t topic_len,
                           uint32_t* out_hops) {
   if (peer == NULL || peer->eabf_want == NULL || topic == NULL) return false;
   return eabf_check(peer->eabf_want, topic, topic_len, out_hops);
+}
+void peer_eabf_want_fulfill(peer_connection_t* peer, const uint8_t* topic, size_t topic_len) {
+  if (peer == NULL || peer->eabf_want == NULL || topic == NULL) return;
+  /* Unsubscribe from level 0 (the only level this ledger inserts to).
+     Any pending wheel entry expires later into a no-op removal. */
+  eabf_unsubscribe(peer->eabf_want, topic, topic_len);
 }
 
 void peer_hebbian_update(peer_connection_t* peer, float delta) {

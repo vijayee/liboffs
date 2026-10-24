@@ -120,6 +120,8 @@ typedef struct network_t {
   struct respiration_actor_t* respiration;
   ATOMIC(uint64_t) gossip_timer_id;
   ATOMIC(uint64_t) respiration_seek_timer_id;
+  /* Advances every connected peer's EABF aging wheels (want/has TTLs). */
+  ATOMIC(uint64_t) peer_eabf_tick_timer_id;
   /* Offers the seeker has seen-and-had (rolled so the responder walks
      DOWN its FIB ranking instead of re-offering the same top-20). */
   uint8_t* seek_exclude_hashes;   /* SEEK_EXCLUDE_RING_MAX (128) * 32 */

@@ -125,6 +125,9 @@ bool peer_eabf_check(const peer_connection_t* peer, const uint8_t* topic, size_t
 bool peer_eabf_want_subscribe(peer_connection_t* peer, const uint8_t* topic, size_t topic_len);
 bool peer_eabf_want_check(const peer_connection_t* peer, const uint8_t* topic, size_t topic_len,
                           uint32_t* out_hops);
+/* Fulfillment: the peer demonstrably holds the hash now - drop the
+   want record (the recall must not fire for satisfied wants). */
+void peer_eabf_want_fulfill(peer_connection_t* peer, const uint8_t* topic, size_t topic_len);
 void peer_eabf_add_with_ttl(peer_connection_t* peer, const uint8_t* block_hash,
                              uint32_t level, size_t bucket_index, uint32_t fingerprint);
 void peer_eabf_tick(peer_connection_t* peer);

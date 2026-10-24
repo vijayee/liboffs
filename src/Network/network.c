@@ -451,6 +451,18 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
       &network->actor, NETWORK_RESPIRATION_SEEK_TICK,
       &network->respiration_seek_timer_id);
 
+  /* EABF aging tick: advances every peer's want/has timing wheels
+     once per wheel slot (60 s = slot_duration), so subscribed
+     entries expire on the 1 h attenuation curve. */
+  network->peer_eabf_tick_timer_id = 0;
+  timer_actor_set(timer, 60000, 60000, &network->actor,
+      PEER_EABF_TICK, &network->peer_eabf_tick_timer_id);
+  /* EABF aging tick: advances every peer's want/has timing wheels
+     once per wheel slot (60 s = slot_duration), so subscribed
+     entries expire on the 1 h attenuation curve. */
+  network->peer_eabf_tick_timer_id = 0;
+  timer_actor_set(timer, 60000, 60000, &network->actor,
+      PEER_EABF_TICK, &network->peer_eabf_tick_timer_id);
   // Start gossip timer: first tick in init_interval_s, then recurring
   network->gossip_timer_id = 0;
   timer_actor_set(timer,
@@ -3588,6 +3600,19 @@ static void network_handle_find_block_response(network_t* network, message_t* ms
       }
     }
 
+    /* FULFILLMENT (found-with-data): the upstream neighbor caches this
+       block through this same response - drop its want record. */
+    if (response->block_data_len > 0 && response->block_data != NULL &&
+        response->path_len > 1) {
+      for (size_t up = 0; up + 1 < response->path_len; up++) {
+        peer_connection_t* upstream_peer = connection_manager_lookup(
+            &network->conn_mgr, &response->path[up]);
+        if (upstream_peer != NULL) {
+          peer_eabf_want_fulfill(upstream_peer, response->block_hash, 32);
+        }
+      }
+    }
+
     // Populate peer EABFs along the response path.
     // For each node at position i in the path, insert block hash into
     // the EABF of the next-hop peer.
@@ -4240,6 +4265,15 @@ static void network_handle_store_block_response(network_t* network, message_t* m
   }
 
   if (response->accepted) {
+    /* FULFILLMENT: the holder demonstrably holds this block - drop the
+       want record so the recall never fires for satisfied wants. */
+    {
+      peer_connection_t* holder_peer =
+          connection_manager_lookup(&network->conn_mgr, &response->holder);
+      if (holder_peer != NULL) {
+        peer_eabf_want_fulfill(holder_peer, response->block_hash, 32);
+      }
+    }
     // Block accepted — apply Hebbian learning rules along the response path
     uint64_t latency_ms = response->latency_ms;
     hebbian_apply_success(&network->hebbian, response->path, response->path_len,
