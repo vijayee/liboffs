@@ -4489,6 +4489,15 @@ static void network_handle_seeking_blocks_response(network_t* network, message_t
     if (hash_buf == NULL) continue;
 
     index_entry_t* entry = index_peek(network->block_cache->index, hash_buf);
+    {
+      static const char hexd[] = "0123456789abcdef";
+      char offer_hex[17]; offer_hex[16] = '\0';
+      for (size_t hx = 0; hx < 8; hx++) {
+        offer_hex[hx*2] = hexd[(offer->hash[hx] >> 4) & 0xF];
+        offer_hex[hx*2+1] = hexd[offer->hash[hx] & 0xF];
+      }
+      log_info("seek: eval offer=%u hash=%s have=%d cap=%.3f", (unsigned)index, offer_hex, entry != NULL, (double)local_capacity);
+    }    index_entry_t* entry = index_peek(network->block_cache->index, hash_buf);
     if (entry != NULL) {
       // Block already stored — skip this offer
       buffer_destroy(hash_buf);
