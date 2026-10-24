@@ -4501,15 +4501,15 @@ static void network_handle_seeking_blocks_response(network_t* network, message_t
     }
     if (entry != NULL) {
       // Block already stored — skip this offer
+      /* Have-already — roll into the exclusion ring so the holder
+         stops re-offering the same top FIB entries. */
+      memcpy(network->seek_exclude_hashes +
+             network->seek_exclude_cursor * 32, offer->hash, 32);
+      network->seek_exclude_cursor = (network->seek_exclude_cursor + 1) % 128;
+      if (network->seek_exclude_count < 128) network->seek_exclude_count++;
       buffer_destroy(hash_buf);
       continue;
     }
-    /* Have-already — roll into the exclusion ring so the holder
-       stops re-offering the same top FIB entries. */
-    memcpy(network->seek_exclude_hashes +
-           network->seek_exclude_cursor * 32, offer->hash, 32);
-    network->seek_exclude_cursor = (network->seek_exclude_cursor + 1) % 128;
-    if (network->seek_exclude_count < 128) network->seek_exclude_count++;
 
     // Block not stored and we should inhale — send FindBlock for this hash
     if (respiration_should_inhale(local_capacity)) {
