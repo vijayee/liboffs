@@ -1487,9 +1487,11 @@ static void network_handle_respiration_seek_tick(network_t* network,
        its FIB ranking (progressive inhale, not a replay). The buffers
        live on this dispatch's stack; the encoder reads them inline. */
     uint8_t exclude_data[20][32];
+    const uint8_t* exclude_ptr[20];
     for (size_t exclude_index = 0; exclude_index < 20; exclude_index++) {
-      seek.exclude_hashes[exclude_index] = exclude_data[exclude_index];
+      exclude_ptr[exclude_index] = exclude_data[exclude_index];
     }
+    seek.exclude_hashes = (uint8_t**)exclude_ptr;
     size_t exclude_filled = 0;
     while (exclude_filled < 20 && exclude_filled < network->seek_exclude_count) {
       size_t slots = network->seek_exclude_count < 128
