@@ -440,6 +440,12 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
      The handler re-arms with respiration_seek_interval(capacity,...)
      while capacity < 50% and drops to a 60s capacity recheck past 50% —
      the 0-50% inhale-seek state of the design, idle above it. */
+  /* Seek-offer exclusion ring — hashes the seeker answered with
+     have-already entries roll here so the responder offers further
+     down its FIB ranking (progressive inhale). */
+  network->seek_exclude_hashes = get_clear_memory(128 * 32);
+  network->seek_exclude_count = 0;
+  network->seek_exclude_cursor = 0;
   network->respiration_seek_timer_id = 0;
   timer_actor_set(timer, network->respiration_tau_min_ms, 0,
       &network->actor, NETWORK_RESPIRATION_SEEK_TICK,
@@ -598,6 +604,7 @@ void network_destroy(network_t* network) {
   eabf_table_deinit(&network->eabf_table);
   eabf_ttl_table_deinit(&network->eabf_ttl);
   wanted_list_destroy(network->wanted_list);
+  free(network->seek_exclude_hashes);
   hebbian_table_deinit(&network->hebbian);
   rate_limit_table_deinit(&network->rate_limits);
   topology_metrics_destroy(network->topology_metrics);
@@ -1476,7 +1483,23 @@ static void network_handle_respiration_seek_tick(network_t* network,
     seek.message_id = gossip_handle_next_query_id(&network->gossip);
     memcpy(&seek.sender_id, &network->authority->local_id, sizeof(node_id_t));
     seek.capacity = capacity;
-    seek.exclude_count = 0;
+    /* Exclude the freshest ring entries so the responder offers DOWN
+       its FIB ranking (progressive inhale, not a replay). The buffers
+       live on this dispatch's stack; the encoder reads them inline. */
+    uint8_t exclude_data[20][32];
+    for (size_t exclude_index = 0; exclude_index < 20; exclude_index++) {
+      seek.exclude_hashes[exclude_index] = exclude_data[exclude_index];
+    }
+    size_t exclude_filled = 0;
+    while (exclude_filled < 20 && exclude_filled < network->seek_exclude_count) {
+      size_t slots = network->seek_exclude_count < 128
+                     ? network->seek_exclude_count : 128;
+      size_t ring_slot = (network->seek_exclude_cursor + slots — 1 - exclude_filled) % slots;
+      memcpy(seek.exclude_hashes[exclude_filled],
+             network->seek_exclude_hashes + ring_slot * 32, 32);
+      exclude_filled++;
+    }
+    seek.exclude_count = exclude_filled;
     cbor_item_t* cbor = wire_seeking_blocks_encode(&seek);
     if (cbor == NULL) return;
     for (size_t index = 0; index < network->conn_mgr.peer_count; index++) {
@@ -4468,6 +4491,12 @@ static void network_handle_seeking_blocks_response(network_t* network, message_t
       buffer_destroy(hash_buf);
       continue;
     }
+    /* Have-already — roll into the exclusion ring so the holder
+       stops re-offering the same top FIB entries. */
+    memcpy(network->seek_exclude_hashes +
+           network->seek_exclude_cursor * 32, offer->hash, 32);
+    network->seek_exclude_cursor = (network->seek_exclude_cursor + 1) % 128;
+    if (network->seek_exclude_count < 128) network->seek_exclude_count++;
 
     // Block not stored and we should inhale — send FindBlock for this hash
     if (respiration_should_inhale(local_capacity)) {
