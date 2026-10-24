@@ -1490,6 +1490,7 @@ static void network_handle_respiration_seek_tick(network_t* network,
                          MSG_DIRECTION_SENT, NULL, seek.message_id, NULL,
                          0, &network->hebbian);
     }
+    log_info("seek: sent peers=%zu cap=%.3f", network->conn_mgr.peer_count, capacity);
   }
   /* Re-arm: tau(c) in the seeking state; a steady 60s capacity recheck
      once past the inhale threshold (seeking off by design). */
@@ -4448,6 +4449,7 @@ static void network_handle_seeking_blocks_response(network_t* network, message_t
 
   float local_capacity = atomic_load(&network->authority->capacity);
 
+  log_info("seek:rx resp offers=%u", (unsigned)response->offer_count);
   // Evaluate each offer: if we should pull (capacity < 50% and block not stored)
   if (!respiration_should_inhale(local_capacity)) {
     return;  // We're not in inhale phase anymore
