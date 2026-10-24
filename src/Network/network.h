@@ -198,6 +198,9 @@ typedef struct network_t {
 #endif
 } network_t;
 
+/* BLOCK PROMOTION: broadcast hash+fib (no data) to connected peers. */
+void network_rank_advertise(network_t* network, buffer_t* hash, uint32_t fib);
+
 /* Destroy-time unregister for a stream that issued NETWORK_LOCAL_FIND_BLOCK
  * requests: prunes the requester from every wanted_list entry it joined so a
  * late result reply never actor_sends into the freed requester actor. */

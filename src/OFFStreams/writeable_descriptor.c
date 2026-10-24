@@ -195,6 +195,12 @@ void writeable_descriptor_dispatch(void* state, message_t* msg) {
         }
         break;
       }
+      if (result->result == CACHE_PUT_EXISTS && result->promoted &&
+          desc->network != NULL) {
+        /* Block promotion — the rank rose; advertise (no data). */
+        network_rank_advertise(desc->network, result->hash, result->fib);
+      }
+
       if (result->result == CACHE_PUT_NEW && desc->network != NULL && !desc->is_ephemeral) {
         /* New block stored — announce to network */
         network_local_store_block_payload_t* net_payload = get_clear_memory(sizeof(network_local_store_block_payload_t));

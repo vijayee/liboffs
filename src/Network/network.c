@@ -3793,6 +3793,34 @@ static void network_sync_hebbian_to_rings(network_t* network) {
 // --- StoreBlock handler ---
 // Accept/decline/forward storage request
 
+/* BLOCK PROMOTION (design): a block whose rank (FIB) rose advertises
+   ITSELF data-less (WIRE_RANK_BLOCK: hash + fib + path). Receivers
+   record the hash in their EABFs and a node below 50% capacity may
+   request it (network_handle_rank_block's may-request is already
+   built). Marked visited so the walk never bounces back to us. */
+void network_rank_advertise(network_t* network, buffer_t* hash,
+                             uint32_t fib) {
+  if (network == NULL || hash == NULL || hash->data == NULL) return;
+  wire_rank_block_t advert;
+  memset(&advert, 0, sizeof(advert));
+  memcpy(advert.block_hash, hash->data, 32);
+  advert.fib = fib;
+  memcpy(&advert.origin, &network->authority->local_id, sizeof(node_id_t));
+  advert.hop_count = 0;
+  find_block_add_visited(advert.visited_bloom, &advert.visited_count,
+                         network->authority->local_id.hash);
+  memcpy(&advert.path[0], &network->authority->local_id, sizeof(node_id_t));
+  advert.path_len = 1;
+  cbor_item_t* cbor = wire_rank_block_encode(&advert);
+  if (cbor == NULL) return;
+  for (size_t index = 0; index < network->conn_mgr.peer_count; index++) {
+    peer_connection_t* peer = network->conn_mgr.peers[index];
+    if (peer == NULL || !peer->connected) continue;
+    conn_state_send(network, peer, cbor);
+  }
+  cbor_decref(&cbor);
+}
+
 /* EABF-INTEREST DELIVERY (the requested design: a node that receives a
    find for a block it lacks gets that hash subscribed in the peer's
    EABF — when it LATER obtains the block (its own PUT, a peer

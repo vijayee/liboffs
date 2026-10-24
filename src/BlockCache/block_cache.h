@@ -238,6 +238,9 @@ typedef struct {
 typedef struct {
   int result;          /* CACHE_PUT_NEW, CACHE_PUT_EXISTS, or CACHE_PUT_ERROR */
   uint32_t fib;        /* Final FIB counter after max(local, incoming) */
+  uint8_t promoted;    /* 1 = the rank rose (incoming_fib > local) on this put —
+                          the design's block-promotion event: the block
+                          advertises itself data-less so seekers may pull. */
   buffer_t* hash;      /* Hash of the stored block (referenced) */
   actor_t* reply_to;
 } cache_put_result_payload_t;

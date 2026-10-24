@@ -425,6 +425,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
     }
     case CACHE_PUT: {
       cache_put_payload_t* p = (cache_put_payload_t*)msg->payload;
+      uint8_t rank_promoted = 0;
       int is_async = (msg->payload_destroy != NULL);
       p->result = CACHE_PUT_ERROR;
       uint32_t result_fib = 0;
@@ -498,9 +499,12 @@ void block_cache_dispatch(void* state, message_t* msg) {
           p->result = CACHE_PUT_NEW;
         }
       } else {
-        /* Block already exists — update FIB to max(local, incoming) */
+        /* Block already exists — update FIB to max(local, incoming), and PROMOTE when the rank
+       actually rose (the design's block promotion: the block
+       advertises itself data-less so seekers may request it). */
         if (p->incoming_fib > entry->counter.fib) {
           entry->counter.fib = p->incoming_fib;
+          rank_promoted = 1;
         }
         result_fib = entry->counter.fib;
         if (is_async) { block_destroy(p->block); p->block = NULL; }
@@ -523,6 +527,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
       if (p->reply_to != NULL) {
         cache_put_result_payload_t* result = get_clear_memory(sizeof(cache_put_result_payload_t));
         result->result = p->result;
+          result->promoted = rank_promoted;
         result->fib = result_fib;
         result->hash = result_hash;
         result->reply_to = NULL;
