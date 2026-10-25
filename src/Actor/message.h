@@ -44,6 +44,10 @@ typedef enum message_type_e {
      filter does not contain. Handled on the block-cache actor thread (the
      index may be enumerated only there; template: CACHE_EPHEMERAL_LIST). */
   CACHE_GC,
+  /* Seek-responder offer list: the network actor asks the cache actor for
+     its top-ranked servable hashes (exclude-filtered); the cache actor
+     enumerates its own index. Handled on the block-cache actor thread. */
+  CACHE_LIST_SERVABLE,
   TIMER_SET,
   TIMER_CANCEL,
   TIMER_DEBOUNCE,
@@ -94,6 +98,10 @@ CACHE_CAPACITY_REFRESH,
   /* Block-cache actor: summary of the CACHE_GC keep-list sweep. Payload is
      cache_gc_result_payload_t (block_cache.h). */
   CACHE_GC_RESULT,
+  /* Block-cache actor: list_servable completion; payload is
+     cache_list_servable_result_payload_t (block_cache.h), routed to
+     reply_to. */
+  CACHE_LIST_SERVABLE_RESULT,
   /* Keep-list GC orchestrator: kick the next collect line (also the walk-/
      sweep-step continuation). No payload. */
   BLOCK_GC_START,

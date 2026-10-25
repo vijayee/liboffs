@@ -21,6 +21,7 @@
 #include "wanted_list.h"
 #include "conn_state.h"
 #include "message_log.h"
+#include "wire.h"
 #include "../Configuration/config.h"
 #include <stdint.h>
 #include <stddef.h>
@@ -98,6 +99,45 @@ typedef struct relay_challenge_t {
   uint64_t deadline_ms;       // now_ms + network->request_timeout_ms
   uint32_t relay_endpoint_id; // route the challenge back via the relay
 } relay_challenge_t;
+
+/* Pending cache-actor fetches (see network_t.cache_pending). The block
+   cache's LRU/index/sections are owned by the block_cache actor — the
+   network actor never calls into them directly; every "do we have this
+   block locally" question goes out as an async block_cache_get (or a
+   no_data get) and the answer comes back as CACHE_GET_RESULT, matched
+   here by hash. kind says what the result handler owes:
+
+   FIND_SERVE    — answer a wire FIND_BLOCK with found (with or without
+                   bytes); a miss (never indexed) resumes the forward search.
+   STORE_CARRY   — forward the origin StoreBlock (with carry bytes) once
+                   the read-back completes.
+   PING_BLOCK    — reply exists + the post-peek fib to the pinger.
+   RECALL_SERVE  — serve StoreBlock to the recall requester (data-less
+                   accept: bytes fetched here).
+   LOCAL_FIND    — deliver found to the stream requester (or fall through
+                   to the wanted-list/wire-search flow on a miss).
+   SEEK_OFFER    — a seek offer's have-check; absent and inhaling → route
+                   NETWORK_LOCAL_FIND_BLOCK for the hash. */
+typedef enum {
+  NETWORK_CACHE_PENDING_FIND_SERVE = 1,
+  NETWORK_CACHE_PENDING_STORE_CARRY,
+  NETWORK_CACHE_PENDING_PING_BLOCK,
+  NETWORK_CACHE_PENDING_RECALL_SERVE,
+  NETWORK_CACHE_PENDING_LOCAL_FIND,
+  NETWORK_CACHE_PENDING_SEEK_RESPONSE,   /* wire offer list reply */
+  NETWORK_CACHE_PENDING_SEEK_OFFER,
+} network_cache_pending_kind_e;
+
+typedef struct network_cache_pending_t {
+  buffer_t* hash;                     /* the fetch key; owned */
+  network_cache_pending_kind_e kind;
+  wire_find_block_t find;             /* FIND_SERVE + LOCAL_FIND: wire fields */
+  actor_t* reply_to;                  /* LOCAL_FIND requester; STORE_CARRY origin */
+  uint32_t fib;                       /* STORE_CARRY: the announced rank */
+  stream_t* owner;                    /* LOCAL_FIND: moved requester stream ref */
+  node_id_t sender_id;                /* PING_BLOCK + RECALL_SERVE: the peer */
+  uint64_t message_id;                /* PING_BLOCK + RECALL_SERVE */
+} network_cache_pending_t;
 
 typedef struct network_t {
   actor_t actor;
@@ -183,12 +223,22 @@ typedef struct network_t {
   closest_nodes_pending_t closest_pending[CLOSEST_NODES_PENDING_MAX];
   size_t closest_pending_count;
 
-  // Pending StoreBlock aggregation (audit #21). Grown on demand; swept by
-  // network_handle_request_timeout_tick. The array is a flat array of
-  // store_pending_t (one per still-unresolved origin StoreBlock).
+/* Pending STORE aggregation (audit #21). Grown on demand; swept by
+   network_handle_request_timeout_tick. The array is a flat array of
+   store_pending_t (one per still-unresolved origin StoreBlock). */
   store_pending_t* store_pending;
   size_t           store_pending_count;
   size_t           store_pending_capacity;
+
+  /* Pending CACHE_ACTOR fetches issued by this actor's handlers. The cache's
+     LRU/index/sections are owned by the block_cache actor; the network actor
+     never calls into them directly — every "do we have this block locally"
+     question goes out as an async block_cache_get (or no_data get) and the
+     answer comes back as CACHE_GET_RESULT, matched here by hash. Grown on
+     demand; freed in network_destroy. */
+  network_cache_pending_t* cache_pending;
+  size_t            cache_pending_count;
+  size_t            cache_pending_capacity;
 
   // Pending relay signed-nonce challenges (audit #8 relay; tier-5b). Grown
   // on demand; swept by network_handle_request_timeout_tick. The array is

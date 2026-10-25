@@ -82,7 +82,7 @@ static void cache_remove_payload_destroy(void* ptr) {
   free(payload);
 }
 
-static void cache_get_payload_destroy(void* ptr) {
+void cache_get_payload_destroy(void* ptr) {
   cache_get_payload_t* payload = (cache_get_payload_t*)ptr;
   if (payload->hash != NULL) {
     DESTROY(payload->hash, buffer);
@@ -149,6 +149,32 @@ void cache_ephemeral_list_payload_destroy(cache_ephemeral_list_payload_t* payloa
 /* void* adapter so the typed destroy can serve as message_t.payload_destroy */
 static void cache_ephemeral_list_payload_destroy_adapter(void* ptr) {
   cache_ephemeral_list_payload_destroy((cache_ephemeral_list_payload_t*)ptr);
+}
+
+void cache_list_servable_result_payload_destroy(cache_list_servable_result_payload_t* payload) {
+  if (payload == NULL) return;
+  if (payload->hashes != NULL) {
+    free(payload->hashes);
+  }
+  if (payload->fibs != NULL) {
+    free(payload->fibs);
+  }
+  free(payload);
+}
+
+/* void* adapter so the typed destroy can serve as message_t.payload_destroy */
+static void cache_list_servable_result_payload_destroy_adapter(void* ptr) {
+  cache_list_servable_result_payload_destroy(
+      (cache_list_servable_result_payload_t*)ptr);
+}
+
+static void cache_list_servable_payload_destroy(void* ptr) {
+  cache_list_servable_payload_t* payload = (cache_list_servable_payload_t*)ptr;
+  if (payload == NULL) return;
+  if (payload->exclude != NULL) {
+    free(payload->exclude);
+  }
+  free(payload);
 }
 
 void block_lru_cache_move(block_lru_cache_t* lru, block_lru_node_t* node);
@@ -390,6 +416,8 @@ static void _block_cache_resolve_pending_gets(block_cache_t* block_cache,
       result->hash = found->hash;
       result->block = block ? (block_t*)refcounter_reference((refcounter_t*)block) : NULL;
       result->reply_to = NULL;
+      result->fib = found->entry->counter.fib;
+      result->entry_existed = 1;
       message_t reply;
       reply.type = CACHE_GET_RESULT;
       reply.payload = result;
@@ -638,6 +666,43 @@ void block_cache_dispatch(void* state, message_t* msg) {
         network_rank_advertise_async(block_cache->respiration->network, entry->hash,
                                entry->counter.fib);
       }
+      /* peer_serve (this fetch answers a WIRE find): a non-servable entry
+         reports as absent so the requester's search flows to the
+         remote-search path exactly as the pre-actor-API code did. */
+      if (p->peer_serve && entry != NULL && !index_entry_is_servable(entry)) {
+        if (p->reply_to != NULL) {
+          cache_get_result_payload_t* result = get_clear_memory(sizeof(cache_get_result_payload_t));
+          result->hash = (buffer_t*)refcounter_reference((refcounter_t*)p->hash);
+          result->block = NULL;
+          result->reply_to = NULL;
+          result->fib = 0;
+          result->entry_existed = 0;
+          message_t reply;
+          reply.type = CACHE_GET_RESULT;
+          reply.payload = result;
+          reply.payload_destroy = cache_get_result_payload_destroy;
+          actor_send(p->reply_to, &reply);
+        }
+        break;
+      }
+      /* no_data (verify-only) serves rank bookkeeping only — never read
+         the block bytes; reply presence + rank immediately. */
+      if (entry != NULL && p->no_data) {
+        if (p->reply_to != NULL) {
+          cache_get_result_payload_t* result = get_clear_memory(sizeof(cache_get_result_payload_t));
+          result->hash = (buffer_t*)refcounter_reference((refcounter_t*)p->hash);
+          result->block = NULL;
+          result->reply_to = NULL;
+          result->fib = entry->counter.fib;
+          result->entry_existed = 1;
+          message_t reply;
+          reply.type = CACHE_GET_RESULT;
+          reply.payload = result;
+          reply.payload_destroy = cache_get_result_payload_destroy;
+          actor_send(p->reply_to, &reply);
+        }
+        break;
+      }
       if (entry == NULL) {
         /* Block not in index — send NULL result if async */
         if (p->reply_to != NULL) {
@@ -700,6 +765,8 @@ void block_cache_dispatch(void* state, message_t* msg) {
             result->hash = (buffer_t*)refcounter_reference((refcounter_t*)p->hash);
             result->block = block;
             result->reply_to = NULL;
+            result->fib = entry->counter.fib;
+            result->entry_existed = 1;
             message_t reply;
             reply.type = CACHE_GET_RESULT;
             reply.payload = result;
@@ -1034,6 +1101,94 @@ void block_cache_dispatch(void* state, message_t* msg) {
       }
       break;
     }
+    case CACHE_LIST_SERVABLE: {
+      /* Seek-responder's offer list: enumerate OUR OWN index (this actor's
+         structure), keep servable entries the seeker did not exclude, order
+         by FIB descending, answer the top max_offers. */
+      cache_list_servable_payload_t* p = (cache_list_servable_payload_t*)msg->payload;
+      cache_list_servable_result_payload_t* result =
+          get_clear_memory(sizeof(cache_list_servable_result_payload_t));
+      result->message_id = p->message_id;
+      result->reply_to = p->reply_to;
+      result->offer_count = 0;
+      result->hashes = NULL;
+      result->fibs = NULL;
+      const size_t max_offers = p->max_offers;
+
+      index_entry_vec_t* entries = index_to_array(block_cache->index);
+      if (entries != NULL && max_offers > 0) {
+        /* First pass: collect servable, non-excluded candidates. */
+        typedef struct fib_candidate_s {
+          index_entry_t* entry;
+        } fib_candidate_t;
+        fib_candidate_t* candidates = NULL;
+        size_t candidate_count = 0;
+        for (size_t entry_idx = 0; entry_idx < entries->length; entry_idx++) {
+          index_entry_t* entry = entries->data[entry_idx];
+          if (entry == NULL || entry->hash == NULL) continue;
+          if (!index_entry_is_servable(entry)) continue;
+          uint8_t excluded = 0;
+          for (size_t ex = 0; ex < p->exclude_count; ex++) {
+            if (p->exclude != NULL &&
+                memcmp(entry->hash->data, p->exclude + ex * 32, 32) == 0) {
+              excluded = 1;
+              break;
+            }
+          }
+          if (excluded) continue;
+          if (candidate_count == 0) {
+            candidates =
+                get_clear_memory(sizeof(fib_candidate_t) * entries->length);
+          }
+          candidates[candidate_count].entry = entry;
+          candidate_count++;
+        }
+        /* FIB descending (highest FIB = most important). */
+        for (size_t i = 0; i < candidate_count; i++) {
+          for (size_t j = i + 1; j < candidate_count; j++) {
+            if (candidates[j].entry->counter.fib >
+                candidates[i].entry->counter.fib) {
+              fib_candidate_t swapped = candidates[i];
+              candidates[i] = candidates[j];
+              candidates[j] = swapped;
+            }
+          }
+        }
+        const size_t out_count = candidate_count < max_offers
+                                     ? candidate_count : max_offers;
+        if (out_count > 0) {
+          result->hashes = get_clear_memory(32 * out_count);
+          result->fibs = get_clear_memory(sizeof(uint32_t) * out_count);
+          for (size_t i = 0; i < out_count; i++) {
+            index_entry_t* entry = candidates[i].entry;
+            memcpy(result->hashes + i * 32, entry->hash->data, 32);
+            result->fibs[i] = entry->counter.fib;
+          }
+          result->offer_count = out_count;
+        }
+        if (candidates != NULL) {
+          free(candidates);
+        }
+      }
+      if (entries != NULL) {
+        for (size_t entry_idx = 0; entry_idx < entries->length; entry_idx++) {
+          index_entry_destroy(entries->data[entry_idx]);
+        }
+        vec_deinit(entries);
+        free(entries);
+      }
+
+      if (result->reply_to != NULL) {
+        message_t reply;
+        reply.type = CACHE_LIST_SERVABLE_RESULT;
+        reply.payload = result;
+        reply.payload_destroy = cache_list_servable_result_payload_destroy_adapter;
+        actor_send(result->reply_to, &reply);
+      } else {
+        cache_list_servable_result_payload_destroy(result);
+      }
+      break;
+    }
     default:
       break;
   }
@@ -1248,10 +1403,17 @@ void block_cache_resize(block_cache_t* block_cache, size_t max_capacity_bytes,
 }
 
 void block_cache_get(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to) {
+  block_cache_get_ex(block_cache, hash, reply_to, 0, 0);
+}
+
+void block_cache_get_ex(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to,
+                        uint8_t no_data, uint8_t peer_serve) {
   cache_get_payload_t* payload = get_clear_memory(sizeof(cache_get_payload_t));
   payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)hash);
   payload->reply_to = reply_to;
   payload->result = NULL;
+  payload->no_data = no_data;
+  payload->peer_serve = peer_serve;
 
   message_t msg;
   msg.type = CACHE_GET;
@@ -1376,6 +1538,30 @@ void block_cache_list_ephemeral(block_cache_t* block_cache, actor_t* reply_to) {
   msg.type = CACHE_EPHEMERAL_LIST;
   msg.payload = payload;
   msg.payload_destroy = cache_ephemeral_list_payload_destroy_adapter;
+
+  actor_send(&block_cache->actor, &msg);
+}
+
+void block_cache_list_servable(block_cache_t* block_cache, size_t max_offers,
+                               const uint8_t* exclude, size_t exclude_count,
+                               uint64_t message_id, actor_t* reply_to) {
+  cache_list_servable_payload_t* payload =
+      get_clear_memory(sizeof(cache_list_servable_payload_t));
+  payload->message_id = message_id;
+  payload->reply_to = reply_to;
+  payload->max_offers = max_offers;
+  payload->exclude_count = exclude_count;
+  if (exclude != NULL && exclude_count > 0) {
+    payload->exclude = get_clear_memory(32 * exclude_count);
+    memcpy(payload->exclude, exclude, 32 * exclude_count);
+  } else {
+    payload->exclude = NULL;
+  }
+
+  message_t msg;
+  msg.type = CACHE_LIST_SERVABLE;
+  msg.payload = payload;
+  msg.payload_destroy = cache_list_servable_payload_destroy;
 
   actor_send(&block_cache->actor, &msg);
 }

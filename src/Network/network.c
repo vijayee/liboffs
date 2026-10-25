@@ -297,6 +297,801 @@ void network_find_block_result_destroy(void* ptr) {
   free(ptr);
 }
 
+/* Forward declarations for the pending-fetch result flow */
+struct store_pending_t;
+static store_pending_t* network_store_pending_append(network_t* network, uint64_t message_id, actor_t* reply_to, buffer_t* hash, uint32_t block_fib, uint16_t replicas_needed, uint64_t deadline_ms);
+static store_pending_t* network_store_pending_find(network_t* network, uint64_t message_id);
+static void network_store_pending_finalize(network_t* network, store_pending_t* entry, size_t entry_index);
+static void network_deliver_to_interested_peers(network_t* network, buffer_t* hash, block_t* block, void* reserved);
+static void network_find_forward(network_t* network, const wire_find_block_t* find_in);
+static void network_local_find_resume(network_t* network, buffer_t* hash,
+                                      actor_t* reply_to, stream_t* owner,
+                                      uint8_t verify_only);
+
+/* ---- Pending cache-actor fetch table ----
+   The block cache's LRU/index/sections belong to the cache actor; this
+   actor only asks through block_cache's actor API (async CACHE_GET /
+   CACHE_LIST_SERVABLE) and continues what it owes in the matched result
+   handlers, keyed by the fetch's hash. */
+
+static size_t network_cache_pending_find_index(network_t* network,
+                                               const uint8_t* hash32) {
+  for (size_t index = 0; index < network->cache_pending_count; index++) {
+    buffer_t* h = network->cache_pending[index].hash;
+    if (h != NULL && h->size == 32 &&
+        memcmp(h->data, hash32, 32) == 0) {
+      return index;
+    }
+  }
+  return (size_t)-1;
+}
+
+/* Adopts `hash` (a reference the caller transfers). Returns the entry's
+   index, or (size_t)-1 on allocation failure (frees the hash first). */
+static size_t network_cache_pending_append(network_t* network,
+                                           buffer_t* hash,
+                                           network_cache_pending_kind_e kind) {
+  if (network->cache_pending_count == network->cache_pending_capacity) {
+    size_t new_capacity =
+        network->cache_pending_capacity == 0
+            ? 8
+            : network->cache_pending_capacity * 2;
+    network_cache_pending_t* grown = realloc(
+        network->cache_pending,
+        new_capacity * sizeof(network_cache_pending_t));
+    if (grown == NULL) {
+      log_error("network: cache pending table growth failed (cap=%zu)",
+                network->cache_pending_capacity);
+      buffer_destroy(hash);
+      return (size_t)-1;
+    }
+    network->cache_pending = grown;
+    network->cache_pending_capacity = new_capacity;
+  }
+  network_cache_pending_t* entry =
+      &network->cache_pending[network->cache_pending_count];
+  memset(entry, 0, sizeof(network_cache_pending_t));
+  entry->hash = hash;
+  entry->kind = kind;
+  size_t index = network->cache_pending_count;
+  network->cache_pending_count++;
+  return index;
+}
+
+/* Copy the pending fetch out and drop the slot by swap-with-last WITHOUT
+   releasing anything: the copy owns the hash (and any owner reference)
+   from here on. */
+static void network_cache_pending_take(network_t* network, size_t index,
+                                       network_cache_pending_t* out) {
+  size_t last = network->cache_pending_count - 1;
+  *out = network->cache_pending[index];
+  if (index != last) {
+    network->cache_pending[index] = network->cache_pending[last];
+  }
+  network->cache_pending_count--;
+}
+
+/* Release a pending copy's hash + any still-held owner reference. */
+static void network_cache_pending_release(network_cache_pending_t* pending) {
+  if (pending->hash != NULL) {
+    buffer_destroy(pending->hash);
+    pending->hash = NULL;
+  }
+  if (pending->owner != NULL && pending->owner->destructor != NULL) {
+    pending->owner->destructor(pending->owner);
+    pending->owner = NULL;
+  }
+}
+
+/* Send the pending fetch to the cache actor. no_data / peer_serve follow
+   block_cache_get_ex's contract (peer_serve: an entry the cache actor finds
+   non-servable reports as absent - the wire behavior). */
+static int network_cache_pending_send_get(network_t* network, size_t index,
+                                          uint8_t no_data, uint8_t peer_serve) {
+  if (network->block_cache == NULL || index >= network->cache_pending_count) {
+    return -1;
+  }
+  network_cache_pending_t* pending = &network->cache_pending[index];
+  cache_get_payload_t* get = get_clear_memory(sizeof(cache_get_payload_t));
+  get->hash = (buffer_t*)refcounter_reference((refcounter_t*)pending->hash);
+  get->reply_to = &network->actor;
+  get->no_data = no_data;
+  get->peer_serve = peer_serve;
+  message_t get_msg;
+  get_msg.type = CACHE_GET;
+  get_msg.payload = get;
+  get_msg.payload_destroy = cache_get_payload_destroy;
+  actor_send(&network->block_cache->actor, &get_msg);
+  return 0;
+}
+
+static void network_cache_pending_clear(network_t* network) {
+  if (network == NULL) return;
+  for (size_t index = 0; index < network->cache_pending_count; index++) {
+    if (network->cache_pending[index].hash != NULL) {
+      buffer_destroy(network->cache_pending[index].hash);
+    }
+    if (network->cache_pending[index].owner != NULL &&
+        network->cache_pending[index].owner->destructor != NULL) {
+      network->cache_pending[index].owner->destructor(
+          network->cache_pending[index].owner);
+    }
+  }
+  free(network->cache_pending);
+  network->cache_pending = NULL;
+  network->cache_pending_count = 0;
+  network->cache_pending_capacity = 0;
+}
+
+/* Purge every LOCAL_FIND pending whose requester actor matches (a stream
+   died before its find resolved): releases hash + the pending's owner
+   reference exactly as the payload release does. */
+static void network_cache_pending_prune_requester(network_t* network,
+                                                  const actor_t* requester) {
+  if (network == NULL || requester == NULL) return;
+  size_t index = 0;
+  while (index < network->cache_pending_count) {
+    if (network->cache_pending[index].kind == NETWORK_CACHE_PENDING_LOCAL_FIND &&
+        network->cache_pending[index].reply_to == requester) {
+      network_cache_pending_t dead;
+      network_cache_pending_take(network, index, &dead);
+      network_cache_pending_release(&dead);
+      continue;
+    }
+    index++;
+  }
+}
+
+
+/* The FOUND response for an incoming wire find whose fetch resolved: the
+   response path is the incoming path plus self (holder); the data rides
+   with the response unless the find was verify-only. */
+static void network_find_send_found_response(
+    network_t* network, const wire_find_block_t* find,
+    const cache_get_result_payload_t* result) {
+  wire_find_block_response_t found_resp;
+  memset(&found_resp, 0, sizeof(found_resp));
+  found_resp.message_id = find->message_id;
+  memcpy(found_resp.block_hash, find->block_hash, 32);
+  found_resp.found = 1;
+  memcpy(&found_resp.holder, &network->authority->local_id, sizeof(node_id_t));
+  found_resp.fib = result->fib;
+  found_resp.path_len = find->path_len;
+  if (found_resp.path_len > WIRE_MAX_PATH) found_resp.path_len = WIRE_MAX_PATH;
+  memcpy(found_resp.path, find->path, found_resp.path_len * sizeof(node_id_t));
+  if (found_resp.path_len < WIRE_MAX_PATH) {
+    memcpy(&found_resp.path[found_resp.path_len],
+           &network->authority->local_id, sizeof(node_id_t));
+    found_resp.path_len++;
+  }
+  found_resp.latency_ms = 0;
+
+  block_t* block = result->block;
+  if (block != NULL && find->verify_only == 0) {
+    found_resp.block_data = block->data->data;
+    found_resp.block_data_len = block->data->size;
+    found_resp.block_fib = result->fib;
+  }
+
+  const node_id_t* reply_to = &find->original_source;
+  if (find->path_len > 0) {
+    reply_to = &find->path[find->path_len - 1];
+  }
+  /* Hebbian: holder strengthens weight toward predecessor */
+  {
+    float delta_w = hebbian_compute_delta(network->gossip_timeout_ms,
+                                          HEBBIAN_FIND_BLOCK_MULTIPLIER);
+    hebbian_frequency(&network->hebbian, reply_to, delta_w);
+    network_sync_hebbian_to_rings(network);
+  }
+  peer_connection_t* reply_peer =
+      connection_manager_lookup(&network->conn_mgr, reply_to);
+  if (reply_peer != NULL) {
+    cbor_item_t* cbor = wire_find_block_response_encode(&found_resp);
+    conn_state_send(network, reply_peer, cbor);
+    cbor_decref(&cbor);
+  }
+  if (network->log != NULL) {
+    message_log_record(network->log, WIRE_FIND_BLOCK_RESPONSE,
+                       MSG_DIRECTION_SENT, reply_to, find->message_id,
+                       find->block_hash, 0, &network->hebbian);
+  }
+}
+
+/* (placeholder) */
+static void network_local_find_resume(network_t* network, buffer_t* hash,
+                                      actor_t* reply_to, stream_t* owner,
+                                      uint8_t verify_only) {
+  // Step 2: Check wanted list for dedup — if entry exists, just add this requester
+  wanted_entry_t* existing = wanted_list_find(network->wanted_list, hash);
+  if (existing != NULL) {
+    wanted_requester_t* requester = get_clear_memory(sizeof(wanted_requester_t));
+    requester->actor = reply_to;
+    /* Move the payload's in-flight requester stream reference into this node
+       (release path: wanted_requester_list_destroy / prune). */
+    requester->owner = owner;
+    owner = NULL;
+    requester->owner_destructor =
+        (requester->owner != NULL) ? requester->owner->destructor : NULL;
+    requester->next = existing->requesters;
+    existing->requesters = requester;
+    return;
+  }
+
+  // Step 3: New request — add to wanted list with a per-request timeout.
+  // The 1s NETWORK_REQUEST_TIMEOUT_TICK sweep will deliver a found=0 result
+  // to reply_to if no response arrives within request_timeout_ms. See #5/#9.
+  uint64_t find_block_deadline_ms =
+      (uint64_t)time(NULL) * 1000 + network->request_timeout_ms;
+  {
+    wanted_list_add(network->wanted_list, hash, reply_to,
+                    owner, find_block_deadline_ms, verify_only);
+  }
+
+  // Step 4: Execute FindBlock routing
+  find_block_state_t state;
+  memset(&state, 0, sizeof(state));
+  uint64_t now_ts = (uint64_t)time(NULL) * 1000;
+  state.message_id = network_next_message_id(network);
+  // Bind the wanted_list entry to this request's message_id so a stale or
+  // forged not-found (different message_id) can't prematurely fail the
+  // search. See audit #10 (follow-up: per-request nonce binding).
+  wanted_entry_t* wanted_entry = wanted_list_get(network->wanted_list, hash);
+  if (wanted_entry != NULL) {
+    wanted_entry->message_id = state.message_id;
+  }
+  memcpy(state.block_hash, hash->data, 32);
+  state.ttl = FORWARD_TTL;
+  state.start_time_ms = now_ts;
+  state.verify_only = verify_only;
+  memcpy(&state.original_source, &network->authority->local_id, sizeof(node_id_t));
+  /* Mark ORIGIN visited: a supplier must never route a find back to the
+     requester that asked for it - for a verify-only (exhale shed) find
+     a loop-back answer would be the origin verifying its OWN copy as
+     redundancy and deleting its last copy of the block. */
+  find_block_add_visited(state.visited_bloom, &state.visited_count,
+                         network->authority->local_id.hash);
+
+  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  // Diagnostic (OFFS-254 hunt): dump the routing-relevant state for this
+  // lookup — per-peer connected/conn_state conn-mgr wire, peer-EABF match,
+  // and ring-table node weight/verification. Remove after the cross-peer
+  // retrieval root-cause lands.
+  {
+    char hash_hex[17];
+    static const char hex_digits[] = "0123456789abcdef";
+    for (size_t hex_index = 0; hex_index < 8; hex_index++) {
+      hash_hex[hex_index * 2] = hex_digits[(state.block_hash[hex_index] >> 4) & 0xF];
+      hash_hex[hex_index * 2 + 1] = hex_digits[state.block_hash[hex_index] & 0xF];
+    }
+    hash_hex[16] = '\0';
+    log_info("find: hash=%s peers=%zu", hash_hex, network->conn_mgr.peer_count);
+    for (size_t peer_index = 0; peer_index < network->conn_mgr.peer_count;
+         peer_index++) {
+      peer_connection_t* peer = network->conn_mgr.peers[peer_index];
+      if (peer == NULL) continue;
+      uint32_t eabf_hops = 0;
+      bool eabf_match = peer_eabf_check(peer, state.block_hash, 32, &eabf_hops);
+      net_node_t* ring_node =
+          ring_set_find_by_id(network->rings, &peer->remote_node_id);
+      log_info("find: peer=%s connected=%d conn_state=%d eabf=%u ring=%s "
+               "weight=%.4f relay_verified=%d flags=%u",
+               peer->remote_node_id.str, peer->connected ? 1 : 0,
+               (int)peer->conn_state, eabf_match ? eabf_hops + 1u : 0u,
+               ring_node != NULL ? "yes" : "no",
+               ring_node != NULL ? ring_node->weight : 0.0f,
+               ring_node != NULL && ring_node->relay_verified,
+               ring_node != NULL ? ring_node->flags : 0u);
+    }
+  }
+
+  find_block_result_e result = find_block_execute(
+      &network->eabf_table,
+      &network->eabf_ttl,
+      &network->conn_mgr,
+      network->rings,
+      &network->authority->local_id,
+      &state,
+      next_hops,
+      &next_hop_count,
+      network_secure_mode(network));
+
+  log_info("find: execute result=%d next_hops=%zu", (int)result, next_hop_count);
+
+  switch (result) {
+    case FIND_BLOCK_FOUND: {
+      // Block is local (shouldn't happen since we checked cache, but handle it)
+      wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, hash);
+      if (requesters != NULL) {
+        wanted_requester_t* req = requesters;
+        while (req != NULL) {
+          network_find_block_result_payload_t* fb_result =
+              get_clear_memory(sizeof(network_find_block_result_payload_t));
+          fb_result->hash = REFERENCE(hash, buffer_t);
+          fb_result->found = 1;
+          message_t fb_msg = {0};
+          fb_msg.type = NETWORK_FIND_BLOCK_RESULT;
+          fb_msg.payload = fb_result;
+          fb_msg.payload_destroy = network_find_block_result_destroy;
+          actor_send(req->actor, &fb_msg);
+          req = req->next;
+        }
+        wanted_requester_list_destroy(requesters);
+      }
+      break;
+    }
+
+    case FIND_BLOCK_NOT_FOUND:
+    case FIND_BLOCK_TTL_EXPIRED: {
+      // On TTL expiry, subscribe block_hash in our EABFs as negative info
+      if (result == FIND_BLOCK_TTL_EXPIRED) {
+        for (size_t index = 0; index < network->eabf_table.count; index++) {
+          eabf_t* eabf = network->eabf_table.entries[index].eabf;
+          if (eabf != NULL) {
+            eabf_subscribe(eabf, state.block_hash, 32);
+          }
+        }
+      }
+
+      // Block not found — notify all requesters
+      wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, hash);
+      if (requesters != NULL) {
+        wanted_requester_t* req = requesters;
+        while (req != NULL) {
+          network_find_block_result_payload_t* fb_result =
+              get_clear_memory(sizeof(network_find_block_result_payload_t));
+          fb_result->hash = REFERENCE(hash, buffer_t);
+          fb_result->found = 0;
+          message_t fb_msg = {0};
+          fb_msg.type = NETWORK_FIND_BLOCK_RESULT;
+          fb_msg.payload = fb_result;
+          fb_msg.payload_destroy = network_find_block_result_destroy;
+          actor_send(req->actor, &fb_msg);
+          req = req->next;
+        }
+        wanted_requester_list_destroy(requesters);
+      }
+      break;
+    }
+
+    case FIND_BLOCK_FORWARDING: {
+      // Add self to path
+      if (state.path_len < FIND_BLOCK_MAX_PATH) {
+        memcpy(&state.path[state.path_len], &network->authority->local_id, sizeof(node_id_t));
+        state.path_len++;
+      }
+      // Add self to visited bloom
+      find_block_add_visited(state.visited_bloom, &state.visited_count, network->authority->local_id.hash);
+      // Decrement TTL
+      state.ttl--;
+
+      // Forward to each selected next-hop, counting reachable hops.
+      // conn_state_send returns -1 when a peer's stream is gone (audit #9);
+      // an unreachable hop won't send a not-found, so counting it in
+      // fanout_count would deadlock the request (not_found_count could never
+      // reach fanout_count). Instead, only count successful sends.
+      size_t reachable_hops = 0;
+      for (size_t hop = 0; hop < next_hop_count; hop++) {
+        wire_find_block_t* forward = get_clear_memory(sizeof(wire_find_block_t));
+        if (forward == NULL) continue;
+        forward->message_id = state.message_id;
+        memcpy(forward->block_hash, state.block_hash, 32);
+        forward->ttl = state.ttl;
+        memcpy(forward->visited_bloom, state.visited_bloom, WIRE_MAX_VISITED_BLOOM);
+        forward->visited_count = state.visited_count;
+        memcpy(forward->path, state.path, state.path_len * sizeof(node_id_t));
+        forward->path_len = state.path_len;
+        forward->start_time = state.start_time_ms;
+        memcpy(&forward->original_source, &state.original_source, sizeof(node_id_t));
+        forward->verify_only = state.verify_only;
+
+        // Encode and send FindBlock to next_hops[hop] via QUIC
+        cbor_item_t* cbor = wire_find_block_encode(forward);
+        peer_connection_t* next_peer = connection_manager_lookup(
+            &network->conn_mgr, &next_hops[hop]);
+        int send_result = next_peer != NULL
+                              ? conn_state_send(network, next_peer, cbor)
+                              : -1;
+        if (send_result == 0) {
+          reachable_hops++;
+          if (network->log != NULL) {
+            message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
+                               &next_hops[hop], state.message_id, state.block_hash,
+                               1, &network->hebbian);
+          }
+        }
+        {
+          /* Diagnostic (OFFS-254 hunt): the node id's str is often unset for
+             gossip-built ring nodes � print the hash hex so the actual hop
+             is identifiable. Remove with the other hunt diagnostics. */
+          char hop_hex[17];
+          static const char hex_digits[] = "0123456789abcdef";
+          for (size_t hex_index = 0; hex_index < 8; hex_index++) {
+            hop_hex[hex_index * 2] =
+                hex_digits[(next_hops[hop].hash[hex_index] >> 4) & 0xF];
+            hop_hex[hex_index * 2 + 1] =
+                hex_digits[next_hops[hop].hash[hex_index] & 0xF];
+          }
+          hop_hex[16] = '\0';
+          log_info("find: hop=%s/%s lookup=%d send=%d", next_hops[hop].str,
+                   hop_hex, next_peer != NULL, send_result);
+        }
+        cbor_decref(&cbor);
+        free(forward);
+      }
+
+      if (reachable_hops == 0) {
+        // No reachable next hop — fail the request immediately rather
+        // than waiting for the 30s timeout sweep. See audit #9.
+        wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, hash);
+        if (requesters != NULL) {
+          wanted_requester_t* req = requesters;
+          while (req != NULL) {
+            wanted_requester_t* next = req->next;
+            network_find_block_result_payload_t* fb_result =
+                get_clear_memory(sizeof(network_find_block_result_payload_t));
+            fb_result->hash = REFERENCE(hash, buffer_t);
+            fb_result->found = 0;
+            message_t fb_msg = {0};
+            fb_msg.type = NETWORK_FIND_BLOCK_RESULT;
+            fb_msg.payload = fb_result;
+            fb_msg.payload_destroy = network_find_block_result_destroy;
+            actor_send(req->actor, &fb_msg);
+            free(req);
+            req = next;
+          }
+        }
+        break;
+      }
+
+      // Set fanout_count to the reachable hop count so the
+      // not_found_count >= fanout_count check (in the found==0 handler
+      // below) is achievable. Unreachable hops won't send not-founds, so
+      // counting them in fanout_count would deadlock the request. See #10.
+      wanted_entry_t* entry = wanted_list_get(network->wanted_list, hash);
+      if (entry != NULL) {
+        entry->fanout_count = (uint8_t)reachable_hops;
+        entry->not_found_count = 0;
+      }
+      break;
+    }
+  }
+}
+/* The store's origin reply fields ride the pending (the original payload
+   died with its message); the carry is the fetched block. */
+static void network_handle_store_carry_result(
+    network_t* network, cache_get_result_payload_t* result,
+    const network_cache_pending_t* pending) {
+  if (result == NULL || result->hash == NULL || pending == NULL) return;
+  // Build store_block_state for local block announcement
+  store_block_state_t state;
+  memset(&state, 0, sizeof(state));
+  uint64_t now_ts = (uint64_t)time(NULL) * 1000;
+  state.message_id = network_next_message_id(network);
+  memcpy(state.block_hash, result->hash->data, 32);
+  state.block_fib = pending->fib;
+  state.replicas_needed = STORE_BLOCK_FORWARD_FANOUT;
+  state.max_hops = STORE_BLOCK_MAX_HOPS;
+  state.visited_count = 0;
+  memcpy(&state.path[0], &network->authority->local_id, sizeof(node_id_t));
+  state.path_len = 1;
+  state.start_time_ms = now_ts;
+  state.carry_data = 0;
+
+  float local_capacity = atomic_load(&network->authority->capacity);
+  node_phase_e local_phase = atomic_load(&network->authority->phase);
+    /* Steal the fetched read-back (the local block's bytes, read on the
+     cache actor - this actor never touches the LRU/index/sections): */
+  block_t* store_carry_block = result->block;
+  result->block = NULL;
+  if (store_carry_block == NULL) {
+    /* No bytes readable - the shed's store-then-delete must not run
+       against a block we cannot supply; the store does not go out
+       (the block stays local; the origin's reply times out). */
+    log_info("store: carry read-back missed; keeping block local");
+    return;
+  }
+  net_node_t* next_hops[STORE_BLOCK_FORWARD_FANOUT];
+  size_t next_hop_count = 0;
+
+  store_block_result_e forward_result = store_block_execute(
+      &network->eabf_table,
+      &network->conn_mgr,
+      network->rings,
+      &network->authority->local_id,
+      local_capacity,
+      local_phase,
+      &state,
+      next_hops,
+      &next_hop_count);
+
+  if (forward_result == STORE_BLOCK_ACCEPTED || forward_result == STORE_BLOCK_FORWARDING) {
+    for (size_t hop_idx = 0; hop_idx < next_hop_count; hop_idx++) {
+      peer_connection_t* peer = connection_manager_lookup(
+          &network->conn_mgr, &next_hops[hop_idx]->id);
+      if (peer != NULL) {
+        wire_store_block_t forward;
+        memset(&forward, 0, sizeof(forward));
+        forward.message_id = state.message_id;
+        memcpy(forward.block_hash, state.block_hash, 32);
+        forward.block_fib = state.block_fib;
+        forward.replicas_needed = state.replicas_needed;
+        forward.max_hops = state.max_hops;
+        memcpy(forward.visited_bloom, state.visited_bloom, STORE_BLOCK_MAX_VISITED_BLOOM);
+        forward.visited_count = state.visited_count;
+        memcpy(forward.path, state.path, state.path_len * sizeof(node_id_t));
+        forward.path_len = state.path_len;
+        forward.start_time = state.start_time_ms;
+        forward.carry_data = 1;
+        if (forward.carry_data && store_carry_block != NULL) {
+          forward.block_data = store_carry_block->data->data;
+          forward.block_data_len = store_carry_block->data->size;
+        }
+
+        cbor_item_t* cbor = wire_store_block_encode(&forward);
+        conn_state_send(network, peer, cbor);
+        cbor_decref(&cbor);
+      }
+    }
+  }
+  if (store_carry_block != NULL) {
+    /* EABF interest: peers whose wells contain this hash sought
+     it (their finds missed here) — deliver the bytes now
+     that we hold them. */
+    network_deliver_to_interested_peers(network, result->hash,
+                                          store_carry_block, NULL);
+    DESTROY(store_carry_block, block);
+  }
+
+  // Aggregate the forward_result if a reply_to was provided. The origin sends
+  // a single NETWORK_STORE_BLOCK_RESULT once all remote replicas respond
+  // (or the deadline passes — swept by NETWORK_REQUEST_TIMEOUT_TICK).
+  // The local decision counts as one acceptance if forward_result == ACCEPTED.
+  // See audit #21.
+  if (pending->reply_to != NULL) {
+    uint64_t deadline_ms =
+        now_ts + (uint64_t)network->request_timeout_ms;
+    store_pending_t* store_entry = network_store_pending_append(
+        network, state.message_id, pending->reply_to, result->hash,
+        state.block_fib, state.replicas_needed, deadline_ms);
+    if (store_entry != NULL) {
+      // The local decision counts as one replica if we stored locally.
+      if (forward_result == STORE_BLOCK_ACCEPTED) {
+        store_entry->accepted_count = 1;
+      }
+      // If we didn't forward (no next hops), the forward_result is final — the
+      // origin can be notified immediately. Otherwise, replicas_remaining
+      // tracks the outstanding remote responses.
+      if (next_hop_count == 0) {
+        store_entry->replicas_remaining = 0;
+        // Finalize immediately (no remote responses to wait for).
+        // Find the entry again — append may have moved the array.
+        store_pending_t* fresh = network_store_pending_find(
+            network, state.message_id);
+        if (fresh != NULL) {
+          size_t fresh_index = (size_t)(fresh - network->store_pending);
+          network_store_pending_finalize(network, fresh, fresh_index);
+        }
+      }
+    }
+  }}
+
+static void network_handle_cache_get_result(network_t* network, message_t* msg) {
+  cache_get_result_payload_t* result = (cache_get_result_payload_t*)msg->payload;
+  if (result == NULL || result->hash == NULL) {
+    return;
+  }
+  size_t index = network_cache_pending_find_index(network, result->hash->data);
+  if (index == (size_t)-1) {
+    /* A late or duplicate result for an already-answered pending - ignore. */
+    return;
+  }
+  network_cache_pending_t local;
+  network_cache_pending_take(network, index, &local);
+
+  switch (local.kind) {
+    case NETWORK_CACHE_PENDING_FIND_SERVE: {
+      if (result->block != NULL || result->entry_existed != 0) {
+        /* Indexed and servable - answer found. Verify-only serves never
+           attach bytes (the no_data fetch returned a NULL block) but the
+           presence answer still goes out. */
+        network_find_send_found_response(network, &local.find, result);
+      } else {
+        /* Never indexed here - the find continues its forward search
+           exactly as the pre-actor-API code did on an index miss. */
+        network_find_forward(network, &local.find);
+      }
+      network_cache_pending_release(&local);
+      break;
+    }
+    case NETWORK_CACHE_PENDING_STORE_CARRY: {
+      network_handle_store_carry_result(network, result, &local);
+      network_cache_pending_release(&local);
+      break;
+    }
+    case NETWORK_CACHE_PENDING_PING_BLOCK: {
+      /* The exhale presence check: exists = indexed-and-servable (the
+         metadata-only fetch's entry_existed), the post-peek rank rides
+         the reply. Ephemeral entries report absent (they are local-only
+         and must not leak their existence to peers). */
+      wire_ping_block_response_t response;
+      memset(&response, 0, sizeof(response));
+      response.message_id = local.message_id;
+      response.exists = (uint8_t)(result->entry_existed != 0 ? 1 : 0);
+      response.fib = result->fib;
+      response.healthy = response.exists;
+      memcpy(&response.sender_id, &network->authority->local_id,
+             sizeof(node_id_t));
+      peer_connection_t* peer =
+          connection_manager_lookup(&network->conn_mgr, &local.sender_id);
+      if (peer != NULL) {
+        cbor_item_t* cbor = wire_ping_block_response_encode(&response);
+        conn_state_send(network, peer, cbor);
+        cbor_decref(&cbor);
+      }
+      network_cache_pending_release(&local);
+      break;
+    }
+    case NETWORK_CACHE_PENDING_RECALL_SERVE: {
+      if (result->block != NULL) {
+        peer_connection_t* peer =
+            connection_manager_lookup(&network->conn_mgr, &local.sender_id);
+        if (peer != NULL) {
+          wire_store_block_t store_msg;
+          memset(&store_msg, 0, sizeof(store_msg));
+          store_msg.message_id = local.message_id;
+          memcpy(store_msg.block_hash, local.hash->data, 32);
+          store_msg.block_fib = result->fib;
+          store_msg.replicas_needed = 0;  /* RECALL - no further replication */
+          store_msg.max_hops = 1;         /* direct delivery, no forwarding */
+          store_msg.carry_data = 1;
+          store_msg.block_data = result->block->data->data;
+          store_msg.block_data_len = result->block->data->size;
+          store_msg.block_size = (uint32_t)result->block->data->size;
+          store_msg.start_time = (uint64_t)time(NULL) * 1000;
+          cbor_item_t* cbor = wire_store_block_encode(&store_msg);
+          conn_state_send(network, peer, cbor);
+          cbor_decref(&cbor);
+        }
+      }
+      network_cache_pending_release(&local);
+      break;
+    }
+    case NETWORK_CACHE_PENDING_LOCAL_FIND: {
+      if (result->entry_existed != 0) {
+        /* Found locally - notify the stream requester. */
+        network_find_block_result_payload_t* fb_result =
+            get_clear_memory(sizeof(network_find_block_result_payload_t));
+        fb_result->hash = REFERENCE(result->hash, buffer_t);
+        fb_result->found = 1;
+        message_t fb_msg = {0};
+        fb_msg.type = NETWORK_FIND_BLOCK_RESULT;
+        fb_msg.payload = fb_result;
+        fb_msg.payload_destroy = network_find_block_result_destroy;
+        actor_send(local.reply_to, &fb_msg);
+        network_cache_pending_release(&local);
+      } else {
+        /* Miss - enter the wanted-list / wire-search flow: the pending's
+           hash rides the resume (the wanted list takes its own
+           reference; this one is dropped after), and the requester's owner
+           reference moves into the wanted list. */
+        network_local_find_resume(network, result->hash, local.reply_to,
+                                  local.owner, local.find.verify_only);
+        local.owner = NULL;
+        network_cache_pending_release(&local);
+      }
+      break;
+    }
+    case NETWORK_CACHE_PENDING_SEEK_OFFER: {
+      if (result->entry_existed != 0) {
+        /* Have-already - roll into the exclusion ring so the holder stops
+           re-offering the same top FIB entries. */
+        if (local.hash != NULL && local.hash->size == 32) {
+          memcpy(network->seek_exclude_hashes +
+                     network->seek_exclude_cursor * 32,
+                 local.hash->data, 32);
+          network->seek_exclude_cursor =
+              (network->seek_exclude_cursor + 1) % 128;
+          if (network->seek_exclude_count < 128) {
+            network->seek_exclude_count++;
+          }
+        }
+        network_cache_pending_release(&local);
+        break;
+      }
+      /* Not stored and we should inhale - route a LOCAL find for this
+         hash (its own local-presence check runs through the cache actor's
+         API as well, so nothing is stored directly here). */
+      if (respiration_should_inhale(
+              atomic_load(&network->authority->capacity))) {
+        network_local_find_block_payload_t find_payload;
+        memset(&find_payload, 0, sizeof(find_payload));
+        find_payload.hash = REFERENCE(result->hash, buffer_t);
+        find_payload.reply_to = &network->actor;
+        find_payload.owner = local.owner;  /* move */
+        local.owner = NULL;
+        find_payload.verify_only = 0;
+        message_t find_msg = {0};
+        find_msg.type = NETWORK_LOCAL_FIND_BLOCK;
+        find_msg.payload = &find_payload;
+        find_msg.payload_destroy = NULL;
+        network_handle_local_find_block(network, &find_msg);
+        /* the local find adopted (pending) or re-notified; release the
+           shell's references */
+        if (find_payload.hash != NULL) {
+          buffer_destroy(find_payload.hash);
+        }
+        if (find_payload.owner != NULL &&
+            find_payload.owner->destructor != NULL) {
+          find_payload.owner->destructor(find_payload.owner);
+        }
+      }
+      network_cache_pending_release(&local);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+/* CACHE_LIST_SERVABLE_RESULT - the seek-responder's offer list: build the
+   wire response for the remembered seeker and send it. */
+static void network_handle_cache_list_result(network_t* network, message_t* msg) {
+  cache_list_servable_result_payload_t* result =
+      (cache_list_servable_result_payload_t*)msg->payload;
+  if (result == NULL) return;
+
+  /* Match the pending fetch by correlation message_id (the wire seek's
+     message id rides the request/result). */
+  size_t match = (size_t)-1;
+  for (size_t index = 0; index < network->cache_pending_count; index++) {
+    if (network->cache_pending[index].kind ==
+            NETWORK_CACHE_PENDING_SEEK_RESPONSE &&
+        network->cache_pending[index].message_id == result->message_id) {
+      match = index;
+      break;
+    }
+  }
+  if (match == (size_t)-1) {
+    return;  /* late reply for an already-answered seek - drop */
+  }
+  network_cache_pending_t local;
+  network_cache_pending_take(network, match, &local);
+
+  wire_seeking_blocks_response_t* response =
+      get_clear_memory(sizeof(wire_seeking_blocks_response_t));
+  response->message_id = local.message_id;
+  memcpy(&response->sender_id, &network->authority->local_id, sizeof(node_id_t));
+  response->offer_count =
+      (uint8_t)(result->offer_count > WIRE_MAX_OFFERS
+                    ? WIRE_MAX_OFFERS
+                    : result->offer_count);
+  for (size_t offer_index = 0; offer_index < response->offer_count;
+       offer_index++) {
+    if (result->hashes != NULL) {
+      memcpy(response->offers[offer_index].hash,
+             result->hashes + offer_index * 32, 32);
+    }
+    if (result->fibs != NULL) {
+      response->offers[offer_index].fib = result->fibs[offer_index];
+    }
+    response->offers[offer_index].size = 0;  /* not tracked in the index */
+  }
+  log_info("seek:tx resp offers=%u", (unsigned)response->offer_count);
+
+  peer_connection_t* peer =
+      connection_manager_lookup(&network->conn_mgr, &local.sender_id);
+  if (peer != NULL) {
+    cbor_item_t* cbor = wire_seeking_blocks_response_encode(response);
+    conn_state_send(network, peer, cbor);
+    cbor_decref(&cbor);
+  }
+  free(response);
+  network_cache_pending_release(&local);
+}
+
 // --- ClosestNodes local payload destroy ---
 // Frees the heap-allocated payload for local closest-nodes requests.
 
@@ -686,6 +1481,10 @@ void network_destroy(network_t* network) {
         DESTROY(network->store_pending[index].hash, buffer);
       }
     }
+  // Free the pending cache-actor fetch table. Each entry holds a
+  // referenced hash buffer (+ a moved requester owner reference) -
+  // release those before freeing the array.
+  network_cache_pending_clear(network);
     free(network->store_pending);
     network->store_pending = NULL;
     network->store_pending_count = 0;
@@ -1365,52 +2164,26 @@ static void network_handle_ping_block(network_t* network, message_t* msg) {
                        0, &network->hebbian);
   }
 
-  // Check if we have the block locally via synchronous index_peek
+  /* ASYNC SERVE: the cache actor owns the LRU/index; the presence check
+     runs there as a metadata-only fetch (no block bytes) and the response
+     is answered from the CACHE_GET_RESULT handler (exists + the post-peek
+     rank). Ephemeral entries report absent under peer_serve - they are
+     local-only and must not leak their existence to peers. */
+  if (network->block_cache == NULL || network->block_cache->index == NULL) {
+    return;
+  }
   buffer_t* hash_buf = buffer_create_from_pointer_copy(ping->block_hash, 32);
   if (hash_buf == NULL) return;
 
-  index_entry_t* entry = index_peek(network->block_cache->index, hash_buf);
-  if (entry != NULL && !index_entry_is_servable(entry)) {
-    // Ephemeral blocks are local-only — ping must not leak their existence
-    // to peers, so treat the entry as not-found (mirrors find-block).
-    entry = NULL;
-  }
-  if (entry != NULL) {
-    // Block exists locally — respond immediately
-    wire_ping_block_response_t response;
-    memset(&response, 0, sizeof(response));
-    response.message_id = ping->message_id;
-    response.exists = 1;
-    response.fib = entry->counter.fib;
-    response.healthy = 1;
-    memcpy(&response.sender_id, &network->authority->local_id, sizeof(node_id_t));
-
-    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &ping->sender_id);
-    if (peer != NULL) {
-      cbor_item_t* cbor = wire_ping_block_response_encode(&response);
-      conn_state_send(network, peer, cbor);
-      cbor_decref(&cbor);
-    }
-    buffer_destroy(hash_buf);
-  } else {
-    // Block not in index — respond with exists=0
-    wire_ping_block_response_t response;
-    memset(&response, 0, sizeof(response));
-    response.message_id = ping->message_id;
-    response.exists = 0;
-    response.fib = 0;
-    response.healthy = 0;
-    memcpy(&response.sender_id, &network->authority->local_id, sizeof(node_id_t));
-
-    peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &ping->sender_id);
-    if (peer != NULL) {
-      cbor_item_t* cbor = wire_ping_block_response_encode(&response);
-      conn_state_send(network, peer, cbor);
-      cbor_decref(&cbor);
-    }
-    buffer_destroy(hash_buf);
-  }
+  size_t pending_index = network_cache_pending_append(
+      network, hash_buf, NETWORK_CACHE_PENDING_PING_BLOCK);
+  if (pending_index == (size_t)-1) return;
+  network->cache_pending[pending_index].message_id = ping->message_id;
+  memcpy(&network->cache_pending[pending_index].sender_id, &ping->sender_id,
+         sizeof(node_id_t));
+  network_cache_pending_send_get(network, pending_index, 1, 1);
 }
+
 
 static void network_handle_ping_block_response(network_t* network, message_t* msg) {
   wire_ping_block_response_t* response = (wire_ping_block_response_t*)msg->payload;
@@ -3191,148 +3964,65 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
                        0, &network->hebbian);
   }
 
-  // Check local block cache first — if we have the block, respond immediately
+  // Check local block cache first - if we have the block, answer found
+  // (with bytes unless verify-only) from the CACHE_GET_RESULT handler; on a
+  // miss (never indexed) the find's forward search resumes there.
+  /* ASYNC SERVE: the cache actor owns the LRU/index/sections - this actor
+     never calls into them directly. The fetch is a CACHE_GET with
+     reply_to = this actor; the pending's find copy carries the wire
+     context the response is built from (the Hebbian answer fires with the
+     found send, as before). */
   if (network->block_cache != NULL && network->block_cache->index != NULL) {
     buffer_t* hash_buf = buffer_create_from_pointer_copy(find->block_hash, 32);
-    if (hash_buf != NULL) {
-      index_entry_t* entry = index_peek(network->block_cache->index, hash_buf);
-      {
-        /* Diagnostic (OFFS-254 hunt): log the wire-received find's local
-           peek outcome, so "holder silently answers not-found despite
-           serving the file locally" is visible. Remove with the other hunt
-           diagnostics. */
-        char hash_hex[17];
-        static const char hex_digits[] = "0123456789abcdef";
-        for (size_t hex_index = 0; hex_index < 8; hex_index++) {
-          hash_hex[hex_index * 2] =
-              hex_digits[(find->block_hash[hex_index] >> 4) & 0xF];
-          hash_hex[hex_index * 2 + 1] = hex_digits[find->block_hash[hex_index] & 0xF];
-        }
-        hash_hex[16] = '\0';
-        log_info("find:rx hash=%s peek=%s ttl=%u path_len=%u", hash_hex,
-                 entry == NULL ? "miss"
-                              : (index_entry_is_servable(entry) ? "hit" : "ephemeral"),
-                 find->ttl, (unsigned)find->path_len);
-      }
-      if (entry != NULL && !index_entry_is_servable(entry)) {
-        // Ephemeral blocks are local-only — treat as not-found for peers so
-        // the request flows into the normal remote-search path below.
-        entry = NULL;
-      }
-      /* Verify-only find looped back to the origin itself: the origin's
-         local copy is NOT external redundancy — answer nothing, so the
-         search expires as not-found and the candidate is preserved
-         (not deleted against its own copy). */
-      if (entry != NULL && !(find->verify_only != 0 &&
-                              node_id_equals(&find->original_source,
-                                             &network->authority->local_id))) {
-        // Block found locally — send FOUND response back along the path
-        const node_id_t* reply_to = &find->original_source;
-        if (find->path_len > 0) {
-          reply_to = &find->path[find->path_len - 1];
-        }
-        // Hebbian: holder strengthens weight toward predecessor
-        {
-          float delta_w = hebbian_compute_delta(network->gossip_timeout_ms, HEBBIAN_FIND_BLOCK_MULTIPLIER);
-          hebbian_frequency(&network->hebbian, reply_to, delta_w);
-          network_sync_hebbian_to_rings(network);
-        }
-        peer_connection_t* reply_peer = connection_manager_lookup(&network->conn_mgr, reply_to);
-        if (reply_peer != NULL) {
-          wire_find_block_response_t found_resp;
-          memset(&found_resp, 0, sizeof(found_resp));
-          found_resp.message_id = find->message_id;
-          memcpy(found_resp.block_hash, find->block_hash, 32);
-          found_resp.found = 1;
-          memcpy(&found_resp.holder, &network->authority->local_id, sizeof(node_id_t));
-          found_resp.fib = entry->counter.fib;
-          // Build response path: incoming path + self (holder)
-          memcpy(found_resp.path, find->path, find->path_len * sizeof(node_id_t));
-          found_resp.path_len = find->path_len;
-          if (found_resp.path_len < WIRE_MAX_PATH) {
-            memcpy(&found_resp.path[found_resp.path_len], &network->authority->local_id, sizeof(node_id_t));
-            found_resp.path_len++;
-          }
-          found_resp.latency_ms = 0;
-
-          /* Include block data from LRU cache so the requester can store it.
-             VERIFY-ONLY searches skip the block entirely: the metadata-only
-             found answer is all the redundancy check needs, and an exhale
-             verifying thousands of candidates must not ship 2+ GB back 
-             to the sheder. */
-          block_t* block = (find->verify_only != 0)
-                              ? NULL
-                              : block_lru_cache_get(network->block_cache->lru, hash_buf);
-          if (block == NULL && find->verify_only == 0) {
-            /* The LRU only holds recently-touched blocks; a durable block
-               still on disk (in the sections + index) must be served too, or
-               the requester receives a data-less found reply, re-fetches from
-               its own cache, misses, and dead-ends on the wanted sweep —
-               exactly the cross-peer fetch failure this hunt chased
-               (penguin: holder had the bytes, requester starved). Sync-read
-               through the sections like CACHE_GET's local path does. */
-            sections_read_payload_t read_payload;
-            read_payload.section_id = entry->section_id;
-            read_payload.section_index = entry->section_index;
-            read_payload.reply_to = NULL;
-            read_payload.result = NULL;
-            message_t sections_msg;
-            sections_msg.type = SECTIONS_READ;
-            sections_msg.payload = &read_payload;
-            sections_msg.payload_destroy = NULL;
-            sections_dispatch(network->block_cache->sections, &sections_msg);
-            buffer_t* data = read_payload.result;
-            if (data != NULL) {
-              if (block_cache_verify_read_hash(data, hash_buf)) {
-                block = block_create_existing_data_hash(data, hash_buf);
-                /* Serve-from-disk warms the LRU like CACHE_GET does. */
-                index_entry_t* ejection = (index_entry_t*)refcounter_reference(
-                    (refcounter_t*)block_lru_cache_put(network->block_cache->lru,
-                                                       block, entry));
-                if (ejection) {
-                  index_set_entry_ejection(network->block_cache->index, ejection,
-                                           time(NULL));
-                  timer_actor_debounce(network->block_cache->timer_actor,
-                                       network->block_cache->index_wait, 0,
-                                       &network->block_cache->actor, INDEX_SAVE);
-                  index_entry_destroy(ejection);
-                }
-              } else {
-                log_error("find: block read hash mismatch for section "
-                          "(peer %s request)",
-                          reply_peer != NULL ? reply_peer->remote_node_id.str
-                                             : "?");
-              }
-              buffer_destroy(data);
-            }
-          }
-          if (block != NULL && find->verify_only == 0) {
-            found_resp.block_data = block->data->data;
-            found_resp.block_data_len = block->data->size;
-            found_resp.block_fib = entry->counter.fib;
-          }
-
-          cbor_item_t* cbor = wire_find_block_response_encode(&found_resp);
-          conn_state_send(network, reply_peer, cbor);
-          cbor_decref(&cbor);
-
-        if (network->log != NULL) {
-          message_log_record(network->log, WIRE_FIND_BLOCK_RESPONSE, MSG_DIRECTION_SENT,
-                             reply_to, find->message_id, find->block_hash,
-                             0, &network->hebbian);
-        }
-
-          if (block != NULL) {
-            DESTROY(block, block);
-          }
-        }
-        buffer_destroy(hash_buf);
-        return;
-      }
-      buffer_destroy(hash_buf);
+    if (hash_buf == NULL) {
+      /* Allocation failed - forward without the local serve. */
+      network_find_forward(network, find);
+      return;
     }
+    /* Verify-only find looped back to the origin itself: the origin's
+       local copy is NOT external redundancy - answer nothing, so the
+       search expires as not-found and the candidate is preserved (not
+       deleted against its own copy). */
+    if (find->verify_only != 0 &&
+        node_id_equals(&find->original_source,
+                       &network->authority->local_id)) {
+      buffer_destroy(hash_buf);
+      network_find_forward(network, find);
+      return;
+    }
+    size_t pending_index = network_cache_pending_append(
+        network, hash_buf, NETWORK_CACHE_PENDING_FIND_SERVE);
+    if (pending_index == (size_t)-1) {
+      /* Pending-table allocation failed - forward without serving. */
+      network_find_forward(network, find);
+      return;
+    }
+    network->cache_pending[pending_index].find = *find;
+    if (network_cache_pending_send_get(network, pending_index,
+                                       (uint8_t)(find->verify_only != 0),
+                                       1) != 0) {
+      /* The fetch could not be sent - drop the pending (it owns the hash)
+         and forward without serving. */
+      network_cache_pending_t dead;
+      network_cache_pending_take(network, pending_index, &dead);
+      network_cache_pending_release(&dead);
+      network_find_forward(network, find);
+      return;
+    }
+    return;
   }
 
+  network_find_forward(network, find);
+}
+
+/* FORWARD LOGIC (extracted): hop-selection + the forwarding / TTL-EABF /
+   not-found handling for a find whose local serve did not answer here.
+   `find_in` is copied; the result-handler callers pass remembered wire
+   find copies. */
+static void network_find_forward(network_t* network,
+                                 const wire_find_block_t* find_in) {
+  wire_find_block_t find_copy = *find_in;
+  wire_find_block_t* find = &find_copy;
   // Build find_block_state from the wire message
   find_block_state_t state;
   memset(&state, 0, sizeof(state));
@@ -3547,6 +4237,7 @@ static void network_handle_find_block(network_t* network, message_t* msg) {
     }
   }
 }
+
 
 static void network_handle_find_block_response(network_t* network, message_t* msg) {
   wire_find_block_response_t* response = (wire_find_block_response_t*)msg->payload;
@@ -4463,63 +5154,44 @@ static void network_handle_seeking_blocks(network_t* network, message_t* msg) {
     return;
   }
 
-  // Build response with offers from our local block index
-  wire_seeking_blocks_response_t* response = get_clear_memory(sizeof(wire_seeking_blocks_response_t));
-  if (response == NULL) return;
-  response->message_id = seeking->message_id;
-  memcpy(&response->sender_id, &network->authority->local_id, sizeof(node_id_t));
-  response->offer_count = 0;
-
-  log_info("seek:rx excl_count=%zu", seeking->exclude_count);
-  // Walk the block index and select up to WIRE_MAX_OFFERS blocks,
-  // sorted by FIB counter descending, excluding any hashes in seeking->exclude_hashes
-  index_entry_vec_t* entries = index_to_array(network->block_cache->index);
-  if (entries != NULL) {
-    // Sort entries by FIB counter descending (highest FIB = most important)
-    size_t entry_count = 0;
-    for (size_t index = 0; index < entries->length && entry_count < (size_t)WIRE_MAX_OFFERS; index++) {
-      index_entry_t* entry = entries->data[index];
-      if (entry == NULL || entry->hash == NULL) continue;
-
-      // Check if this hash is in the exclude list
-      uint8_t excluded = 0;
-      for (size_t ex = 0; ex < seeking->exclude_count; ex++) {
-        if (seeking->exclude_hashes[ex] != NULL &&
-            memcmp(entry->hash->data, seeking->exclude_hashes[ex], 32) == 0) {
-          excluded = 1;
-          break;
-        }
-      }
-      if (excluded) continue;
-
-      // Add this block to the offers
-      memcpy(response->offers[entry_count].hash, entry->hash->data, 32);
-      response->offers[entry_count].fib = entry->counter.fib;
-      response->offers[entry_count].size = 0;  // Size not tracked in index_entry
-      entry_count++;
-    }
-    response->offer_count = (uint8_t)entry_count;
-    /* index_to_array pushes every entry with a fresh reference; release
-     * them or each SEEKING-BLOCKS scan leaks the entries and their hash
-     * buffers (index/LRU teardown only drops the index/LRU refs). */
-    for (size_t index = 0; index < entries->length; index++) {
-      if (entries->data[index] != NULL) {
-        index_entry_destroy(entries->data[index]);
-      }
-    }
-    vec_deinit(entries);
-    free(entries);
+  /* ASYNC SERVE: the cache actor owns the index (the index may be
+     enumerated only there). Ask it for the offer list - servable entries,
+     exclude-filtered, FIB-descending - and build + send the wire response
+     from the CACHE_LIST_SERVABLE_RESULT handler (correlated by the
+     remembered message_id + sender). */
+  if (network->block_cache == NULL) {
+    return;
   }
-
-  // Encode and send SeekingBlocksResponse via QUIC to the sender's peer connection.
-  peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &seeking->sender_id);
-  if (peer != NULL) {
-    cbor_item_t* cbor = wire_seeking_blocks_response_encode(response);
-    conn_state_send(network, peer, cbor);
-    cbor_decref(&cbor);
+  uint8_t* exclude_flat = NULL;
+  size_t exclude_flat_count = 0;
+  if (seeking->exclude_count > 0) {
+    /* Flatten the wire's pointer array into the cache request's blob. An
+       entry with a NULL pointer stays as a zero slot (a zero hash never
+       matches a real block hash), keeping the count consistent. */
+    exclude_flat = get_clear_memory(32 * seeking->exclude_count);
+    for (size_t ex = 0; ex < seeking->exclude_count; ex++) {
+      if (seeking->exclude_hashes[ex] != NULL) {
+        memcpy(exclude_flat + exclude_flat_count * 32,
+               seeking->exclude_hashes[ex], 32);
+      }
+      exclude_flat_count++;
+    }
   }
-  free(response);
+  size_t pending_index = network_cache_pending_append(
+      network, NULL, NETWORK_CACHE_PENDING_SEEK_RESPONSE);
+  if (pending_index != (size_t)-1) {
+    network->cache_pending[pending_index].message_id = seeking->message_id;
+    memcpy(&network->cache_pending[pending_index].sender_id,
+           &seeking->sender_id, sizeof(node_id_t));
+    block_cache_list_servable(network->block_cache, WIRE_MAX_OFFERS,
+                              exclude_flat, exclude_flat_count,
+                              seeking->message_id, &network->actor);
+  }
+  if (exclude_flat != NULL) {
+    free(exclude_flat);
+  }
 }
+
 
 static void network_handle_seeking_blocks_response(network_t* network, message_t* msg) {
   wire_seeking_blocks_response_t* response = (wire_seeking_blocks_response_t*)msg->payload;
@@ -4531,59 +5203,27 @@ static void network_handle_seeking_blocks_response(network_t* network, message_t
                        0, &network->hebbian);
   }
 
-  float local_capacity = atomic_load(&network->authority->capacity);
-
   log_info("seek:rx resp offers=%u", (unsigned)response->offer_count);
-  // Evaluate each offer: if we should pull (capacity < 50% and block not stored)
-  if (!respiration_should_inhale(local_capacity)) {
-    return;  // We're not in inhale phase anymore
+  // Evaluate the offers only while inhaling (capacity < 50%)
+  if (!respiration_should_inhale(atomic_load(&network->authority->capacity))) {
+    return;
   }
 
+  /* ASYNC SERVE: the cache actor owns the index; each offer's have-check
+     is a metadata-only fetch resolved in the CACHE_GET_RESULT handler
+     (already-had rolls into the exclusion ring; absent-and-inhaling
+     routes the LOCAL find for the hash). */
+  if (network->block_cache == NULL || network->block_cache->index == NULL) {
+    return;
+  }
   for (uint8_t index = 0; index < response->offer_count; index++) {
     wire_block_offer_t* offer = &response->offers[index];
-
-    // Check if block is already stored locally
     buffer_t* hash_buf = buffer_create_from_pointer_copy(offer->hash, 32);
     if (hash_buf == NULL) continue;
-
-    index_entry_t* entry = index_peek(network->block_cache->index, hash_buf);
-    {
-      static const char hexd[] = "0123456789abcdef";
-      char offer_hex[17]; offer_hex[16] = '\0';
-      for (size_t hx = 0; hx < 8; hx++) {
-        offer_hex[hx*2] = hexd[(offer->hash[hx] >> 4) & 0xF];
-        offer_hex[hx*2+1] = hexd[offer->hash[hx] & 0xF];
-      }
-      log_info("seek: eval offer=%u hash=%s have=%d cap=%.3f", (unsigned)index, offer_hex, entry != NULL, (double)local_capacity);
-    }
-    if (entry != NULL) {
-      // Block already stored — skip this offer
-      /* Have-already — roll into the exclusion ring so the holder
-         stops re-offering the same top FIB entries. */
-      memcpy(network->seek_exclude_hashes +
-             network->seek_exclude_cursor * 32, offer->hash, 32);
-      network->seek_exclude_cursor = (network->seek_exclude_cursor + 1) % 128;
-      if (network->seek_exclude_count < 128) network->seek_exclude_count++;
-      buffer_destroy(hash_buf);
-      continue;
-    }
-
-    // Block not stored and we should inhale — send FindBlock for this hash
-    if (respiration_should_inhale(local_capacity)) {
-      // Add to wanted list and route a FindBlock
-      network_local_find_block_payload_t find_payload;
-      memset(&find_payload, 0, sizeof(find_payload));
-      find_payload.hash = hash_buf;
-      find_payload.reply_to = &network->actor;
-      message_t find_msg = {0};
-      find_msg.type = NETWORK_LOCAL_FIND_BLOCK;
-      find_msg.payload = &find_payload;
-      find_msg.payload_destroy = NULL;  // stack-allocated payload
-      network_handle_local_find_block(network, &find_msg);
-      buffer_destroy(hash_buf);
-    } else {
-      buffer_destroy(hash_buf);
-    }
+    size_t pending_index = network_cache_pending_append(
+        network, hash_buf, NETWORK_CACHE_PENDING_SEEK_OFFER);
+    if (pending_index == (size_t)-1) continue;
+    network_cache_pending_send_get(network, pending_index, 1, 0);
   }
 }
 
@@ -4800,7 +5440,13 @@ static void network_handle_recall_accept(network_t* network, message_t* msg) {
     }
   }
 
-  // Look up the block by hash in the local block_cache index
+  /* Serve the block back to the recall requester (the acceptor now holds
+     the block and answers the original requester with a direct
+     StoreBlock). With the accept's bytes attached, forward those;
+     otherwise fetch the bytes through the cache actor's API (async
+     CACHE_GET; the serve goes out from the CACHE_GET_RESULT handler - so
+     a RECALL reply always carries real bytes now, never an announce-only
+     store). */
   buffer_t* hash_buf = buffer_create_from_pointer_copy(accept->block_hash, 32);
   if (hash_buf == NULL) {
     if (block != NULL) {
@@ -4808,35 +5454,38 @@ static void network_handle_recall_accept(network_t* network, message_t* msg) {
     }
     return;
   }
-
-  index_entry_t* entry = index_peek(network->block_cache->index, hash_buf);
-  if (entry != NULL) {
-    // Block found locally — send StoreBlock with the block data to the requesting peer
+  if (accept->block_data != NULL && accept->block_data_len > 0) {
     peer_connection_t* peer = connection_manager_lookup(&network->conn_mgr, &accept->sender_id);
-
     if (peer != NULL) {
       wire_store_block_t store_msg;
       memset(&store_msg, 0, sizeof(store_msg));
       store_msg.message_id = accept->message_id;
       memcpy(store_msg.block_hash, accept->block_hash, 32);
-      store_msg.block_fib = entry->counter.fib;
-      store_msg.replicas_needed = 0;  // RECALL — no further replication needed
-      store_msg.max_hops = 1;  // Direct delivery, no forwarding
+      store_msg.block_fib = accept->block_fib;
+      store_msg.replicas_needed = 0;  /* RECALL - no further replication */
+      store_msg.max_hops = 1;         /* direct delivery, no forwarding */
       store_msg.carry_data = 1;
-      // If the accept message carries block data, forward it
-      if (accept->block_data != NULL && accept->block_data_len > 0) {
-        store_msg.block_data = accept->block_data;
-        store_msg.block_data_len = accept->block_data_len;
-        store_msg.block_size = (uint32_t)accept->block_data_len;
-      }
+      store_msg.block_data = accept->block_data;
+      store_msg.block_data_len = accept->block_data_len;
+      store_msg.block_size = (uint32_t)accept->block_data_len;
       store_msg.start_time = (uint64_t)time(NULL) * 1000;
 
       cbor_item_t* cbor = wire_store_block_encode(&store_msg);
       conn_state_send(network, peer, cbor);
       cbor_decref(&cbor);
     }
+  } else {
+    size_t pending_index = network_cache_pending_append(
+        network, hash_buf, NETWORK_CACHE_PENDING_RECALL_SERVE);
+    if (pending_index != (size_t)-1) {
+      network->cache_pending[pending_index].message_id = accept->message_id;
+      memcpy(&network->cache_pending[pending_index].sender_id,
+             &accept->sender_id, sizeof(node_id_t));
+      network_cache_pending_send_get(network, pending_index, 0, 0);
+    }
   }
   buffer_destroy(hash_buf);
+
 
   // Check wanted_list — notify any local requesters waiting for this block.
   // The block is attached directly to the result so the consumer can use it
@@ -4979,290 +5628,44 @@ static void network_handle_local_find_block(network_t* network, message_t* msg) 
 
   if (payload->verify_only) {
     /* Verify-only (exhale shed): SKIP the local cache check - the block
-       being shed is local BY DEFINITION, so a local index_peek always
-       answers found and every shed candidate would be marked redundant
-       without any actual network redundancy check (last-copy delete at
-       scale). Seek the rest of the network instead. */
-    goto wire_search;
-  }
-
-  // Step 1: Check local block_cache first
-  index_entry_t* entry = index_peek(network->block_cache->index, payload->hash);
-  if (entry != NULL) {
-    // Block found locally — send result immediately
-    network_find_block_result_payload_t* result =
-        get_clear_memory(sizeof(network_find_block_result_payload_t));
-    result->hash = REFERENCE(payload->hash, buffer_t);
-    result->found = 1;
-    message_t result_msg = {0};
-    result_msg.type = NETWORK_FIND_BLOCK_RESULT;
-    result_msg.payload = result;
-    result_msg.payload_destroy = network_find_block_result_destroy;
-    actor_send(payload->reply_to, &result_msg);
+       being shed is local BY DEFINITION (a local check would always
+       answer found and every shed candidate would be marked redundant
+       without any actual network redundancy check - last-copy delete at
+       scale). Run the wanted-list / wire-search flow directly. */
+    stream_t* owner_moved = payload->owner;
+    payload->owner = NULL;
+    network_local_find_resume(network, payload->hash, payload->reply_to,
+                              owner_moved, payload->verify_only);
     return;
   }
 
-  // Step 2: Check wanted list for dedup — if entry exists, just add this requester
-  wanted_entry_t* existing = wanted_list_find(network->wanted_list, payload->hash);
-  if (existing != NULL) {
-    wanted_requester_t* requester = get_clear_memory(sizeof(wanted_requester_t));
-    requester->actor = payload->reply_to;
-    /* Move the payload's in-flight requester stream reference into this node
-       (release path: wanted_requester_list_destroy / prune). */
-    requester->owner = payload->owner;
+  /* Step 1 (async): the presence check runs through the cache actor's API
+     (a metadata-only fetch; no block bytes). On a hit the found result is
+     notified from the CACHE_GET_RESULT handler; on a miss the find enters
+     the wanted-list / wire-search flow there (the requester's owner
+     reference moves through the pending so the stream cannot die
+     mid-search). */
+  size_t pending_index = network_cache_pending_append(
+      network, payload->hash, NETWORK_CACHE_PENDING_LOCAL_FIND);
+  if (pending_index == (size_t)-1) {
+    /* Adoption failed - fall through to the search without the local
+       check (best effort). */
+    stream_t* owner_moved = payload->owner;
     payload->owner = NULL;
-    requester->owner_destructor =
-        (requester->owner != NULL) ? requester->owner->destructor : NULL;
-    requester->next = existing->requesters;
-    existing->requesters = requester;
+    network_local_find_resume(network, payload->hash, payload->reply_to,
+                              owner_moved, payload->verify_only);
     return;
   }
-
-wire_search:
-  // Step 3: New request — add to wanted list with a per-request timeout.
-  // The 1s NETWORK_REQUEST_TIMEOUT_TICK sweep will deliver a found=0 result
-  // to reply_to if no response arrives within request_timeout_ms. See #5/#9.
-  uint64_t find_block_deadline_ms =
-      (uint64_t)time(NULL) * 1000 + network->request_timeout_ms;
-  {
-    /* Move the payload's in-flight requester stream reference into the list. */
-    stream_t* owner = payload->owner;
-    payload->owner = NULL;
-    wanted_list_add(network->wanted_list, payload->hash, payload->reply_to,
-                    owner, find_block_deadline_ms, payload->verify_only);
-  }
-
-  // Step 4: Execute FindBlock routing
-  find_block_state_t state;
-  memset(&state, 0, sizeof(state));
-  uint64_t now_ts = (uint64_t)time(NULL) * 1000;
-  state.message_id = network_next_message_id(network);
-  // Bind the wanted_list entry to this request's message_id so a stale or
-  // forged not-found (different message_id) can't prematurely fail the
-  // search. See audit #10 (follow-up: per-request nonce binding).
-  wanted_entry_t* wanted_entry = wanted_list_get(network->wanted_list, payload->hash);
-  if (wanted_entry != NULL) {
-    wanted_entry->message_id = state.message_id;
-  }
-  memcpy(state.block_hash, payload->hash->data, 32);
-  state.ttl = FORWARD_TTL;
-  state.start_time_ms = now_ts;
-  state.verify_only = payload->verify_only;
-  memcpy(&state.original_source, &network->authority->local_id, sizeof(node_id_t));
-  /* Mark ORIGIN visited: a supplier must never route a find back to the
-     requester that asked for it - for a verify-only (exhale shed) find
-     a loop-back answer would be the origin verifying its OWN copy as
-     redundancy and deleting its last copy of the block. */
-  find_block_add_visited(state.visited_bloom, &state.visited_count,
-                         network->authority->local_id.hash);
-
-  node_id_t next_hops[FIND_BLOCK_FORWARD_FANOUT];
-  size_t next_hop_count = 0;
-
-  // Diagnostic (OFFS-254 hunt): dump the routing-relevant state for this
-  // lookup — per-peer connected/conn_state conn-mgr wire, peer-EABF match,
-  // and ring-table node weight/verification. Remove after the cross-peer
-  // retrieval root-cause lands.
-  {
-    char hash_hex[17];
-    static const char hex_digits[] = "0123456789abcdef";
-    for (size_t hex_index = 0; hex_index < 8; hex_index++) {
-      hash_hex[hex_index * 2] = hex_digits[(state.block_hash[hex_index] >> 4) & 0xF];
-      hash_hex[hex_index * 2 + 1] = hex_digits[state.block_hash[hex_index] & 0xF];
-    }
-    hash_hex[16] = '\0';
-    log_info("find: hash=%s peers=%zu", hash_hex, network->conn_mgr.peer_count);
-    for (size_t peer_index = 0; peer_index < network->conn_mgr.peer_count;
-         peer_index++) {
-      peer_connection_t* peer = network->conn_mgr.peers[peer_index];
-      if (peer == NULL) continue;
-      uint32_t eabf_hops = 0;
-      bool eabf_match = peer_eabf_check(peer, state.block_hash, 32, &eabf_hops);
-      net_node_t* ring_node =
-          ring_set_find_by_id(network->rings, &peer->remote_node_id);
-      log_info("find: peer=%s connected=%d conn_state=%d eabf=%u ring=%s "
-               "weight=%.4f relay_verified=%d flags=%u",
-               peer->remote_node_id.str, peer->connected ? 1 : 0,
-               (int)peer->conn_state, eabf_match ? eabf_hops + 1u : 0u,
-               ring_node != NULL ? "yes" : "no",
-               ring_node != NULL ? ring_node->weight : 0.0f,
-               ring_node != NULL && ring_node->relay_verified,
-               ring_node != NULL ? ring_node->flags : 0u);
-    }
-  }
-
-  find_block_result_e result = find_block_execute(
-      &network->eabf_table,
-      &network->eabf_ttl,
-      &network->conn_mgr,
-      network->rings,
-      &network->authority->local_id,
-      &state,
-      next_hops,
-      &next_hop_count,
-      network_secure_mode(network));
-
-  log_info("find: execute result=%d next_hops=%zu", (int)result, next_hop_count);
-
-  switch (result) {
-    case FIND_BLOCK_FOUND: {
-      // Block is local (shouldn't happen since we checked cache, but handle it)
-      wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, payload->hash);
-      if (requesters != NULL) {
-        wanted_requester_t* req = requesters;
-        while (req != NULL) {
-          network_find_block_result_payload_t* fb_result =
-              get_clear_memory(sizeof(network_find_block_result_payload_t));
-          fb_result->hash = REFERENCE(payload->hash, buffer_t);
-          fb_result->found = 1;
-          message_t fb_msg = {0};
-          fb_msg.type = NETWORK_FIND_BLOCK_RESULT;
-          fb_msg.payload = fb_result;
-          fb_msg.payload_destroy = network_find_block_result_destroy;
-          actor_send(req->actor, &fb_msg);
-          req = req->next;
-        }
-        wanted_requester_list_destroy(requesters);
-      }
-      break;
-    }
-
-    case FIND_BLOCK_NOT_FOUND:
-    case FIND_BLOCK_TTL_EXPIRED: {
-      // On TTL expiry, subscribe block_hash in our EABFs as negative info
-      if (result == FIND_BLOCK_TTL_EXPIRED) {
-        for (size_t index = 0; index < network->eabf_table.count; index++) {
-          eabf_t* eabf = network->eabf_table.entries[index].eabf;
-          if (eabf != NULL) {
-            eabf_subscribe(eabf, state.block_hash, 32);
-          }
-        }
-      }
-
-      // Block not found — notify all requesters
-      wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, payload->hash);
-      if (requesters != NULL) {
-        wanted_requester_t* req = requesters;
-        while (req != NULL) {
-          network_find_block_result_payload_t* fb_result =
-              get_clear_memory(sizeof(network_find_block_result_payload_t));
-          fb_result->hash = REFERENCE(payload->hash, buffer_t);
-          fb_result->found = 0;
-          message_t fb_msg = {0};
-          fb_msg.type = NETWORK_FIND_BLOCK_RESULT;
-          fb_msg.payload = fb_result;
-          fb_msg.payload_destroy = network_find_block_result_destroy;
-          actor_send(req->actor, &fb_msg);
-          req = req->next;
-        }
-        wanted_requester_list_destroy(requesters);
-      }
-      break;
-    }
-
-    case FIND_BLOCK_FORWARDING: {
-      // Add self to path
-      if (state.path_len < FIND_BLOCK_MAX_PATH) {
-        memcpy(&state.path[state.path_len], &network->authority->local_id, sizeof(node_id_t));
-        state.path_len++;
-      }
-      // Add self to visited bloom
-      find_block_add_visited(state.visited_bloom, &state.visited_count, network->authority->local_id.hash);
-      // Decrement TTL
-      state.ttl--;
-
-      // Forward to each selected next-hop, counting reachable hops.
-      // conn_state_send returns -1 when a peer's stream is gone (audit #9);
-      // an unreachable hop won't send a not-found, so counting it in
-      // fanout_count would deadlock the request (not_found_count could never
-      // reach fanout_count). Instead, only count successful sends.
-      size_t reachable_hops = 0;
-      for (size_t hop = 0; hop < next_hop_count; hop++) {
-        wire_find_block_t* forward = get_clear_memory(sizeof(wire_find_block_t));
-        if (forward == NULL) continue;
-        forward->message_id = state.message_id;
-        memcpy(forward->block_hash, state.block_hash, 32);
-        forward->ttl = state.ttl;
-        memcpy(forward->visited_bloom, state.visited_bloom, WIRE_MAX_VISITED_BLOOM);
-        forward->visited_count = state.visited_count;
-        memcpy(forward->path, state.path, state.path_len * sizeof(node_id_t));
-        forward->path_len = state.path_len;
-        forward->start_time = state.start_time_ms;
-        memcpy(&forward->original_source, &state.original_source, sizeof(node_id_t));
-        forward->verify_only = state.verify_only;
-
-        // Encode and send FindBlock to next_hops[hop] via QUIC
-        cbor_item_t* cbor = wire_find_block_encode(forward);
-        peer_connection_t* next_peer = connection_manager_lookup(
-            &network->conn_mgr, &next_hops[hop]);
-        int send_result = next_peer != NULL
-                              ? conn_state_send(network, next_peer, cbor)
-                              : -1;
-        if (send_result == 0) {
-          reachable_hops++;
-          if (network->log != NULL) {
-            message_log_record(network->log, WIRE_FIND_BLOCK, MSG_DIRECTION_FORWARDED,
-                               &next_hops[hop], state.message_id, state.block_hash,
-                               1, &network->hebbian);
-          }
-        }
-        {
-          /* Diagnostic (OFFS-254 hunt): the node id's str is often unset for
-             gossip-built ring nodes � print the hash hex so the actual hop
-             is identifiable. Remove with the other hunt diagnostics. */
-          char hop_hex[17];
-          static const char hex_digits[] = "0123456789abcdef";
-          for (size_t hex_index = 0; hex_index < 8; hex_index++) {
-            hop_hex[hex_index * 2] =
-                hex_digits[(next_hops[hop].hash[hex_index] >> 4) & 0xF];
-            hop_hex[hex_index * 2 + 1] =
-                hex_digits[next_hops[hop].hash[hex_index] & 0xF];
-          }
-          hop_hex[16] = '\0';
-          log_info("find: hop=%s/%s lookup=%d send=%d", next_hops[hop].str,
-                   hop_hex, next_peer != NULL, send_result);
-        }
-        cbor_decref(&cbor);
-        free(forward);
-      }
-
-      if (reachable_hops == 0) {
-        // No reachable next hop — fail the request immediately rather
-        // than waiting for the 30s timeout sweep. See audit #9.
-        wanted_requester_t* requesters = wanted_list_remove(network->wanted_list, payload->hash);
-        if (requesters != NULL) {
-          wanted_requester_t* req = requesters;
-          while (req != NULL) {
-            wanted_requester_t* next = req->next;
-            network_find_block_result_payload_t* fb_result =
-                get_clear_memory(sizeof(network_find_block_result_payload_t));
-            fb_result->hash = REFERENCE(payload->hash, buffer_t);
-            fb_result->found = 0;
-            message_t fb_msg = {0};
-            fb_msg.type = NETWORK_FIND_BLOCK_RESULT;
-            fb_msg.payload = fb_result;
-            fb_msg.payload_destroy = network_find_block_result_destroy;
-            actor_send(req->actor, &fb_msg);
-            free(req);
-            req = next;
-          }
-        }
-        break;
-      }
-
-      // Set fanout_count to the reachable hop count so the
-      // not_found_count >= fanout_count check (in the found==0 handler
-      // below) is achievable. Unreachable hops won't send not-founds, so
-      // counting them in fanout_count would deadlock the request. See #10.
-      wanted_entry_t* entry = wanted_list_get(network->wanted_list, payload->hash);
-      if (entry != NULL) {
-        entry->fanout_count = (uint8_t)reachable_hops;
-        entry->not_found_count = 0;
-      }
-      break;
-    }
-  }
+  /* The pending adopted the payload's hash reference; the payload shell
+     must not release it again. */
+  payload->hash = NULL;
+  network->cache_pending[pending_index].reply_to = payload->reply_to;
+  network->cache_pending[pending_index].owner = payload->owner;
+  payload->owner = NULL;  /* moved into the pending */
+  network->cache_pending[pending_index].find.verify_only = payload->verify_only;
+  network_cache_pending_send_get(network, pending_index, 1, 0);
 }
+
 
 // --- Peer-book reconnect tick handler (network side) ---
 /* The peer-book actor owns the peer lists and arms the reconnect tick
@@ -5639,6 +6042,12 @@ void network_dispatch(void* state, message_t* msg) {
       break;
     case NETWORK_PING_BLOCK_RESPONSE:
       network_handle_ping_block_response(network, msg);
+      break;
+    case CACHE_GET_RESULT:
+      network_handle_cache_get_result(network, msg);
+      break;
+    case CACHE_LIST_SERVABLE_RESULT:
+      network_handle_cache_list_result(network, msg);
       break;
     case NETWORK_FIND_BLOCK:
       network_handle_find_block(network, msg);
@@ -6312,6 +6721,7 @@ void network_dispatch(void* state, message_t* msg) {
           (network_local_find_cancel_payload_t*)msg->payload;
       if (cancel != NULL && cancel->requester != NULL) {
         wanted_list_prune_requester(network->wanted_list, cancel->requester);
+        network_cache_pending_prune_requester(network, cancel->requester);
       }
       free(cancel);
       break;
@@ -6322,180 +6732,30 @@ void network_dispatch(void* state, message_t* msg) {
       break;
     }
     case NETWORK_LOCAL_STORE_BLOCK: {
-      // Stream announces new block to network
+      // Stream announces new block to peers
       network_local_store_block_payload_t* payload =
           (network_local_store_block_payload_t*)msg->payload;
-      if (payload != NULL && payload->hash != NULL) {
-        // Build store_block_state for local block announcement
-        store_block_state_t state;
-        memset(&state, 0, sizeof(state));
-        uint64_t now_ts = (uint64_t)time(NULL) * 1000;
-        state.message_id = network_next_message_id(network);
-        memcpy(state.block_hash, payload->hash->data, 32);
-        state.block_fib = payload->fib;
-        state.replicas_needed = STORE_BLOCK_FORWARD_FANOUT;
-        state.max_hops = STORE_BLOCK_MAX_HOPS;
-        state.visited_count = 0;
-        memcpy(&state.path[0], &network->authority->local_id, sizeof(node_id_t));
-        state.path_len = 1;
-        state.start_time_ms = now_ts;
-        state.carry_data = 0;
-
-        float local_capacity = atomic_load(&network->authority->capacity);
-        node_phase_e local_phase = atomic_load(&network->authority->phase);
-        /* Carry the bytes when asked (exhale shed-then-delete): read the
-            block back from the local cache and attach it to every hop's
-            StoreBlock, so a peer that accepts stores REAL data. */
-        /* Carry the bytes when asked (exhale shed-then-delete): read the
-           block back from the local cache and attach it to every hop's
-           StoreBlock, so a peer that accepts stores REAL data. An
-           announce-only store means the peer accepts without storing
-           and the origin deletes data that was never sent. */
-        /* Carry the bytes when asked (exhale shed-then-delete): read the
-           block back from the local cache and attach it to every hop's
-           StoreBlock, so a peer that accepts stores REAL data. An
-           announce-only store means the peer accepts without storing
-           and the origin deletes data that was never sent. Ownership:
-           mirror the find-serve path - the block build references the
-           read-back buffers, the creator refs drop IMMEDIATELY after
-           the build, the block ref drops after the sends. */
-        block_t* store_carry_block = NULL;
-        /* Stores ALWAYS carry the block bytes (user design: every PUT
-           pushes real content, not an announcement) - an announce-only
-           store lets the peer accept without storing and the origin
-           delete data that was never sent. */
-        if (1) {
-          /* ALWAYS read through the SECTIONS path (thread-safe; the reader
-             is sync-dispatched): never touch the LRU from this (network)
-             actor - block_lru_cache_get mutates the LRU list and the
-             hashmap the cache actor is concurrently putting/evicting on
-             while a stream PUT is in flight; that cross-actor list
-             mutation was the c0000374 heap corruption under streaming
-             puts (the pre-page-heap 13 service deaths). The shed's
-             original carry path never used the LRU; the shortcut was the
-             regression. The hash-verified disk read costs the same
-             class as the find-serve path's cold-read branch. */
-          buffer_t* load_hash = buffer_create_from_pointer_copy(payload->hash->data, payload->hash->size);
-          if (load_hash != NULL) {
-            index_entry_t* load_entry = index_peek(network->block_cache->index, load_hash);
-            if (load_entry != NULL) {
-              sections_read_payload_t load_read;
-              memset(&load_read, 0, sizeof(load_read));
-              load_read.section_id = load_entry->section_id;
-              load_read.section_index = load_entry->section_index;
-              load_read.reply_to = NULL;
-              load_read.result = NULL;
-              message_t load_msg;
-              load_msg.type = SECTIONS_READ;
-              load_msg.payload = &load_read;
-              load_msg.payload_destroy = NULL;
-              sections_dispatch(network->block_cache->sections, &load_msg);
-              buffer_t* load_data = load_read.result;
-              if (load_data != NULL) {
-                if (block_cache_verify_read_hash(load_data, load_hash)) {
-                  store_carry_block =
-                      block_create_existing_data_hash(load_data, load_hash);
-                }
-                /* creator refs drop now either way; the block keeps its
-                   own references */
-                buffer_destroy(load_data);
-              }
-            }
-            if (store_carry_block == NULL) {
-              /* No bytes readable - the shed's store-then-delete must not
-                 run against a block we cannot supply; keep the block
-                 local (the store result will simply never accept it). */
-            }
-            buffer_destroy(load_hash);
-          }
-        }
-        net_node_t* next_hops[STORE_BLOCK_FORWARD_FANOUT];
-        size_t next_hop_count = 0;
-
-        store_block_result_e result = store_block_execute(
-            &network->eabf_table,
-            &network->conn_mgr,
-            network->rings,
-            &network->authority->local_id,
-            local_capacity,
-            local_phase,
-            &state,
-            next_hops,
-            &next_hop_count);
-
-        if (result == STORE_BLOCK_ACCEPTED || result == STORE_BLOCK_FORWARDING) {
-          for (size_t hop_idx = 0; hop_idx < next_hop_count; hop_idx++) {
-            peer_connection_t* peer = connection_manager_lookup(
-                &network->conn_mgr, &next_hops[hop_idx]->id);
-            if (peer != NULL) {
-              wire_store_block_t forward;
-              memset(&forward, 0, sizeof(forward));
-              forward.message_id = state.message_id;
-              memcpy(forward.block_hash, state.block_hash, 32);
-              forward.block_fib = state.block_fib;
-              forward.replicas_needed = state.replicas_needed;
-              forward.max_hops = state.max_hops;
-              memcpy(forward.visited_bloom, state.visited_bloom, STORE_BLOCK_MAX_VISITED_BLOOM);
-              forward.visited_count = state.visited_count;
-              memcpy(forward.path, state.path, state.path_len * sizeof(node_id_t));
-              forward.path_len = state.path_len;
-              forward.start_time = state.start_time_ms;
-              forward.carry_data = 1;
-              if (forward.carry_data && store_carry_block != NULL) {
-                forward.block_data = store_carry_block->data->data;
-                forward.block_data_len = store_carry_block->data->size;
-              }
-
-              cbor_item_t* cbor = wire_store_block_encode(&forward);
-              conn_state_send(network, peer, cbor);
-              cbor_decref(&cbor);
-            }
-          }
-        }
-        if (store_carry_block != NULL) {
-          /* EABF interest: peers whose wells contain this hash sought
-           it (their finds missed here) — deliver the bytes now
-           that we hold them. */
-          network_deliver_to_interested_peers(network, payload->hash,
-                                                store_carry_block, NULL);
-          DESTROY(store_carry_block, block);
-        }
-
-        // Aggregate the result if a reply_to was provided. The origin sends
-        // a single NETWORK_STORE_BLOCK_RESULT once all remote replicas respond
-        // (or the deadline passes — swept by NETWORK_REQUEST_TIMEOUT_TICK).
-        // The local decision counts as one acceptance if result == ACCEPTED.
-        // See audit #21.
-        if (payload->reply_to != NULL) {
-          uint64_t deadline_ms =
-              now_ts + (uint64_t)network->request_timeout_ms;
-          store_pending_t* pending = network_store_pending_append(
-              network, state.message_id, payload->reply_to, payload->hash,
-              state.block_fib, state.replicas_needed, deadline_ms);
-          if (pending != NULL) {
-            // The local decision counts as one replica if we stored locally.
-            if (result == STORE_BLOCK_ACCEPTED) {
-              pending->accepted_count = 1;
-            }
-            // If we didn't forward (no next hops), the result is final — the
-            // origin can be notified immediately. Otherwise, replicas_remaining
-            // tracks the outstanding remote responses.
-            if (next_hop_count == 0) {
-              pending->replicas_remaining = 0;
-              // Finalize immediately (no remote responses to wait for).
-              // Find the entry again — append may have moved the array.
-              store_pending_t* fresh = network_store_pending_find(
-                  network, state.message_id);
-              if (fresh != NULL) {
-                size_t fresh_index = (size_t)(fresh - network->store_pending);
-                network_store_pending_finalize(network, fresh, fresh_index);
-              }
-            }
-          }
-        }
+      if (payload == NULL || payload->hash == NULL) {
+        break;
       }
+      /* ASYNC CARRY: stores ALWAYS carry the block bytes (user design:
+         every PUT pushes real content, not an announcement). The bytes
+         are read back by the cache actor itself (async CACHE_GET with
+         reply_to = this actor); the store forward, the want-delivery and
+         the origin's pending-attach continue in
+         network_handle_store_carry_result. */
+      size_t pending_index = network_cache_pending_append(
+          network, REFERENCE(payload->hash, buffer_t),
+          NETWORK_CACHE_PENDING_STORE_CARRY);
+      if (pending_index == (size_t)-1) {
+        break;
+      }
+      network->cache_pending[pending_index].reply_to = payload->reply_to;
+      network->cache_pending[pending_index].fib = payload->fib;
+      network_cache_pending_send_get(network, pending_index, 0, 0);
       break;
     }
+
     case NETWORK_STORE_BLOCK_RESULT: {
       // Network returns StoreBlock result to stream
       // Handled by stream actor — dispatch routes to reply_to

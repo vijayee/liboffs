@@ -64,11 +64,19 @@ typedef struct {
 
 /* Payload for CACHE_GET message.
    When reply_to is NULL (sync), result is filled by dispatch.
-   When reply_to is set (async), a completion message is sent back. */
+   When reply_to is set (async), a completion message is sent back.
+   no_data: 1 = metadata-only fetch — increment the rank (index_peek runs
+   the hit counter) and report the entry's presence, but never read the
+   block bytes (verify-only finds must not ship 2+ GB back).
+   peer_serve: 1 = the fetch answers a WIRE find — an entry the cache finds
+   non-servable is reported as absent (ephemeral blocks must not leak their
+   existence to peers). */
 typedef struct {
   buffer_t* hash;
   actor_t* reply_to;
   block_t* result;
+  uint8_t no_data;
+  uint8_t peer_serve;
 } cache_get_payload_t;
 
 /* Payload for CACHE_REMOVE message.
@@ -191,6 +199,35 @@ typedef struct {
 
 void cache_ephemeral_list_payload_destroy(cache_ephemeral_list_payload_t* payload);
 
+/* Payload for CACHE_LIST_SERVABLE — the seek-responder's offer list.
+   Request: reply_to gets the result; message_id correlates the reply (the
+   seek's wire message id); max_offers caps the list; exclude carries the
+   seeker's exclude_hashes flat blob (exclude_count * 32 raw bytes, owned
+   by the payload, NULL when none). The cache actor enumerates its own
+   index, keeps servable entries not in the exclude list, sorts them by
+   FIB descending, and answers the top max_offers. */
+typedef struct {
+  uint64_t message_id;
+  actor_t* reply_to;
+  size_t max_offers;
+  uint8_t* exclude;
+  size_t exclude_count;
+} cache_list_servable_payload_t;
+
+/* Result: flat offer arrays (offer_count <= max_offers); hashes are the raw
+   32-byte block hashes, fibs the matching ranks; message_id mirrors the
+   request's correlation id. */
+typedef struct {
+  uint64_t message_id;
+  actor_t* reply_to;
+  size_t offer_count;
+  uint8_t* hashes;   /* offer_count * 32 */
+  uint32_t* fibs;    /* offer_count */
+} cache_list_servable_result_payload_t;
+
+void cache_list_servable_result_payload_destroy(cache_list_servable_result_payload_t* payload);
+
+
 /* Pending get request — tracks CACHE_GET requests awaiting SECTIONS_READ_RESULT */
 typedef struct pending_get_t {
   buffer_t* hash;
@@ -227,11 +264,17 @@ typedef struct block_cache_t {
   ephemeral_registry_t* registry;
 } block_cache_t;
 
-/* Result payload for CACHE_GET_RESULT */
+/* Result payload for CACHE_GET_RESULT.
+   fib: the entry's rank after the fetch's hit-counter increment (0 when the
+   hash was absent). entry_existed: 1 = the hash was in the index at fetch
+   time (a NULL block then means the disk read failed), 0 = the hash was
+   never indexed — consumers use it to tell a miss from a failed read. */
 typedef struct {
   buffer_t* hash;
   block_t* block;
   actor_t* reply_to;
+  uint32_t fib;
+  uint8_t entry_existed;
 } cache_get_result_payload_t;
 
 /* Result payload for CACHE_PUT_RESULT */
@@ -283,10 +326,16 @@ void block_cache_resize(block_cache_t* block_cache, size_t max_capacity_bytes, a
    caller must NULL its copy as soon as it calls this. */
 void block_cache_gc(block_cache_t* block_cache, elastic_bloom_filter_t* keep,
                     uint8_t force, actor_t* reply_to);
+void cache_get_payload_destroy(void* ptr);
 void block_cache_dispatch(void* state, message_t* msg);
 
 /* Async API — send message and inject actor into scheduler */
 void block_cache_get(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
+/* Metadata-only / peer-serving fetches (see cache_get_payload_t's no_data /
+   peer_serve): an async fetch with byte loading suppressed or with wire
+   servability rules. */
+void block_cache_get_ex(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to,
+                        uint8_t no_data, uint8_t peer_serve);
 void block_cache_put(block_cache_t* block_cache, block_t* block, uint32_t incoming_fib, actor_t* reply_to);
 void block_cache_remove(block_cache_t* block_cache, buffer_t* hash, actor_t* reply_to);
 void block_cache_remove_ex(block_cache_t* block_cache, buffer_t* hash, uint8_t force, actor_t* reply_to);
@@ -326,6 +375,12 @@ void block_cache_put_ephemeral(block_cache_t* block_cache, block_t* block, actor
  * pre-flight reject before enqueuing a PUT; the authoritative capacity
  * decision is still made inside block_cache_dispatch on the actor thread. */
 int block_cache_can_fit(block_cache_t* block_cache, size_t required_bytes);
+/* Seek-responder offer list (async): enumerates the cache's own index on the
+   cache actor and replies CACHE_LIST_SERVABLE_RESULT to reply_to, carrying
+   the request's message_id back for correlation. */
+void block_cache_list_servable(block_cache_t* block_cache, size_t max_offers,
+                               const uint8_t* exclude, size_t exclude_count,
+                               uint64_t message_id, actor_t* reply_to);
 void block_cache_defragment(block_cache_t* block_cache, float occupancy_threshold, actor_t* reply_to);
 
 // Recompute BLAKE3 over read data and compare against the stored hash. Used on
