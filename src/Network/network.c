@@ -6365,33 +6365,40 @@ void network_dispatch(void* state, message_t* msg) {
            store lets the peer accept without storing and the origin
            delete data that was never sent. */
         if (1) {
+          /* ALWAYS read through the SECTIONS path (thread-safe; the reader
+             is sync-dispatched): never touch the LRU from this (network)
+             actor - block_lru_cache_get mutates the LRU list and the
+             hashmap the cache actor is concurrently putting/evicting on
+             while a stream PUT is in flight; that cross-actor list
+             mutation was the c0000374 heap corruption under streaming
+             puts (the pre-page-heap 13 service deaths). The shed's
+             original carry path never used the LRU; the shortcut was the
+             regression. The hash-verified disk read costs the same
+             class as the find-serve path's cold-read branch. */
           buffer_t* load_hash = buffer_create_from_pointer_copy(payload->hash->data, payload->hash->size);
           if (load_hash != NULL) {
-            store_carry_block = block_lru_cache_get(network->block_cache->lru, load_hash);
-            if (store_carry_block == NULL) {
-              index_entry_t* load_entry = index_peek(network->block_cache->index, load_hash);
-              if (load_entry != NULL) {
-                sections_read_payload_t load_read;
-                memset(&load_read, 0, sizeof(load_read));
-                load_read.section_id = load_entry->section_id;
-                load_read.section_index = load_entry->section_index;
-                load_read.reply_to = NULL;
-                load_read.result = NULL;
-                message_t load_msg;
-                load_msg.type = SECTIONS_READ;
-                load_msg.payload = &load_read;
-                load_msg.payload_destroy = NULL;
-                sections_dispatch(network->block_cache->sections, &load_msg);
-                buffer_t* load_data = load_read.result;
-                if (load_data != NULL) {
-                  if (block_cache_verify_read_hash(load_data, load_hash)) {
-                    store_carry_block =
-                        block_create_existing_data_hash(load_data, load_hash);
-                  }
-                  /* creator refs drop now either way; the block keeps its
-                     own references */
-                  buffer_destroy(load_data);
+            index_entry_t* load_entry = index_peek(network->block_cache->index, load_hash);
+            if (load_entry != NULL) {
+              sections_read_payload_t load_read;
+              memset(&load_read, 0, sizeof(load_read));
+              load_read.section_id = load_entry->section_id;
+              load_read.section_index = load_entry->section_index;
+              load_read.reply_to = NULL;
+              load_read.result = NULL;
+              message_t load_msg;
+              load_msg.type = SECTIONS_READ;
+              load_msg.payload = &load_read;
+              load_msg.payload_destroy = NULL;
+              sections_dispatch(network->block_cache->sections, &load_msg);
+              buffer_t* load_data = load_read.result;
+              if (load_data != NULL) {
+                if (block_cache_verify_read_hash(load_data, load_hash)) {
+                  store_carry_block =
+                      block_create_existing_data_hash(load_data, load_hash);
                 }
+                /* creator refs drop now either way; the block keeps its
+                   own references */
+                buffer_destroy(load_data);
               }
             }
             if (store_carry_block == NULL) {
