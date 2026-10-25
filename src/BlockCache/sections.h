@@ -171,6 +171,13 @@ typedef struct {
   size_t wait;
   size_t max_wait;
   bool fsync_data;
+  /* Ceiling the block cache's capacity setting places on the robin: the
+     section layer grows (opens fresh sections) only up to
+     ceil(max_bytes / section_size) + 1 headroom. 0 = uncapped (legacy
+     floor-only behavior: the robin tops up to max_tuple_size and never
+     grows past what its history allocated). Owned by the sections actor —
+     set on the dispatch thread via sections_set_max_bytes. */
+  size_t max_bytes;
   timer_actor_t* timer_actor;
   struct scheduler_pool_t* pool;
   actor_t actor;
@@ -184,6 +191,14 @@ typedef struct {
 } sections_t;
 
 sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t max_tuple_size, block_size_e type, timer_actor_t* timer_actor, scheduler_pool_t* pool, size_t wait, size_t max_wait, bool fsync_data);
+
+/* The block cache's capacity setting caps how far the section layer may
+   grow: full sections rotate out and fresh ones open until the robin covers
+   ceil(max_bytes / section_size) + 1 headroom (0 = uncapped, legacy). The
+   set runs on the sections dispatch thread (call from block_cache's actor),
+   so it cannot race a concurrent sections_write. Growth itself is lazy —
+   fresh sections open when writes actually exhaust the robin. */
+void sections_set_max_bytes(sections_t* sections, size_t max_total_bytes);
 void sections_destroy(sections_t* sections);
 void sections_dispatch(void* state, message_t* msg);
 

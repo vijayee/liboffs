@@ -1239,6 +1239,10 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
   if (max_capacity_bytes > 0) {
     block_cache->current_bytes = index_count(block_cache->index) * (size_t)type;
     block_cache_update_capacity(block_cache);
+    /* the capacity setting also caps the section layer's growth ceiling */
+    if (block_cache->sections != NULL) {
+      sections_set_max_bytes(block_cache->sections, max_capacity_bytes);
+    }
   }
   /* Registry lives next to the index (same folder), so it must be created
      before the folder path is freed below. A failed create degrades to
@@ -1374,6 +1378,14 @@ void block_cache_update_capacity(block_cache_t* block_cache) {
 void block_cache_set_max_capacity(block_cache_t* block_cache, size_t max_capacity_bytes) {
   if (block_cache == NULL) return;
   block_cache->max_capacity_bytes = max_capacity_bytes;
+  /* The section layer's growth ceiling follows the capacity setting: the
+     robin may open fresh sections until it covers the cap (before this, a
+     raised cap did nothing for the disk shelves — the physical sections
+     stayed at whatever history had allocated and big puts failed with
+     sections-write-full). Dispatch-thread only, same as the field above. */
+  if (block_cache->sections != NULL) {
+    sections_set_max_bytes(block_cache->sections, max_capacity_bytes);
+  }
   if (max_capacity_bytes > 0) {
     block_cache->current_bytes = index_count(block_cache->index) * (size_t)block_cache->type;
     block_cache_update_capacity(block_cache);

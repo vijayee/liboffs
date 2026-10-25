@@ -25,6 +25,41 @@ static void section_on_dirty(void* context, section_t* section);
 static section_t* _sections_create_fresh(sections_t* sections);
 static int _sections_grow(sections_t* sections);
 
+/* The robin count the block cache's capacity setting allows: ceil(bytes /
+   section_size) plus one section of headroom for tuple slack and padding.
+   0 when uncapped (max_bytes == 0) — the caller falls back to the legacy
+   floor-only behavior. */
+static size_t _sections_target_count(sections_t* sections) {
+  if (sections->max_bytes == 0) {
+    return 0;
+  }
+  size_t need = (sections->max_bytes + sections->size - 1) / sections->size;
+  return need + 1;
+}
+
+/* Open fresh sections until the robin covers the capacity ceiling (lazy:
+   called from the full/write paths, so files appear only when data really
+   needs the room). Returns the number of sections added. */
+static size_t _sections_grow_to_target(sections_t* sections) {
+  size_t target = _sections_target_count(sections);
+  if (target == 0) {
+    return 0;
+  }
+  size_t added = 0;
+  while (sections->robin->size < target) {
+    if (_sections_grow(sections) != 0) {
+      break;
+    }
+    added++;
+  }
+  if (added > 0) {
+    log_info("sections: robin grown to %u of target %u (cap %zu bytes)",
+             (unsigned)sections->robin->size, (unsigned)target,
+             sections->max_bytes);
+  }
+  return added;
+}
+
 sections_lru_cache_t* sections_lru_cache_create(size_t size) {
   sections_lru_cache_t* lru = get_clear_memory(sizeof(sections_lru_cache_t));
   lru->size = size;
@@ -241,11 +276,13 @@ void sections_dispatch(void* state, message_t* msg) {
         p->section_index = write_payload.index;
         if ((p->result == 2) || write_payload.full) {
           sections_full(sections, p->section_id);
-          /* If we still couldn't place the block and robin is back to the
-             minimum size, grow it by adding a fresh section rather than
-             giving up. */
-          if (p->result == 2 && sections->robin->size <= sections->max_tuple_size &&
-              attempts + 1 < max_attempts) {
+          /* If we still couldn't place the block and the capacity setting
+             allows more storage than the robin currently holds, grow it by
+             adding a fresh section rather than giving up (legacy: only the
+             max_tuple_size floor triggered growth). */
+          if (p->result == 2 && attempts + 1 < max_attempts &&
+              (sections->robin->size <= sections->max_tuple_size ||
+               sections->robin->size < _sections_target_count(sections))) {
             _sections_grow(sections);
           }
         }
@@ -908,6 +945,20 @@ void sections_full(sections_t* sections, size_t section_id) {
     }
     round_robin_unshift(sections->robin, section->id);
   }
+  /* The capacity setting may allow more storage than history allocated:
+     open more sections (lazy, one per full event is enough to make room for
+     the write that tripped this). */
+  _sections_grow_to_target(sections);
+}
+
+void sections_set_max_bytes(sections_t* sections, size_t max_total_bytes) {
+  if (sections == NULL) {
+    return;
+  }
+  sections->max_bytes = max_total_bytes;
+  log_info("sections: capacity ceiling set to %zu bytes (robin %u, section "
+           "size %zu)",
+           max_total_bytes, (unsigned)sections->robin->size, sections->size);
 }
 
 /* Grow the robin by one fresh section. Used when all current robin sections

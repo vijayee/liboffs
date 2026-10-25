@@ -698,6 +698,48 @@ TEST_F(TestSections, SectionsFunctions) {
   }
 }
 
+/* ---- Capacity-ceiling growth ---- */
+
+/* The block cache's capacity setting caps how far the section layer grows.
+   Without a ceiling the robin stays at max_tuple_size (full sections rotate
+   out, history is never exceeded); with one, full-section events open fresh
+   sections until the robin covers ceil(max_bytes / section size) + 1, so a
+   raised cache cap actually yields writable disk shelves instead of
+   sections-write-full failures. */
+TEST_F(TestSections, SectionsGrowToCapacityCeiling) {
+  size_t section_index;
+  size_t section_id;
+
+  /* No ceiling: legacy behavior — the robin never exceeds max_tuple_size. */
+  for (size_t i = 0; i < 25; i++) {
+    ASSERT_EQ(sections_write_sync(sections, blocks[i]->data, &section_id, &section_index), 0);
+  }
+  EXPECT_LE(sections->robin->size, max_tuple_size);
+
+  /* Raise the ceiling to ~10 sections' worth: the next full-section event
+     provisions the robin up to the target in one step. */
+  const size_t ceiling_size = size * 10;
+  sections_set_max_bytes(sections, ceiling_size);
+  const size_t target = ((ceiling_size + size - 1) / size) + 1;
+
+  for (size_t i = 0; i < 25 && sections->robin->size < target; i++) {
+    ASSERT_EQ(sections_write_sync(sections, blocks[i]->data, &section_id, &section_index), 0);
+  }
+  EXPECT_EQ(sections->robin->size, target);
+
+  /* Once provisioned, writes keep succeeding with room to spare. */
+  for (size_t i = 0; i < 25; i++) {
+    ASSERT_EQ(sections_write_sync(sections, blocks[i]->data, &section_id, &section_index), 0);
+  }
+
+  /* Clearing the ceiling back to uncapped keeps writing (behavior is
+     legacy; the robin is not shrunk). */
+  sections_set_max_bytes(sections, 0);
+  for (size_t i = 0; i < 25; i++) {
+    ASSERT_EQ(sections_write_sync(sections, blocks[i]->data, &section_id, &section_index), 0);
+  }
+}
+
 /* ---- Bitmap-specific tests ---- */
 
 TEST_F(TestSection, TestBitmapAllocationOrder) {
