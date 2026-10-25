@@ -455,13 +455,10 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
      once per wheel slot (60 s = slot_duration), so subscribed
      entries expire on the 1 h attenuation curve. */
   network->peer_eabf_tick_timer_id = 0;
-  timer_actor_set(timer, 60000, 60000, &network->actor,
-      PEER_EABF_TICK, &network->peer_eabf_tick_timer_id);
-  /* EABF aging tick: advances every peer's want/has timing wheels
-     once per wheel slot (60 s = slot_duration), so subscribed
-     entries expire on the 1 h attenuation curve. */
-  network->peer_eabf_tick_timer_id = 0;
-  timer_actor_set(timer, 60000, 60000, &network->actor,
+  const uint64_t eabf_slot_ms = (network->eabf_base_ttl_ms > 63)
+                                      ? (network->eabf_base_ttl_ms / 64)
+                                      : 60000;
+  timer_actor_set(timer, eabf_slot_ms, eabf_slot_ms, &network->actor,
       PEER_EABF_TICK, &network->peer_eabf_tick_timer_id);
   // Start gossip timer: first tick in init_interval_s, then recurring
   network->gossip_timer_id = 0;
@@ -3852,6 +3849,30 @@ static void network_sync_hebbian_to_rings(network_t* network) {
    record the hash in their EABFs and a node below 50% capacity may
    request it (network_handle_rank_block's may-request is already
    built). Marked visited so the walk never bounces back to us. */
+/* Cross-actor announce: build the rank message and hand it to the network
+   actor - the caller's own actor must never touch conn state directly
+   (the cache actor's GET-hit pulse was doing exactly that and
+   corrupting: c0000374 under put-streaming + concurrent inhale pulls). */
+void network_rank_advertise_async(network_t* network, buffer_t* hash,
+                                   uint32_t fib) {
+  if (network == NULL || hash == NULL || hash->data == NULL) return;
+  wire_rank_block_t* advert = get_clear_memory(sizeof(wire_rank_block_t));
+  if (advert == NULL) return;
+  memcpy(advert->block_hash, hash->data, 32);
+  advert->fib = fib;
+  memcpy(&advert->origin, &network->authority->local_id, sizeof(node_id_t));
+  advert->hop_count = 0;
+  find_block_add_visited(advert->visited_bloom, &advert->visited_count,
+                         network->authority->local_id.hash);
+  memcpy(&advert->path[0], &network->authority->local_id, sizeof(node_id_t));
+  advert->path_len = 1;
+  message_t msg = {0};
+  msg.type = NETWORK_RANK_BLOCK;
+  msg.payload = advert;
+  msg.payload_destroy = free;
+  actor_send(&network->actor, &msg);
+}
+
 void network_rank_advertise(network_t* network, buffer_t* hash,
                              uint32_t fib) {
   if (network == NULL || hash == NULL || hash->data == NULL) return;
@@ -7121,4 +7142,5 @@ void network_dispatch(void* state, message_t* msg) {
     default:
       break;
   }
-}
+
+  connection_manager_set_eabf_ttl(&network->conn_mgr, network->eabf_base_ttl_ms);}

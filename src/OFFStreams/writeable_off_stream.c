@@ -438,7 +438,7 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
       if (result->result == CACHE_PUT_EXISTS && result->promoted &&
           stream->network != NULL) {
         /* Block promotion — the rank rose; advertise (no data). */
-        network_rank_advertise(stream->network, result->hash, result->fib);
+        network_rank_advertise_async(stream->network, result->hash, result->fib);
       }
 
       if (result->result == CACHE_PUT_NEW && stream->network != NULL && !stream->is_ephemeral) {

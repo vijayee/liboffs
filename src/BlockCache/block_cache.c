@@ -635,7 +635,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
       if (entry != NULL && block_cache->index->last_increment_promoted &&
           block_cache->respiration != NULL &&
           block_cache->respiration->network != NULL) {
-        network_rank_advertise(block_cache->respiration->network, entry->hash,
+        network_rank_advertise_async(block_cache->respiration->network, entry->hash,
                                entry->counter.fib);
       }
       if (entry == NULL) {

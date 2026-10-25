@@ -207,6 +207,11 @@ typedef struct network_t {
 
 /* BLOCK PROMOTION: broadcast hash+fib (no data) to connected peers. */
 void network_rank_advertise(network_t* network, buffer_t* hash, uint32_t fib);
+/* Cross-actor callers MUST use the async form: it hands the advertise to
+    the network actor (the sole owner of conn state); the sync form above
+    is legal only ON the network actor. The cache actor's GET-hit pulse
+    and the stream-origin put sites run this way. */
+void network_rank_advertise_async(network_t* network, buffer_t* hash, uint32_t fib);
 
 /* Destroy-time unregister for a stream that issued NETWORK_LOCAL_FIND_BLOCK
  * requests: prunes the requester from every wanted_list entry it joined so a
