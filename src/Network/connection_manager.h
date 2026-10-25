@@ -23,11 +23,16 @@ typedef struct connection_manager_t {
   size_t peer_capacity;
   hebbian_config_t hebbian;
   size_t max_connections;
+  /* EABF want/has TTL (level-0 dwell). Wheel slot duration derives
+     from this (slot = ttl / 64 slots); peers created before a setter
+     call keep their initial wheels. */
+  uint64_t eabf_ttl_ms;
 } connection_manager_t;
 
 void connection_manager_init(connection_manager_t* mgr, size_t initial_capacity,
                              const hebbian_config_t* hebbian_config);
 void connection_manager_deinit(connection_manager_t* mgr);
+void connection_manager_set_eabf_ttl(connection_manager_t* mgr, uint64_t ttl_ms);
 
 peer_connection_t* connection_manager_add(connection_manager_t* mgr,
                                           const node_id_t* remote_id,

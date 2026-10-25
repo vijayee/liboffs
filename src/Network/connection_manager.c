@@ -28,6 +28,25 @@ void connection_manager_init(connection_manager_t* mgr, size_t initial_capacity,
   }
 
   mgr->max_connections = 128;
+  mgr->eabf_ttl_ms = 3600000;
+}
+
+void connection_manager_set_eabf_ttl(connection_manager_t* mgr, uint64_t ttl_ms) {
+  if (mgr == NULL || ttl_ms == 0) return;
+  mgr->eabf_ttl_ms = ttl_ms;
+  /* Re-scale existing peers' aging wheels: slot duration = ttl / slots.
+     Wheels are empty (or hold young entries) at config time; a re-init
+     drops pending entries, which is acceptable for a startup-set knob. */
+  for (size_t index = 0; index < mgr->peer_count; index++) {
+    peer_connection_t* peer = mgr->peers[index];
+    if (peer == NULL) continue;
+    uint64_t slot_duration = ttl_ms / 64;
+    if (slot_duration == 0) slot_duration = 1;
+    timing_wheel_deinit(&peer->eabf_wheel);
+    timing_wheel_init(&peer->eabf_wheel, 64, slot_duration);
+    timing_wheel_deinit(&peer->want_wheel);
+    timing_wheel_init(&peer->want_wheel, 64, slot_duration);
+  }
 }
 
 void connection_manager_deinit(connection_manager_t* mgr) {
@@ -79,6 +98,14 @@ peer_connection_t* connection_manager_add(connection_manager_t* mgr,
 
   peer_connection_t* peer = peer_connection_create(remote_id, peer_addr,
                                                     mgr->hebbian.initial_weight, pool);
+  if (peer != NULL && mgr->eabf_ttl_ms > 0) {
+    uint64_t slot_duration = mgr->eabf_ttl_ms / 64;
+    if (slot_duration == 0) slot_duration = 1;
+    timing_wheel_deinit(&peer->eabf_wheel);
+    timing_wheel_init(&peer->eabf_wheel, 64, slot_duration);
+    timing_wheel_deinit(&peer->want_wheel);
+    timing_wheel_init(&peer->want_wheel, 64, slot_duration);
+  }
   if (peer == NULL) {
     return NULL;
   }
