@@ -1052,13 +1052,18 @@ static void* _wedge_dialer(void* arg) {
 #ifdef _WIN32
 static DWORD CALLBACK _wedge_watchdog(LPVOID arg) {
   (void)arg;
-  Sleep(20000);
-  /* Nothing should survive 20s of teardown. */
-  fprintf(stderr, "wedge test: teardown exceeded 20s, force-exiting\n");
-  fflush(stderr);
-  g_wedge_fired = 1;
-  fflush(stderr);
-  TerminateProcess(GetCurrentProcess(), 2);
+  /* Fire only when the teardown did NOT finish in 20s: the stop event set
+     at the end of network_destroy cancels the kill (a fire-anyway watchdog
+     terminated the whole suite 20s test-later instead). */
+  DWORD wait = WaitForSingleObject(g_wedge_stop_event, 20000);
+  if (wait != WAIT_OBJECT_0) {
+    /* Nothing should survive 20s of teardown. */
+    fprintf(stderr, "wedge test: teardown exceeded 20s, force-exiting\n");
+    fflush(stderr);
+    g_wedge_fired = 1;
+    fflush(stderr);
+    TerminateProcess(GetCurrentProcess(), 2);
+  }
   return 0;
 }
 #endif
