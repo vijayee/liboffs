@@ -1865,6 +1865,18 @@ void network_destroy(network_t* network) {
     timer_actor_cancel(network->timer, atomic_load(&network->request_timer_id));
     atomic_store(&network->request_timer_id, 0);
   }
+  /* The eabf tick is periodic and the respiration seek re-arms itself,
+     so both stay armed past the cancel block above until the timer
+     actor dies - a leaked pd_timer holds a CreateEvent + timer-queue
+     handle per network create/destroy cycle. */
+  if (atomic_load(&network->respiration_seek_timer_id) != 0) {
+    timer_actor_cancel(network->timer, atomic_load(&network->respiration_seek_timer_id));
+    atomic_store(&network->respiration_seek_timer_id, 0);
+  }
+  if (atomic_load(&network->peer_eabf_tick_timer_id) != 0) {
+    timer_actor_cancel(network->timer, atomic_load(&network->peer_eabf_tick_timer_id));
+    atomic_store(&network->peer_eabf_tick_timer_id, 0);
+  }
   if (network->relay != NULL) {
     relay_client_destroy(network->relay);
     network->relay = NULL;
