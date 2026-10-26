@@ -949,13 +949,23 @@ void sections_destroy(sections_t* sections) {
 }
 
 static section_t* _sections_create_fresh(sections_t* sections) {
+  size_t section_id = sections->next_id;
   section_t* section = section_create(sections->data_path, sections->meta_path,
-                                        sections->size, sections->next_id++,
+                                        sections->size, section_id,
                                         sections->type, sections->pool,
                                         sections->fsync_data);
   if (section == NULL) {
+    /* section_create never logs its own failure paths - a silent NULL here
+       turned a big put's CACHE_PUT into a bare -1 ("cache write error")
+       with no named reason (the 909MB mkv put aborted at robin 171 /
+       section 403; nothing on disk explained it). Name it now. */
+    log_error("sections: section_create failed for id %lu (path=%s) - out of "
+              "memory or file open/create failure",
+              (unsigned long)section_id, sections->data_path);
+    /* The id slot was NOT consumed: retry with the same id next call. */
     return NULL;
   }
+  sections->next_id++;
   section->on_dirty = section_on_dirty;
   section->on_dirty_context = sections;
   refcounter_yield((refcounter_t*) section);
