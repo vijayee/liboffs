@@ -68,6 +68,18 @@ typedef struct {
   recipe_state_e state;             /* stream state */
   recycle_ephemeral_e override_mode; /* explicit recycle-ephemeral mode from the put */
   vec_buffer_t acquired_hashes;     /* claims this recipe acquired (propagate) — released only via recycler_recipe_release_acquired (failure rollback) */
+
+  /* Ephemeral-exclusion flow through the cache actor's API: before a data
+     block is fetched, a metadata-only fetch (block_cache_get_ex no_data)
+     asks the CACHE ACTOR for the entry's status; the report's decision
+     rides this struct to the delivery — no actor reads another's index,
+     and no block is ever parked. enforce_hash != NULL = a check or data
+     fetch is in flight; further pulls' fetches are serviced when this
+     block's flow reaches its delivery. */
+  uint8_t enforce_decision;   /* 0 deliver-only, 1 propagate (acquire claim), 2 commit (clear + announce) */
+  uint32_t enforce_fib;       /* the reported rank, for the commit announce */
+  buffer_t* enforce_hash;             /* the checked/fetched block's hash */
+  buffer_t* enforce_descriptor_hash;  /* ref of this ORI's descriptor hash (registry self-heal) */
 } recycler_recipe_t;
 
 new_blocks_recipe_t* new_blocks_recipe_create(

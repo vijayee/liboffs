@@ -268,13 +268,21 @@ typedef struct block_cache_t {
    fib: the entry's rank after the fetch's hit-counter increment (0 when the
    hash was absent). entry_existed: 1 = the hash was in the index at fetch
    time (a NULL block then means the disk read failed), 0 = the hash was
-   never indexed — consumers use it to tell a miss from a failed read. */
+   never indexed — consumers use it to tell a miss from a failed read.
+   ephemeral_entry: 1 = the entry still holds ephemeral claims — the
+   recycling flow's fetch-time exclusion check reads this (a metadata-only
+   no_data GET reports it through here instead of any actor reading the
+   index entry directly).
+   no_data: echoes the REQUEST's no_data — distinguishes a metadata report
+   from an ordinary block-less miss (a descriptor/data fetch miss). */
 typedef struct {
   buffer_t* hash;
   block_t* block;
   actor_t* reply_to;
   uint32_t fib;
   uint8_t entry_existed;
+  uint8_t ephemeral_entry;
+  uint8_t no_data;
 } cache_get_result_payload_t;
 
 /* Result payload for CACHE_PUT_RESULT */

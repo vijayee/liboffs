@@ -229,60 +229,33 @@ static void _finish_descriptor_load(recycler_recipe_t* recipe) {
   recipe->loading_descriptor = 0;
 }
 
-/* Fetch-time ephemeral enforcement for a recycled data block. The exact
-   check walks the block's index entry: the registry CHECK is advisory only
-   (bloom false positives resolve here, false negatives self-heal via ADD).
-   Returns 1 when the block may be delivered downstream (permanent source,
-   or a claim acquired/committed per the mode), 0 when the recipe has been
-   deactivated and the caller must destroy the block and stop. */
-static uint8_t _recycler_enforce_ephemeral(recycler_recipe_t* recipe, block_t* block) {
-  if (recipe->recipe.bc == NULL) {
-    return 1;
+/* Ephemeral exclusion through the cache actor's API. The entry state the
+   decision reads (ephemeral_count, fib) belongs to the cache actor, so the
+   check is a metadata-only roundtrip: issue the no-data fetch (this
+   function) and apply the report (the dispatch's CACHE_GET_RESULT no_data
+   gate) - the decision then rides the flow to the delivery. The block is
+   never parked, so ownership and the descriptor cursor's sequencing stay
+   exactly as the sync version. */
+static void _recycler_check_status(recycler_recipe_t* recipe, buffer_t* hash) {
+  if (recipe->recipe.bc == NULL || hash == NULL || hash->size != 32) {
+    return;
   }
-  index_entry_t* entry = index_peek(recipe->recipe.bc->index, block->hash);
-  if (entry == NULL || entry->ephemeral_count == 0) {
-    return 1;
+  /* The cursor may already be past this ori (the exhaust advanced it):
+     bounds-guard the self-heal key. */
+  buffer_t* desc = NULL;
+  if (recipe->ori_index >= 0 &&
+      (size_t)recipe->ori_index < recipe->oris.length) {
+    desc = recipe->oris.data[recipe->ori_index]->descriptor_hash;
   }
-
-  /* Discovered an ephemeral block — self-heal the registry for this source. */
-  if (recipe->recipe.bc->registry != NULL) {
-    ori_t* source_ori = recipe->oris.data[recipe->ori_index];
-    if (source_ori->descriptor_hash != NULL) {
-      ephemeral_registry_add(recipe->recipe.bc->registry, source_ori->descriptor_hash);
-    }
-  }
-
-  if (recipe->recipe.put_is_ephemeral || recipe->override_mode == RECYCLE_EPHEMERAL_PROPAGATE) {
-    /* Propagate: acquire the consuming representation's claim. After a
-       successful put these claims are the consuming representation's ONLY
-       reference protection on the shared source blocks — they are released
-       solely by recycler_recipe_release_acquired (failure rollback). */
-    block_cache_ephemeral(recipe->recipe.bc, block->hash, CACHE_EPHEMERAL_ACQUIRE, NULL);
-    vec_push(&recipe->acquired_hashes,
-             (buffer_t*)refcounter_reference((refcounter_t*)block->hash));
-    return 1;
-  }
-
-  if (recipe->override_mode == RECYCLE_EPHEMERAL_COMMIT) {
-    /* Commit: clear the source block to permanent and announce it like a
-       put would. */
-    block_cache_ephemeral(recipe->recipe.bc, block->hash, CACHE_EPHEMERAL_CLEAR, NULL);
-    if (recipe->network != NULL) {
-      network_local_store_block_payload_t* store_payload =
-          get_clear_memory(sizeof(network_local_store_block_payload_t));
-      store_payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)block->hash);
-      store_payload->fib = entry->counter.fib > 0 ? entry->counter.fib : 1;
-      store_payload->reply_to = NULL;
-      message_t store_msg;
-      store_msg.type = NETWORK_LOCAL_STORE_BLOCK;
-      store_msg.payload = store_payload;
-      store_msg.payload_destroy = network_local_store_block_payload_destroy;
-      actor_send(&recipe->network->actor, &store_msg);
-    }
-    return 1;
-  }
-
-  return 0;
+  recipe->enforce_descriptor_hash =
+      desc != NULL ? (buffer_t*)refcounter_reference((refcounter_t*)desc) : NULL;
+  recipe->enforce_hash = (buffer_t*)refcounter_reference((refcounter_t*)hash);
+  recipe->enforce_decision = 0;
+  recipe->enforce_fib = 0;
+  /* metadata-only fetch: presence + ephemeral status + rank bookkeeping,
+     all on the cache actor */
+  block_cache_get_ex(recipe->recipe.bc, recipe->enforce_hash,
+                     &recipe->recipe.stream.actor, 1, 0);
 }
 
 /* Fetch the next data block from the descriptor. */
@@ -319,8 +292,20 @@ static void _try_fetch_next(recycler_recipe_t* recipe) {
     return;
   }
 
+  /* One data flow in flight at a time: further pulls' fetches are
+     serviced when the current block's check/report/delivery returns
+     through _try_fetch_next. */
+  if (recipe->recipe.bc != NULL && recipe->enforce_hash != NULL) {
+    return;
+  }
   buffer_t* hash = recipe->descriptor.data[recipe->descriptor_index];
   recipe->descriptor_index++;
+  /* Ephemeral gate first: ask the cache actor for the entry's status (a
+     metadata-only fetch); the data fetch issues on the report. */
+  if (recipe->recipe.bc != NULL) {
+    _recycler_check_status(recipe, hash);
+    return;
+  }
   block_cache_get(recipe->recipe.bc, hash, &recipe->recipe.stream.actor);
 }
 
@@ -347,6 +332,67 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
         if (result->block != NULL) {
           DESTROY(result->block, block);
         }
+        if (result->hash != NULL) {
+          DESTROY(result->hash, buffer);
+        }
+        break;
+      }
+
+      /* The ephemeral check's report (only this flow issues no_data
+         fetches): the decision is made HERE and rides the flow to the
+         block's delivery. */
+      if (result->no_data) {
+        if (recipe->enforce_hash == NULL || result->hash == NULL ||
+            result->hash->size != recipe->enforce_hash->size ||
+            memcmp(recipe->enforce_hash->data, result->hash->data,
+                   result->hash->size) != 0) {
+          /* stale report - drop it */
+          if (result->hash != NULL) {
+            DESTROY(result->hash, buffer);
+          }
+          break;
+        }
+        if (result->entry_existed && result->ephemeral_entry) {
+          /* Ephemeral source discovered - self-heal the registry. */
+          if (recipe->recipe.bc->registry != NULL &&
+              recipe->enforce_descriptor_hash != NULL) {
+            ephemeral_registry_add(recipe->recipe.bc->registry,
+                                   recipe->enforce_descriptor_hash);
+          }
+          if (recipe->recipe.put_is_ephemeral ||
+              recipe->override_mode == RECYCLE_EPHEMERAL_PROPAGATE) {
+            /* Propagate: the consuming representation's claim is acquired
+               at delivery (the acquire rides with it). */
+            recipe->enforce_decision = 1;
+          } else if (recipe->override_mode == RECYCLE_EPHEMERAL_COMMIT) {
+            /* Commit: clear + announce at delivery. */
+            recipe->enforce_decision = 2;
+            recipe->enforce_fib = result->fib > 0 ? result->fib : 1;
+          } else {
+            /* Default mode: hard error - unverified data must not enter a
+               permanent representation. */
+            DESTROY(recipe->enforce_hash, buffer);
+            recipe->enforce_hash = NULL;
+            if (recipe->enforce_descriptor_hash != NULL) {
+              DESTROY(recipe->enforce_descriptor_hash, buffer);
+              recipe->enforce_descriptor_hash = NULL;
+            }
+            stream_deactivate((stream_t*)recipe,
+                              OFFS_ERROR("recycle source is ephemeral/unverified"));
+            recipe->recipe.stream.is_deactivated = 1;
+            if (result->hash != NULL) {
+              DESTROY(result->hash, buffer);
+            }
+            break;
+          }
+        }
+        if (recipe->enforce_descriptor_hash != NULL) {
+          DESTROY(recipe->enforce_descriptor_hash, buffer);
+          recipe->enforce_descriptor_hash = NULL;
+        }
+        /* proceed to the data fetch (the held hash is the fetch key) */
+        block_cache_get(recipe->recipe.bc, recipe->enforce_hash,
+                        &recipe->recipe.stream.actor);
         if (result->hash != NULL) {
           DESTROY(result->hash, buffer);
         }
@@ -424,24 +470,60 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
         break;
       }
 
-      /* Data block result — enforce the ephemeral exclusion rule, then
-         transfer ownership of result->block to stream_notify */
+      /* Data block result: the check's decision rides the flow - apply it
+         (acquire the propagate claim / clear + announce the commit), then
+         transfer ownership of result->block to stream_notify. */
       if (result->block != NULL) {
-        if (!_recycler_enforce_ephemeral(recipe, result->block)) {
-          /* Default mode: hard error — unverified data must not enter a
-             permanent representation. */
-          DESTROY(result->block, block);
-          if (result->hash != NULL) {
-            DESTROY(result->hash, buffer);
+        if (recipe->enforce_decision == 1) {
+          /* Propagate: acquire the consuming representation's claim. After
+             a successful put these claims are the consuming
+             representation's ONLY reference protection on the shared
+             source blocks - released solely by
+             recycler_recipe_release_acquired (failure rollback). */
+          block_cache_ephemeral(recipe->recipe.bc, result->block->hash,
+                                CACHE_EPHEMERAL_ACQUIRE, NULL);
+          vec_push(&recipe->acquired_hashes,
+                   (buffer_t*)refcounter_reference((refcounter_t*)result->block->hash));
+        } else if (recipe->enforce_decision == 2) {
+          /* Commit: clear the source block to permanent and announce it
+             like a put would. */
+          block_cache_ephemeral(recipe->recipe.bc, result->block->hash,
+                                CACHE_EPHEMERAL_CLEAR, NULL);
+          if (recipe->network != NULL) {
+            network_local_store_block_payload_t* store_payload =
+                get_clear_memory(sizeof(network_local_store_block_payload_t));
+            store_payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)result->block->hash);
+            store_payload->fib = recipe->enforce_fib > 0 ? recipe->enforce_fib : 1;
+            store_payload->reply_to = NULL;
+            message_t store_msg;
+            store_msg.type = NETWORK_LOCAL_STORE_BLOCK;
+            store_msg.payload = store_payload;
+            store_msg.payload_destroy = network_local_store_block_payload_destroy;
+            actor_send(&recipe->network->actor, &store_msg);
           }
-          stream_deactivate((stream_t*)recipe, OFFS_ERROR("recycle source is ephemeral/unverified"));
-          recipe->recipe.stream.is_deactivated = 1;
-          break;
+        }
+        recipe->enforce_decision = 0;
+        recipe->enforce_fib = 0;
+        if (recipe->enforce_hash != NULL) {
+          DESTROY(recipe->enforce_hash, buffer);
+          recipe->enforce_hash = NULL;
         }
         stream_notify((stream_t*)recipe, data_event,
                       CONSUME(result->block, block_t), (void (*)(void*))block_destroy);
         recipe->pending_pull--;
       } else {
+        /* Data fetch missed though the entry existed at check time: the
+           block was removed in between. Hand the held hash to the network
+           flow below (it moves into pending_fetch_hash). */
+        if (recipe->enforce_hash != NULL) {
+          if (result->hash != NULL) {
+            DESTROY(result->hash, buffer);
+            result->hash = NULL;
+          }
+          recipe->pending_fetch_hash = recipe->enforce_hash;
+          recipe->enforce_hash = NULL;
+        }
+        /* Data block not found */
         /* Data block not found */
         if (recipe->network != NULL) {
           /* Network-aware: send NETWORK_LOCAL_FIND_BLOCK */
@@ -506,23 +588,48 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
               }
             }
           } else {
-            /* Data block: enforce the ephemeral exclusion rule (mirror
-               CACHE_GET_RESULT's data branch), then transfer ownership to
-               stream_notify. */
-            if (!_recycler_enforce_ephemeral(recipe, result->block)) {
-              DESTROY(result->block, block);
-              stream_deactivate((stream_t*)recipe, OFFS_ERROR("recycle source is ephemeral/unverified"));
-              recipe->recipe.stream.is_deactivated = 1;
-            } else {
-              stream_notify((stream_t*)recipe, data_event,
-                            CONSUME(result->block, block_t), (void (*)(void*))block_destroy);
-              recipe->pending_pull--;
-              result->block = NULL;  /* ownership transferred via CONSUME; null to prevent destroy double-free */
+            /* Data block from the network (the fetch missed, the find
+               answered): the check's decision was made before the fetch
+               and survives the round trip - apply it, then transfer
+               ownership to stream_notify. */
+            if (recipe->enforce_decision == 1) {
+              block_cache_ephemeral(recipe->recipe.bc, result->block->hash,
+                                    CACHE_EPHEMERAL_ACQUIRE, NULL);
+              vec_push(&recipe->acquired_hashes,
+                       (buffer_t*)refcounter_reference((refcounter_t*)result->block->hash));
+            } else if (recipe->enforce_decision == 2) {
+              block_cache_ephemeral(recipe->recipe.bc, result->block->hash,
+                                    CACHE_EPHEMERAL_CLEAR, NULL);
+              if (recipe->network != NULL) {
+                network_local_store_block_payload_t* store_payload =
+                    get_clear_memory(sizeof(network_local_store_block_payload_t));
+                store_payload->hash = (buffer_t*)refcounter_reference((refcounter_t*)result->block->hash);
+                store_payload->fib = recipe->enforce_fib > 0 ? recipe->enforce_fib : 1;
+                store_payload->reply_to = NULL;
+                message_t store_msg;
+                store_msg.type = NETWORK_LOCAL_STORE_BLOCK;
+                store_msg.payload = store_payload;
+                store_msg.payload_destroy = network_local_store_block_payload_destroy;
+                actor_send(&recipe->network->actor, &store_msg);
+              }
             }
+            recipe->enforce_decision = 0;
+            recipe->enforce_fib = 0;
+            if (recipe->enforce_hash != NULL) {
+              DESTROY(recipe->enforce_hash, buffer);
+              recipe->enforce_hash = NULL;
+            }
+            stream_notify((stream_t*)recipe, data_event,
+                          CONSUME(result->block, block_t), (void (*)(void*))block_destroy);
+            recipe->pending_pull--;
+            result->block = NULL;  /* ownership transferred via CONSUME */
           }
         } else {
-          /* Local path: block is in the cache. Re-fetch as before. */
-          block_cache_get(recipe->recipe.bc, recipe->pending_fetch_hash, &recipe->recipe.stream.actor);
+          /* Local path: block is in the cache. Re-fetch through the same
+             gate (a stale decision must not ride a re-fetch). */
+          if (recipe->enforce_hash == NULL) {
+            _recycler_check_status(recipe, recipe->pending_fetch_hash);
+          }
           recipe->state = RECIPE_FETCHING_BLOCK;
         }
       } else {
@@ -546,6 +653,16 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
           _start_descriptor_load(recipe);
         } else {
           /* Data block not found on network — deactivate */
+          if (recipe->enforce_hash != NULL) {
+            DESTROY(recipe->enforce_hash, buffer);
+            recipe->enforce_hash = NULL;
+          }
+          if (recipe->enforce_descriptor_hash != NULL) {
+            DESTROY(recipe->enforce_descriptor_hash, buffer);
+            recipe->enforce_descriptor_hash = NULL;
+          }
+          recipe->enforce_decision = 0;
+          recipe->enforce_fib = 0;
           stream_deactivate((stream_t*)recipe, OFFS_ERROR("Block not found on network"));
           recipe->recipe.stream.is_deactivated = 1;
         }
@@ -569,6 +686,8 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
         DESTROY(recipe->pending_fetch_hash, buffer);
         recipe->pending_fetch_hash = NULL;
       }
+      /* The ephemeral flow's leftovers die with the recipe (the destroy
+         releases them); a deactivate mid-flow does the same at destroy. */
       stream_notify((stream_t*)recipe, close_event, NULL, NULL);
       recipe->recipe.stream.is_deactivated = 1;
       break;
@@ -642,6 +761,18 @@ void recycler_recipe_destroy(recycler_recipe_t* recipe) {
       DESTROY(recipe->acquired_hashes.data[i], buffer);
     }
     vec_deinit(&recipe->acquired_hashes);
+    /* Release the ephemeral-flow leftovers (an in-flight check's refs and
+       any unapplied decision). */
+    if (recipe->enforce_hash != NULL) {
+      DESTROY(recipe->enforce_hash, buffer);
+      recipe->enforce_hash = NULL;
+    }
+    if (recipe->enforce_descriptor_hash != NULL) {
+      DESTROY(recipe->enforce_descriptor_hash, buffer);
+      recipe->enforce_descriptor_hash = NULL;
+    }
+    recipe->enforce_decision = 0;
+    recipe->enforce_fib = 0;
 
     for (int i = 0; i < recipe->oris.length; i++) {
       DESTROY(recipe->oris.data[i], ori);

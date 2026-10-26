@@ -418,6 +418,8 @@ static void _block_cache_resolve_pending_gets(block_cache_t* block_cache,
       result->reply_to = NULL;
       result->fib = found->entry->counter.fib;
       result->entry_existed = 1;
+      result->ephemeral_entry = (uint8_t)(found->entry->ephemeral_count > 0);
+      result->no_data = 0;
       message_t reply;
       reply.type = CACHE_GET_RESULT;
       reply.payload = result;
@@ -695,6 +697,8 @@ void block_cache_dispatch(void* state, message_t* msg) {
           result->reply_to = NULL;
           result->fib = entry->counter.fib;
           result->entry_existed = 1;
+          result->ephemeral_entry = (uint8_t)(entry->ephemeral_count > 0);
+          result->no_data = 1;
           message_t reply;
           reply.type = CACHE_GET_RESULT;
           reply.payload = result;
@@ -767,6 +771,8 @@ void block_cache_dispatch(void* state, message_t* msg) {
             result->reply_to = NULL;
             result->fib = entry->counter.fib;
             result->entry_existed = 1;
+            result->ephemeral_entry = (uint8_t)(entry->ephemeral_count > 0);
+            result->no_data = 0;
             message_t reply;
             reply.type = CACHE_GET_RESULT;
             reply.payload = result;
