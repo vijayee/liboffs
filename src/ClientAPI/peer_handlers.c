@@ -205,11 +205,11 @@ void peer_handle_connect(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
      DIRECT (back-compat) -> RELAY. The first that connects wins. RELAY
      candidates are admitted via the connection manager with
      relay_endpoint_id set; no QUIC connection is needed. See audit #18. */
-  int connected = (network_connect_peer_candidates(ctx->network,
-                                                   &remote_info.node_id,
-                                                   remote_info.addresses,
-                                                   remote_info.address_count,
-                                                   false) == 0) ? 1 : 0;
+  int connected = (network_connect_peer_candidates_request(
+                       ctx->network, &remote_info.node_id,
+                       remote_info.addresses, remote_info.address_count,
+                       false, false, NETWORK_API_TIMEOUT_MS) ==
+                   NETWORK_CONNECT_STARTED) ? 1 : 0;
 
   peer_info_destroy(&remote_info);
 
@@ -229,25 +229,35 @@ void peer_handle_list_request(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     return;
   }
 
-  connection_manager_t* mgr = &ctx->network->conn_mgr;
+  /* Snapshot the connection manager on the network actor (bounded
+     round-trip): conn state is the network actor's sole-owner domain
+     (connection_manager has no internal locks). */
+  network_peer_snapshot_entry_t* snapshot = NULL;
+  size_t snapshot_count = 0;
+  if (network_peer_snapshot_request(ctx->network, NETWORK_API_TIMEOUT_MS,
+                                    &snapshot, &snapshot_count) != 0) {
+    ctx->send_error(ctx->conn, CLIENT_API_STATUS_INTERNAL_ERROR,
+                    "Failed to snapshot peer list");
+    return;
+  }
 
-  /* Count non-NULL peers so the definite array has exact size */
+  /* Conn-mgr entries only (ring-only gossip nodes have no wire entry). */
   size_t valid_count = 0;
-  for (size_t index = 0; index < mgr->peer_count; index++) {
-    if (mgr->peers[index] != NULL) valid_count++;
+  for (size_t index = 0; index < snapshot_count; index++) {
+    if (!snapshot[index].in_ring) valid_count++;
   }
 
   cbor_item_t* peers_array = cbor_new_definite_array(valid_count);
 
-  for (size_t index = 0; index < mgr->peer_count; index++) {
-    peer_connection_t* peer = mgr->peers[index];
-    if (peer == NULL) continue;
+  for (size_t index = 0; index < snapshot_count; index++) {
+    network_peer_snapshot_entry_t* peer = &snapshot[index];
+    if (peer->in_ring) continue;
 
     cbor_item_t* peer_map = cbor_new_definite_map(4);
 
     /* node_id (bstr) */
     cbor_item_t* key = cbor_build_uint8(CLIENT_API_PEER_LIST_KEY_NODE_ID);
-    cbor_item_t* val = cbor_build_bytestring(peer->remote_node_id.hash, NODE_ID_HASH_SIZE);
+    cbor_item_t* val = cbor_build_bytestring(peer->node_id.hash, NODE_ID_HASH_SIZE);
     (void)cbor_map_add(peer_map, (struct cbor_pair){.key = key, .value = val});
     cbor_decref(&key);
     cbor_decref(&val);
@@ -276,6 +286,7 @@ void peer_handle_list_request(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
     (void)cbor_array_push(peers_array, peer_map);
     cbor_decref(&peer_map);
   }
+  network_peer_snapshot_free(snapshot, snapshot_count);
 
   client_api_peer_list_response_t response;
   memset(&response, 0, sizeof(response));
@@ -348,11 +359,11 @@ void peer_handle_friend_add(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
   /* Try candidates in priority order: HOST -> SRFLX -> DIRECT -> RELAY.
      Friend peers are admitted via connection_manager_add_friend so they
      skip Hebbian decay eviction. See audit #18. */
-  int connected = (network_connect_peer_candidates(ctx->network,
-                                                   &new_friend.node_id,
-                                                   new_friend.addresses,
-                                                   new_friend.address_count,
-                                                   true) == 0) ? 1 : 0;
+  int connected = (network_connect_peer_candidates_request(
+                       ctx->network, &new_friend.node_id,
+                       new_friend.addresses, new_friend.address_count,
+                       true, false, NETWORK_API_TIMEOUT_MS) ==
+                   NETWORK_CONNECT_STARTED) ? 1 : 0;
 
   peer_info_destroy(&new_friend);
 
@@ -406,8 +417,9 @@ void peer_handle_friend_remove(peer_handler_ctx_t* ctx, cbor_item_t* frame) {
   (void)peer_book_friend_remove(ctx->network->peer_book, &target_id,
                                 PEER_BOOK_TIMEOUT_MS);
 
-  /* Also remove from connection_manager */
-  connection_manager_remove(&ctx->network->conn_mgr, &target_id);
+  /* Also remove from the connection manager — on the network actor. */
+  network_peer_remove_request(ctx->network, &target_id,
+                              NETWORK_API_TIMEOUT_MS);
 
   /* Persist via the debounced dirty flag — previously only the HTTP handlers
      saved immediately, so a crash before shutdown could lose friend changes. */

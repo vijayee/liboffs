@@ -16,6 +16,7 @@
 #include "hebbian.h"
 #include "hebbian_config.h"
 #include "connection_manager.h"
+#include "peer_info.h"
 #include "rate_limit.h"
 #include "node_id.h"
 #include "wanted_list.h"
@@ -175,7 +176,7 @@ typedef struct network_t {
                                          closest_pending expiry (#5/#6/#9) */
   uint32_t request_timeout_ms;        /* per-pending-request deadline; default 30s */
   ATOMIC(uint8_t) running;
-  uint8_t peer_state_dirty;              /* set when hebbian/peers change; cleared on save */
+  ATOMIC(uint8_t) peer_state_dirty;      /* set when hebbian/peers change; cleared on save */
   uint32_t peer_state_save_interval_ms;  /* recurring peer-state save cadence (from config) */
   ATOMIC(uint64_t) peer_state_save_timer_id;  /* recurring save tick; NOT a debounce —
     a debounce re-armed on every gossip tick (hebbian decay marks dirty each tick)
@@ -290,6 +291,76 @@ void network_dispatch(void* state, message_t* msg);
    debounce is armed. The authoritative final save remains
    authority_save_peers in offs_node_stop Phase 8. */
 void network_mark_peer_state_dirty(network_t* network);
+
+/* --- ClientAPI peer surface: bounded synchronous round-trips to the
+   network actor ---
+
+   The connection manager has no internal locks (docs/concurrency-pass.md)
+   and the network actor is its sole owner, so ClientAPI handlers running
+   on connection-actor threads must not touch conn state directly. These
+   helpers block on a timed condvar while the network actor performs the
+   operation on its own thread and fills the result - the same
+   request-shell/orphan ownership scheme as the PEER_BOOK_* round-trips
+   (see peer_book.h): on timeout ownership of the whole request (shell +
+   input copies) transfers to the actor, which applies the op and frees
+   it. Returns: 0 = completed, -1 = timeout or actor stopped. */
+
+#define NETWORK_API_TIMEOUT_MS 2000u
+
+/* Result codes for network_connect_peer_candidates_request. */
+#define NETWORK_CONNECT_STARTED 0   /* QUIC candidates kicked off (async) */
+#define NETWORK_CONNECT_ALREADY 1   /* peer already in the connection manager */
+
+/* Plain-value copy of one conn_mgr peer (or a gossip ring node deduped
+   against it), safe to read from any thread once
+   network_peer_snapshot_request() has filled the array. */
+typedef struct network_peer_snapshot_entry_t {
+  node_id_t node_id;
+  uint8_t connected;
+  uint8_t is_friend;
+  uint8_t in_ring;   /* gossip ring member with no conn_mgr entry */
+  double rtt_ewma;
+} network_peer_snapshot_entry_t;
+
+/* Removes target_id from the connection manager on the network actor. */
+int network_peer_remove_request(network_t* network, const node_id_t* target_id,
+                                uint32_t timeout_ms);
+
+/* Already-connected check + candidate admission (connection_manager_add/
+   add_friend, SRFLX record, relay admission, QUIC starts) on the network
+   actor. Input addresses are deep-copied into the request. */
+int network_connect_peer_candidates_request(network_t* network,
+                                            const node_id_t* node_id,
+                                            const peer_address_t* addresses,
+                                            size_t address_count,
+                                            bool is_friend,
+                                            bool check_already,
+                                            uint32_t timeout_ms);
+
+/* Snapshot of the connection manager plus ring-only gossip nodes (deduped).
+   On success the caller owns *out_entries (free with
+   network_peer_snapshot_free); *out_count is the entry count. */
+/* Plain-value copy of the topology_metrics aggregates the network actor
+   maintains (peer/ring push path) - safe to render from any thread. */
+typedef struct network_metrics_snapshot_t {
+  size_t peer_count;              /* peer_snapshots count at push time */
+  size_t total_connections;
+  float avg_hebbian_weight;
+  uint64_t total_rpc_calls[PEER_RPC_TYPE_COUNT];
+  uint64_t total_rate_limit_accepted[RPC_TYPE_COUNT];
+  uint64_t total_rate_limit_rejected[RPC_TYPE_COUNT];
+  float avg_rate_limit_tokens[RPC_TYPE_COUNT];
+  float effective_rate[RPC_TYPE_COUNT];
+} network_metrics_snapshot_t;
+
+int network_metrics_snapshot_request(network_t* network, uint32_t timeout_ms,
+                                     network_metrics_snapshot_t* out);
+
+int network_peer_snapshot_request(network_t* network, uint32_t timeout_ms,
+                                  network_peer_snapshot_entry_t** out_entries,
+                                  size_t* out_count);
+void network_peer_snapshot_free(network_peer_snapshot_entry_t* entries,
+                                size_t count);
 
 /* Secure-mode predicate (Stage 4 mode-aware relay gating). Returns true iff
    the network has an authority configured for secure mode (allow_secure) AND

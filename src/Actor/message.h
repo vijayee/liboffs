@@ -196,6 +196,20 @@ NETWORK_RESPIRATION_SEEK_TICK,
      flag. The authoritative final save is authority_save_peers in
      offs_node_stop Phase 8. */
   NETWORK_PEER_STATE_SAVE,
+  /* ClientAPI peer surface: bounded synchronous round-trips to this actor.
+     The payload embeds reply plumbing first (same ownership scheme as the
+     PEER_BOOK_* round-trips): timeout transfers the request shell to this
+     actor, which applies the op and frees it. The network actor performs
+     the work because the connection manager has no internal locks
+     (docs/concurrency-pass.md) and conn state is this actor's sole-owner
+     domain. */
+  NETWORK_PEER_REMOVE,
+  NETWORK_PEER_CONNECT_CANDIDATES,
+  NETWORK_PEER_SNAPSHOT,
+  /* Health stats: snapshot of the topology_metrics aggregates the
+     network actor just pushed (peer counts, Hebbian average, RPC
+     counters, rate-limit aggregates) for off-thread renderers. */
+  NETWORK_METRICS_SNAPSHOT,
   /* Peer connection messages */
   PEER_SEND_FIND_BLOCK,
   PEER_SEND_STORE_BLOCK,

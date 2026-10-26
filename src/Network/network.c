@@ -89,7 +89,7 @@ uint64_t network_bad_blocks_received_value(void) {
 
 void network_mark_peer_state_dirty(network_t* network) {
   if (network == NULL) return;
-  network->peer_state_dirty = 1;
+  ATOMIC_STORE(&network->peer_state_dirty, 1);
   /* No timer arming here. The save fires on the recurring
      NETWORK_PEER_STATE_SAVE timer (armed in network_create with
      peer_state_save_interval_ms). The earlier implementation armed a
@@ -99,6 +99,438 @@ void network_mark_peer_state_dirty(network_t* network) {
      peer_store was only ever written by the shutdown save and friend
      persistence broke wherever connections churned. The dirty flag is
      still set for the Phase 8 final save. */
+}
+
+
+/* --- ClientAPI peer surface: bounded synchronous round-trips ---
+
+   Same ownership scheme as the peer_book mutation round-trips (peer_book.h):
+   the caller allocates a request shell embedding reply plumbing (mutex/cv)
+   as the first members, deep-copies its inputs into it, and blocks on the
+   reply condvar with a timeout. On timeout the caller marks orphaned under
+   the reply mutex and OWNERSHIP TRANSFERS to the actor: the dispatch
+   handler performs the op, sees orphaned under the mutex and frees the
+   shell after the work (a timed-out removal may still have happened -
+   documented behavior, mirroring peer_book). Never touch conn_mgr or
+   peer_connection_t fields off the actor thread: the connection manager
+   has no internal locks (docs/concurrency-pass.md).
+
+   payload_destroy stays NULL: the request shell is owned by the caller or
+   the orphan scheme, never by the queue (actor_run must not free these
+   payloads; actor_send only ever queues the one message that owns it). The
+   peer_book tradeoff applies: a request still queued when the actor tears
+   down is dropped by message_queue_destroy (leaked, not freed) rather than
+   racing its waiting caller - requests are short-lived and teardown drains
+   HTTP first. */
+
+typedef struct network_peer_request_t {
+  /* Reply plumbing first - the orphan protocol reads it under the mutex. */
+  platform_mutex_t* mutex;
+  platform_condvar_t* cv;
+  int done;
+  int orphaned;
+  /* Request op + inputs (owned copies; the caller's decode-side structures
+     may be stack-destroyed by the time the actor runs, same as peer_book).
+     op is a message_type_e value set by the public request functions. */
+  uint32_t op;
+  node_id_t node_id;
+  bool is_friend;
+  /* When true, a peer already present in the connection manager short-
+     circuits the request to NETWORK_CONNECT_ALREADY (HTTP _connect_to_peer
+     semantics). Wire connect handlers leave it false: they always re-run
+     candidate admission (candidates reuses an already-managered peer and
+     re-dials it). */
+  bool check_already;
+  size_t address_count;
+  peer_address_t* addresses;   /* owned deep copy (host strings strduped) */
+  /* Outputs, filled on the network actor. */
+  int result;                  /* op-specific: removal ok / connect code / 0 */
+  network_peer_snapshot_entry_t* entries;
+  size_t entry_count;
+  /* NETWORK_METRICS_SNAPSHOT output (value copy, filled on the actor). */
+  network_metrics_snapshot_t metrics;
+} network_peer_request_t;
+
+static void _network_peer_request_free(network_peer_request_t* request) {
+  if (request == NULL) return;
+  if (request->addresses != NULL) {
+    for (size_t i = 0; i < request->address_count; i++) {
+      free(request->addresses[i].host);
+    }
+    free(request->addresses);
+  }
+  if (request->entries != NULL) free(request->entries);
+  if (request->mutex != NULL) platform_mutex_destroy(request->mutex);
+  if (request->cv != NULL) platform_condvar_destroy(request->cv);
+  free(request);
+}
+
+static peer_address_t* _network_peer_address_copy(const peer_address_t* src,
+                                                  size_t count) {
+  peer_address_t* out = get_clear_memory(count * sizeof(peer_address_t));
+  if (out == NULL) return NULL;
+  for (size_t i = 0; i < count; i++) {
+    out[i] = src[i];
+    out[i].host = NULL;
+    if (src[i].host != NULL) {
+      out[i].host = strdup(src[i].host);
+      if (out[i].host == NULL) {
+        for (size_t j = 0; j <= i; j++) free(out[j].host);
+        free(out);
+        return NULL;
+      }
+    }
+  }
+  return out;
+}
+
+/* Shared round-trip core. Returns:
+     0  - completed; the caller reads result/outputs and frees the request;
+     1  - send refused (actor destroying); nobody will process the request,
+          the caller frees it itself;
+     -1 - timeout; ownership of the request transferred to the actor, the
+          caller frees NOTHING. */
+static int _network_peer_round_trip(network_t* network,
+                                    network_peer_request_t* request,
+                                    uint32_t timeout_ms) {
+  if (network == NULL || request == NULL) return 1;
+  if (atomic_load(&network->actor.flags) & ACTOR_FLAG_DESTROY) return 1;
+  message_t message;
+  memset(&message, 0, sizeof(message));
+  message.type = request->op;
+  message.payload = request;
+  message.payload_destroy = NULL;
+  actor_send(&network->actor, &message);
+
+  platform_mutex_lock(request->mutex);
+  for (;;) {
+    if (request->done) break;
+    if (platform_condvar_timed_wait(request->cv, request->mutex, timeout_ms) != 0) {
+      if (!request->done) {
+        /* Hand the request to the actor: it may still be queued or mid-op.
+           The actor frees it after processing (ownership transfer). */
+        request->orphaned = 1;
+        platform_mutex_unlock(request->mutex);
+        return -1;
+      }
+      break;
+    }
+  }
+  platform_mutex_unlock(request->mutex);
+  return 0;
+}
+
+/* Fills result and signals the waiting caller, or - if the caller timed out
+   and transferred ownership - frees the shell after the op ran. */
+static void _network_peer_request_complete(network_peer_request_t* request,
+                                           int result) {
+  platform_mutex_lock(request->mutex);
+  if (request->orphaned) {
+    platform_mutex_unlock(request->mutex);
+    _network_peer_request_free(request);
+    return;
+  }
+  request->result = result;
+  request->done = 1;
+  platform_condvar_signal(request->cv);
+  platform_mutex_unlock(request->mutex);
+}
+
+/* Dispatch handlers: run on the network actor thread only. */
+
+static void _network_handle_peer_remove(network_t* network,
+                                        network_peer_request_t* request) {
+  connection_manager_remove(&network->conn_mgr, &request->node_id);
+  _network_peer_request_complete(request, 0);
+}
+
+static void _network_handle_peer_connect(network_t* network,
+                                         network_peer_request_t* request) {
+  int result;
+  /* Look up before dialing only when the caller asked for HTTP-style
+     semantics; the wire handlers always re-run candidate admission, which
+     reuses an already-managered peer and re-dials it. */
+  if (request->check_already &&
+      connection_manager_lookup(&network->conn_mgr, &request->node_id) != NULL) {
+    result = NETWORK_CONNECT_ALREADY;
+  } else {
+    result = (network_connect_peer_candidates(network, &request->node_id,
+                                              request->addresses,
+                                              request->address_count,
+                                              request->is_friend) == 0)
+                 ? NETWORK_CONNECT_STARTED : -1;
+  }
+  _network_peer_request_complete(request, result);
+}
+
+static void _network_handle_peer_snapshot(network_t* network,
+                                          network_peer_request_t* request) {
+  connection_manager_t* mgr = &network->conn_mgr;
+  size_t cap = 0;
+  for (size_t i = 0; i < mgr->peer_count; i++) {
+    if (mgr->peers[i] != NULL) cap++;
+  }
+  if (network->rings != NULL) {
+    for (size_t r = 0; r < network->rings->ring_count; r++) {
+      cap += (size_t)network->rings->rings[r].primary.length;
+      cap += (size_t)network->rings->rings[r].secondary.length;
+    }
+  }
+  if (cap == 0) {
+    _network_peer_request_complete(request, 0);
+    return;
+  }
+  request->entries = get_clear_memory(cap * sizeof(network_peer_snapshot_entry_t));
+  if (request->entries == NULL) {
+    _network_peer_request_complete(request, -1);
+    return;
+  }
+  network_peer_snapshot_entry_t* entries = request->entries;
+  size_t count = 0;
+  for (size_t i = 0; i < mgr->peer_count && count < cap; i++) {
+    peer_connection_t* peer = mgr->peers[i];
+    if (peer == NULL) continue;
+    memcpy(&entries[count].node_id, &peer->remote_node_id, sizeof(node_id_t));
+    entries[count].connected = peer->connected ? 1 : 0;
+    entries[count].is_friend = peer->is_friend ? 1 : 0;
+    entries[count].in_ring = 0;
+    entries[count].rtt_ewma = peer->rtt_ewma;
+    count++;
+  }
+  /* Ring-only gossip nodes, deduped against the conn_mgr entries and each
+     other (the JSON renderer used to emit a node listed in both the
+     primary and the secondary ring twice). */
+  if (network->rings != NULL) {
+    for (size_t r = 0; r < network->rings->ring_count; r++) {
+      const ring_t* ring = &network->rings->rings[r];
+      const vec_node_t* lists[2] = {&ring->primary, &ring->secondary};
+      for (size_t which = 0; which < 2 && count < cap; which++) {
+        const vec_node_t* list = lists[which];
+        for (size_t n = 0; n < (size_t)list->length && count < cap; n++) {
+          net_node_t* node = list->data[n];
+          if (node == NULL) continue;
+          if (connection_manager_lookup(mgr, &node->id) != NULL) continue;
+          bool seen = false;
+          for (size_t e2 = 0; e2 < count; e2++) {
+            if (node_id_equals(&entries[e2].node_id, &node->id)) {
+              seen = true;
+              break;
+            }
+          }
+          if (seen) continue;
+          memcpy(&entries[count].node_id, &node->id, sizeof(node_id_t));
+          entries[count].connected = 0;
+          entries[count].is_friend = 0;
+          entries[count].in_ring = 1;
+          entries[count].rtt_ewma = 0.0;
+          count++;
+        }
+      }
+    }
+  }
+  request->entry_count = count;
+  _network_peer_request_complete(request, 0);
+}
+static void _network_handle_metrics_snapshot(
+
+    network_t* network, network_peer_request_t* request) {
+
+  topology_metrics_t* metrics = network->topology_metrics;
+
+  network_metrics_snapshot_t snap;
+
+  memset(&snap, 0, sizeof(snap));
+
+  if (metrics != NULL) {
+
+    snap.peer_count = metrics->peer_snapshot_count;
+
+    snap.total_connections = metrics->total_connections;
+
+    snap.avg_hebbian_weight = metrics->avg_hebbian_weight;
+
+    memcpy(snap.total_rpc_calls, metrics->total_rpc_calls,
+
+           sizeof(snap.total_rpc_calls));
+
+    memcpy(snap.total_rate_limit_accepted, metrics->total_rate_limit_accepted,
+
+           sizeof(snap.total_rate_limit_accepted));
+
+    memcpy(snap.total_rate_limit_rejected, metrics->total_rate_limit_rejected,
+
+           sizeof(snap.total_rate_limit_rejected));
+
+    memcpy(snap.avg_rate_limit_tokens, metrics->avg_rate_limit_tokens,
+
+           sizeof(snap.avg_rate_limit_tokens));
+
+    memcpy(snap.effective_rate, metrics->effective_rate,
+
+           sizeof(snap.effective_rate));
+
+  }
+
+  request->metrics = snap;
+
+  _network_peer_request_complete(request, 0);
+
+}
+
+/* --- ClientAPI peer surface: public request functions --- */
+
+int network_peer_remove_request(network_t* network, const node_id_t* target_id,
+                                uint32_t timeout_ms) {
+  if (network == NULL || target_id == NULL) return -1;
+  network_peer_request_t* request = get_clear_memory(sizeof(network_peer_request_t));
+  if (request == NULL) return -1;
+  request->mutex = platform_mutex_create();
+  request->cv = platform_condvar_create();
+  if (request->mutex == NULL || request->cv == NULL) {
+    _network_peer_request_free(request);
+    return -1;
+  }
+  request->op = NETWORK_PEER_REMOVE;
+  memcpy(&request->node_id, target_id, sizeof(node_id_t));
+
+  int trip = _network_peer_round_trip(network, request, timeout_ms);
+  if (trip == 1) {
+    _network_peer_request_free(request);
+    return -1;
+  }
+  if (trip != 0) return -1;  /* orphaned to the actor; it applied + freed */
+
+  int result = request->result;
+  _network_peer_request_free(request);
+  return result;
+}
+
+int network_connect_peer_candidates_request(network_t* network,
+                                            const node_id_t* node_id,
+                                            const peer_address_t* addresses,
+                                            size_t address_count,
+                                            bool check_already,
+                                            bool is_friend,
+                                            uint32_t timeout_ms) {
+  if (network == NULL || node_id == NULL) return -1;
+  /* addresses may be empty: an opted-in already-connected check still runs
+     (HTTP _connect_to_peer answered ALREADY before the address check). */
+  network_peer_request_t* request = get_clear_memory(sizeof(network_peer_request_t));
+  if (request == NULL) return -1;
+  request->mutex = platform_mutex_create();
+  request->cv = platform_condvar_create();
+  if (request->mutex == NULL || request->cv == NULL) {
+    _network_peer_request_free(request);
+    return -1;
+  }
+  request->op = NETWORK_PEER_CONNECT_CANDIDATES;
+  memcpy(&request->node_id, node_id, sizeof(node_id_t));
+  request->is_friend = is_friend;
+  request->check_already = check_already;
+  if (addresses != NULL && address_count > 0) {
+    request->addresses = _network_peer_address_copy(addresses, address_count);
+    if (request->addresses == NULL) {
+      _network_peer_request_free(request);
+      return -1;
+    }
+    request->address_count = address_count;
+  }
+
+  int trip = _network_peer_round_trip(network, request, timeout_ms);
+  if (trip == 1) {
+    _network_peer_request_free(request);
+    return -1;
+  }
+  if (trip != 0) return -1;
+
+  int result = request->result;
+  _network_peer_request_free(request);
+  return result;
+}
+
+int network_peer_snapshot_request(network_t* network, uint32_t timeout_ms,
+                                  network_peer_snapshot_entry_t** out_entries,
+                                  size_t* out_count) {
+  if (network == NULL || out_entries == NULL || out_count == NULL) return -1;
+  *out_entries = NULL;
+  *out_count = 0;
+  network_peer_request_t* request = get_clear_memory(sizeof(network_peer_request_t));
+  if (request == NULL) return -1;
+  request->mutex = platform_mutex_create();
+  request->cv = platform_condvar_create();
+  if (request->mutex == NULL || request->cv == NULL) {
+    _network_peer_request_free(request);
+    return -1;
+  }
+  request->op = NETWORK_PEER_SNAPSHOT;
+
+  int trip = _network_peer_round_trip(network, request, timeout_ms);
+  if (trip != 0) {
+    if (trip == 1) _network_peer_request_free(request);
+    return -1;  /* timeout: the actor owns (and frees) the snapshot array */
+  }
+  if (request->result != 0) {
+    _network_peer_request_free(request);
+    return -1;
+  }
+  *out_entries = request->entries;
+  *out_count = request->entry_count;
+  request->entries = NULL;  /* ownership moved to the caller */
+  _network_peer_request_free(request);
+  return 0;
+}
+
+void network_peer_snapshot_free(network_peer_snapshot_entry_t* entries,
+                                size_t count) {
+  (void)count;
+  if (entries != NULL) free(entries);
+}
+int network_metrics_snapshot_request(network_t* network, uint32_t timeout_ms,
+
+                                     network_metrics_snapshot_t* out) {
+
+  if (network == NULL || out == NULL) return -1;
+
+  network_peer_request_t* request = get_clear_memory(sizeof(network_peer_request_t));
+
+  if (request == NULL) return -1;
+
+  request->mutex = platform_mutex_create();
+
+  request->cv = platform_condvar_create();
+
+  if (request->mutex == NULL || request->cv == NULL) {
+
+    _network_peer_request_free(request);
+
+    return -1;
+
+  }
+
+  request->op = NETWORK_METRICS_SNAPSHOT;
+
+
+
+  int trip = _network_peer_round_trip(network, request, timeout_ms);
+
+  if (trip == 1) {
+
+    _network_peer_request_free(request);
+
+    return -1;
+
+  }
+
+  if (trip != 0) return -1;  /* orphaned to the actor; it applied + freed */
+
+
+
+  *out = request->metrics;
+
+  _network_peer_request_free(request);
+
+  return request->result;
+
 }
 
 bool network_secure_mode(const network_t* network) {
@@ -1152,6 +1584,9 @@ network_t* network_create(authority_t* authority, block_cache_t* block_cache,
   eabf_table_set_max_count(&network->eabf_table, 256);
   network->log = NULL;
   network->topology_metrics = topology_metrics_create(pool);
+  if (network->topology_metrics != NULL) {
+    network->topology_metrics->network = network; /* create-time back-pointer */
+  }
   /* Wire the bad-block tunables from config_t into the connection manager's
    * hebbian config. The other hebbian_config fields keep their
    * hebbian_config_init defaults; only the two bad-block fields are
@@ -1390,10 +1825,10 @@ void network_destroy(network_t* network) {
      offsd's _shutdown stops it before network_destroy). See the
      peer_book.h invariant. */
   if (network->authority != NULL && network->authority->peer_store_path != NULL &&
-      network->peer_state_dirty &&
+      ATOMIC_LOAD(&network->peer_state_dirty) &&
       (network->peer_book == NULL ||
        !atomic_load(&network->peer_book->started))) {
-    network->peer_state_dirty = 0;
+    ATOMIC_STORE(&network->peer_state_dirty, 0);
     authority_save_peers(network->authority, network);
   }
   if (atomic_load(&network->gossip_timer_id) != 0) {
@@ -6128,7 +6563,7 @@ void network_dispatch(void* state, message_t* msg) {
                                       save_snapshot->b58_friend_count,
                                       save_snapshot->managed_endpoints,
                                       save_snapshot->managed_count);
-        network->peer_state_dirty = 0;
+        ATOMIC_STORE(&network->peer_state_dirty, 0);
       }
       break;
     }
@@ -6157,20 +6592,28 @@ void network_dispatch(void* state, message_t* msg) {
         }
       }
 
-      /* Collect ring topology entries */
+      /* Collect ring topology entries through the topology-metrics actor's
+         own API: topology_metrics_update_rings owns ring_entries and its
+         capacity growth (doubling when the count exceeds it). The previous
+         inline version wrote ring_entries/ring_entry_capacity/count directly,
+         bypassing the actor boundary and its growth logic - a ring set
+         larger than the seeded 64 overflowed the entry buffer. */
       if (network->rings != NULL) {
-        size_t ring_capacity = network->topology_metrics->ring_entry_capacity;
-        if (ring_capacity == 0) {
-          ring_capacity = 64;
-          network->topology_metrics->ring_entries = get_clear_memory(
-            ring_capacity * sizeof(ring_topology_entry_t));
-          network->topology_metrics->ring_entry_capacity = ring_capacity;
+        size_t ring_max = 0;
+        for (size_t ring_index = 0; ring_index < network->rings->ring_count; ring_index++) {
+          ring_max += network->rings->rings[ring_index].primary.length;
         }
-        size_t ring_count = ring_set_collect_topology(
-          network->rings,
-          network->topology_metrics->ring_entries,
-          ring_capacity);
-        network->topology_metrics->ring_entry_count = ring_count;
+        if (ring_max > 0) {
+          ring_topology_entry_t* ring_snapshot = get_clear_memory(
+            ring_max * sizeof(ring_topology_entry_t));
+          if (ring_snapshot != NULL) {
+            size_t ring_count = ring_set_collect_topology(
+              network->rings, ring_snapshot, ring_max);
+            topology_metrics_update_rings(network->topology_metrics,
+                                          ring_snapshot, ring_count);
+            free(ring_snapshot);
+          }
+        }
       }
 
       /* Push to metrics server if configured */
@@ -7375,6 +7818,18 @@ void network_dispatch(void* state, message_t* msg) {
       }
       break;
     }
+    case NETWORK_PEER_REMOVE:
+      _network_handle_peer_remove(network, (network_peer_request_t*)msg->payload);
+      break;
+    case NETWORK_PEER_CONNECT_CANDIDATES:
+      _network_handle_peer_connect(network, (network_peer_request_t*)msg->payload);
+      break;
+    case NETWORK_PEER_SNAPSHOT:
+      _network_handle_peer_snapshot(network, (network_peer_request_t*)msg->payload);
+      break;
+    case NETWORK_METRICS_SNAPSHOT:
+      _network_handle_metrics_snapshot(network, (network_peer_request_t*)msg->payload);
+      break;
     case NETWORK_PEER_STATE_SAVE: {
       /* Recurring mid-run save tick (peer_state_save_interval_ms). Marks from
          the gossip tick (Hebbian decay) and explicit mutations (friend adds)
@@ -7386,12 +7841,12 @@ void network_dispatch(void* state, message_t* msg) {
          authority_save_peers in offs_node_stop remains authoritative (it
          runs after the pool is stopped, where direct list access is legal
          per the invariant in peer_book.h). */
-      if (network->authority != NULL && network->peer_state_dirty) {
+      if (network->authority != NULL && ATOMIC_LOAD(&network->peer_state_dirty)) {
         if (network->peer_book == NULL) {
           /* No peer-book actor (list-only tests on a shell network_t): legacy
              direct save, legal because no peer-book actor exists to race. */
           authority_save_peers(network->authority, network);
-          network->peer_state_dirty = 0;
+          ATOMIC_STORE(&network->peer_state_dirty, 0);
         } else {
           /* Send failure (actor already tearing down): leave the flag set and
              skip the direct save — a concurrent PEER_BOOK_MUTATION could still

@@ -122,23 +122,27 @@ static int _decode_peer_info_body(http_request_t* request, peer_info_t* info) {
 /* --- Connect to peer and return status code --- */
 
 static int _connect_to_peer(offs_node_t* node, peer_info_t* info) {
-  /* Check if already connected */
-  if (connection_manager_lookup(&node->network->conn_mgr, &info->node_id) != NULL) {
-    return CONNECT_STATUS_ALREADY;
-  }
-
   if (info->address_count == 0 || info->addresses == NULL) {
     return CONNECT_STATUS_FAILED;
   }
 
-  /* Try all candidate addresses in priority order (HOST -> SRFLX -> DIRECT ->
-     RELAY). network_connect_peer_candidates handles the fallback chain and
-     relay-mediated rendezvous; the old code only looked for PEER_ADDR_DIRECT
-     which peer_info_from_node never produces, so /peer/connect always failed. */
-  int rc = network_connect_peer_candidates(node->network, &info->node_id,
-                                            info->addresses,
-                                            info->address_count, false);
-  if (rc != 0) {
+  /* Round-trip to the network actor: it owns the connection manager (no
+     locks of its own), so the already-connected check, candidate admission
+     and QUIC starts all happen on the actor's thread - in the same
+     order the old inline code ran them (already-connected before the
+     address check, so an already-connected peer with no addresses still
+     answers ALREADY). An empty address list rides along: the actor
+     answers ALREADY first, or fails the candidate start, exactly as
+     before. check_already=true keeps the HTTP handler semantics; the
+     wire handlers pass false. */
+  int rc = network_connect_peer_candidates_request(
+      node->network, &info->node_id,
+      info->addresses, info->address_count, false, true,
+      NETWORK_API_TIMEOUT_MS);
+  if (rc == NETWORK_CONNECT_ALREADY) {
+    return CONNECT_STATUS_ALREADY;
+  }
+  if (rc != NETWORK_CONNECT_STARTED) {
     return CONNECT_STATUS_FAILED;
   }
 
@@ -346,56 +350,35 @@ static void _peer_list_handler(http_request_t* request, http_response_t* respons
   if (_check_auth(request, response) != 0) return;
 
   network_t* network = ctx->node->network;
-  connection_manager_t* mgr = &network->conn_mgr;
+
+  /* Snapshot conn_mgr peers + ring-only gossip nodes on the network actor
+     (bounded round-trip). The network actor is the conn state's sole owner
+     (connection_manager has no internal locks); these are plain value
+     copies, safe to iterate and render here. */
+  network_peer_snapshot_entry_t* snapshot = NULL;
+  size_t snapshot_count = 0;
+  if (network_peer_snapshot_request(network, NETWORK_API_TIMEOUT_MS,
+                                    &snapshot, &snapshot_count) != 0) {
+    http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_end(response);
+    return;
+  }
 
   cJSON* arr = cJSON_CreateArray();
-
-  /* Connection-manager peers (directly connected). */
-  for (size_t index = 0; index < mgr->peer_count; index++) {
-    peer_connection_t* peer = mgr->peers[index];
-    if (!peer->connected) continue;
+  for (size_t index = 0; index < snapshot_count; index++) {
+    network_peer_snapshot_entry_t* snap = &snapshot[index];
+    /* Preserve the old renderer semantics: connected conn-mgr peers plus
+       ring-only gossip nodes; a conn-mgr entry that is not connected was
+       not listed (and a ring duplicate of it neither). */
+    if (!snap->connected && !snap->in_ring) continue;
     cJSON* entry = cJSON_CreateObject();
-    cJSON_AddStringToObject(entry, "node_id", peer->remote_node_id.str);
-    cJSON_AddBoolToObject(entry, "connected", true);
-    cJSON_AddBoolToObject(entry, "is_friend", peer->is_friend);
-    cJSON_AddBoolToObject(entry, "in_ring", false);
+    cJSON_AddStringToObject(entry, "node_id", snap->node_id.str);
+    cJSON_AddBoolToObject(entry, "connected", snap->connected != 0);
+    cJSON_AddBoolToObject(entry, "is_friend", snap->is_friend != 0);
+    cJSON_AddBoolToObject(entry, "in_ring", snap->in_ring != 0);
     cJSON_AddItemToArray(arr, entry);
   }
-
-  /* Ring-set peers (gossip-discovered, may not have a live connection yet).
-     These are the peers the node knows about via gossip/FIND_NODE but has
-     not necessarily established a direct QUIC connection to. */
-  ring_set_t* rings = network->rings;
-  if (rings != NULL) {
-    for (size_t ring_idx = 0; ring_idx < rings->ring_count; ring_idx++) {
-      ring_t* ring = &rings->rings[ring_idx];
-      /* Primary members */
-      for (int node_idx = 0; node_idx < ring->primary.length; node_idx++) {
-        net_node_t* node = ring->primary.data[node_idx];
-        if (node == NULL) continue;
-        /* Skip if already in the connection manager (dedup) */
-        if (connection_manager_lookup(mgr, &node->id) != NULL) continue;
-        cJSON* entry = cJSON_CreateObject();
-        cJSON_AddStringToObject(entry, "node_id", node->id.str);
-        cJSON_AddBoolToObject(entry, "connected", false);
-        cJSON_AddBoolToObject(entry, "is_friend", false);
-        cJSON_AddBoolToObject(entry, "in_ring", true);
-        cJSON_AddItemToArray(arr, entry);
-      }
-      /* Secondary members */
-      for (int node_idx = 0; node_idx < ring->secondary.length; node_idx++) {
-        net_node_t* node = ring->secondary.data[node_idx];
-        if (node == NULL) continue;
-        if (connection_manager_lookup(mgr, &node->id) != NULL) continue;
-        cJSON* entry = cJSON_CreateObject();
-        cJSON_AddStringToObject(entry, "node_id", node->id.str);
-        cJSON_AddBoolToObject(entry, "connected", false);
-        cJSON_AddBoolToObject(entry, "is_friend", false);
-        cJSON_AddBoolToObject(entry, "in_ring", true);
-        cJSON_AddItemToArray(arr, entry);
-      }
-    }
-  }
+  network_peer_snapshot_free(snapshot, snapshot_count);
 
   char* json_str = cJSON_Print(arr);
   cJSON_Delete(arr);
@@ -518,8 +501,10 @@ static void _friend_remove_handler(http_request_t* request, http_response_t* res
     return;
   }
 
-  /* Remove from connection_manager if connected */
-  connection_manager_remove(&ctx->node->network->conn_mgr, &target_id);
+  /* Remove from the connection manager on the network actor (bounded
+     round-trip; conn state has no locks of its own). */
+  network_peer_remove_request(ctx->node->network, &target_id,
+                              NETWORK_API_TIMEOUT_MS);
 
   /* Persist via the debounced dirty flag — same mechanism as the wire handlers. */
   network_mark_peer_state_dirty(ctx->node->network);
@@ -543,8 +528,6 @@ static void _friend_list_handler(http_request_t* request, http_response_t* respo
 
   if (_check_auth(request, response) != 0) return;
 
-  connection_manager_t* mgr = &ctx->node->network->conn_mgr;
-
   /* Snapshot the friend list through the peer-book actor (deep-copied
      peer_info_t entries, owned by this handler). */
   peer_info_t** friends = NULL;
@@ -556,16 +539,35 @@ static void _friend_list_handler(http_request_t* request, http_response_t* respo
     return;
   }
 
+  /* Connected flags come from a network-actor snapshot: conn state is the
+     network actor's sole-owner domain (no locks of its own), so never read
+     peer_connection_t fields off it directly. */
+  network_peer_snapshot_entry_t* conns = NULL;
+  size_t conns_count = 0;
+  if (network_peer_snapshot_request(ctx->node->network, NETWORK_API_TIMEOUT_MS,
+                                    &conns, &conns_count) != 0) {
+    peer_book_free_peer_info_array(friends, friend_count);
+    http_response_set_status(response, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    http_response_end(response);
+    return;
+  }
+
   cJSON* arr = cJSON_CreateArray();
   for (size_t index = 0; index < friend_count; index++) {
     peer_info_t* friend_peer = friends[index];
-    peer_connection_t* conn = connection_manager_lookup(mgr, &friend_peer->node_id);
-    bool connected = (conn != NULL && conn->connected);
+    bool connected = false;
+    for (size_t conn_idx = 0; conn_idx < conns_count; conn_idx++) {
+      if (node_id_equals(&conns[conn_idx].node_id, &friend_peer->node_id)) {
+        connected = conns[conn_idx].connected != 0;
+        break;
+      }
+    }
     cJSON* entry = cJSON_CreateObject();
     cJSON_AddStringToObject(entry, "node_id", friend_peer->node_id.str);
     cJSON_AddBoolToObject(entry, "connected", connected);
     cJSON_AddItemToArray(arr, entry);
   }
+  network_peer_snapshot_free(conns, conns_count);
   peer_book_free_peer_info_array(friends, friend_count);
 
   char* json_str = cJSON_Print(arr);

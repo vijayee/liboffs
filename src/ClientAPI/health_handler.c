@@ -3,6 +3,7 @@
 //
 
 #include "health_handler.h"
+#include "../Network/network.h"
 #include "../Platform/platform_time.h"
 #include <cJSON.h>
 #include <string.h>
@@ -68,24 +69,36 @@ health_data_t health_data_collect(const health_context_t* ctx) {
     data.node_id_str[sizeof(data.node_id_str) - 1] = '\0';
   }
 
-  /* Copy topology metrics if available */
-  if (ctx != NULL && ctx->topology_metrics != NULL) {
-    topology_metrics_t* metrics = ctx->topology_metrics;
-    data.peer_count = metrics->peer_snapshot_count;
-    data.total_connections = metrics->total_connections;
-    data.avg_hebbian_weight = metrics->avg_hebbian_weight;
-    memcpy(data.rate_limit_accepted, metrics->total_rate_limit_accepted, sizeof(data.rate_limit_accepted));
-    memcpy(data.rate_limit_rejected, metrics->total_rate_limit_rejected, sizeof(data.rate_limit_rejected));
-    memcpy(data.avg_rate_limit_tokens, metrics->avg_rate_limit_tokens, sizeof(data.avg_rate_limit_tokens));
-    memcpy(data.effective_rate, metrics->effective_rate, sizeof(data.effective_rate));
-    memcpy(data.total_rpc_calls, metrics->total_rpc_calls, sizeof(data.total_rpc_calls));
+  /* Topology metrics are pushed/stored by the network actor (peer/ring
+     update paths run there; topology_metrics_t has no locks of its own):
+     snapshot once through a bounded round-trip instead of reading the
+     struct off-thread. On round-trip failure the fields stay zeroed. */
+  if (ctx != NULL && ctx->topology_metrics != NULL &&
+      ctx->topology_metrics->network != NULL) {
+    network_metrics_snapshot_t snap;
+    if (network_metrics_snapshot_request(ctx->topology_metrics->network,
+                                         NETWORK_API_TIMEOUT_MS, &snap) == 0) {
+      data.peer_count = snap.peer_count;
+      data.total_connections = snap.total_connections;
+      data.avg_hebbian_weight = snap.avg_hebbian_weight;
+      memcpy(data.rate_limit_accepted, snap.total_rate_limit_accepted,
+             sizeof(data.rate_limit_accepted));
+      memcpy(data.rate_limit_rejected, snap.total_rate_limit_rejected,
+             sizeof(data.rate_limit_rejected));
+      memcpy(data.avg_rate_limit_tokens, snap.avg_rate_limit_tokens,
+             sizeof(data.avg_rate_limit_tokens));
+      memcpy(data.effective_rate, snap.effective_rate,
+             sizeof(data.effective_rate));
+      memcpy(data.total_rpc_calls, snap.total_rpc_calls,
+             sizeof(data.total_rpc_calls));
+    }
   }
 
   /* Copy block cache stats if available */
   if (ctx != NULL && ctx->block_cache != NULL) {
     block_cache_t* cache = ctx->block_cache;
-    data.block_cache_current_bytes = cache->current_bytes;
-    data.block_cache_max_bytes = cache->max_capacity_bytes;
+    data.block_cache_current_bytes = ATOMIC_LOAD(&cache->current_bytes);
+    data.block_cache_max_bytes = ATOMIC_LOAD(&cache->max_capacity_bytes);
     data.block_cache_block_count = block_cache_count(cache);
   }
 

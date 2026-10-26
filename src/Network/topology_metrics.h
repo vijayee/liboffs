@@ -21,6 +21,13 @@ typedef struct ring_topology_entry_t {
   bool is_active_connection;
 } ring_topology_entry_t;
 
+/* Create-time back-pointer to the owning network (immutable: set
+   once in network_create before any actor runs; read-only field,
+   same class as the config/actor-address reads the actor-boundary
+   rule blesses). Lets health snapshots ride the network actor's
+   round-trip machinery without a separate health context field. */
+typedef struct network_t network_t;
+
 typedef struct topology_metrics_t {
   actor_t actor;
 
@@ -42,6 +49,7 @@ typedef struct topology_metrics_t {
   float avg_rate_limit_tokens[RPC_TYPE_COUNT];
   float effective_rate[RPC_TYPE_COUNT];  // Inverse-scaled effective rate at current network size
 
+  struct network_t* network;   /* create-time back-pointer, immutable */
   uint64_t collect_interval_ms;
 } topology_metrics_t;
 

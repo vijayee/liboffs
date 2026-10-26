@@ -8,6 +8,8 @@ extern "C" {
 #include "../src/Configuration/config.h"
 #include "../src/Timer/timer_actor.h"
 #include "../src/Network/topology_metrics.h"
+#include "../src/Network/authority.h"
+#include "../src/Network/network.h"
 #include "../src/Platform/platform_time.h"
 }
 
@@ -95,8 +97,38 @@ TEST(HealthHandler, CollectTopologyMetrics) {
   ASSERT_NE(pool, nullptr);
   scheduler_pool_start(pool);
 
-  topology_metrics_t* metrics = topology_metrics_create(pool);
-  ASSERT_NE(metrics, nullptr);
+  timer_actor_t* timer = timer_actor_create(pool);
+  ASSERT_NE(timer, nullptr);
+
+  config_t config = config_default();
+  authority_t* authority = authority_create(&config);
+  ASSERT_NE(authority, nullptr);
+
+  block_cache_t* bc = block_cache_create(config, (char*)"test_health_topo_bc",
+      standard, timer, pool, NULL, 1024 * 1024);
+  ASSERT_NE(bc, nullptr);
+
+  /* The topology aggregates are read through a network-actor round-trip
+     (the peer/ring update paths run on that actor thread, and the struct
+     has no locks of its own), so the fixture must drive values through a
+     real network's own topology_metrics back-pointer. */
+  network_t* network = network_create(authority, bc, timer, pool, &config);
+  if (network == nullptr || network->topology_metrics == nullptr) {
+    if (network != nullptr) network_destroy(network);
+    block_cache_destroy(bc);
+    timer_actor_destroy(timer);
+    authority_destroy(authority);
+    scheduler_pool_wait_for_idle(pool);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
+    GTEST_SKIP() << "network init failed";
+  }
+
+  /* Fixture setup runs before any request is queued (single test thread;
+     wait_for_idle proves no dispatch is in flight), so the direct writes
+     below are owner-side, not a cross-actor access. */
+  scheduler_pool_wait_for_idle(pool);
+  topology_metrics_t* metrics = network->topology_metrics;
   metrics->peer_snapshot_count = 3;
   metrics->total_connections = 7;
   metrics->avg_hebbian_weight = 0.75f;
@@ -116,7 +148,11 @@ TEST(HealthHandler, CollectTopologyMetrics) {
   EXPECT_EQ(data.rate_limit_rejected[0], 5u);
   EXPECT_EQ(data.total_rpc_calls[0], 42u);
 
-  topology_metrics_destroy(metrics);
+  network_destroy(network);
+  block_cache_destroy(bc);
+  timer_actor_destroy(timer);
+  authority_destroy(authority);
+  scheduler_pool_wait_for_idle(pool);
   scheduler_pool_stop(pool);
   scheduler_pool_destroy(pool);
 }
