@@ -534,13 +534,13 @@ void stream_deactivate(stream_t* stream, async_error_t* error) {
      deactivate owns the error/close terminal events for the stream's whole
      life. A no-op re-deactivate must still release the caller-supplied
      error: callers transfer ownership of it to this call. */
-  if (stream->is_deactivated) {
+  if (ATOMIC_LOAD(&stream->is_deactivated)) {
     if (error != NULL) {
       error_destroy(error);
     }
     return;
   }
-  stream->is_deactivated = 1;
+  ATOMIC_STORE(&stream->is_deactivated, 1);
   {
     /* Diagnostic (OFFS-254 hunt): name the deactivation source at runtime —
        "Stream error" surfaces here first. Remove with the other hunt
@@ -839,7 +839,7 @@ void readable_push_stream_pipe(stream_t* rs, stream_t* ws) {
 }
 
 void _readable_push_stream_on_pipe(stream_t* rs, stream_t* ws) {
-  if (rs->is_deactivated == 1) {
+  if (ATOMIC_LOAD(&rs->is_deactivated) == 1) {
     stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (rs->pipe_notifiers == NULL) {
@@ -906,7 +906,7 @@ void _writeable_push_stream_on_piped(stream_t* ws, stream_t* rs) {
     log_error("Invalid writeable push stream being piped");
     return;
   }
-  if (ws->is_deactivated == 1) {
+  if (ATOMIC_LOAD(&ws->is_deactivated) == 1) {
     stream_notify(ws, error_event, OFFS_ERROR_TRANSFER("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (ws->pipe_notifiers == NULL) {
@@ -967,7 +967,7 @@ void _writeable_push_stream_error_notify(stream_t* stream, void* payload) {
 
 void _writeable_push_stream_close_notify(stream_t* stream, void* payload) {
   (void)payload;
-  if (!stream->is_deactivated) {
+  if (!ATOMIC_LOAD(&stream->is_deactivated)) {
     stream_close(stream);
   }
 }
@@ -1001,7 +1001,7 @@ void _writeable_pull_stream_on_pipe(stream_t* ws, stream_t* rs) {
     log_error("Invalid readable pull stream being piped");
     return;
   }
-  if (ws->is_deactivated == 1) {
+  if (ATOMIC_LOAD(&ws->is_deactivated) == 1) {
     stream_notify(ws, error_event, OFFS_ERROR_TRANSFER("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (ws->pipe_notifiers == NULL) {
@@ -1052,7 +1052,7 @@ void _readable_pull_stream_on_piped(stream_t* rs, stream_t* ws) {
     log_error("Invalid writeable push stream being piped");
     return;
   }
-  if (rs->is_deactivated == 1) {
+  if (ATOMIC_LOAD(&rs->is_deactivated) == 1) {
     stream_notify(rs, error_event, OFFS_ERROR_TRANSFER("Stream has been destroyed"), (void (*)(void*))error_destroy);
   } else {
     if (rs->pipe_notifiers == NULL) {

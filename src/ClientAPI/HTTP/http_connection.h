@@ -58,7 +58,7 @@ typedef struct http_connection_t {
   uint8_t headers_complete;
   uint8_t request_complete;
   uint8_t is_ssl;
-  uint8_t piped_pending;
+  ATOMIC(uint8_t) piped_pending;
   uint8_t is_closing;
   http_route_t* streaming_route;
   /* Slowloris defense: one-shot idle timer armed on the I/O loop. Fires after

@@ -285,7 +285,7 @@ static void _start_tuple_cache_lookup(readable_off_stream_t* stream, tuple_t* tu
 
 /* Process next tuple from the queue if available. Called after a tuple finishes processing. */
 static void _drain_tuple_queue(readable_off_stream_t* stream) {
-  if (stream->stream.is_deactivated || stream->pending_tuple != NULL) {
+  if (ATOMIC_LOAD(&stream->stream.is_deactivated) || stream->pending_tuple != NULL) {
     return;
   }
   if (stream->tuple_queue != NULL) {
@@ -304,7 +304,7 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
   switch (msg->type) {
     case OFF_STREAM_WRITE: {
       tuple_t* tuple = (tuple_t*)msg->payload;
-      if (stream->stream.is_deactivated) {
+      if (ATOMIC_LOAD(&stream->stream.is_deactivated)) {
         DESTROY(tuple, tuple);
         msg->payload = NULL;
         break;
@@ -335,7 +335,7 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
     }
     case TUPLE_CACHE_GET_RESULT: {
       tuple_cache_get_result_payload_t* result = (tuple_cache_get_result_payload_t*)msg->payload;
-      if (stream->stream.is_deactivated) {
+      if (ATOMIC_LOAD(&stream->stream.is_deactivated)) {
         if (result->value != NULL) {
           DESTROY(result->value, buffer);
         }
@@ -364,7 +364,7 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
     }
     case CACHE_GET_RESULT: {
       cache_get_result_payload_t* result = (cache_get_result_payload_t*)msg->payload;
-      if (stream->stream.is_deactivated) {
+      if (ATOMIC_LOAD(&stream->stream.is_deactivated)) {
         if (result->block != NULL) {
           DESTROY(result->block, block);
           result->block = NULL;
@@ -534,7 +534,7 @@ void readable_off_stream_dispatch(void* state, message_t* msg) {
       break;
     }
     case CLOSE_STREAM: {
-      if (!stream->stream.is_deactivated) {
+      if (!ATOMIC_LOAD(&stream->stream.is_deactivated)) {
         _close_stream(stream);
       }
       break;
@@ -576,14 +576,14 @@ static void _close_stream(readable_off_stream_t* stream) {
   _clear_stale_fetches(stream);
   stream->closed = 1;
   stream_notify((stream_t*)stream, close_event, NULL, NULL);
-  stream->stream.is_deactivated = 1;
+  ATOMIC_STORE(&stream->stream.is_deactivated, 1);
 }
 
 void readable_off_stream_request_close(readable_off_stream_t* stream) {
   if (stream == NULL) {
     return;
   }
-  if (stream->stream.is_deactivated || stream->closed) {
+  if (ATOMIC_LOAD(&stream->stream.is_deactivated) || stream->closed) {
     return;
   }
   _close_stream(stream);

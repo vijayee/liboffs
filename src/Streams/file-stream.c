@@ -45,7 +45,7 @@ void readable_push_file_stream_destroy(readable_push_file_stream_t* stream) {
 }
 
 void readable_push_file_stream_push(readable_push_file_stream_t* stream) {
-  if (stream->stream.is_deactivated == 1 || stream->file == NULL) {
+  if (ATOMIC_LOAD(&stream->stream.is_deactivated) == 1 || stream->file == NULL) {
     return;
   }
   int32_t diff = stream->file_size - stream->cursor;
@@ -79,7 +79,7 @@ void readable_push_file_stream_push(readable_push_file_stream_t* stream) {
 }
 
 void readable_push_file_stream_read(readable_push_file_stream_t* stream, size_t size, void* ctx, void (*cb)(void*, void*)) {
-  if (stream->stream.is_deactivated == 1) {
+  if (ATOMIC_LOAD(&stream->stream.is_deactivated) == 1) {
     stream_notify((stream_t*)stream, error_event, OFFS_ERROR_TRANSFER("Stream is already destroyed"), (void (*)(void*))error_destroy);
   } else {
     int32_t diff = stream->file_size - stream->cursor;
@@ -102,9 +102,9 @@ void readable_push_file_stream_read(readable_push_file_stream_t* stream, size_t 
 }
 
 void readable_push_file_stream_close(readable_push_file_stream_t* stream) {
-  uint8_t deactivated = stream->stream.is_deactivated;
+  uint8_t deactivated = ATOMIC_LOAD(&stream->stream.is_deactivated);
   if (deactivated == 0) {
-    stream->stream.is_deactivated = 1;
+    ATOMIC_STORE(&stream->stream.is_deactivated, 1);
     stream->stream.is_piped = 0;
     stream_unsubscribe_pipe_notifiers((stream_t*) stream);
     stream_notify((stream_t*) stream, close_event, NULL, NULL);
@@ -138,9 +138,9 @@ void writeable_push_file_stream_destroy(writeable_push_file_stream_t* stream) {
   }
 }
 void writeable_push_file_stream_close(writeable_push_file_stream_t* stream) {
-  uint8_t deactivated = stream->stream.is_deactivated;
+  uint8_t deactivated = ATOMIC_LOAD(&stream->stream.is_deactivated);
   if (deactivated == 0) {
-    stream->stream.is_deactivated = 1;
+    ATOMIC_STORE(&stream->stream.is_deactivated, 1);
     stream->stream.is_piped = 0;
     stream_unsubscribe_pipe_notifiers((stream_t*) stream);
     stream_notify((stream_t*) stream, close_event, NULL, NULL);
@@ -183,7 +183,7 @@ void readable_pull_file_stream_destroy(readable_pull_file_stream_t* stream) {
 }
 
 void _readable_pull_file_stream_on_pull(readable_pull_file_stream_t* stream) {
-  if (stream->stream.is_deactivated == 1) {
+  if (ATOMIC_LOAD(&stream->stream.is_deactivated) == 1) {
     return;
   }
   int32_t diff = stream->file_size - stream->cursor;
@@ -215,9 +215,9 @@ void _readable_pull_file_stream_on_pull(readable_pull_file_stream_t* stream) {
 }
 
 void readable_pull_file_stream_close(readable_pull_file_stream_t* stream) {
-  uint8_t deactivated = stream->stream.is_deactivated;
+  uint8_t deactivated = ATOMIC_LOAD(&stream->stream.is_deactivated);
   if (deactivated == 0) {
-    stream->stream.is_deactivated = 1;
+    ATOMIC_STORE(&stream->stream.is_deactivated, 1);
     stream->stream.is_piped = 0;
     stream_unsubscribe_pipe_notifiers((stream_t*) stream);
     stream_notify((stream_t*) stream, close_event, NULL, NULL);
@@ -251,9 +251,9 @@ void writeable_pull_file_stream_destroy(writeable_pull_file_stream_t* stream) {
   }
 }
 void writeable_pull_file_stream_close(writeable_pull_file_stream_t* stream) {
-  uint8_t deactivated = stream->stream.is_deactivated;
+  uint8_t deactivated = ATOMIC_LOAD(&stream->stream.is_deactivated);
   if (deactivated == 0) {
-    stream->stream.is_deactivated = 1;
+    ATOMIC_STORE(&stream->stream.is_deactivated, 1);
     stream->stream.is_piped = 0;
     stream_unsubscribe_pipe_notifiers((stream_t*) stream);
     stream_notify((stream_t*) stream, close_event, NULL, NULL);

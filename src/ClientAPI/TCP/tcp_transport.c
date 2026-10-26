@@ -227,6 +227,18 @@ void tcp_transport_destroy(tcp_transport_t* transport) {
     platform_socket_destroy(transport->listen_sock);
     transport->listen_sock = NULL;
   }
+  /* Quiesce the connection actors BEFORE mutating is_closing/sock/transport:
+     those are plain (non-ATOMIC) fields the connection dispatch reads, and a
+     worker could still be mid-dispatch of an already-delivered message while
+     this loop runs. ACTOR_FLAG_DESTROY stops actor_run from dispatching
+     further messages; wait_for_idle then proves no dispatch is in flight. */
+  for (int i = 0; i < transport->connections.length; i++) {
+    tcp_connection_t* conn = transport->connections.data[i];
+    atomic_fetch_or(&conn->actor.flags, ACTOR_FLAG_DESTROY);
+  }
+  if (!atomic_load_explicit(&transport->pool->terminate, memory_order_acquire)) {
+    scheduler_pool_wait_for_idle(transport->pool);
+  }
   for (int i = 0; i < transport->connections.length; i++) {
     tcp_connection_t* conn = transport->connections.data[i];
     conn->is_closing = 1;
@@ -235,13 +247,6 @@ void tcp_transport_destroy(tcp_transport_t* transport) {
       conn->sock = NULL;
     }
     conn->transport = NULL;
-  }
-  for (int i = 0; i < transport->connections.length; i++) {
-    tcp_connection_t* conn = transport->connections.data[i];
-    atomic_fetch_or(&conn->actor.flags, ACTOR_FLAG_DESTROY);
-  }
-  if (!atomic_load_explicit(&transport->pool->terminate, memory_order_acquire)) {
-    scheduler_pool_wait_for_idle(transport->pool);
   }
   for (int i = transport->connections.length - 1; i >= 0; i--) {
     tcp_connection_t* conn = transport->connections.data[i];

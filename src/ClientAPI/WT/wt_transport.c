@@ -342,14 +342,8 @@ void wt_transport_destroy(wt_transport_t* transport) {
     wt_transport_stop(transport);
   }
 
-  platform_mutex_lock(transport->conn_lock);
-  for (int i = 0; i < transport->connections.length; i++) {
-    wt_connection_t* conn = transport->connections.data[i];
-    conn->is_closing = 1;
-    conn->transport = NULL;
-  }
-  platform_mutex_unlock(transport->conn_lock);
-
+  /* Quiesce the connection actors BEFORE mutating is_closing/transport (plain
+     fields read by the connection dispatch); see tcp_transport.c. */
   for (int i = 0; i < transport->connections.length; i++) {
     wt_connection_t* conn = transport->connections.data[i];
     atomic_fetch_or(&conn->actor.flags, ACTOR_FLAG_DESTROY);
@@ -357,6 +351,13 @@ void wt_transport_destroy(wt_transport_t* transport) {
   if (!atomic_load_explicit(&transport->pool->terminate, memory_order_acquire)) {
     scheduler_pool_wait_for_idle(transport->pool);
   }
+  platform_mutex_lock(transport->conn_lock);
+  for (int i = 0; i < transport->connections.length; i++) {
+    wt_connection_t* conn = transport->connections.data[i];
+    conn->is_closing = 1;
+    conn->transport = NULL;
+  }
+  platform_mutex_unlock(transport->conn_lock);
   /* Take conn_lock defensively during the residual free loop. After
      wt_transport_stop awaited active_connections == 0, all SHUTDOWN_COMPLETE
      handlers have run, so no MsQuic callback can fire on these connections

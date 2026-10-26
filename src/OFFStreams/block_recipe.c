@@ -28,14 +28,14 @@ void new_blocks_recipe_dispatch(void* state, message_t* msg) {
   new_blocks_recipe_t* recipe = (new_blocks_recipe_t*)state;
   switch (msg->type) {
     case READABLE_PULL: {
-      if (recipe->recipe.stream.is_deactivated) {
+      if (ATOMIC_LOAD(&recipe->recipe.stream.is_deactivated)) {
         break;
       }
       block_t* block = block_create_random_block_by_type(recipe->recipe.block_type);
       if (block == NULL) {
         async_error_t* err = OFFS_ERROR("Block creation failed");
         stream_deactivate((stream_t*)recipe, err);
-        recipe->recipe.stream.is_deactivated = 1;
+        ATOMIC_STORE(&recipe->recipe.stream.is_deactivated, 1);
         break;
       }
       if (recipe->recipe.put_is_ephemeral) {
@@ -52,7 +52,7 @@ void new_blocks_recipe_dispatch(void* state, message_t* msg) {
     }
     case CLOSE_STREAM: {
       stream_notify((stream_t*)recipe, close_event, NULL, NULL);
-      recipe->recipe.stream.is_deactivated = 1;
+      ATOMIC_STORE(&recipe->recipe.stream.is_deactivated, 1);
       break;
     }
     default:
@@ -112,7 +112,7 @@ static void _start_descriptor_load(recycler_recipe_t* recipe) {
   if (recipe->ori_index >= recipe->oris.length) {
     stream_notify((stream_t*)recipe, complete_event, NULL, NULL);
     stream_notify((stream_t*)recipe, close_event, NULL, NULL);
-    recipe->recipe.stream.is_deactivated = 1;
+    ATOMIC_STORE(&recipe->recipe.stream.is_deactivated, 1);
     return;
   }
 
@@ -260,7 +260,7 @@ static void _recycler_check_status(recycler_recipe_t* recipe, buffer_t* hash) {
 
 /* Fetch the next data block from the descriptor. */
 static void _try_fetch_next(recycler_recipe_t* recipe) {
-  if (recipe->recipe.stream.is_deactivated) {
+  if (ATOMIC_LOAD(&recipe->recipe.stream.is_deactivated)) {
     return;
   }
 
@@ -313,7 +313,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
   recycler_recipe_t* recipe = (recycler_recipe_t*)state;
   switch (msg->type) {
     case READABLE_PULL: {
-      if (recipe->recipe.stream.is_deactivated) {
+      if (ATOMIC_LOAD(&recipe->recipe.stream.is_deactivated)) {
         break;
       }
       if (!recipe->descriptor_loaded && !recipe->loading_descriptor) {
@@ -328,7 +328,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
     case CACHE_GET_RESULT: {
       cache_get_result_payload_t* result = (cache_get_result_payload_t*)msg->payload;
 
-      if (recipe->recipe.stream.is_deactivated) {
+      if (ATOMIC_LOAD(&recipe->recipe.stream.is_deactivated)) {
         if (result->block != NULL) {
           DESTROY(result->block, block);
         }
@@ -379,7 +379,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
             }
             stream_deactivate((stream_t*)recipe,
                               OFFS_ERROR("recycle source is ephemeral/unverified"));
-            recipe->recipe.stream.is_deactivated = 1;
+            ATOMIC_STORE(&recipe->recipe.stream.is_deactivated, 1);
             if (result->hash != NULL) {
               DESTROY(result->hash, buffer);
             }
@@ -463,7 +463,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
         } else {
           /* All descriptor blocks loaded — finalize */
           _finish_descriptor_load(recipe);
-          if (recipe->pending_pull > 0 && !recipe->recipe.stream.is_deactivated) {
+          if (recipe->pending_pull > 0 && !ATOMIC_LOAD(&recipe->recipe.stream.is_deactivated)) {
             _try_fetch_next(recipe);
           }
         }
@@ -551,7 +551,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
             DESTROY(result->hash, buffer);
           }
           stream_deactivate((stream_t*)recipe, OFFS_ERROR("Block not found"));
-          recipe->recipe.stream.is_deactivated = 1;
+          ATOMIC_STORE(&recipe->recipe.stream.is_deactivated, 1);
         }
         break;
       }
@@ -560,7 +560,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
       }
 
       /* Try to serve next pending pull */
-      if (recipe->pending_pull > 0 && !recipe->recipe.stream.is_deactivated) {
+      if (recipe->pending_pull > 0 && !ATOMIC_LOAD(&recipe->recipe.stream.is_deactivated)) {
         _try_fetch_next(recipe);
       }
       break;
@@ -583,7 +583,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
               block_cache_get(recipe->recipe.bc, hash, &recipe->recipe.stream.actor);
             } else {
               _finish_descriptor_load(recipe);
-              if (recipe->pending_pull > 0 && !recipe->recipe.stream.is_deactivated) {
+              if (recipe->pending_pull > 0 && !ATOMIC_LOAD(&recipe->recipe.stream.is_deactivated)) {
                 _try_fetch_next(recipe);
               }
             }
@@ -664,7 +664,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
           recipe->enforce_decision = 0;
           recipe->enforce_fib = 0;
           stream_deactivate((stream_t*)recipe, OFFS_ERROR("Block not found on network"));
-          recipe->recipe.stream.is_deactivated = 1;
+          ATOMIC_STORE(&recipe->recipe.stream.is_deactivated, 1);
         }
       }
       if (recipe->pending_fetch_hash != NULL) {
@@ -689,7 +689,7 @@ void recycler_recipe_dispatch(void* state, message_t* msg) {
       /* The ephemeral flow's leftovers die with the recipe (the destroy
          releases them); a deactivate mid-flow does the same at destroy. */
       stream_notify((stream_t*)recipe, close_event, NULL, NULL);
-      recipe->recipe.stream.is_deactivated = 1;
+      ATOMIC_STORE(&recipe->recipe.stream.is_deactivated, 1);
       break;
     }
     default:

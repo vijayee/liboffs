@@ -93,7 +93,7 @@ static void _build_descriptor_blocks(writeable_descriptor_t* desc) {
         DESTROY(prior_hash, buffer);
       }
       stream_deactivate((stream_t*)desc, OFFS_ERROR("Write descriptor error"));
-      desc->stream.is_deactivated = 1;
+      ATOMIC_STORE(&desc->stream.is_deactivated, 1);
       return;
     }
 
@@ -123,7 +123,7 @@ static void _build_descriptor_blocks(writeable_descriptor_t* desc) {
 
   stream_notify((stream_t*)desc, finished_event, NULL, NULL);
   stream_notify((stream_t*)desc, complete_event, NULL, NULL);
-  desc->stream.is_deactivated = 1;
+  ATOMIC_STORE(&desc->stream.is_deactivated, 1);
   stream_notify((stream_t*)desc, close_event, NULL, NULL);
 }
 
@@ -132,7 +132,7 @@ void writeable_descriptor_dispatch(void* state, message_t* msg) {
   switch (msg->type) {
     case WRITEABLE_DESCRIPTOR_WRITE: {
       tuple_t* tuple = (tuple_t*)msg->payload;
-      if (desc->stream.is_deactivated) {
+      if (ATOMIC_LOAD(&desc->stream.is_deactivated)) {
         DESTROY(tuple, tuple);
         msg->payload = NULL;
         break;
@@ -180,10 +180,10 @@ void writeable_descriptor_dispatch(void* state, message_t* msg) {
          * Guard: only fire error_event once — the first failure deactivates
          * and notifies; subsequent failures are dropped to avoid repeated
          * stream_deactivate / connection send calls that crash the daemon. */
-        if (desc->stream.is_deactivated) {
+        if (ATOMIC_LOAD(&desc->stream.is_deactivated)) {
           break;
         }
-        desc->stream.is_deactivated = 1;
+        ATOMIC_STORE(&desc->stream.is_deactivated, 1);
         if (result->result == CACHE_PUT_FULL) {
           stream_notify((stream_t*)desc, error_event,
                         OFFS_ERROR_TRANSFER("cache full during put: configure larger max_capacity_bytes"),
@@ -216,12 +216,12 @@ void writeable_descriptor_dispatch(void* state, message_t* msg) {
       break;
     }
     case CLOSE_STREAM: {
-      if (desc->stream.is_deactivated) {
+      if (ATOMIC_LOAD(&desc->stream.is_deactivated)) {
         break;
       }
       if (desc->sent_descriptor) {
         stream_notify((stream_t*)desc, close_event, NULL, NULL);
-        desc->stream.is_deactivated = 1;
+        ATOMIC_STORE(&desc->stream.is_deactivated, 1);
       } else {
         _build_descriptor_blocks(desc);
       }

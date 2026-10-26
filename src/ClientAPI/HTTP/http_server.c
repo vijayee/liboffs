@@ -278,22 +278,14 @@ void http_server_destroy(http_server_t* server) {
     platform_socket_destroy(server->listen_sock);
     server->listen_sock = NULL;
   }
-  /* Mark all connections as closing, close their fds so actors drain quickly,
-   * and null out the server pointer so connection callbacks won't send
-   * messages to the server actor. */
-  for (int i = 0; i < server->connections.length; i++) {
-    http_connection_t* conn = server->connections.data[i];
-    conn->is_closing = 1;
-    platform_socket_t* sock = ATOMIC_EXCHANGE(&conn->sock, NULL);
-    if (sock != NULL) {
-      platform_socket_destroy(sock);
-    }
-    conn->server = NULL;
-  }
-  /* Mark all connection actors as destroyed so the scheduler skips them
-   * and actor_send drops any new messages. This MUST happen before
-   * scheduler_pool_wait_for_idle, otherwise a worker thread could still
-   * be dispatching on a connection when we free it below. */
+  /* Quiesce the connection actors BEFORE mutating is_closing/server/sock:
+     is_closing and server are plain (non-ATOMIC) fields the connection
+     dispatch reads, and a worker could still be mid-dispatch of an
+     already-delivered message while this loop runs. ACTOR_FLAG_DESTROY stops
+     actor_run from dispatching further messages; wait_for_idle proves no
+     dispatch is in flight. Sockets are non-blocking (poll-dancer sends
+     READABLE/DATA messages; the worker never blocks on the fd), so waiting
+     before the fd close cannot hang. */
   for (int i = 0; i < server->connections.length; i++) {
     http_connection_t* conn = server->connections.data[i];
     atomic_fetch_or(&conn->actor.flags, ACTOR_FLAG_DESTROY);
@@ -304,6 +296,19 @@ void http_server_destroy(http_server_t* server) {
    * to skip this. */
   if (!atomic_load_explicit(&server->pool->terminate, memory_order_acquire)) {
     scheduler_pool_wait_for_idle(server->pool);
+  }
+  /* Mark all connections as closing, close their fds, and null out the
+   * server pointer so connection callbacks won't send messages to the
+   * server actor. Safe after the quiesce above: no dispatch can read these
+   * plain fields anymore. */
+  for (int i = 0; i < server->connections.length; i++) {
+    http_connection_t* conn = server->connections.data[i];
+    conn->is_closing = 1;
+    platform_socket_t* sock = ATOMIC_EXCHANGE(&conn->sock, NULL);
+    if (sock != NULL) {
+      platform_socket_destroy(sock);
+    }
+    conn->server = NULL;
   }
   /* Drain each connection's message queue and free its resources.
    * We must NOT call actor_destroy here because it triggers

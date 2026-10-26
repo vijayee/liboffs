@@ -508,7 +508,7 @@ static void _connection_ssl_data_handle(http_connection_t* connection,
       DESTROY(plain, buffer);
       if (connection->parser.http_errno != HPE_OK) {
         /* Parse error — close the connection */
-        if (connection->piped_pending) {
+        if (ATOMIC_LOAD(&connection->piped_pending)) {
           if (connection->streaming_route != NULL && connection->request != NULL) {
             stream_deactivate((stream_t*)connection->request,
                               OFFS_ERROR("Connection closed during streaming upload"));
@@ -627,7 +627,7 @@ void http_connection_dispatch(void* state, message_t* msg) {
       DESTROY(data, buffer);
       if (connection->parser.http_errno != HPE_OK) {
         /* Parse error — close the connection */
-        if (connection->piped_pending) {
+        if (ATOMIC_LOAD(&connection->piped_pending)) {
           if (connection->streaming_route != NULL && connection->request != NULL) {
             stream_deactivate((stream_t*)connection->request,
                               OFFS_ERROR("Connection closed during streaming upload"));
@@ -642,7 +642,7 @@ void http_connection_dispatch(void* state, message_t* msg) {
 
     case HTTP_CONNECTION_HANGUP:
     case HTTP_CONNECTION_ERROR: {
-      if (connection->piped_pending) {
+      if (ATOMIC_LOAD(&connection->piped_pending)) {
         if (connection->streaming_route != NULL && connection->request != NULL) {
           stream_deactivate((stream_t*)connection->request,
                             OFFS_ERROR("Connection closed during streaming upload"));
@@ -1022,7 +1022,7 @@ static void _connection_do_reads(http_connection_t* connection) {
     DESTROY(data, buffer);
     if (connection->parser.http_errno != HPE_OK) {
       /* Parse error — close the connection */
-      if (connection->piped_pending) {
+      if (ATOMIC_LOAD(&connection->piped_pending)) {
         if (connection->streaming_route != NULL && connection->request != NULL) {
           stream_deactivate((stream_t*)connection->request,
                             OFFS_ERROR("Connection closed during streaming upload"));

@@ -12,6 +12,7 @@
 #define ATOMIC_LOAD(ptr) (ptr)->load()
 #define ATOMIC_EXCHANGE(ptr, val) (ptr)->exchange(val)
 #define ATOMIC_FETCH_ADD(ptr, val) (ptr)->fetch_add(val)
+#define ATOMIC_FETCH_SUB(ptr, val) (ptr)->fetch_sub(val)
 #else
 #include <stdatomic.h>
 #define ATOMIC(T) _Atomic(T)
@@ -19,6 +20,7 @@
 #define ATOMIC_LOAD(ptr) atomic_load(ptr)
 #define ATOMIC_EXCHANGE(ptr, val) atomic_exchange(ptr, val)
 #define ATOMIC_FETCH_ADD(ptr, val) atomic_fetch_add(ptr, val)
+#define ATOMIC_FETCH_SUB(ptr, val) atomic_fetch_sub(ptr, val)
 /* ATOMIC_VAR_INIT was deprecated in C11 and is not provided by MSVC's
    <stdatomic.h>. GCC's <stdatomic.h> expands it to a plain expression in
    parens, which makes `x = ATOMIC_VAR_INIT(0);` a valid assignment.

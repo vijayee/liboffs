@@ -251,8 +251,16 @@ typedef struct block_cache_t {
   uint64_t index_wait;
   actor_t actor;
   pending_get_t* pending_gets;
-  size_t current_bytes;
-  size_t max_capacity_bytes;
+  /* Written on the cache actor (single writer); read cross-actor by the
+     health handler (actor-boundary rule: atomics where the direct
+    read is genuinely required). */
+  ATOMIC(size_t) current_bytes;
+  ATOMIC(size_t) max_capacity_bytes;
+  /* Live entry count, maintained on the cache actor at the same points
+     current_bytes moves (+put-new, -delete-entry) and recomputed from the
+     index at create/gc paths. block_cache_count() reads this instead of
+     walking the live btree from another actor. */
+  ATOMIC(uint64_t) entry_count;
   /* True from the moment capacity crosses the exhale threshold until
      the shed drives it back to the 50% floor (respiration_blocks_to_free
      targets). Between batches the gate is this flag, not the raw

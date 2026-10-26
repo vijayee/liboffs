@@ -361,7 +361,9 @@ static void _block_cache_delete_entry(block_cache_t* block_cache, buffer_t* hash
   size_t section_index = entry->section_index;
   index_remove(block_cache->index, hash);
   timer_actor_debounce(block_cache->timer_actor, block_cache->index_wait, 0, &block_cache->actor, INDEX_SAVE);
-  block_cache->current_bytes -= (size_t)block_cache->type;
+  ATOMIC_FETCH_SUB(&block_cache->entry_count, 1);
+  ATOMIC_STORE(&block_cache->current_bytes,
+               ATOMIC_LOAD(&block_cache->current_bytes) - (size_t)block_cache->type);
   block_cache_update_capacity(block_cache);
   block_lru_cache_delete(block_cache->lru, hash);
   section_deallocate_payload_t dealloc_payload;
@@ -465,7 +467,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
       index_entry_t* entry = index_peek(block_cache->index, p->block->hash);
       /* Reject new blocks if cache is at capacity */
       if (entry == NULL && block_cache->max_capacity_bytes > 0 &&
-          block_cache->current_bytes + (size_t)block_cache->type > block_cache->max_capacity_bytes) {
+          ATOMIC_LOAD(&block_cache->current_bytes) + (size_t)block_cache->type > ATOMIC_LOAD(&block_cache->max_capacity_bytes)) {
         /* No room for a new block */
         if (is_async) { block_destroy(p->block); p->block = NULL; }
         DESTROY(result_hash, buffer);
@@ -523,9 +525,11 @@ void block_cache_dispatch(void* state, message_t* msg) {
           if (is_async) { block_destroy(p->block); p->block = NULL; }
           refcounter_yield((refcounter_t*) entry);
           index_add(block_cache->index, entry);
+          ATOMIC_FETCH_ADD(&block_cache->entry_count, 1);
           timer_actor_debounce(block_cache->timer_actor, block_cache->index_wait, 0, &block_cache->actor, INDEX_SAVE);
           result_fib = entry->counter.fib;
-          block_cache->current_bytes += (size_t)block_cache->type;
+          ATOMIC_STORE(&block_cache->current_bytes,
+                       ATOMIC_LOAD(&block_cache->current_bytes) + (size_t)block_cache->type);
           block_cache_update_capacity(block_cache);
           p->result = CACHE_PUT_NEW;
         }
@@ -584,7 +588,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
             get_clear_memory(sizeof(cache_resize_result_payload_t));
         result->result = 0;
         result->max_capacity_bytes = block_cache->max_capacity_bytes;
-        result->current_bytes = block_cache->current_bytes;
+        result->current_bytes = ATOMIC_LOAD(&block_cache->current_bytes);
         result->reply_to = NULL;
         message_t reply;
         reply.type = CACHE_RESIZE_RESULT;
@@ -1211,8 +1215,9 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
   block_cache->timer_actor = timer_actor;
   block_cache->index_wait = config.index_wait;
   block_cache->authority = authority;
-  block_cache->max_capacity_bytes = max_capacity_bytes;
-  block_cache->current_bytes = 0;
+  ATOMIC_STORE(&block_cache->max_capacity_bytes, max_capacity_bytes);
+  ATOMIC_STORE(&block_cache->current_bytes, 0);
+  ATOMIC_STORE(&block_cache->entry_count, 0);
   char* folder;
   switch (type) {
     case standard:
@@ -1243,7 +1248,9 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
     block_cache->index->fsync_data = config.fsync_data;
   }
   if (max_capacity_bytes > 0) {
-    block_cache->current_bytes = index_count(block_cache->index) * (size_t)type;
+    size_t replay_count = index_count(block_cache->index);
+    ATOMIC_STORE(&block_cache->current_bytes, replay_count * (size_t)type);
+    ATOMIC_STORE(&block_cache->entry_count, (uint64_t)replay_count);
     block_cache_update_capacity(block_cache);
     /* the capacity setting also caps the section layer's growth ceiling */
     if (block_cache->sections != NULL) {
@@ -1297,14 +1304,19 @@ void block_cache_destroy(block_cache_t* block_cache) {
 }
 
 size_t block_cache_count(block_cache_t* block_cache) {
-  return index_count(block_cache->index);
+  if (block_cache == NULL) return 0;
+  /* Reads the entry_count the cache actor maintains (see block_cache.h).
+     The old implementation walked index_count() over the live btree -
+     unsafe from another actor (actor-boundary rule). entry_count is ATOMIC
+     and single-writer; an approximation is fine for callers (health stats). */
+  return (size_t)ATOMIC_LOAD(&block_cache->entry_count);
 }
 
 void block_cache_update_capacity(block_cache_t* block_cache) {
   if (block_cache == NULL) return;
-  if (block_cache->max_capacity_bytes == 0) return;
+  if (ATOMIC_LOAD(&block_cache->max_capacity_bytes) == 0) return;
   if (block_cache->authority == NULL) return;
-  float capacity = (float)block_cache->current_bytes / (float)block_cache->max_capacity_bytes;
+  float capacity = (float)ATOMIC_LOAD(&block_cache->current_bytes) / (float)ATOMIC_LOAD(&block_cache->max_capacity_bytes);
   if (capacity > 1.0f) capacity = 1.0f;
   authority_update_capacity(block_cache->authority, capacity);
   authority_update_phase(block_cache->authority, capacity);
@@ -1383,7 +1395,7 @@ void block_cache_update_capacity(block_cache_t* block_cache) {
 
 void block_cache_set_max_capacity(block_cache_t* block_cache, size_t max_capacity_bytes) {
   if (block_cache == NULL) return;
-  block_cache->max_capacity_bytes = max_capacity_bytes;
+  ATOMIC_STORE(&block_cache->max_capacity_bytes, max_capacity_bytes);
   /* The section layer's growth ceiling follows the capacity setting: the
      robin may open fresh sections until it covers the cap (before this, a
      raised cap did nothing for the disk shelves — the physical sections
@@ -1393,7 +1405,9 @@ void block_cache_set_max_capacity(block_cache_t* block_cache, size_t max_capacit
     sections_set_max_bytes(block_cache->sections, max_capacity_bytes);
   }
   if (max_capacity_bytes > 0) {
-    block_cache->current_bytes = index_count(block_cache->index) * (size_t)block_cache->type;
+    ATOMIC_STORE(&block_cache->current_bytes,
+                 index_count(block_cache->index) * (size_t)block_cache->type);
+    ATOMIC_STORE(&block_cache->entry_count, (uint64_t)index_count(block_cache->index));
     block_cache_update_capacity(block_cache);
   }
 }
@@ -1588,10 +1602,9 @@ int block_cache_can_fit(block_cache_t* block_cache, size_t required_bytes) {
   if (block_cache == NULL) {
     return CACHE_FIT_OK;
   }
-  if (block_cache->max_capacity_bytes == 0) {
-    return CACHE_FIT_OK;
+  if (ATOMIC_LOAD(&block_cache->max_capacity_bytes) == 0) {    return CACHE_FIT_OK;
   }
-  if (block_cache->current_bytes + required_bytes > block_cache->max_capacity_bytes) {
+  if (ATOMIC_LOAD(&block_cache->current_bytes) + required_bytes > ATOMIC_LOAD(&block_cache->max_capacity_bytes)) {
     return CACHE_FIT_FULL;
   }
   return CACHE_FIT_OK;

@@ -93,7 +93,7 @@ static int _process_descriptor(readable_descriptor_t* desc, buffer_t* block_data
   }
 
   while (current_descriptor != NULL && current_descriptor->size > 0 &&
-         !desc->stream.is_deactivated) {
+         !ATOMIC_LOAD(&desc->stream.is_deactivated)) {
     if (desc->current_tuple == NULL) {
       desc->current_tuple = tuple_create(desc->ori->tuple_size);
     }
@@ -143,7 +143,7 @@ static int _process_descriptor(readable_descriptor_t* desc, buffer_t* block_data
       if (desc->tuple_counter >= desc->tuple_count) {
         stream_notify((stream_t*)desc, complete_event, NULL, NULL);
         stream_notify((stream_t*)desc, close_event, NULL, NULL);
-        desc->stream.is_deactivated = 1;
+        ATOMIC_STORE(&desc->stream.is_deactivated, 1);
         if (current_descriptor != NULL) {
           DESTROY(current_descriptor, buffer);
         }
@@ -171,13 +171,13 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
   readable_descriptor_t* desc = (readable_descriptor_t*)state;
   switch (msg->type) {
     case READABLE_PUSH: {
-      if (desc->stream.is_deactivated) {
+      if (ATOMIC_LOAD(&desc->stream.is_deactivated)) {
         break;
       }
       if (desc->current_descriptor == NULL) {
         if (desc->ori->descriptor_hash == NULL && desc->next_descriptor_hash == NULL) {
           stream_notify((stream_t*)desc, error_event, NULL, NULL);
-          desc->stream.is_deactivated = 1;
+          ATOMIC_STORE(&desc->stream.is_deactivated, 1);
           break;
         }
         buffer_t* hash = desc->next_descriptor_hash != NULL
@@ -191,7 +191,7 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
     }
     case CACHE_GET_RESULT: {
       cache_get_result_payload_t* result = (cache_get_result_payload_t*)msg->payload;
-      if (desc->stream.is_deactivated) {
+      if (ATOMIC_LOAD(&desc->stream.is_deactivated)) {
         if (result->block != NULL) {
           DESTROY(result->block, block);
           result->block = NULL;
@@ -253,7 +253,7 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
             result->hash = NULL;
           }
           stream_deactivate((stream_t*)desc, OFFS_ERROR("Descriptor block not found"));
-          desc->stream.is_deactivated = 1;
+          ATOMIC_STORE(&desc->stream.is_deactivated, 1);
         }
         break;
       }
@@ -267,7 +267,7 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
         result->hash = NULL;
       }
 
-      if (need_more && desc->next_descriptor_hash != NULL && !desc->stream.is_deactivated) {
+      if (need_more && desc->next_descriptor_hash != NULL && !ATOMIC_LOAD(&desc->stream.is_deactivated)) {
         /* Need another descriptor block — fetch it */
         buffer_t* hash = desc->next_descriptor_hash;
         desc->next_descriptor_hash = NULL;
@@ -290,7 +290,7 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
             DESTROY(result->hash, buffer);
             result->hash = NULL;
           }
-          if (need_more && desc->next_descriptor_hash != NULL && !desc->stream.is_deactivated) {
+          if (need_more && desc->next_descriptor_hash != NULL && !ATOMIC_LOAD(&desc->stream.is_deactivated)) {
             buffer_t* hash = desc->next_descriptor_hash;
             desc->next_descriptor_hash = NULL;
             _fetch_descriptor_block(desc, hash);
@@ -306,13 +306,13 @@ void readable_descriptor_dispatch(void* state, message_t* msg) {
       } else {
         /* Block not found on network — deactivate */
         stream_deactivate((stream_t*)desc, OFFS_ERROR("Descriptor block not found on network"));
-        desc->stream.is_deactivated = 1;
+        ATOMIC_STORE(&desc->stream.is_deactivated, 1);
       }
       break;
     }
     case CLOSE_STREAM: {
       stream_notify((stream_t*)desc, close_event, NULL, NULL);
-      desc->stream.is_deactivated = 1;
+      ATOMIC_STORE(&desc->stream.is_deactivated, 1);
       break;
     }
     default:

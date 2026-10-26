@@ -348,7 +348,7 @@ static void _unix_load_on_rs_error(void* ctx, void* error) {
    * deactivate when this error did not already come from one —
    * stream_deactivate re-notifies error_event UNCONDITIONALLY, so an
    * unguarded re-deactivate here would loop forever on the stream's actor. */
-  if (!pipeline->rs->stream.is_deactivated) {
+  if (!ATOMIC_LOAD(&pipeline->rs->stream.is_deactivated)) {
     stream_deactivate((stream_t*)pipeline->rs, NULL);
   }
 }
@@ -362,10 +362,10 @@ static void _unix_load_on_desc_error(void* ctx, void* error) {
    * fired FROM a deactivated stream, and stream_deactivate re-notifies
    * error_event unconditionally on its target, so re-deactivating either
    * stream from this handler would re-enter these handlers forever. */
-  if (!pipeline->rs->stream.is_deactivated) {
+  if (!ATOMIC_LOAD(&pipeline->rs->stream.is_deactivated)) {
     stream_deactivate((stream_t*)pipeline->rs, NULL);
   }
-  if (!((stream_t*)pipeline->desc)->is_deactivated) {
+  if (!ATOMIC_LOAD(&((stream_t*)pipeline->desc)->is_deactivated)) {
     stream_deactivate((stream_t*)pipeline->desc, NULL);
   }
 }

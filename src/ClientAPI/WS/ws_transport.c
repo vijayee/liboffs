@@ -228,6 +228,15 @@ void ws_transport_destroy(ws_transport_t* transport) {
     platform_socket_destroy(transport->listen_sock);
     transport->listen_sock = NULL;
   }
+  /* Quiesce the connection actors BEFORE mutating is_closing/sock/transport
+     (plain fields read by the connection dispatch); see tcp_transport.c. */
+  for (int i = 0; i < transport->connections.length; i++) {
+    ws_connection_t* conn = transport->connections.data[i];
+    atomic_fetch_or(&conn->actor.flags, ACTOR_FLAG_DESTROY);
+  }
+  if (!atomic_load_explicit(&transport->pool->terminate, memory_order_acquire)) {
+    scheduler_pool_wait_for_idle(transport->pool);
+  }
   for (int i = 0; i < transport->connections.length; i++) {
     ws_connection_t* conn = transport->connections.data[i];
     conn->is_closing = 1;
@@ -236,13 +245,6 @@ void ws_transport_destroy(ws_transport_t* transport) {
       conn->sock = NULL;
     }
     conn->transport = NULL;
-  }
-  for (int i = 0; i < transport->connections.length; i++) {
-    ws_connection_t* conn = transport->connections.data[i];
-    atomic_fetch_or(&conn->actor.flags, ACTOR_FLAG_DESTROY);
-  }
-  if (!atomic_load_explicit(&transport->pool->terminate, memory_order_acquire)) {
-    scheduler_pool_wait_for_idle(transport->pool);
   }
   for (int i = transport->connections.length - 1; i >= 0; i--) {
     ws_connection_t* conn = transport->connections.data[i];

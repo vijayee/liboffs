@@ -463,7 +463,7 @@ static void _load_pipeline_on_rs_error(void* ctx, void* error) {
        deactivate when the error did not already come from one —
        stream_deactivate re-notifies error_event UNCONDITIONALLY, so an
        unguarded re-deactivate here would loop forever. */
-    if (!pipeline->rs->stream.is_deactivated) {
+    if (!ATOMIC_LOAD(&pipeline->rs->stream.is_deactivated)) {
         stream_deactivate((stream_t*)pipeline->rs, NULL);
     }
 }
@@ -493,7 +493,7 @@ static void _load_pipeline_on_desc_error(void* ctx, void* error) {
        terminal); DESC_ERROR implies DESC_CLOSE right after. No desc
        re-deactivate here — the error already fired FROM a deactivated
        descriptor, and re-deactivating would re-queue error_event. */
-    if (!pipeline->rs->stream.is_deactivated) {
+    if (!ATOMIC_LOAD(&pipeline->rs->stream.is_deactivated)) {
         stream_deactivate((stream_t*)pipeline->rs, NULL);
     }
     int is_zero = 0;
@@ -557,7 +557,7 @@ static void _setup_load_pipeline(http_response_t* response, scheduler_pool_t* po
     response->unknown_length = 1;
     response->keep_alive = 0;
     response->is_piped = 1;
-    response->connection->piped_pending = 1;
+    ATOMIC_STORE(&response->connection->piped_pending, 1);
     refcounter_reference((refcounter_t*)response);
     refcounter_reference((refcounter_t*)response->connection);
 
@@ -1500,7 +1500,7 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
     put_ctx->response = response;
     put_ctx->connection = response->connection;
     response->is_piped = 1;
-    response->connection->piped_pending = 1;
+    ATOMIC_STORE(&response->connection->piped_pending, 1);
     refcounter_reference((refcounter_t*)response);
     refcounter_reference((refcounter_t*)response->connection);
     put_ctx->content_type = strdup(type);
@@ -1734,7 +1734,7 @@ static int _off_put_headers_complete(http_connection_t* connection,
        request's close_event has actually been dispatched. */
     put_ctx->request = REFERENCE(request, http_request_t);
     response->is_piped = 1;
-    connection->piped_pending = 1;
+    ATOMIC_STORE(&connection->piped_pending, 1);
     refcounter_reference((refcounter_t*)response);
     refcounter_reference((refcounter_t*)connection);
     put_ctx->content_type = strdup(type);
@@ -1905,7 +1905,7 @@ static void _rep_route_start(http_request_t* request, http_response_t* response,
     route_ctx->connection = response->connection;
     route_ctx->pool = ctx->pool;
     response->is_piped = 1;
-    response->connection->piped_pending = 1;
+    ATOMIC_STORE(&response->connection->piped_pending, 1);
     refcounter_reference((refcounter_t*)response);
     refcounter_reference((refcounter_t*)response->connection);
     actor_init(&route_ctx->actor, route_ctx, _rep_route_dispatch, ctx->pool);
@@ -2107,7 +2107,7 @@ static void _off_list_ephemeral_handler(http_request_t* request, http_response_t
     route_ctx->connection = response->connection;
     route_ctx->pool = ctx->pool;
     response->is_piped = 1;
-    response->connection->piped_pending = 1;
+    ATOMIC_STORE(&response->connection->piped_pending, 1);
     refcounter_reference((refcounter_t*)response);
     refcounter_reference((refcounter_t*)response->connection);
     actor_init(&route_ctx->actor, route_ctx, _off_list_ephemeral_dispatch, ctx->pool);
@@ -2297,7 +2297,7 @@ static void _off_gc_handler(http_request_t* request, http_response_t* response,
     route_ctx->connection = response->connection;
     route_ctx->pool = ctx->pool;
     response->is_piped = 1;
-    response->connection->piped_pending = 1;
+    ATOMIC_STORE(&response->connection->piped_pending, 1);
     refcounter_reference((refcounter_t*)response);
     refcounter_reference((refcounter_t*)response->connection);
     actor_init(&route_ctx->actor, route_ctx, _off_gc_dispatch, ctx->pool);

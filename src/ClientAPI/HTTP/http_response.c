@@ -152,7 +152,7 @@ static void _pipe_on_close(void* ctx, void* unused) {
     http_response_destroy(response);
     if (conn) {
         if (keep_alive) {
-            conn->piped_pending = 0;
+            ATOMIC_STORE(&conn->piped_pending, 0);
         }
         http_connection_destroy(conn);
     }
@@ -175,7 +175,7 @@ static void _pipe_on_error(void* ctx, async_error_t* error) {
 void http_response_pipe(http_response_t* response, stream_t* source) {
     if (!response || !source) return;
     response->is_piped = 1;
-    response->connection->piped_pending = 1;
+    ATOMIC_STORE(&response->connection->piped_pending, 1);
     refcounter_reference((refcounter_t*)response->connection);
     refcounter_reference((refcounter_t*)response);
     stream_subscribe(source, data_event, response,

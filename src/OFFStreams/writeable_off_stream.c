@@ -105,7 +105,7 @@ static void _release_ephemeral_claims(writeable_off_stream_t* stream) {
 static void _maybe_finalize(writeable_off_stream_t* stream) {
   if (stream->pending_finalize && stream->entries.length == 0 && !stream->has_pulled) {
     stream->pending_finalize = 0;
-    stream->stream.is_deactivated = 1;
+    ATOMIC_STORE(&stream->stream.is_deactivated, 1);
     stream->completed = 1;
     stream_notify((stream_t*)stream, finished_event, NULL, NULL);
     stream_notify((stream_t*)stream, complete_event, NULL, NULL);
@@ -185,12 +185,12 @@ static void _create_tuple(writeable_off_stream_t* stream, off_stream_tuple_entry
   if (is_final) {
     block_destroy(stream->final_block);
     stream->final_block = NULL;
-    stream->stream.is_deactivated = 1;
+    ATOMIC_STORE(&stream->stream.is_deactivated, 1);
     stream->completed = 1;
     stream_notify((stream_t*)stream, finished_event, NULL, NULL);
     stream_notify((stream_t*)stream, complete_event, NULL, NULL);
     stream_notify((stream_t*)stream, close_event, NULL, NULL);
-  } else if (stream->entries.length > 0 && !stream->stream.is_deactivated) {
+  } else if (stream->entries.length > 0 && !ATOMIC_LOAD(&stream->stream.is_deactivated)) {
     _get_random_blocks(stream);
   } else {
     _maybe_finalize(stream);
@@ -251,7 +251,7 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
   switch (msg->type) {
     case WRITEABLE_WRITE: {
       buffer_t* data = (buffer_t*)msg->payload;
-      if (stream->stream.is_deactivated) {
+      if (ATOMIC_LOAD(&stream->stream.is_deactivated)) {
         DESTROY(data, buffer);
         msg->payload = NULL;
         break;
@@ -298,7 +298,7 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
       break;
     }
     case WRITEABLE_FINALIZE: {
-      if (stream->stream.is_deactivated) {
+      if (ATOMIC_LOAD(&stream->stream.is_deactivated)) {
         break;
       }
       blake3_hasher hasher;
@@ -324,7 +324,7 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
       }
 
       if (stream->entries.length == 0 && !stream->has_pulled) {
-        stream->stream.is_deactivated = 1;
+        ATOMIC_STORE(&stream->stream.is_deactivated, 1);
         stream->completed = 1;
         stream_notify((stream_t*)stream, finished_event, NULL, NULL);
         stream_notify((stream_t*)stream, complete_event, NULL, NULL);
@@ -338,7 +338,7 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
       block_t* block = (block_t*)msg->payload;
       stream->has_pulled = 0;
 
-      if (stream->entries.length == 0 || stream->stream.is_deactivated) {
+      if (stream->entries.length == 0 || ATOMIC_LOAD(&stream->stream.is_deactivated)) {
         /* A delivery that was in flight when an error branch ran (or a
            surplus delivery after finalize) arrives past the attach path —
            but the new_blocks_recipe already claimed this block at creation,
@@ -388,7 +388,7 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
       stream->current_recipe_index++;
       if (stream->current_recipe_index >= stream->recipes.length) {
         stream_deactivate((stream_t*)stream, OFFS_ERROR("Write error"));
-        stream->stream.is_deactivated = 1;
+        ATOMIC_STORE(&stream->stream.is_deactivated, 1);
         break;
       }
 
@@ -415,10 +415,10 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
          * first failure deactivates the stream and notifies the client;
          * subsequent failures are dropped here to avoid repeated
          * stream_deactivate / connection send calls that crash the daemon. */
-        if (stream->stream.is_deactivated) {
+        if (ATOMIC_LOAD(&stream->stream.is_deactivated)) {
           break;
         }
-        stream->stream.is_deactivated = 1;
+        ATOMIC_STORE(&stream->stream.is_deactivated, 1);
         /* The put failed mid-stream: release every claim this ephemeral put
          * acquired (created blocks die at count 0; the recycler's acquired
          * claims roll back) before the error reaches the client. Fires once
@@ -457,7 +457,7 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
     }
     case CLOSE_STREAM: {
       stream_notify((stream_t*)stream, close_event, NULL, NULL);
-      stream->stream.is_deactivated = 1;
+      ATOMIC_STORE(&stream->stream.is_deactivated, 1);
       break;
     }
     default:

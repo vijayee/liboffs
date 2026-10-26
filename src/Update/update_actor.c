@@ -133,7 +133,7 @@ static void _start_check(update_actor_t* ua) {
     clock_gettime(CLOCK_MONOTONIC, &now);
     ua->drain_start_ms = (uint64_t)(now.tv_sec * 1000 + now.tv_nsec / 1000000);
   }
-  *ua->draining_flag = 1;
+  ATOMIC_STORE(ua->draining_flag, 1);
   ua->state = update_state_draining;
   _update_status_ctx(ua);
 

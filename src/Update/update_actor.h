@@ -37,7 +37,7 @@ typedef struct update_actor_t {
   ATOMIC(uint64_t) check_timer_id;
   uint64_t drain_start_ms;
   uint64_t drain_timeout_ms;
-  uint8_t* draining_flag;
+  ATOMIC(uint8_t)* draining_flag;   /* points at offs_node_t.draining (ATOMIC) */
   ATOMIC(uint32_t)* open_stream_count;
   update_status_context_t* status_ctx;
 } update_actor_t;
@@ -48,7 +48,7 @@ update_actor_t* update_actor_create(scheduler_pool_t* pool,
                                     const char* staging_dir,
                                     const char* install_dir,
                                     const char* backup_dir,
-                                    uint8_t* draining_flag,
+                                    ATOMIC(uint8_t)* draining_flag,
                                     ATOMIC(uint32_t)* open_stream_count,
                                     update_status_context_t* status_ctx);
 void update_actor_destroy(update_actor_t* actor);
