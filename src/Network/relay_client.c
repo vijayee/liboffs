@@ -907,13 +907,23 @@ int relay_client_connect(relay_client_t* client, const char* host, uint16_t port
     }
   }
 
-  // Start I/O thread
-  ATOMIC_STORE(&client->running, 1);
-  client->thread = platform_thread_create(_relay_client_thread, client);
+  // Start I/O thread, unless one already exists: the retry path (and any
+  // re-connect behind a running thread) is dispatched ON this client's relay
+  // I/O thread - its own pd_loop runs under the caller here, so spawning a
+  // fresh thread would orphan the current one (which never exits, holding a
+  // pd_loop + IOCP port) and accumulate a spinning thread + OS handles per
+  // failed retry: a daemon with the relay down accumulated ~1,100 threads
+  // over a night of 8-second retry cycles (2026-10-25).
   if (client->thread == NULL) {
-    ATOMIC_STORE(&client->running, 0);
-    log_error("relay_client: platform_thread_create failed");
-    return -1;
+    ATOMIC_STORE(&client->running, 1);
+    client->thread = platform_thread_create(_relay_client_thread, client);
+    if (client->thread == NULL) {
+      ATOMIC_STORE(&client->running, 0);
+      log_error("relay_client: platform_thread_create failed");
+      return -1;
+    }
+  } else {
+    ATOMIC_STORE(&client->running, 1);
   }
 
   log_info("relay_client: connecting to %s:%u", host != NULL ? host : "127.0.0.1", port);
@@ -940,6 +950,10 @@ void relay_client_disconnect(relay_client_t* client) {
   ATOMIC_STORE(&client->running, 0);
   pd_loop_async_send(client->loop, NULL);
   platform_thread_join(client->thread);
+  /* Clear the handle after the join so a later connect spawns a fresh I/O
+     thread (the connect skips the spawn while a thread pointer exists -
+     see the retry-path comment in relay_client_connect). */
+  client->thread = NULL;
 
   _relay_client_abortive_shutdown(client);
   if (client->stream != NULL && client->msquic != NULL) {
