@@ -249,10 +249,23 @@ void sections_dispatch(void* state, message_t* msg) {
       /* Keep trying until we either write the block or exhaust all robin
          sections plus any newly created ones. max_tuple_size is a minimum
          number of sections to keep in the robin, not a hard limit on how
-         many sections we may try. */
+         many sections we may try. The budget is refreshed each iteration:
+         with a grown robin whose older entries came from past puts, MANY of
+         them are full, and one fixed budget computed at loop start burns
+         out cycling full sections before reaching a fresh one (a 7,105-block
+         put aborted CACHE_PUT-full with the robin at 171 sections). Each
+         full attempt permanently removes that section from the robin
+         (sections_full), so the pool of harmful picks shrinks monotonically
+         and the loop terminates once only fresh sections remain. */
       size_t attempts = 0;
-      size_t max_attempts = sections->robin->size + sections->max_tuple_size;
-      for (; attempts < max_attempts; attempts++) {
+      size_t full_rotations = 0;
+      for (;;) {
+        size_t max_attempts = sections->robin->size + full_rotations +
+                              sections->max_tuple_size;
+        if (attempts >= max_attempts) {
+          break;
+        }
+        attempts++;
         if (!round_robin_next(sections->robin, &p->section_id)) {
           break;
         }
@@ -288,12 +301,14 @@ void sections_dispatch(void* state, message_t* msg) {
         p->result = write_payload.result;
         p->section_index = write_payload.index;
         if ((p->result == 2) || write_payload.full) {
+          full_rotations++;
           sections_full(sections, p->section_id);
           /* If we still couldn't place the block and the capacity setting
              allows more storage than the robin currently holds, grow it by
              adding a fresh section rather than giving up (legacy: only the
-             max_tuple_size floor triggered growth). */
-          if (p->result == 2 && attempts + 1 < max_attempts &&
+             max_tuple_size floor triggered growth). The refreshed budget
+             (robin + full_rotations) covers the fresh section too. */
+          if (p->result == 2 &&
               (sections->robin->size <= sections->max_tuple_size ||
                sections->robin->size < _sections_target_count(sections))) {
             _sections_grow(sections);
