@@ -25,39 +25,52 @@ static void section_on_dirty(void* context, section_t* section);
 static section_t* _sections_create_fresh(sections_t* sections);
 static int _sections_grow(sections_t* sections);
 
-/* The robin count the block cache's capacity setting allows: ceil(bytes /
-   section_size) plus one section of headroom for tuple slack and padding.
-   0 when uncapped (max_bytes == 0) — the caller falls back to the legacy
-   floor-only behavior. */
+/* A section's byte capacity: `size` counts TUPLES (block slots), each one
+   block_size_e bytes — the ceiling math must divide by bytes per section,
+   not by the tuple count (dividing by 78 on a 4.6GB cap demanded ~59
+   million sections and wedged the cache actor in the create/evict churn). */
+static size_t _sections_bytes_for_type(block_size_e type) {
+  switch (type) {
+    case mega:     return 1000000;
+    case standard: return 128000;
+    case mini:     return 64000;
+    case nano:     return 136;
+  }
+  return 128000;
+}
+
+/* The robin count the block cache's capacity setting allows:
+   ceil(max_bytes / section byte capacity) plus one section of headroom for
+   tuple slack and padding. 0 when uncapped (max_bytes == 0) — the caller
+   falls back to the legacy floor-only behavior. */
 static size_t _sections_target_count(sections_t* sections) {
   if (sections->max_bytes == 0) {
     return 0;
   }
-  size_t need = (sections->max_bytes + sections->size - 1) / sections->size;
+  size_t section_bytes = sections->size * _sections_bytes_for_type(sections->type);
+  if (section_bytes == 0) {
+    return 0;
+  }
+  size_t need = (sections->max_bytes + section_bytes - 1) / section_bytes;
   return need + 1;
 }
 
-/* Open fresh sections until the robin covers the capacity ceiling (lazy:
-   called from the full/write paths, so files appear only when data really
-   needs the room). Returns the number of sections added. */
-static size_t _sections_grow_to_target(sections_t* sections) {
+/* Open ONE fresh section toward the capacity ceiling (lazy: one per
+   full-section event — the write path's retry grows further as its writes
+   need the room, so a big put never forces a hundreds-of-files storm in a
+   single call). Returns 1 when a section was added. */
+static int _sections_maybe_grow(sections_t* sections) {
   size_t target = _sections_target_count(sections);
-  if (target == 0) {
+  if (target == 0 || sections->robin->size >= target) {
     return 0;
   }
-  size_t added = 0;
-  while (sections->robin->size < target) {
-    if (_sections_grow(sections) != 0) {
-      break;
-    }
-    added++;
+  if (_sections_grow(sections) != 0) {
+    return 0;
   }
-  if (added > 0) {
-    log_info("sections: robin grown to %u of target %u (cap %zu bytes)",
-             (unsigned)sections->robin->size, (unsigned)target,
-             sections->max_bytes);
-  }
-  return added;
+  log_info("sections: robin grown to %u of target %u (cap %zu bytes)",
+           (unsigned)sections->robin->size, (unsigned)target,
+           sections->max_bytes);
+  return 1;
 }
 
 sections_lru_cache_t* sections_lru_cache_create(size_t size) {
@@ -936,6 +949,7 @@ static section_t* _sections_create_fresh(sections_t* sections) {
 }
 
 void sections_full(sections_t* sections, size_t section_id) {
+  size_t pre_remove = sections->robin->size;
   round_robin_remove(sections->robin, section_id);
   /* Always maintain at least max_tuple_size sections in the robin. */
   while (sections->robin->size < sections->max_tuple_size) {
@@ -945,10 +959,28 @@ void sections_full(sections_t* sections, size_t section_id) {
     }
     round_robin_unshift(sections->robin, section->id);
   }
-  /* The capacity setting may allow more storage than history allocated:
-     open more sections (lazy, one per full event is enough to make room for
-     the write that tripped this). */
-  _sections_grow_to_target(sections);
+  /* The capacity setting may allow more storage than history allocated: the
+     robin climbs ONE NET section per full event (the fresh replacement for
+     the dead section keeps the pre-event count, plus one more) — growing
+     all the way to the target here would instead create hundreds of files
+     in a single write, and refilling to the floor alone would pin the robin
+     at max_tuple_size + 1 forever (the full section's successor is fresh,
+     so the next full event's floor refill ate the previous climb). */
+  size_t target = _sections_target_count(sections);
+  if (target != 0 && target > sections->robin->size) {
+    size_t want = (pre_remove >= sections->robin->size ? pre_remove : sections->robin->size) + 1;
+    if (want > target) {
+      want = target;
+    }
+    while (sections->robin->size < want) {
+      if (_sections_grow(sections) != 0) {
+        break;
+      }
+      log_info("sections: robin grown to %u of target %u (cap %zu bytes)",
+               (unsigned)sections->robin->size, (unsigned)target,
+               sections->max_bytes);
+    }
+  }
 }
 
 void sections_set_max_bytes(sections_t* sections, size_t max_total_bytes) {
