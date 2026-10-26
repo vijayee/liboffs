@@ -731,10 +731,10 @@ void network_find_block_result_destroy(void* ptr) {
 
 /* Forward declarations for the pending-fetch result flow */
 struct store_pending_t;
-static store_pending_t* network_store_pending_append(network_t* network, uint64_t message_id, actor_t* reply_to, buffer_t* hash, uint32_t block_fib, uint16_t replicas_needed, uint64_t deadline_ms);
+static store_pending_t* network_store_pending_append(network_t* network, uint64_t message_id, actor_t* reply_to, buffer_t* hash, uint32_t block_fib, uint8_t replicas_needed, uint64_t deadline_ms);
 static store_pending_t* network_store_pending_find(network_t* network, uint64_t message_id);
 static void network_store_pending_finalize(network_t* network, store_pending_t* entry, size_t entry_index);
-static void network_deliver_to_interested_peers(network_t* network, buffer_t* hash, block_t* block, void* reserved);
+static void network_deliver_to_interested_peers(network_t* network, const buffer_t* hash, const block_t* block, void* reserved);
 static void network_find_forward(network_t* network, const wire_find_block_t* find_in);
 static void network_local_find_resume(network_t* network, buffer_t* hash,
                                       actor_t* reply_to, stream_t* owner,
@@ -5043,7 +5043,7 @@ void network_rank_advertise(network_t* network, buffer_t* hash,
    NOT forward — delivery, not fanout). Bloom false positives just
    deliver to a peer that dedups (its index already has it) or declines —
    harmless. */
-void network_deliver_to_interested_peers(network_t* network,
+static void network_deliver_to_interested_peers(network_t* network,
                                           const buffer_t* hash,
                                           const block_t* block,
                                           const node_id_t* exclude_id) {
