@@ -540,6 +540,19 @@ static HQUIC _open_persistent_stream(quic_listener_t* listener, HQUIC connection
 static QUIC_STATUS QUIC_API quic_connection_callback(
     HQUIC connection, void* context, QUIC_CONNECTION_EVENT* event) {
   quic_listener_t* listener = (quic_listener_t*)context;
+  /* Diagnostic: the connection-callback event stream. The in-tree msquic is
+     built with QUIC_EVENTS_STUB, so there is no ETW mirror of these events on
+     a deployed daemon — surface them at warn level instead (they are rare). */
+  if (event->Type == QUIC_CONNECTION_EVENT_CONNECTED) {
+    log_warn("quic_listener: event CONNECTED conn=%p", (void*)connection);
+  } else if (event->Type == QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT) {
+    log_warn("quic_listener: event SHUTDOWN_BY_TRANSPORT conn=%p status=0x%x",
+             (void*)connection, event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status);
+  } else if (event->Type == QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER) {
+    log_warn("quic_listener: event SHUTDOWN_BY_PEER conn=%p code=%llu",
+             (void*)connection,
+             (unsigned long long)event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode);
+  }
   switch (event->Type) {
     case QUIC_CONNECTION_EVENT_PEER_CERTIFICATE_RECEIVED: {
       // Fired during the TLS handshake (before CONNECTED) when
