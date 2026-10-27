@@ -34,6 +34,8 @@ typedef enum message_type_e {
   SECTIONS_DEFRAGMENT,
   CACHE_GET,
   CACHE_PUT,
+  /* The emitting PUT stream finished: group receipt force-delete (abort=1)/release (abort=0). */
+  CACHE_PUT_GROUP_END,
   CACHE_REMOVE,
   CACHE_DEFRAGMENT,
   CACHE_BLOCK_LOADED,

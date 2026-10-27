@@ -409,6 +409,59 @@ TEST_F(TestBlockCache, TestBlockCachePutOnly) {
   EXPECT_EQ(block_cache_count(block_cache), BLOCK_COUNT);
 }
 
+TEST_F(TestBlockCache, TestPutGroupAbortDeletesCreatedBlocks) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+
+  /* Fresh puts under one abort group; the cache records its receipt. */
+  for (size_t i = 0; i < BLOCK_COUNT; i++) {
+    block_cache_put_group(block_cache, blocks[i], 0, nullptr, 77u);
+  }
+  scheduler_pool_wait_for_idle(pool);
+  EXPECT_EQ(block_cache_count(block_cache), BLOCK_COUNT);
+
+  /* Aborted PUT: END abort=1 force-deletes the group's fresh creations
+     regardless of pin status. */
+  block_cache_put_group_end(block_cache, 77u, 1);
+  scheduler_pool_wait_for_idle(pool);
+  EXPECT_EQ(block_cache_count(block_cache), 0u);
+
+  /* Deleted blocks no longer read. */
+  for (size_t i = 0; i < BLOCK_COUNT; i++) {
+    block_t* got = bc_get_sync(block_cache, blocks[i]->hash, pool);
+    EXPECT_EQ(got, nullptr) << "deleted block still readable for block " << i;
+    if (got != nullptr) block_destroy(got);
+  }
+}
+
+TEST_F(TestBlockCache, TestPutGroupAbortIgnoresPins) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  block_cache_put_group(block_cache, blocks[0], 0, nullptr, 79u);
+  scheduler_pool_wait_for_idle(pool);
+  /* A pinned block is still deleted by the abort (the user-facing rule). */
+  block_cache_pin(block_cache, blocks[0]->hash, nullptr);
+  scheduler_pool_wait_for_idle(pool);
+  block_cache_put_group_end(block_cache, 79u, 1);
+  scheduler_pool_wait_for_idle(pool);
+  EXPECT_EQ(block_cache_count(block_cache), 0u);
+}
+
+TEST_F(TestBlockCache, TestPutGroupCompleteKeepsBlocks) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  for (size_t i = 0; i < BLOCK_COUNT; i++) {
+    block_cache_put_group(block_cache, blocks[i], 0, nullptr, 78u);
+  }
+  scheduler_pool_wait_for_idle(pool);
+  /* Completed put: END abort=0 drops the receipt but keeps every block. */
+  block_cache_put_group_end(block_cache, 78u, 0);
+  scheduler_pool_wait_for_idle(pool);
+  EXPECT_EQ(block_cache_count(block_cache), BLOCK_COUNT);
+  for (size_t i = 0; i < BLOCK_COUNT; i++) {
+    block_t* got = bc_get_sync(block_cache, blocks[i]->hash, pool);
+    EXPECT_NE(got, nullptr);
+    if (got != nullptr) block_destroy(got);
+  }
+}
+
 TEST_F(TestBlockCache, TestBlockCachePutGetOnly) {
   block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
   for (size_t i = 0; i < BLOCK_COUNT; i++) {

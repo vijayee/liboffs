@@ -40,6 +40,10 @@ typedef struct {
   uint8_t pending_finalize;
   uint8_t is_ephemeral;             /* ephemeral put — created blocks acquire claims, no network announcement */
   uint8_t completed;                /* 1 once the stream fired its completion (finished_event path) */
+  uint32_t put_group;               /* this PUT's abort-group id: the cache records fresh
+                                       creations under it; the stream sends
+                                       CACHE_PUT_GROUP_END abort=0 on completion,
+                                       abort=1 on every dead-put path */
   vec_buffer_t created_hashes;      /* blocks this put created (ephemeral mode): random blocks
                                         from non-recycler recipes + off_blocks. Recycler-delivered
                                         blocks are EXCLUDED — the recycler rolls back its own

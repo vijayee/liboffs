@@ -35,6 +35,7 @@ typedef struct {
   uint32_t peer_state_ttl_ms;          // drop persisted peers not seen for this long on load (0 = never expire)
   uint32_t peer_state_save_interval_ms; // debounced peer-state save cadence
   bool     fsync_data;                  // fsync block data + WAL + snapshot for crash durability (default true; false for fast test builds)
+  bool     delete_blocks_on_put_failure; /* failed/aborted PUT deletes the blocks it newly created, regardless of pin status (default true) */
   uint32_t eabf_base_ttl_ms;
   uint32_t eabf_maintenance_ms;
   uint32_t respiration_tau_min_ms;

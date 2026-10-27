@@ -139,6 +139,8 @@ config_t* config_pending_load(const char* data_dir) {
       config->tcp_tls_enabled = cJSON_IsTrue(item);
     else if (strcmp(item->string, "allow_secure") == 0 && cJSON_IsBool(item))
       config->allow_secure = cJSON_IsTrue(item);
+    else if (strcmp(item->string, "delete_blocks_on_put_failure") == 0 && cJSON_IsBool(item))
+      config->delete_blocks_on_put_failure = cJSON_IsTrue(item);
     /* uint16_t fields */
     else if (strcmp(item->string, "http_port") == 0 && cJSON_IsNumber(item))
       config->http_port = (uint16_t)item->valuedouble;

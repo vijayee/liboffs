@@ -349,6 +349,91 @@ void block_lru_cache_move(block_lru_cache_t* lru, block_lru_node_t* node) {
   }
 }
 
+static void _block_cache_delete_entry(block_cache_t* block_cache, buffer_t* hash,
+                                    index_entry_t* entry);
+
+/* ---- put-abort group receipts ----
+   A failed/aborted client PUT must delete the blocks it freshly stored
+   regardless of pin/claim status (the delete_blocks_on_put_failure option,
+   default on). The cache actor keeps one ROLLBACK RECEIPT per emitting PUT
+   (keyed by the PUT's group id, assigned by the writeable_off_stream that
+   owns the pipeline): every CACHE_PUT_NEW under the group appends an owned
+   32-byte hash copy; dedup hits (CACHE_PUT_EXISTS) are never recorded.
+   CACHE_PUT_GROUP_END closes the receipt: abort=1 force-deletes everything
+   recorded, abort=0 keeps (the put completed). Deleting rides the internal
+   delete path (index + LRU + section deallocation) — the same path
+   CACHE_REMOVE force and the GC force sweep take, with the same documented
+   against-in-flight-READ hazard. Actor FIFO ordering makes the receipt
+   complete: any put queued before the END message is recorded before the
+   deletes run.
+
+   Receipt memory is proportional to the put (32 bytes per ~128KB block,
+   ~0.025%), so no cap is enforced here; the destroy frees any residual. */
+
+/* Cache actor only: record one fresh creation under the PUT's group. */
+static void _put_group_record(block_cache_t* block_cache, uint32_t group,
+                              buffer_t* hash) {
+  if (group == 0 || hash == NULL || hash->data == NULL || hash->size != 32) {
+    return;
+  }
+  bc_put_group_t* entry = NULL;
+  for (size_t g = 0; g < block_cache->put_groups.length; g++) {
+    if (block_cache->put_groups.data[g].group == group) {
+      entry = &block_cache->put_groups.data[g];
+      break;
+    }
+  }
+  if (entry == NULL) {
+    bc_put_group_t fresh;
+    memset(&fresh, 0, sizeof(bc_put_group_t));
+    fresh.group = group;
+    vec_init(&fresh.hashes);
+    if (vec_push(&block_cache->put_groups, fresh) == -1) {
+      return;
+    }
+    entry = &block_cache->put_groups.data[block_cache->put_groups.length - 1];
+  }
+  buffer_t* copy = buffer_copy(hash);
+  if (copy != NULL) {
+    vec_push(&entry->hashes, copy);
+  }
+}
+
+static void _put_group_end_dispatch(block_cache_t* block_cache, uint32_t group,
+                                    uint8_t abort) {
+  size_t at = 0;
+  bc_put_group_t* found = NULL;
+  for (size_t g = 0; g < block_cache->put_groups.length; g++) {
+    if (block_cache->put_groups.data[g].group == group) {
+      found = &block_cache->put_groups.data[g];
+      at = g;
+      break;
+    }
+  }
+  if (found == NULL) {
+    return;  /* unknown / already ended: idempotent no-op */
+  }
+  uint8_t do_delete = (uint8_t)(abort && block_cache->delete_blocks_on_put_failure);
+  for (size_t h = 0; h < found->hashes.length; h++) {
+    buffer_t* hash = found->hashes.data[h];
+    if (do_delete) {
+      /* CACHE_REMOVE-force template: borrowed entry, synchronous delete on
+         the cache actor, pins zeroed first (verbatim force semantics). */
+      index_entry_t* entry = index_peek(block_cache->index, hash);
+      if (entry != NULL) {
+        if (entry->pin_count > 0) {
+          entry->pin_count = 0;
+          index_write_entry_metadata(block_cache->index, entry);
+        }
+        _block_cache_delete_entry(block_cache, hash, entry);
+      }
+    }
+    DESTROY(hash, buffer);  /* the receipt's own copy */
+  }
+  vec_deinit(&found->hashes);
+  vec_splice(&block_cache->put_groups, (int)at, 1);
+}
+
 /* ---- block_cache dispatch ---- */
 
 /* Delete one entry from the index, LRU, and section store. `hash` must be a
@@ -532,6 +617,7 @@ void block_cache_dispatch(void* state, message_t* msg) {
                        ATOMIC_LOAD(&block_cache->current_bytes) + (size_t)block_cache->type);
           block_cache_update_capacity(block_cache);
           p->result = CACHE_PUT_NEW;
+          _put_group_record(block_cache, p->put_group, result_hash);
         }
       } else {
         /* Block already exists — update FIB to max(local, incoming), and PROMOTE when the rank
@@ -577,6 +663,12 @@ void block_cache_dispatch(void* state, message_t* msg) {
           DESTROY(result_hash, buffer);
         }
       }
+      break;
+    }
+    case CACHE_PUT_GROUP_END: {
+      cache_put_group_end_payload_t* p = (cache_put_group_end_payload_t*)msg->payload;
+      if (p == NULL) break;
+      _put_group_end_dispatch(block_cache, p->group, p->abort);
       break;
     }
     case CACHE_RESIZE: {
@@ -1214,6 +1306,8 @@ block_cache_t* block_cache_create(config_t config, char* location, block_size_e 
   block_cache->pool = pool;
   block_cache->timer_actor = timer_actor;
   block_cache->index_wait = config.index_wait;
+  block_cache->delete_blocks_on_put_failure = (uint8_t)config.delete_blocks_on_put_failure;
+  vec_init(&block_cache->put_groups);
   block_cache->authority = authority;
   ATOMIC_STORE(&block_cache->max_capacity_bytes, max_capacity_bytes);
   ATOMIC_STORE(&block_cache->current_bytes, 0);
@@ -1294,6 +1388,14 @@ void block_cache_destroy(block_cache_t* block_cache) {
     /* The registry actor must not be processing when destroyed — the
        wait_for_idle above covers it (the registry's own destroy re-waits). */
     ephemeral_registry_destroy(block_cache->registry);
+    for (size_t g = 0; g < block_cache->put_groups.length; g++) {
+      bc_put_group_t* pg = &block_cache->put_groups.data[g];
+      for (size_t h = 0; h < pg->hashes.length; h++) {
+        DESTROY(pg->hashes.data[h], buffer);
+      }
+      vec_deinit(&pg->hashes);
+    }
+    vec_deinit(&block_cache->put_groups);
     sections_destroy(block_cache->sections);
     block_lru_cache_destroy(block_cache->lru);
     actor_destroy(&block_cache->actor);
@@ -1456,17 +1558,45 @@ void block_cache_get_ex(block_cache_t* block_cache, buffer_t* hash, actor_t* rep
 }
 
 void block_cache_put(block_cache_t* block_cache, block_t* block, uint32_t incoming_fib, actor_t* reply_to) {
+  block_cache_put_group(block_cache, block, incoming_fib, reply_to, 0);
+}
+
+/* PUT under a put-abort group: fresh creations (CACHE_PUT_NEW) are recorded
+   so the emitting PUT's CACHE_PUT_GROUP_END with abort=1 force-deletes them
+   (writeable_off_stream's failed/aborted-put cleanup). */
+void block_cache_put_group(block_cache_t* block_cache, block_t* block,
+                           uint32_t incoming_fib, actor_t* reply_to,
+                           uint32_t put_group) {
   cache_put_payload_t* payload = get_clear_memory(sizeof(cache_put_payload_t));
   payload->block = (block_t*)refcounter_reference((refcounter_t*)block);
   payload->incoming_fib = incoming_fib;
   payload->reply_to = reply_to;
   payload->result = CACHE_PUT_ERROR;
   payload->acquire_ephemeral = 0;
+  payload->put_group = put_group;
 
   message_t msg;
   msg.type = CACHE_PUT;
   msg.payload = payload;
   msg.payload_destroy = cache_put_payload_destroy;
+
+  actor_send(&block_cache->actor, &msg);
+}
+
+/* Close the emitting PUT's abort receipt: abort=1 force-deletes the blocks
+   the group created (config delete_blocks_on_put_failure on); abort=0 = the
+   put completed, keep them. The receipt itself is freed either way. */
+void block_cache_put_group_end(block_cache_t* block_cache, uint32_t put_group,
+                               uint8_t abort) {
+  if (block_cache == NULL || put_group == 0) return;
+  cache_put_group_end_payload_t* payload = get_clear_memory(sizeof(cache_put_group_end_payload_t));
+  payload->group = put_group;
+  payload->abort = abort;
+
+  message_t msg;
+  msg.type = CACHE_PUT_GROUP_END;
+  msg.payload = payload;
+  msg.payload_destroy = free;
 
   actor_send(&block_cache->actor, &msg);
 }

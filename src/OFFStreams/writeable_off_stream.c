@@ -72,6 +72,23 @@ static void _entry_destroy(off_stream_tuple_entry_t* entry) {
 
 static void _get_random_blocks(writeable_off_stream_t* stream);
 
+/* Put-abort group ids: 1-based (0 = untracked). The receipt's life begins at
+   the first fresh creation the cache records and ends at CACHE_PUT_GROUP_END,
+   sent from this actor's dispatch or the destroy backstop below. */
+static ATOMIC(uint32_t) _put_group_id_counter;
+
+/* The emitting PUT's stream ended: close the cache's abort receipt.
+   abort = 1 on every dead-put path (cache full/write error, recipe
+   exhaustion, disconnect/destroy before completion), 0 on completed puts. */
+static void _writeable_put_group_end(writeable_off_stream_t* stream, uint8_t abort) {
+  if (stream->put_group == 0 || stream->bc == NULL) {
+    return;
+  }
+  uint32_t group = stream->put_group;
+  stream->put_group = 0;  /* receipt closed; later ends are no-ops */
+  block_cache_put_group_end(stream->bc, group, abort);
+}
+
 /* Failure cleanup for an ephemeral put: release the ephemeral claim on every
  * block this put created (its only claim is the failed put's, so each block
  * is deleted at count 0) and roll back the acquired claims on every recycler
@@ -389,6 +406,8 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
       if (stream->current_recipe_index >= stream->recipes.length) {
         stream_deactivate((stream_t*)stream, OFFS_ERROR("Write error"));
         ATOMIC_STORE(&stream->stream.is_deactivated, 1);
+        /* No recipe left, so the put cannot finish: delete its fresh blocks. */
+        _writeable_put_group_end(stream, 1);
         break;
       }
 
@@ -424,6 +443,11 @@ void writeable_off_stream_dispatch(void* state, message_t* msg) {
          * claims roll back) before the error reaches the client. Fires once
          * — the guard above drops every subsequent failure. */
         _release_ephemeral_claims(stream);
+        /* The failed PUT's own fresh blocks: force-delete via the put's
+         * abort receipt (regardless of pin status), so a put that errors
+         * out mid-stream leaves no orphaned block data behind. The cache
+         * actor's FIFO covers every put queued before this END. */
+        _writeable_put_group_end(stream, 1);
         if (result->result == CACHE_PUT_FULL) {
           stream_notify((stream_t*)stream, error_event,
                         OFFS_ERROR_TRANSFER("cache full during put: configure larger max_capacity_bytes"),
@@ -489,6 +513,7 @@ writeable_off_stream_t* writeable_off_stream_create(
 
   vec_init(&stream->entries);
   vec_init(&stream->created_hashes);
+  stream->put_group = ATOMIC_FETCH_ADD(&_put_group_id_counter, 1) + 1;
 
   stream->accumulator = buffer_create(stream->block_size);
   stream->accumulator->size = 0;
@@ -500,6 +525,14 @@ writeable_off_stream_t* writeable_off_stream_create(
   stream->recipes = recipes;
   for (int i = 0; i < stream->recipes.length; i++) {
     refcounter_reference((refcounter_t*)stream->recipes.data[i]);
+    /* Tag this PUT's recipes with the put-abort group so the recipe's own
+       fresh-creation puts are recorded at the cache. Recycler recipes keep 0:
+       their recycled blocks are staged content the put never created (their
+       rollback is recycler_recipe_release_acquired). Set here, before any
+       dispatch can run — same pre-pipeline window as set_ephemeral's rules. */
+    if (!stream->recipes.data[i]->is_recycler) {
+      stream->recipes.data[i]->put_group = stream->put_group;
+    }
   }
   stream->current_recipe_index = 0;
   stream->current_recipe = stream->recipes.length > 0 ? stream->recipes.data[0] : NULL;
@@ -536,6 +569,13 @@ void writeable_off_stream_destroy(writeable_off_stream_t* stream) {
     if (stream->is_ephemeral && !stream->completed) {
       _release_ephemeral_claims(stream);
     }
+    /* Put-abort-group backstop: the FIRST caller of
+       _writeable_put_group_end wins (the error/rotate branches run first
+       where they fire); here it is the catch-all for every other dead-put
+       path — client disconnect mid-put, deactivation, abort — and the
+       group-cleanup for completed puts (abort=0, receipt dropped, keep).
+       Either way the cache actor frees the receipt, so nothing lingers. */
+    _writeable_put_group_end(stream, (uint8_t)!stream->completed);
     for (int i = 0; i < stream->entries.length; i++) {
       _entry_destroy(stream->entries.data[i]);
     }

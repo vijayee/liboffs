@@ -21,7 +21,7 @@ static const char* _string_fields[] = {
 static const char* _bool_fields[] = {
   "http_enabled", "https_enabled", "unix_enabled", "tcp_enabled",
   "ws_enabled", "wt_enabled", "tcp_tls_enabled", "allow_secure",
-  "fsync_data", NULL
+  "fsync_data", "delete_blocks_on_put_failure", NULL
 };
 
 static const char* _number_fields[] = {
@@ -92,6 +92,7 @@ cJSON* config_to_json(const config_t* config) {
 
   cJSON_AddBoolToObject(root, "allow_secure", config->allow_secure);
   cJSON_AddBoolToObject(root, "fsync_data", config->fsync_data);
+  cJSON_AddBoolToObject(root, "delete_blocks_on_put_failure", config->delete_blocks_on_put_failure);
 
   if (config->api_key_hash)
     cJSON_AddStringToObject(root, "api_key_hash", config->api_key_hash);

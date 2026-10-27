@@ -38,6 +38,9 @@ typedef struct {
   block_size_e block_type;
   uint8_t put_is_ephemeral;  /* consuming put is ephemeral — recipe claims its own outputs */
   uint8_t is_recycler;       /* set by recycler_recipe_create; stream cleanup skips these blocks */
+  uint32_t put_group;        /* abort-group id the consuming writeable_off_stream assigned
+                                (0 until set, before dispatch starts); the recipe's own
+                                put carries it so the cache records fresh creations */
 } block_recipe_t;
 
 typedef vec_t(block_recipe_t*) vec_block_recipe_t;

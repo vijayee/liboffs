@@ -39,6 +39,7 @@ config_t config_default() {
   config.peer_state_ttl_ms = 604800000u;   // 7 days
   config.peer_state_save_interval_ms = 250u;
   config.fsync_data = true;
+  config.delete_blocks_on_put_failure = true;
   config.eabf_base_ttl_ms = 3600000;
   config.eabf_maintenance_ms = 60000;
   /* Inhale-seek throttle bounds (per design): a node at ~0% capacity

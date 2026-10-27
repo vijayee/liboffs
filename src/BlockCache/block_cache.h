@@ -12,6 +12,7 @@
 #include "../Timer/timer_actor.h"
 #include "../Configuration/config.h"
 #include "../Actor/actor.h"
+#include "../Util/vec.h"
 #include "../Scheduler/scheduler.h"
 #include <hashmap.h>
 
@@ -60,6 +61,9 @@ typedef struct {
   uint32_t incoming_fib;
   int result;
   uint8_t acquire_ephemeral; /* 1 = acquire an ephemeral claim (count += 1) on the stored block */
+  uint32_t put_group;        /* 0 = untracked (default); nonzero = put-abort group id from the
+                                caller: fresh creations (CACHE_PUT_NEW) record their hash under
+                                the group so CACHE_PUT_GROUP_END can force-delete them. */
 } cache_put_payload_t;
 
 /* Payload for CACHE_GET message.
@@ -107,6 +111,24 @@ typedef struct {
   size_t current_bytes;
   actor_t* reply_to;
 } cache_resize_result_payload_t;
+
+/* One live put-abort group: the cache's rollback receipt for the blocks one
+   client PUT freshly stored. Records the hash (raw bytes, fixed 32-byte
+   BLAKE3 stride) of every CACHE_PUT_NEW under that PUT's group id; dedup
+   hits (CACHE_PUT_EXISTS) are never recorded. Freed by CACHE_PUT_GROUP_END:
+   abort=1 force-deletes each (regardless of pin/claim status — verbatim
+   CACHE_REMOVE force semantics; the same in-flight-READ hazard the GC force
+   sweep documents), abort=0 frees the receipt alone. */
+typedef struct {
+  uint32_t group;
+  vec_t(buffer_t*) hashes;   /* owned hash copies, always 32 bytes */
+} bc_put_group_t;
+
+/* Payload for CACHE_PUT_GROUP_END. */
+typedef struct {
+  uint32_t group;
+  uint8_t abort;
+} cache_put_group_end_payload_t;
 
 /* Payload for CACHE_GC — a destructive keep-list sweep. `keep` is OWNED BY
    THE DISPATCH: the cache actor tests every indexed block's hash against it,
@@ -245,6 +267,14 @@ typedef struct block_cache_t {
   sections_t* sections;
   index_t* index;
   block_size_e type;
+  /* Config, create-time immutable, read by other actors' put machinery — the
+     config-field-read class the actor-boundary rule blesses.
+     delete_blocks_on_put_failure: a failed/aborted PUT force-deletes the
+     blocks it freshly created regardless of pin/claim status, so a client
+     disconnect or mid-put failure leaves no orphaned block data (default on;
+     off = the failed put's blocks stay, as before this flag existed). */
+  uint8_t delete_blocks_on_put_failure;
+  vec_t(bc_put_group_t) put_groups;   /* live put-abort receipts, freed at CACHE_PUT_GROUP_END */
   bool fsync_data;
   struct scheduler_pool_t* pool;
   timer_actor_t* timer_actor;
@@ -382,6 +412,20 @@ bool block_cache_entry_is_sheddable(const index_entry_t* entry);
    claim on a fresh block makes it 1. Works for both a new put and a block
    that already exists. */
 void block_cache_put_ephemeral(block_cache_t* block_cache, block_t* block, actor_t* reply_to);
+
+/* PUT under a put-abort group (writeable_off_stream's failed-PUT cleanup):
+   the cache records fresh creations (CACHE_PUT_NEW) under the group so the
+   emitting PUT's CACHE_PUT_GROUP_END can force-delete them. block_cache_put
+   delegates here with group 0. */
+void block_cache_put_group(block_cache_t* block_cache, block_t* block,
+                           uint32_t incoming_fib, actor_t* reply_to,
+                           uint32_t put_group);
+/* Close the emitting PUT's abort receipt. abort = 1: the PUT failed/aborted —
+   force-delete everything the group freshly created REGARDLESS of pin/claim
+   status (gated by config delete_blocks_on_put_failure, default on).
+   abort = 0: the PUT completed — keep the blocks. */
+void block_cache_put_group_end(block_cache_t* block_cache, uint32_t put_group,
+                               uint8_t abort);
 
 /* Advisory capacity check (unsynchronized): returns CACHE_FIT_OK if
  * current_bytes + required_bytes <= max_capacity_bytes, else CACHE_FIT_FULL.

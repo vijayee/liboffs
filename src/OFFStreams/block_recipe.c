@@ -44,7 +44,11 @@ void new_blocks_recipe_dispatch(void* state, message_t* msg) {
            the claim is never doubled. */
         block_cache_put_ephemeral(recipe->recipe.bc, block, NULL);
       } else {
-        block_cache_put(recipe->recipe.bc, block, 0, NULL);
+        /* Plain put under the consuming put's abort group: fresh creations
+           are recorded by the cache so a failed/aborted PUT force-deletes
+           them (the block stored HERE is where the entry first exists). */
+        block_cache_put_group(recipe->recipe.bc, block, 0, NULL,
+                              recipe->recipe.put_group);
       }
       stream_notify((stream_t*)recipe, data_event,
                     CONSUME(block, block_t), (void (*)(void*))block_destroy);
