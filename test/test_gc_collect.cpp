@@ -288,6 +288,71 @@ static buffer_t* _test_put_ephemeral(block_cache_t* bc, scheduler_pool_t* pool, 
   return put_ctx.descriptor_hash;
 }
 
+/* Non-ephemeral equivalent of _test_put_ephemeral (plain put: no claims,
+   network NULL). Mirrors the route wiring (desc->put_group = ws->put_group)
+   and the completion order. finalize=0: write only, then the deferred ws
+   deref drives the abort (destroy backstop: END abort=1) — no descriptor
+   flush, no completion; the helper still fully tears everything down. */
+static buffer_t* _test_put_plain(block_cache_t* bc, scheduler_pool_t* pool,
+                                 size_t data_size, uint8_t finalize) {
+  gc_put_context_t put_ctx;
+  memset(&put_ctx, 0, sizeof(put_ctx));
+  tuple_cache_t* tc = tuple_cache_create(16, pool);
+  if (tc == NULL) {
+    return NULL;
+  }
+  writeable_descriptor_t* desc = writeable_descriptor_create(pool, bc, standard, 32, 3, data_size, NULL);
+  if (desc == NULL) {
+    tuple_cache_destroy(tc);
+    return NULL;
+  }
+  put_ctx.desc_handle = desc;
+  vec_block_recipe_t recipes;
+  vec_init(&recipes);
+  new_blocks_recipe_t* recipe = new_blocks_recipe_create(pool, bc, standard);
+  if (recipe == NULL) {
+    stream_deferred_deref((stream_t*)desc);
+    scheduler_pool_wait_for_idle(pool);
+    tuple_cache_destroy(tc);
+    return NULL;
+  }
+  vec_push(&recipes, (block_recipe_t*)recipe);
+  writeable_off_stream_t* ws = writeable_off_stream_create(pool, bc, tc, standard, 3, 32, recipes, NULL);
+  if (ws == NULL) {
+    refcounter_dereference((refcounter_t*)recipe);
+    scheduler_pool_defer_cleanup(pool, recipe, (void (*)(void*))new_blocks_recipe_destroy);
+    stream_deferred_deref((stream_t*)desc);
+    scheduler_pool_wait_for_idle(pool);
+    tuple_cache_destroy(tc);
+    return NULL;
+  }
+  desc->put_group = ws->put_group;
+  if (finalize) {
+    stream_subscribe((stream_t*)ws, data_event, &put_ctx, gc_capture_tuple, NULL);
+    stream_subscribe((stream_t*)ws, close_event, &put_ctx, gc_rep_put_ws_close, NULL);
+    stream_subscribe((stream_t*)desc, data_event, &put_ctx, gc_capture_descriptor_hash, NULL);
+    stream_once((stream_t*)desc, close_event, &put_ctx, gc_rep_put_close, NULL);
+  }
+  buffer_t* upload = buffer_create(data_size);
+  upload->size = data_size;
+  writeable_off_stream_write(ws, upload);
+  if (finalize) {
+    writeable_off_stream_finalize(ws);
+    while (!ATOMIC_LOAD(&put_ctx.done)) { platform_sleep_ms(1); }
+  }
+  buffer_destroy(upload);
+  scheduler_pool_wait_for_idle(pool);
+  /* Release the recipe's creation reference, deferring its destructor so it
+     runs LAST (the pending list is LIFO). Mirrors off_routes.c's order. */
+  refcounter_dereference((refcounter_t*)recipe);
+  scheduler_pool_defer_cleanup(pool, recipe, (void (*)(void*))new_blocks_recipe_destroy);
+  stream_deferred_deref((stream_t*)ws);
+  stream_deferred_deref((stream_t*)desc);
+  scheduler_pool_wait_for_idle(pool);
+  tuple_cache_destroy(tc);
+  return put_ctx.descriptor_hash;
+}
+
 /* ---- direct COLLECT walk (test a) ---- */
 
 typedef struct {
@@ -834,6 +899,43 @@ TEST_F(TestGcCollect, KeepFilterSizedExactlyFromUrls) {
   free(three);
   free(one);
   DESTROY(hash, buffer);
+  block_cache_sync(block_cache);
+  block_cache_destroy(block_cache);
+  block_cache = NULL;
+}
+
+/* (put-abort receipt, pipeline level) A plain put destroyed before completion
+   force-deletes EVERYTHING it freshly created: the recipe's random blocks AND
+   the off-blocks (the XORED data carriers) — both recorded under the put's
+   abort group. One data block (128000 B) => 2 random + 1 off recorded. */
+TEST_F(TestGcCollect, PutAbortStreamDestroyDeletesOffAndRecipeBlocks) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  ASSERT_NE(block_cache, nullptr);
+
+  buffer_t* descriptor_hash = _test_put_plain(block_cache, pool, standard, 0);
+  EXPECT_EQ(descriptor_hash, nullptr) << "finalize=0 must not complete the put";
+  scheduler_pool_wait_for_idle(pool);
+  /* The destroy backstop's END (abort=1) deleted the 3 recorded fresh
+     creations; the descriptor was never flushed, so nothing else stored. */
+  EXPECT_EQ(block_cache_count(block_cache), 0u);
+
+  block_cache_sync(block_cache);
+  block_cache_destroy(block_cache);
+  block_cache = NULL;
+}
+
+/* (put-abort receipt, pipeline level) A completed plain put keeps everything
+   its receipt recorded (2 random + 1 off + 1 descriptor block). */
+TEST_F(TestGcCollect, PutCompletePlainPipelineKeepsBlocks) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  ASSERT_NE(block_cache, nullptr);
+
+  buffer_t* descriptor_hash = _test_put_plain(block_cache, pool, standard, 1);
+  ASSERT_NE(descriptor_hash, nullptr);
+  EXPECT_EQ(block_cache_count(block_cache), 4u);
+  DESTROY(descriptor_hash, buffer);
+
+  scheduler_pool_wait_for_idle(pool);
   block_cache_sync(block_cache);
   block_cache_destroy(block_cache);
   block_cache = NULL;

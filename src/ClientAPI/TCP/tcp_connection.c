@@ -705,6 +705,7 @@ static void _tcp_handle_put(tcp_connection_t* conn, cbor_item_t* frame) {
     conn->pool, conn->bc, conn->tc, block_type, tuple_size, descriptor_pad, recipes, NULL);
   writeable_descriptor_t* desc = writeable_descriptor_create(
     conn->pool, conn->bc, block_type, descriptor_pad, tuple_size, msg.stream_length, NULL);
+  desc->put_group = ws->put_group;  /* descriptor blocks join the put's abort receipt */
 
   if (msg.temporary) {
     writeable_off_stream_set_ephemeral(ws, 1);

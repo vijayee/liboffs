@@ -26,6 +26,13 @@ typedef struct {
   uint8_t sent_descriptor;
   uint8_t is_ephemeral;             /* ephemeral put — descriptor blocks acquire claims, no network announcement */
   block_size_e block_type;
+  /* Put-abort group id of the consuming PUT (0 = untracked/unset): the
+     cache records the descriptor's fresh creations under it so the
+     emitting PUT's CACHE_PUT_GROUP_END covers them. Assign at create
+     time (from the paired writeable_off_stream's put_group) and BEFORE
+     the first writeable_descriptor_write — the value is read on the
+     pool's dispatch thread when close flushes the descriptor blocks. */
+  uint32_t put_group;
 } writeable_descriptor_t;
 
 writeable_descriptor_t* writeable_descriptor_create(

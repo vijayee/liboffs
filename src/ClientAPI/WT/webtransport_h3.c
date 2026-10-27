@@ -752,6 +752,7 @@ static void _wt_h3_handle_put(webtransport_h3_conn_t* conn, cbor_item_t* frame) 
       conn->pool, conn->bc, conn->tc, block_type, tuple_size, descriptor_pad, recipes, NULL);
   conn->put_desc = writeable_descriptor_create(
       conn->pool, conn->bc, block_type, descriptor_pad, tuple_size, msg.stream_length, NULL);
+  conn->put_desc->put_group = conn->put_ws->put_group;  /* descriptor blocks join the put's abort receipt */
 
   if (msg.temporary) {
     writeable_off_stream_set_ephemeral(conn->put_ws, 1);

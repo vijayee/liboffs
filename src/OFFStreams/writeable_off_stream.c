@@ -176,12 +176,18 @@ static void _create_tuple(writeable_off_stream_t* stream, off_stream_tuple_entry
      owner per claim. */
   actor_t* reply_to = &stream->stream.actor;
   for (int random_idx = 0; random_idx < entry->random_blocks.length; random_idx++) {
-    block_cache_put(stream->bc, entry->random_blocks.data[random_idx], 0, reply_to);
+    /* Tagged with this PUT's abort group: the recipe's creation put normally
+       wins (this re-put sees EXISTS); if this put's copy ever lands NEW, it
+       belongs in the receipt too. */
+    block_cache_put_group(stream->bc, entry->random_blocks.data[random_idx], 0,
+                          reply_to, stream->put_group);
   }
   if (stream->is_ephemeral) {
     block_cache_put_ephemeral(stream->bc, off_block, reply_to);
   } else {
-    block_cache_put(stream->bc, off_block, 0, reply_to);
+    /* The off-block (the XORED data carrier) is this PUT's own fresh
+       creation: record it in the abort receipt like the recipe blocks. */
+    block_cache_put_group(stream->bc, off_block, 0, reply_to, stream->put_group);
   }
 
   tuple_cache_put(stream->tc, tuple, origin_data);

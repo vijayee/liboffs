@@ -1490,6 +1490,7 @@ static void _off_put_handler(http_request_t* request, http_response_t* response,
 
     writeable_descriptor_t* desc = writeable_descriptor_create(
         ctx->pool, ctx->bc, standard, 32, tuple_size, stream_length, NULL);
+    desc->put_group = ws->put_group;  /* descriptor blocks join the put's abort receipt */
 
     if (is_temporary) {
         writeable_off_stream_set_ephemeral(ws, 1);
@@ -1715,6 +1716,7 @@ static int _off_put_headers_complete(http_connection_t* connection,
 
     writeable_descriptor_t* desc = writeable_descriptor_create(
         routes_ctx->pool, routes_ctx->bc, standard, 32, tuple_size, stream_length, NULL);
+    desc->put_group = ws->put_group;  /* descriptor blocks join the put's abort receipt */
 
     if (is_temporary) {
         writeable_off_stream_set_ephemeral(ws, 1);

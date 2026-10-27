@@ -104,7 +104,11 @@ static void _build_descriptor_blocks(writeable_descriptor_t* desc) {
     if (desc->is_ephemeral) {
       block_cache_put_ephemeral(desc->bc, block, reply_to);
     } else {
-      block_cache_put(desc->bc, block, 0, reply_to);
+      /* Tagged with the consuming PUT's abort group: an aborted put's
+         receipt force-deletes these blocks too (and close-time flushes
+         arriving after the END drop against the tombstone) — no orphaned
+         descriptor data. */
+      block_cache_put_group(desc->bc, block, 0, reply_to, desc->put_group);
     }
     if (prior_hash != NULL) {
       DESTROY(prior_hash, buffer);
