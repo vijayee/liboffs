@@ -6139,6 +6139,42 @@ static void network_handle_peer_book_reconnect(
       (snapshot->config_count > 0 || snapshot->managed_count > 0)) {
     uint64_t now_ms = platform_monotonic_ns() / 1000000u;
     if (now_ms >= network->bootstrap_next_attempt_ms) {
+      /* LAST-KNOWN-GOOD FIRST: dial the persisted ring-table peers. The
+         peer store restores each contact with the address a live
+         connection last observed (salutation captures the peer source
+         address, post-NAT via the shared-port listener binding), while
+         the config-declared lists only carry the addresses known at
+         record time - which is exactly what goes stale. Dialing runs
+         inside the same partition-heal backoff window as the bootstrap
+         dials, so this cannot add a hot retry loop; tracked (connected
+         or in-flight) and self and rendezvous (relay) ring entries are
+         skipped. Ring set + conn state are this actor's own state: the
+         dial is in-boundary. */
+      for (size_t ring_index = 0; ring_index < network->rings->ring_count; ring_index++) {
+        const ring_t* ring = &network->rings->rings[ring_index];
+        const vec_node_t* lists[2] = {&ring->primary, &ring->secondary};
+        for (size_t list_pick = 0; list_pick < 2; list_pick++) {
+          const vec_node_t* list = lists[list_pick];
+          for (int node_index = 0; node_index < list->length; node_index++) {
+            net_node_t* node = list->data[node_index];
+            if (node == NULL) continue;
+            if (node->addr == 0 || node->port == 0) continue;  /* no usable v4 addr */
+            if (node->flags & NET_NODE_FLAG_RENDEZVOUS) continue;  /* relays dial via endpoint lists */
+            if (node_id_equals(&node->id, &network->authority->local_id)) continue;  /* self */
+            if (connection_manager_lookup(&network->conn_mgr, &node->id) != NULL) continue;
+            char host_buf[16] = {0};
+            if (_ipv4_to_string(node->addr, host_buf, sizeof(host_buf)) != 0) continue;
+            peer_address_t last_good;
+            memset(&last_good, 0, sizeof(last_good));
+            last_good.type = PEER_ADDR_HOST;
+            last_good.host = host_buf;
+            last_good.port = node->port;
+            last_good.relay_id = 0;
+            (void)network_connect_peer_candidates(network, &node->id,
+                                                  &last_good, 1, false);
+          }
+        }
+      }
       for (size_t index = 0; index < snapshot->config_info_count; index++) {
         peer_info_t* entry_info = snapshot->config_infos[index];
         if (entry_info == NULL) continue;
