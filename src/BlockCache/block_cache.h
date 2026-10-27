@@ -112,13 +112,22 @@ typedef struct {
   actor_t* reply_to;
 } cache_resize_result_payload_t;
 
-/* One live put-abort group: the cache's rollback receipt for the blocks one
-   client PUT freshly stored. Records the hash (raw bytes, fixed 32-byte
-   BLAKE3 stride) of every CACHE_PUT_NEW under that PUT's group id; dedup
-   hits (CACHE_PUT_EXISTS) are never recorded. Freed by CACHE_PUT_GROUP_END:
-   abort=1 force-deletes each (regardless of pin/claim status — verbatim
-   CACHE_REMOVE force semantics; the same in-flight-READ hazard the GC force
-   sweep documents), abort=0 frees the receipt alone. */
+/* Bounded tombstone ring for ended put-abort groups (see block_cache_t). */
+#define BLOCK_CACHE_PUT_GROUP_TOMBSTONES 1024
+
+/* ---- put-abort group receipts ----
+   One live receipt per emitting PUT (keyed by group id): CACHE_PUT_NEW
+   appends an owned 32-byte hash copy; dedup hits (CACHE_PUT_EXISTS) are
+   never recorded. CACHE_PUT_GROUP_END closes it: abort=1 force-deletes
+   everything recorded REGARDLESS of pin/claim status (verbatim
+   CACHE_REMOVE force semantics; the same in-flight-READ hazard the GC
+   force sweep documents), abort=0 frees the receipt alone.
+
+   FIFO makes the receipt's record phase complete for puts the cache
+   actor queued BEFORE the END message. Puts still in flight when the
+   emitting stream ends (recipe actors delivering past the abort) land
+   AFTER it: those are dropped against the ended-group tombstone ring
+   (see block_cache_t.ended_put_groups) before anything is stored. */
 typedef struct {
   uint32_t group;
   vec_t(buffer_t*) hashes;   /* owned hash copies, always 32 bytes */
@@ -275,6 +284,14 @@ typedef struct block_cache_t {
      off = the failed put's blocks stay, as before this flag existed). */
   uint8_t delete_blocks_on_put_failure;
   vec_t(bc_put_group_t) put_groups;   /* live put-abort receipts, freed at CACHE_PUT_GROUP_END */
+  /* Bounded tombstone ring of ended put-groups (circular, newest last).
+     Group ids are process-monotonic (one writeable_off_stream counter) so an
+     id is never reused: a CACHE_PUT_NEW for a tombstoned id is a LATE
+     delivery from a recipe whose emitting put already ended — dropped before
+     storing, instead of silently re-creating a ghost receipt. */
+  uint32_t ended_put_groups[BLOCK_CACHE_PUT_GROUP_TOMBSTONES];
+  size_t   ended_put_groups_count;    /* ring length (≤ tombstone cap) */
+  size_t   ended_put_groups_next;     /* write position once the ring is full */
   bool fsync_data;
   struct scheduler_pool_t* pool;
   timer_actor_t* timer_actor;

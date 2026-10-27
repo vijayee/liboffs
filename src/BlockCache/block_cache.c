@@ -410,28 +410,48 @@ static void _put_group_end_dispatch(block_cache_t* block_cache, uint32_t group,
       break;
     }
   }
-  if (found == NULL) {
-    return;  /* unknown / already ended: idempotent no-op */
-  }
-  uint8_t do_delete = (uint8_t)(abort && block_cache->delete_blocks_on_put_failure);
-  for (size_t h = 0; h < found->hashes.length; h++) {
-    buffer_t* hash = found->hashes.data[h];
-    if (do_delete) {
-      /* CACHE_REMOVE-force template: borrowed entry, synchronous delete on
-         the cache actor, pins zeroed first (verbatim force semantics). */
-      index_entry_t* entry = index_peek(block_cache->index, hash);
-      if (entry != NULL) {
-        if (entry->pin_count > 0) {
-          entry->pin_count = 0;
-          index_write_entry_metadata(block_cache->index, entry);
+  if (found != NULL) {
+    uint8_t do_delete = (uint8_t)(abort && block_cache->delete_blocks_on_put_failure);
+    for (size_t h = 0; h < found->hashes.length; h++) {
+      buffer_t* hash = found->hashes.data[h];
+      if (do_delete) {
+        /* CACHE_REMOVE-force template: borrowed entry, synchronous delete on
+           the cache actor, pins zeroed first (verbatim force semantics). */
+        index_entry_t* entry = index_peek(block_cache->index, hash);
+        if (entry != NULL) {
+          if (entry->pin_count > 0) {
+            entry->pin_count = 0;
+            index_write_entry_metadata(block_cache->index, entry);
+          }
+          _block_cache_delete_entry(block_cache, hash, entry);
         }
-        _block_cache_delete_entry(block_cache, hash, entry);
       }
+      DESTROY(hash, buffer);  /* the receipt's own copy */
     }
-    DESTROY(hash, buffer);  /* the receipt's own copy */
+    vec_deinit(&found->hashes);
+    vec_splice(&block_cache->put_groups, (int)at, 1);
   }
-  vec_deinit(&found->hashes);
-  vec_splice(&block_cache->put_groups, (int)at, 1);
+  /* Tombstone whether or not a receipt existed (a dedup-only put never
+     recorded one, but its stragglers must still drop): recipe actors may
+     deliver past this END's queue position, and a late CACHE_PUT_NEW for
+     this id must NOT re-create a ghost receipt (ids never reuse). */
+  if (block_cache->ended_put_groups_count < BLOCK_CACHE_PUT_GROUP_TOMBSTONES) {
+    block_cache->ended_put_groups[block_cache->ended_put_groups_count++] = group;
+  } else {
+    block_cache->ended_put_groups[block_cache->ended_put_groups_next] = group;
+    block_cache->ended_put_groups_next =
+        (block_cache->ended_put_groups_next + 1) % BLOCK_CACHE_PUT_GROUP_TOMBSTONES;
+  }
+}
+
+/* Cache actor only: is this group already ended (its receipt closed)? */
+static int _put_group_ended(block_cache_t* block_cache, uint32_t group) {
+  for (size_t s = 0; s < block_cache->ended_put_groups_count; s++) {
+    if (block_cache->ended_put_groups[s] == group) {
+      return 1;
+    }
+  }
+  return 0;
 }
 
 /* ---- block_cache dispatch ---- */
@@ -572,6 +592,30 @@ void block_cache_dispatch(void* state, message_t* msg) {
         break;
       }
       if (entry == NULL) {
+        /* A fresh creation for an ENDED put-group is a straggler: its
+           emitting stream's END already ran — the pre-END deliveries were
+           force-deleted by the receipt sweep, this delivery slipped past
+           FIFO. Drop it before storing instead of re-creating a ghost
+           receipt that nothing would ever close. */
+        if (p->put_group != 0 && _put_group_ended(block_cache, p->put_group)) {
+          if (is_async) { block_destroy(p->block); p->block = NULL; }
+          DESTROY(result_hash, buffer);
+          p->result = CACHE_PUT_FULL;
+          if (p->reply_to != NULL) {
+            cache_put_result_payload_t* result = get_clear_memory(sizeof(cache_put_result_payload_t));
+            result->result = p->result;
+            result->promoted = 0;
+            result->fib = 0;
+            result->hash = NULL;
+            result->reply_to = NULL;
+            message_t reply;
+            reply.type = CACHE_PUT_RESULT;
+            reply.payload = result;
+            reply.payload_destroy = free;
+            actor_send(p->reply_to, &reply);
+          }
+          break;
+        }
         entry = index_entry_create(p->block->hash);
         /* Set incoming FIB on new entry (0 for local puts, network-provided for remote) */
         entry->counter.fib = p->incoming_fib;

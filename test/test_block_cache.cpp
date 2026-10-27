@@ -462,6 +462,25 @@ TEST_F(TestBlockCache, TestPutGroupCompleteKeepsBlocks) {
   }
 }
 
+TEST_F(TestBlockCache, TestPutGroupEndDropsLateStragglerPut) {
+  block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
+  block_cache_put_group(block_cache, blocks[0], 0, nullptr, 90u);
+  scheduler_pool_wait_for_idle(pool);
+  block_cache_put_group_end(block_cache, 90u, 1);
+  scheduler_pool_wait_for_idle(pool);
+  EXPECT_EQ(block_cache_count(block_cache), 0u);
+
+  /* A recipe-actor straggler arriving after the END (FIFO slip past the
+     receipt sweep): a fresh creation for a tombstoned group is dropped, not
+     stored, and must not re-create a ghost receipt. */
+  block_cache_put_group(block_cache, blocks[0], 0, nullptr, 90u);
+  scheduler_pool_wait_for_idle(pool);
+  EXPECT_EQ(block_cache_count(block_cache), 0u);
+  block_t* got = bc_get_sync(block_cache, blocks[0]->hash, pool);
+  EXPECT_EQ(got, nullptr) << "post-END straggler block was stored";
+  if (got != nullptr) block_destroy(got);
+}
+
 TEST_F(TestBlockCache, TestBlockCachePutGetOnly) {
   block_cache = block_cache_create(config, location, type, timer_actor, pool, NULL, 0);
   for (size_t i = 0; i < BLOCK_COUNT; i++) {
