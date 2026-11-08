@@ -69,13 +69,16 @@ typedef struct relay_client_t {
   char* key_path;
 
   // Retry state: when the QUIC connection fails with UNREACHABLE,
-  // we automatically retry up to max_retries times.
+  // we automatically retry up to max_retries times at the base delay, then
+  // keep retrying long-haul with exponential backoff (RELAY_BACKOFF_*)
+  // until the relay answers; success resets both counters.
   char* relay_host;
   uint16_t relay_port;
   uint8_t retry_count;
   uint8_t shutdown_pending;  // 1 if we're intentionally shutting down
   uint8_t max_retries;
   uint32_t retry_delay_ms;
+  uint8_t backoff_attempt;   // consecutive failed connects (capped, for the backoff shift)
 #ifdef HAS_MSQUIC
   HQUIC shared_registration;  // shared registration from quic_listener (may be NULL)
   void* peer_verify;  // peer_verify_ctx_t* — NULL if no CA cert loaded
@@ -104,6 +107,14 @@ void relay_client_dispatch(void* state, message_t* msg);
 #define RELAY_CLIENT_ADDR_REQUEST  1
 #define RELAY_CLIENT_SEND          2
 #define RELAY_CLIENT_RETRY         3
+
+// Long-haul backoff for a relay that stays down past the initial retry
+// budget: the delay keeps doubling up to RELAY_BACKOFF_MAX_MS instead of
+// hammering a dead relay at the base interval (which flooded the daemon log
+// with one retry cycle every ~18s). Cap the shift so the delay can never
+// overflow the unsigned long arithmetic.
+#define RELAY_BACKOFF_MAX_ATTEMPT 12
+#define RELAY_BACKOFF_MAX_MS 60000ul
 
 typedef struct relay_retry_payload_t {
   unsigned long delay_ms;

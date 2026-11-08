@@ -253,6 +253,7 @@ static QUIC_STATUS QUIC_API _relay_client_connection_callback(
     case QUIC_CONNECTION_EVENT_CONNECTED: {
       log_info("relay_client: connected to relay server");
       client->retry_count = 0;  // reset retry counter on successful connection
+      client->backoff_attempt = 0;  // and the long-haul backoff ladder
 
       // Open a bidirectional stream for relay communication
       HQUIC stream = NULL;
@@ -303,14 +304,20 @@ static QUIC_STATUS QUIC_API _relay_client_connection_callback(
       // localhost when multiple QUIC connections start concurrently), but a
       // bounced relay server surfaces as a different status (e.g. 0x6e on
       // container restart) — without this, clients stayed orphaned until
-      // process restart. The retry budget (max_retries + exponential backoff,
-      // reset on successful connect) bounds the loop for permanently-gone
-      // relays; app-initiated shutdowns (shutdown_pending) never retry.
-      if (!client->shutdown_pending &&
-          client->retry_count < client->max_retries) {
-        client->retry_count++;
-        log_info("relay_client: scheduling retry %u/%u",
-                 client->retry_count, client->max_retries);
+      // process restart. The retry budget (max_retries at the base delay)
+      // bounds the fast ladder for a relay that just came back; past it the
+      // connection keeps retrying long-haul with exponential backoff up to
+      // RELAY_BACKOFF_MAX_MS (see SHUTDOWN_COMPLETE below), reset on success.
+      // App-initiated shutdowns (shutdown_pending) never retry.
+      if (!client->shutdown_pending) {
+        if (client->retry_count < client->max_retries) {
+          client->retry_count++;
+        }
+        if (client->backoff_attempt < RELAY_BACKOFF_MAX_ATTEMPT) {
+          client->backoff_attempt++;
+        }
+        log_info("relay_client: shutdown — scheduling retry attempt %u (budget %u/%u)",
+                 client->backoff_attempt, client->retry_count, client->max_retries);
       }
       break;
     }
@@ -320,13 +327,17 @@ static QUIC_STATUS QUIC_API _relay_client_connection_callback(
                (unsigned long)event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode);
       // A relay restart surfaces as a graceful peer-initiated close (the
       // server never gets to send a transport error) — schedule the same
-      // bounded retry as the transport-initiated path, or a bounced relay
-      // orphans the client until process restart.
-      if (!client->shutdown_pending &&
-          client->retry_count < client->max_retries) {
-        client->retry_count++;
-        log_info("relay_client: scheduling retry %u/%u",
-                 client->retry_count, client->max_retries);
+      // backoff-ladder retry as the transport-initiated path, or a bounced
+      // relay orphans the client until process restart.
+      if (!client->shutdown_pending) {
+        if (client->retry_count < client->max_retries) {
+          client->retry_count++;
+        }
+        if (client->backoff_attempt < RELAY_BACKOFF_MAX_ATTEMPT) {
+          client->backoff_attempt++;
+        }
+        log_info("relay_client: peer shutdown — scheduling retry attempt %u (budget %u/%u)",
+                 client->backoff_attempt, client->retry_count, client->max_retries);
       }
       break;
     }
@@ -338,12 +349,14 @@ static QUIC_STATUS QUIC_API _relay_client_connection_callback(
                event->SHUTDOWN_COMPLETE.AppCloseInProgress);
       ATOMIC_STORE(&client->connected, 0);
 
-      // If a retry was scheduled (retry_count was incremented by
-      // SHUTDOWN_INITIATED_BY_TRANSPORT for UNREACHABLE), attempt reconnect.
-      // We defer the retry to the I/O thread via actor_send to avoid blocking
-      // the MsQuic worker thread and to prevent thread leaks from spawning
-      // a new I/O thread while the old one is still running.
-      if (client->retry_count > 0 && client->retry_count <= client->max_retries &&
+      // If a retry was scheduled, attempt reconnect. We defer the retry to
+      // the I/O thread via actor_send to avoid blocking the MsQuic worker
+      // thread and to prevent thread leaks from spawning a new I/O thread
+      // while the old one is still running. The delay is the exponential
+      // backoff: base << (attempt-1), doubling per consecutive failure up to
+      // RELAY_BACKOFF_MAX_MS — never a permanent stop, so a relay that
+      // returns is picked up again, but a dead one stops flooding the log.
+      if (client->backoff_attempt > 0 &&
           !client->shutdown_pending && ATOMIC_LOAD(&client->running)) {
 
         // Clean up the current QUIC connection resources before retrying.
@@ -366,11 +379,19 @@ static QUIC_STATUS QUIC_API _relay_client_connection_callback(
           client->framer = NULL;
         }
 
-        // Defer reconnect to the I/O thread — it will apply exponential
-        // backoff and call relay_client_connect from a safe context.
-        unsigned long delay_ms = client->retry_delay_ms * (1 << (client->retry_count - 1));
-        log_info("relay_client: scheduling retry (attempt %u/%u) to %s:%u in %lums",
-                 client->retry_count, client->max_retries,
+        // Defer reconnect to the I/O thread — it will back off and call
+        // relay_client_connect from a safe context. Long-haul attempts past
+        // the budget keep doubling: base << (attempt-1), capped.
+        uint32_t shift = client->backoff_attempt - 1;
+        unsigned long delay_ms =
+            (shift >= RELAY_BACKOFF_MAX_ATTEMPT)
+                ? RELAY_BACKOFF_MAX_MS
+                : (unsigned long)client->retry_delay_ms << shift;
+        if (delay_ms > RELAY_BACKOFF_MAX_MS) {
+          delay_ms = RELAY_BACKOFF_MAX_MS;
+        }
+        log_info("relay_client: scheduling retry (attempt %u, budget %u/%u) to %s:%u in %lums",
+                 client->backoff_attempt, client->retry_count, client->max_retries,
                  client->relay_host ? client->relay_host : "127.0.0.1",
                  client->relay_port, delay_ms);
 
@@ -991,6 +1012,11 @@ void relay_client_dispatch(void* state, message_t* msg) {
                client->relay_host ? client->relay_host : "127.0.0.1",
                client->relay_port, delay_ms);
       platform_sleep_ms(delay_ms);
+      /* The sleep can outlast a teardown: re-check before dialing so a stop
+         never opens a fresh connection to a black-holed relay. */
+      if (!ATOMIC_LOAD(&client->running) || client->shutdown_pending) {
+        break;
+      }
       relay_client_connect(client, client->relay_host, client->relay_port,
                            client->shared_registration);
       break;
