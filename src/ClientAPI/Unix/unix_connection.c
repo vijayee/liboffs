@@ -982,6 +982,9 @@ static void _unix_dispatch_frame(unix_connection_t* conn, uint8_t type, cbor_ite
     case CLIENT_API_CONFIG_RELOAD_REQUEST:
       config_handle_reload_request(&conn->config_ctx, frame);
       break;
+    case CLIENT_API_STOP_REQUEST:
+      config_handle_stop_request(&conn->config_ctx, frame);
+      break;
     case CLIENT_API_PEER_INFO_REQUEST:
       peer_handle_info_request(&conn->peer_ctx, frame);
       break;
@@ -1501,6 +1504,8 @@ unix_connection_t* unix_connection_create(unix_transport_t* transport, platform_
   connection->config_ctx.send_error = (config_send_error_fn)_unix_connection_send_error;
   connection->config_ctx.trigger_restart = transport->trigger_restart;
   connection->config_ctx.restart_user_data = transport->restart_user_data;
+  connection->config_ctx.trigger_stop = transport->trigger_stop;
+  connection->config_ctx.stop_user_data = transport->stop_user_data;
 
   connection->peer_ctx.conn = (block_connection_t*)connection;
   connection->peer_ctx.network = transport->config_node ? transport->config_node->network : NULL;

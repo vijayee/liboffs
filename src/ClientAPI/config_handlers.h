@@ -36,11 +36,17 @@ typedef struct {
   config_send_error_fn send_error;
   config_trigger_restart_fn trigger_restart; /* NULL → offs_node_restart fallback */
   void* restart_user_data;
+  /* Graceful-shutdown trigger (`offs stop`): when set by the daemon, the stop
+     handler hands the shutdown to the main loop via the flag pattern, the
+     same way trigger_restart does for reload. NULL = stop unsupported. */
+  config_trigger_restart_fn trigger_stop; /* NULL → stop unsupported */
+  void* stop_user_data;
 } config_handler_ctx_t;
 
 /* Frame handlers — called from each transport's dispatch_frame switch. */
 void config_handle_show_request(config_handler_ctx_t* ctx, cbor_item_t* frame);
 void config_handle_set_request(config_handler_ctx_t* ctx, cbor_item_t* frame);
 void config_handle_reload_request(config_handler_ctx_t* ctx, cbor_item_t* frame);
+void config_handle_stop_request(config_handler_ctx_t* ctx, cbor_item_t* frame);
 
 #endif /* OFFS_CONFIG_HANDLERS_H */

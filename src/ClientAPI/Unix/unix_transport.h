@@ -53,11 +53,15 @@ typedef struct unix_transport_t {
      unix_transport_set_config_ctx. Per-connection config_handler_ctx_t borrows
      these. NULL node means config frames are rejected with INTERNAL_ERROR.
      trigger_restart, when set, is invoked by the reload handler instead of
-     offs_node_restart (the daemon runs the restart on a non-pool thread). */
+     offs_node_restart (the daemon runs the restart on a non-pool thread).
+     trigger_stop, when set, is invoked by the stop handler (graceful
+     daemon shutdown for `offs stop`). */
   offs_node_t* config_node;
   char* config_data_dir;
   config_trigger_restart_fn trigger_restart;
   void* restart_user_data;
+  config_trigger_restart_fn trigger_stop;
+  void* stop_user_data;
 } unix_transport_t;
 
 /* socket_mode: POSIX only — the mode chmod()ed onto the bound unix socket
@@ -90,5 +94,13 @@ void unix_transport_set_config_ctx(unix_transport_t* transport,
                                     offs_node_t* node, const char* data_dir,
                                     config_trigger_restart_fn trigger_restart,
                                     void* restart_user_data);
+
+/* Wire the graceful-shutdown trigger (`offs stop`): the daemon passes its
+   stop callback, which runs the shutdown on the main thread (never on the
+   pool worker that dispatches this frame). NULL stops being unsupported
+   (the handler replies "daemon did not enable remote stop"). */
+void unix_transport_set_stop_ctx(unix_transport_t* transport,
+                                 config_trigger_restart_fn trigger_stop,
+                                 void* stop_user_data);
 
 #endif // OFFS_UNIX_TRANSPORT_H

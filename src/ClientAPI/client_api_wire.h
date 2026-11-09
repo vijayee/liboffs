@@ -67,6 +67,8 @@
 #define CLIENT_API_CACHE_RESIZE_RESPONSE         57
 #define CLIENT_API_GC_REQUEST                    58
 #define CLIENT_API_GC_RESPONSE                   59
+#define CLIENT_API_STOP_REQUEST                  60
+#define CLIENT_API_STOP_RESPONSE                 61
 
 /* Representation-op responses are the adjacent pair (request + 1); the
  * transport handler derives the response code arithmetically, so a renumbering
@@ -318,6 +320,18 @@ typedef struct {
   uint8_t status;
   char* message;  // caller must free
 } client_api_config_reload_response_t;
+
+// --- Stop Request ---
+// [type] — no payload (graceful daemon shutdown: the daemon's main loop runs
+// its normal teardown and exits; works for SCM services and foreground
+// daemons without the caller holding service-control rights)
+// The connection is torn down by the shutdown, so the reply may not arrive —
+// the CLI treats a broken pipe after the send as success too.
+
+// --- Stop Response ---
+// [type, status: uint, message: tstr]
+// status: 0 = shutdown triggered
+typedef client_api_config_reload_response_t client_api_stop_response_t;
 
 // --- Peer Info Request ---
 // [type] or [type, format: uint]
@@ -588,6 +602,11 @@ cbor_item_t* client_api_config_reload_request_encode(void);
 cbor_item_t* client_api_config_reload_response_encode(const client_api_config_reload_response_t* msg);
 int client_api_config_reload_response_decode(cbor_item_t* item, client_api_config_reload_response_t* msg);
 void client_api_config_reload_response_destroy(client_api_config_reload_response_t* msg);
+
+cbor_item_t* client_api_stop_request_encode(void);
+cbor_item_t* client_api_stop_response_encode(const client_api_stop_response_t* msg);
+int client_api_stop_response_decode(cbor_item_t* item, client_api_stop_response_t* msg);
+void client_api_stop_response_destroy(client_api_stop_response_t* msg);
 
 cbor_item_t* client_api_peer_info_request_encode(void);
 /* Same frame with an explicit response format byte:

@@ -2286,6 +2286,80 @@ void client_api_config_reload_response_destroy(client_api_config_reload_response
     msg->message = NULL;
   }
 }
+
+// --- Stop Request ---
+// [type] — no payload
+
+cbor_item_t* client_api_stop_request_encode(void) {
+  cbor_item_t* array = cbor_new_definite_array(1);
+  cbor_item_t* item = cbor_build_uint8(CLIENT_API_STOP_REQUEST);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+  return array;
+}
+
+// --- Stop Response ---
+// [type, status: uint, message: tstr] — same shape as the reload response,
+// but tagged with the STOP type byte.
+
+cbor_item_t* client_api_stop_response_encode(const client_api_stop_response_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(3);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(CLIENT_API_STOP_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint8(msg->status);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_string(msg->message != NULL ? msg->message : "");
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int client_api_stop_response_decode(cbor_item_t* item, client_api_stop_response_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 3) return -1;
+  memset(msg, 0, sizeof(*msg));
+
+  cbor_item_t* type_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(type_item) || cbor_get_uint8(type_item) != CLIENT_API_STOP_RESPONSE) {
+    cbor_decref(&type_item);
+    return -1;
+  }
+  cbor_decref(&type_item);
+
+  cbor_item_t* status_item = cbor_array_get(item, 1);
+  if (cbor_isa_uint(status_item)) {
+    msg->status = cbor_get_uint8(status_item);
+  }
+  cbor_decref(&status_item);
+
+  cbor_item_t* msg_item = cbor_array_get(item, 2);
+  if (cbor_isa_string(msg_item)) {
+    size_t len = cbor_string_length(msg_item);
+    msg->message = get_memory(len + 1);
+    memcpy(msg->message, cbor_string_handle(msg_item), len);
+    msg->message[len] = '\0';
+  } else {
+    msg->message = get_memory(1);
+    msg->message[0] = '\0';
+  }
+  cbor_decref(&msg_item);
+
+  return 0;
+}
+
+void client_api_stop_response_destroy(client_api_stop_response_t* msg) {
+  if (msg == NULL) return;
+  if (msg->message != NULL) {
+    free(msg->message);
+    msg->message = NULL;
+  }
+}
 // --- Representation op request ---
 // [type, url] — shared by the four op request types (42/44/46/48)
 

@@ -159,3 +159,32 @@ void config_handle_reload_request(config_handler_ctx_t* ctx, cbor_item_t* frame)
     offs_node_restart(ctx->node, ctx->data_dir);
   }
 }
+
+void config_handle_stop_request(config_handler_ctx_t* ctx, cbor_item_t* frame) {
+  (void)frame; /* STOP_REQUEST carries no payload */
+
+  if (_config_require_auth(ctx) != 0) return;
+
+  client_api_stop_response_t resp;
+  memset(&resp, 0, sizeof(resp));
+
+  if (ctx->trigger_stop == NULL) {
+    resp.status = 1;
+    resp.message = strdup("daemon did not enable remote stop");
+    cbor_item_t* resp_frame = client_api_stop_response_encode(&resp);
+    ctx->send_frame(ctx->conn, resp_frame);
+    client_api_stop_response_destroy(&resp);
+    return;
+  }
+
+  /* Reply before the shutdown tears the transport down — the reply may still
+     not reach the CLI if scheduling strips it; the CLI treats a broken pipe
+     after the send as success. */
+  resp.status = 0;
+  resp.message = strdup("stopping");
+  cbor_item_t* resp_frame = client_api_stop_response_encode(&resp);
+  ctx->send_frame(ctx->conn, resp_frame);
+  client_api_stop_response_destroy(&resp);
+
+  ctx->trigger_stop(ctx->stop_user_data);
+}

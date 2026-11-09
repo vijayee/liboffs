@@ -523,3 +523,10 @@ void unix_transport_set_config_ctx(unix_transport_t* transport,
   transport->trigger_restart = trigger_restart;
   transport->restart_user_data = restart_user_data;
 }
+
+void unix_transport_set_stop_ctx(unix_transport_t* transport,
+                                 config_trigger_restart_fn trigger_stop,
+                                 void* stop_user_data) {
+  transport->trigger_stop = trigger_stop;
+  transport->stop_user_data = stop_user_data;
+}
