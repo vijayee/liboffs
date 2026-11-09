@@ -33,6 +33,7 @@ config_t config_default() {
   config.gossip_init_count = 5;
   config.gossip_steady_interval_s = 30;
   config.gossip_timeout_ms = 5000;
+  config.anti_entropy_interval_s = 300;
   config.hebbian_decay_factor = 0.999f;
   config.bad_block_multiplier = 5.0f;
   config.bad_block_rate_cost = 10.0f;
@@ -181,6 +182,11 @@ int config_validate(const config_t* config) {
   }
   if (config->gossip_timeout_ms == 0) {
     log_error("config_validate: gossip_timeout_ms must be > 0");
+    valid = false;
+  }
+  if (config->anti_entropy_interval_s < 10) {
+    log_error("config_validate: anti_entropy_interval_s (%u) must be >= 10",
+              config->anti_entropy_interval_s);
     valid = false;
   }
   if (config->hebbian_decay_factor <= 0.0f || config->hebbian_decay_factor >= 1.0f) {

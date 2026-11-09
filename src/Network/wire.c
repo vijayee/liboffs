@@ -2362,6 +2362,207 @@ int wire_gossip_pull_decode(cbor_item_t* item, wire_gossip_pull_t* msg) {
   return 0;
 }
 
+// --- AntiEntropy digest ---
+
+cbor_item_t* wire_anti_entropy_encode(const wire_anti_entropy_t* msg) {
+  cbor_item_t* array = cbor_new_definite_array(6);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(WIRE_ANTI_ENTROPY);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->message_id >> 32);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->message_id & 0xFFFFFFFF);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  cbor_item_t* sender = _node_id_encode(&msg->sender_id);
+  (void)cbor_array_push(array, sender);
+  cbor_decref(&sender);
+
+  cbor_item_t* bloom = cbor_build_bytestring(msg->bloom, WIRE_ANTI_ENTROPY_BLOOM_BYTES);
+  (void)cbor_array_push(array, bloom);
+  cbor_decref(&bloom);
+
+  item = cbor_build_uint8(msg->member_count);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  return array;
+}
+
+int wire_anti_entropy_decode(cbor_item_t* item, wire_anti_entropy_t* msg) {
+  if (!cbor_isa_array(item) || cbor_array_size(item) < 6) return -1;
+  uint8_t type_byte;
+  if (_array_get_uint8(item, 0, &type_byte) != 0 || type_byte != WIRE_ANTI_ENTROPY) return -1;
+  uint64_t id_hi, id_lo;
+  if (_array_get_int(item, 1, &id_hi) != 0) return -1;
+  if (_array_get_int(item, 2, &id_lo) != 0) return -1;
+  msg->message_id = (id_hi << 32) | id_lo;
+  cbor_item_t* sender = cbor_array_get(item, 3);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+
+  cbor_item_t* bloom_item = cbor_array_get(item, 4);
+  int bloom_rc = -1;
+  if (cbor_isa_bytestring(bloom_item) &&
+      cbor_bytestring_length(bloom_item) == WIRE_ANTI_ENTROPY_BLOOM_BYTES) {
+    memcpy(msg->bloom, cbor_bytestring_handle(bloom_item), WIRE_ANTI_ENTROPY_BLOOM_BYTES);
+    bloom_rc = 0;
+  }
+  cbor_decref(&bloom_item);
+  if (bloom_rc != 0) return -1;
+  if (_array_get_uint8(item, 5, &msg->member_count) != 0) return -1;
+  return 0;
+}
+
+// --- AntiEntropy offer / response ---
+// Both legs share `wire_anti_entropy_offer_t`; the response layout is the
+// offer layout minus the bloom element.
+
+cbor_item_t* wire_anti_entropy_offer_encode(const wire_anti_entropy_offer_t* msg) {
+  uint8_t id_count = msg->id_count > WIRE_ANTI_ENTROPY_MAX_IDS
+      ? WIRE_ANTI_ENTROPY_MAX_IDS : msg->id_count;
+  cbor_item_t* array = cbor_new_definite_array(7);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(WIRE_ANTI_ENTROPY_OFFER);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->message_id >> 32);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->message_id & 0xFFFFFFFF);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  cbor_item_t* sender = _node_id_encode(&msg->sender_id);
+  (void)cbor_array_push(array, sender);
+  cbor_decref(&sender);
+
+  cbor_item_t* bloom = cbor_build_bytestring(msg->bloom, WIRE_ANTI_ENTROPY_BLOOM_BYTES);
+  (void)cbor_array_push(array, bloom);
+  cbor_decref(&bloom);
+
+  item = cbor_build_uint8(id_count);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  cbor_item_t* ids = cbor_new_definite_array(id_count);
+  for (uint8_t index = 0; index < id_count; index++) {
+    cbor_item_t* node_id = _node_id_encode(&msg->ids[index]);
+    (void)cbor_array_push(ids, node_id);
+    cbor_decref(&node_id);
+  }
+  (void)cbor_array_push(array, ids);
+  cbor_decref(&ids);
+
+  return array;
+}
+
+cbor_item_t* wire_anti_entropy_response_encode(const wire_anti_entropy_offer_t* msg) {
+  uint8_t id_count = msg->id_count > WIRE_ANTI_ENTROPY_MAX_IDS
+      ? WIRE_ANTI_ENTROPY_MAX_IDS : msg->id_count;
+  cbor_item_t* array = cbor_new_definite_array(6);
+  cbor_item_t* item;
+
+  item = cbor_build_uint8(WIRE_ANTI_ENTROPY_RESPONSE);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->message_id >> 32);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  item = cbor_build_uint64(msg->message_id & 0xFFFFFFFF);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  cbor_item_t* sender = _node_id_encode(&msg->sender_id);
+  (void)cbor_array_push(array, sender);
+  cbor_decref(&sender);
+
+  item = cbor_build_uint8(id_count);
+  (void)cbor_array_push(array, item);
+  cbor_decref(&item);
+
+  cbor_item_t* ids = cbor_new_definite_array(id_count);
+  for (uint8_t index = 0; index < id_count; index++) {
+    cbor_item_t* node_id = _node_id_encode(&msg->ids[index]);
+    (void)cbor_array_push(ids, node_id);
+    cbor_decref(&node_id);
+  }
+  (void)cbor_array_push(array, ids);
+  cbor_decref(&ids);
+
+  return array;
+}
+
+// Shared decode body for the offer/response legs. Only accepts the exact
+// `type_byte` (a response must not decode as an offer and vice versa).
+static int _anti_entropy_list_decode(cbor_item_t* item, wire_anti_entropy_offer_t* msg,
+                                     uint8_t type_byte, bool has_bloom) {
+  size_t minimum = has_bloom ? 7 : 6;
+  if (!cbor_isa_array(item) || cbor_array_size(item) < minimum) return -1;
+  uint8_t wire_type;
+  if (_array_get_uint8(item, 0, &wire_type) != 0 || wire_type != type_byte) return -1;
+  uint64_t id_hi, id_lo;
+  if (_array_get_int(item, 1, &id_hi) != 0) return -1;
+  if (_array_get_int(item, 2, &id_lo) != 0) return -1;
+  msg->message_id = (id_hi << 32) | id_lo;
+  cbor_item_t* sender = cbor_array_get(item, 3);
+  int sender_rc = _node_id_decode(sender, &msg->sender_id);
+  cbor_decref(&sender);
+  if (sender_rc != 0) return sender_rc;
+
+  size_t count_index = has_bloom ? 5 : 4;
+  size_t ids_index = has_bloom ? 6 : 5;
+  if (has_bloom) {
+    cbor_item_t* bloom_item = cbor_array_get(item, 4);
+    int bloom_rc = -1;
+    if (cbor_isa_bytestring(bloom_item) &&
+        cbor_bytestring_length(bloom_item) == WIRE_ANTI_ENTROPY_BLOOM_BYTES) {
+      memcpy(msg->bloom, cbor_bytestring_handle(bloom_item), WIRE_ANTI_ENTROPY_BLOOM_BYTES);
+      bloom_rc = 0;
+    }
+    cbor_decref(&bloom_item);
+    if (bloom_rc != 0) return -1;
+  }
+
+  if (_array_get_uint8(item, count_index, &msg->id_count) != 0) return -1;
+  if (msg->id_count > WIRE_ANTI_ENTROPY_MAX_IDS) msg->id_count = WIRE_ANTI_ENTROPY_MAX_IDS;
+
+  cbor_item_t* ids_arr = cbor_array_get(item, ids_index);
+  size_t arr_len = 0;
+  if (cbor_isa_array(ids_arr)) {
+    arr_len = cbor_array_size(ids_arr);
+  }
+  size_t decode_count = arr_len < msg->id_count ? arr_len : msg->id_count;
+  for (size_t index = 0; index < decode_count; index++) {
+    cbor_item_t* node_item = cbor_array_get(ids_arr, index);
+    _node_id_decode(node_item, &msg->ids[index]);
+    cbor_decref(&node_item);
+  }
+  msg->id_count = (uint8_t)decode_count;
+  cbor_decref(&ids_arr);
+  return 0;
+}
+
+int wire_anti_entropy_offer_decode(cbor_item_t* item, wire_anti_entropy_offer_t* msg) {
+  return _anti_entropy_list_decode(item, msg, WIRE_ANTI_ENTROPY_OFFER, true);
+}
+
+int wire_anti_entropy_response_decode(cbor_item_t* item, wire_anti_entropy_offer_t* msg) {
+  return _anti_entropy_list_decode(item, msg, WIRE_ANTI_ENTROPY_RESPONSE, false);
+}
+
 // --- Destroy helpers for relay wire types ---
 
 void wire_relay_send_destroy(wire_relay_send_t* msg) {

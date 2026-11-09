@@ -29,6 +29,7 @@ typedef struct {
   size_t gossip_init_count;
   uint32_t gossip_steady_interval_s;
   uint32_t gossip_timeout_ms;
+  uint32_t anti_entropy_interval_s;    // anti-entropy digest-exchange cadence (min 10)
   float hebbian_decay_factor;
   float bad_block_multiplier;          // Hebbian failure_penalty multiplier for a bad block
   float bad_block_rate_cost;           // extra FIND_BLOCK tokens charged to a bad-block supplier

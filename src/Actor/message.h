@@ -161,6 +161,7 @@ CACHE_CAPACITY_REFRESH,
   NETWORK_EABF_EXPIRE,
   NETWORK_METRICS_PUSH,
   NETWORK_GOSSIP_TICK,
+  NETWORK_ANTI_ENTROPY_TICK,
   NETWORK_REQUEST_TIMEOUT_TICK,
 /* Inhale-seek tick: while capacity < 50% the node broadcasts
    WIRE_SEEKING_BLOCKS to its connected peers every tau(c)

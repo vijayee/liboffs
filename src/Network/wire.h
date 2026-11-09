@@ -390,6 +390,16 @@ typedef struct wire_addr_response_t {
 #define WIRE_MEASURE_NODES_RESPONSE    26
 #define WIRE_CLOSEST_NODES_PROGRESS    27
 
+// --- Anti-entropy (ring membership divergence repair) ---
+#define WIRE_ANTI_ENTROPY           28
+#define WIRE_ANTI_ENTROPY_OFFER     29
+#define WIRE_ANTI_ENTROPY_RESPONSE  30
+
+// Mirrored in anti_entropy.h; equality is static-asserted in anti_entropy.c
+// (same mirror convention as WIRE_MAX_VISITED_BLOOM / CLOSEST_NODES_MAX_VISITED).
+#define WIRE_ANTI_ENTROPY_BLOOM_BYTES 512
+#define WIRE_ANTI_ENTROPY_MAX_IDS     10
+
 typedef struct {
   uint64_t  message_id;
   node_id_t sender_id;
@@ -409,6 +419,23 @@ typedef struct {
   uint8_t   target_count;
   wire_addr_t rendv6;                 // appended v6-aware rendezvous address
 } wire_gossip_pull_t;
+
+typedef struct {
+  uint64_t  message_id;
+  node_id_t sender_id;
+  uint8_t   bloom[WIRE_ANTI_ENTROPY_BLOOM_BYTES];
+  uint8_t   member_count;   // informational: members hashed into the filter
+} wire_anti_entropy_t;
+
+// Legs 2 (OFFER) and 3 (RESPONSE). RESPONSE reuses this struct and the
+// codec simply does not emit/consume the bloom field (added in a later task).
+typedef struct {
+  uint64_t  message_id;
+  node_id_t sender_id;
+  uint8_t   bloom[WIRE_ANTI_ENTROPY_BLOOM_BYTES]; // OFFER only
+  node_id_t ids[WIRE_ANTI_ENTROPY_MAX_IDS];
+  uint8_t   id_count;
+} wire_anti_entropy_offer_t;
 
 // --- ClosestNodes (Meridian proximity routing) ---
 
@@ -532,6 +559,12 @@ int wire_addr_request_decode(cbor_item_t* item, wire_addr_request_t* msg);
 int wire_addr_response_decode(cbor_item_t* item, wire_addr_response_t* msg);
 int wire_gossip_decode(cbor_item_t* item, wire_gossip_t* msg);
 int wire_gossip_pull_decode(cbor_item_t* item, wire_gossip_pull_t* msg);
+cbor_item_t* wire_anti_entropy_encode(const wire_anti_entropy_t* msg);
+cbor_item_t* wire_anti_entropy_offer_encode(const wire_anti_entropy_offer_t* msg);
+cbor_item_t* wire_anti_entropy_response_encode(const wire_anti_entropy_offer_t* msg);
+int wire_anti_entropy_decode(cbor_item_t* item, wire_anti_entropy_t* msg);
+int wire_anti_entropy_offer_decode(cbor_item_t* item, wire_anti_entropy_offer_t* msg);
+int wire_anti_entropy_response_decode(cbor_item_t* item, wire_anti_entropy_offer_t* msg);
 int wire_closest_nodes_decode(cbor_item_t* item, wire_closest_nodes_t* msg);
 int wire_closest_nodes_response_decode(cbor_item_t* item, wire_closest_nodes_response_t* msg);
 int wire_measure_nodes_decode(cbor_item_t* item, wire_measure_nodes_t* msg);

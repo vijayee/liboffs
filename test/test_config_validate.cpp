@@ -56,6 +56,18 @@ TEST(TestConfigValidate, RejectsZeroGossipInitInterval) {
   EXPECT_NE(config_validate(&config), 0);
 }
 
+TEST(TestConfigValidate, RejectsAntiEntropyIntervalBelowMinimum) {
+  config_t config = config_default();
+  config.anti_entropy_interval_s = 5;
+  EXPECT_NE(config_validate(&config), 0);
+}
+
+TEST(TestConfigValidate, AcceptsAntiEntropyIntervalAtMinimum) {
+  config_t config = config_default();
+  config.anti_entropy_interval_s = 10;
+  EXPECT_EQ(config_validate(&config), 0);
+}
+
 TEST(TestConfigValidate, RejectsGossipSteadyLessThanInit) {
   config_t config = config_default();
   config.gossip_init_interval_s = 60;
