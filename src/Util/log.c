@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2020 rxi
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -201,10 +201,39 @@ static void init_event(log_Event *ev, void *udata) {
   ev->udata = udata;
 }
 
+/* Truncate a build-machine __FILE__ to the codebase-relative form: the log
+   shows the path from the LAST "src" or "test" component on, so a binary
+   never exposes the building machine's filesystem in logs shipped to remote
+   peers (error_create/log both capture the compiler's absolute path, e.g.
+   "C:\Users\me\Git-projects\OFFS\deps\liboffs\src\Platform\platform_local.c"
+   becomes "src\Platform\platform_local.c"). No separator match -> returned
+   unchanged. Public: error.c uses it too. */
+const char* log_base_of_code(const char* file) {
+  size_t len = strlen(file);
+  for (size_t i = len; i > 0; i--) {
+    size_t start = i - 1;
+    /* Component boundary: the character before it is a separator (or the
+       string start). */
+    if (start > 0 && file[start - 1] != '/' && file[start - 1] != '\\') {
+      continue;
+    }
+    const char sep = file[start + 3];
+    const char sep4 = file[start + 4];
+    if (strncmp(file + start, "src", 3) == 0 && (sep == '/' || sep == '\\')) {
+      return file + start;
+    }
+    if (strncmp(file + start, "test", 4) == 0 &&
+        (sep4 == '/' || sep4 == '\\')) {
+      return file + start;
+    }
+  }
+  return file;
+}
+
 void log_log(int level, const char *file, int line, const char *fmt, ...) {
   log_Event ev = {
     .fmt   = fmt,
-    .file  = file,
+    .file  = log_base_of_code(file),
     .line  = line,
     .level = level,
     .module = LOG_MODULE_DEFAULT,
@@ -248,7 +277,7 @@ void _log_structured(int level, int module, const char *file, int line, ...) {
 
   log_Event ev = {
     .fmt    = NULL,
-    .file   = file,
+    .file   = log_base_of_code(file),
     .line   = line,
     .level  = level,
     .module = module,

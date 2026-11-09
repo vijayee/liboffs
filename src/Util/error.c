@@ -3,19 +3,24 @@
 //
 #include "error.h"
 #include "allocator.h"
+#include "log.h"
 #include <string.h>
 
 async_error_t* error_create(char* message, char* file, char* function, int line) {
   if ((message == NULL) || (file == NULL) || (function == NULL)) {
     return NULL;
   }
+  /* Codebase-relative file path: never copy the building machine's absolute
+     filesystem into a shipped error object (the last "src"/"test" component
+     on, e.g. "src\Platform\platform_local.c"). */
+  const char* code_file = log_base_of_code(file);
   async_error_t* error = get_clear_memory(sizeof(async_error_t));
   size_t message_len = strlen(message) + 1;
   error->message = get_memory(message_len);
   memcpy(error->message, message, message_len);
-  size_t file_len = strlen(file) + 1;
+  size_t file_len = strlen(code_file) + 1;
   error->file = get_memory(file_len);
-  memcpy(error->file, file, file_len);
+  memcpy(error->file, code_file, file_len);
   size_t function_len = strlen(function) + 1;
   error->function = get_memory(function_len);
   memcpy(error->function, function, function_len);

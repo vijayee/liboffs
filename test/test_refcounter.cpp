@@ -8,6 +8,23 @@
 #include <vector>
 extern "C" {
 #include "../src/RefCounter/refcounter.h"
+#include "../src/Util/log.h"
+}
+
+/* The log/error path truncation must never leak the building machine's
+   filesystem into shipped logs (see log_base_of_code in log.c). */
+TEST(LogBaseOfCode, TruncatesToLastSrcAndTestComponent) {
+  EXPECT_STREQ(log_base_of_code("C:\\Users\\me\\Git-projects\\OFFS\\deps\\liboffs\\src\\Platform\\platform_local.c"),
+               "src\\Platform\\platform_local.c");
+  EXPECT_STREQ(log_base_of_code("/home/victor/Workspace/src/github.com/vijayee/liboffs/src/OFFStreams/block_recipe.c"),
+               "src/OFFStreams/block_recipe.c");
+  EXPECT_STREQ(log_base_of_code("C:\\Users\\me\\OFFS\\test\\test_x.cpp"), "test\\test_x.cpp");
+  /* A source tree rooted in a directory named "src" still truncates at the
+     LAST matching component. */
+  EXPECT_STREQ(log_base_of_code("build/src/src/Network/relay_client.c"), "src/Network/relay_client.c");
+  /* No component match -> returned unchanged. */
+  EXPECT_STREQ(log_base_of_code("weird.txt"), "weird.txt");
+  EXPECT_STREQ(log_base_of_code("srcfile.h"), "srcfile.h");
 }
 
 TEST(TestRefCounter, TestRefCounterFunctions) {

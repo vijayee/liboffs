@@ -71,5 +71,10 @@ int log_add_fp(FILE *fp, int level);
 
 void log_log(int level, const char *file, int line, const char *fmt, ...);
 void _log_structured(int level, int module, const char *file, int line, ...);
+/* Truncate a build-machine __FILE__ to its codebase-relative form (from the
+   last "src"/"test" component on) so logs and error objects never leak the
+   building machine's filesystem to remote peers. Returns `file` unchanged
+   when no component matches. */
+const char* log_base_of_code(const char* file);
 
 #endif
