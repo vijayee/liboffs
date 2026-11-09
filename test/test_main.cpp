@@ -12,6 +12,7 @@ extern "C" {
 #include "../src/BlockCache/block.h"
 #include "../src/Util/allocator.h"
 #include "../src/Util/error.h"
+#include "../src/Util/log.h"
 #include "../src/BlockCache/fibonacci.h"
 #include "../src/BlockCache/index.h"
 #include "Platform/platform.h"
@@ -65,7 +66,11 @@ TEST(TestError, TestErrorCreateDestroy) {
   async_error_t* error = error_create(cmessage, file, func, line);
   EXPECT_EQ(strcmp(error->message, cmessage), 0);
   EXPECT_NE(error->message, cmessage);
-  EXPECT_EQ(strcmp(error->file, file), 0);
+  /* error->file is the CODEBASE-RELATIVE path (never the build machine's
+     absolute filesystem — it ships to remote peers); __FILE__ here is
+     "...\test\test_main.cpp", so expect the truncation at the last
+     "test" component. */
+  EXPECT_EQ(strcmp(error->file, log_base_of_code(file)), 0);
   EXPECT_NE(error->file, file);
   EXPECT_EQ(strcmp(error->function, func), 0);
   EXPECT_NE(error->function, func);
